@@ -21,15 +21,15 @@ exposes typed per-instance evidence, display activation as unknown rather than i
 
 ## Current Bootstrap State
 
-The repository currently contains its guidelines and a pinned upstream submodule, but no native or
-console build manifests yet. The directory layout and commands below are the target repository
-contract and become executable as their manifests are added. Do not claim that a build or test
-command passed when the corresponding project files do not exist yet.
+The C++ data plane has been migrated to `native/access-server/` and is wired to the pinned upstream
+submodule through `native/CMakeLists.txt`. The native build and focused CTest commands below are
+active. The console workspaces and their npm manifests have not been created yet; the web/server
+layout and npm commands below remain the target contract until that bootstrap lands. Do not claim
+that a control-plane command passed while its corresponding project files do not exist.
 
-Bootstrap in coherent vertical steps: establish the pinned native build and migrated test target,
-then the independently testable console API and web shell, then persistence/publication workflows,
-and finally the reproducible end-to-end deployment. Keep the repository runnable at the end of each
-step.
+Continue in coherent vertical steps: establish an independently testable console API and web shell,
+then persistence/publication workflows, and finally the reproducible end-to-end deployment. Keep
+the repository runnable at the end of each step.
 
 ## Source Ownership and Upstream Boundaries
 
@@ -156,7 +156,7 @@ cmake -S native -B native/build -G Ninja \
   -DCMAKE_BUILD_TYPE=Release -DFIBER_BUILD_TESTS=ON
 cmake --build native/build --target fiber_app_access_server --parallel
 cmake --build native/build --target fiber_access_server_tests --parallel
-ctest --test-dir native/build --output-on-failure
+ctest --test-dir native/build --output-on-failure -L access-server
 ```
 
 The migrated executable target remains `fiber_app_access_server`, with output name
