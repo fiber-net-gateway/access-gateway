@@ -1,0 +1,457 @@
+#include "NativeValidatorProtocol.h"
+
+#include "config/AccessConfigCodec.h"
+#include "routing/Cidr.h"
+#include "routing/ProjectRouteSnapshot.h"
+#include "runtime/AccessScriptRuntime.h"
+#include "runtime/GrayMatchStore.h"
+
+#include <cstdint>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <unordered_set>
+#include <utility>
+#include <vector>
+
+#include <fiber/common/json/JsonEncode.h>
+#include <fiber/common/json/JsonParse.h>
+#include <fiber/common/json/JsonParser.h>
+#include <fiber/common/mem/BufPool.h>
+#include <fiber/common/util/Base64.h>
+
+namespace fiber::access_server {
+namespace {
+
+using json::Generator;
+using json::JsonParser;
+using json::ObjectFieldStatus;
+using json::ParseStatus;
+using mem::BufPool;
+
+enum RequestField : std::uint8_t {
+  ContractVersion = 1U << 0U,
+  RequestId = 1U << 1U,
+  Kind = 1U << 2U,
+  Project = 1U << 3U,
+  Payload = 1U << 4U,
+};
+
+struct ValidatorRequest {
+  std::int64_t contract_version = 0;
+  std::string_view request_id;
+  std::string_view kind;
+  std::string_view project;
+  std::string_view payload_base64;
+  std::uint8_t present = 0;
+};
+
+struct ValidationError {
+  std::string code;
+  std::string field;
+  std::size_t offset = 0;
+  std::string message;
+};
+
+struct ValidationSummary {
+  std::optional<std::int32_t> project_version;
+  std::optional<std::size_t> host_count;
+  std::optional<std::size_t> route_count;
+  std::optional<std::size_t> gray_rule_count;
+};
+
+struct ValidationResult {
+  bool valid = false;
+  ValidationSummary summary;
+  std::vector<ValidationError> errors;
+};
+
+class StringSink final : public json::OutputSink {
+public:
+  explicit StringSink(std::string &output) noexcept : output_(&output) {}
+
+  [[nodiscard]] bool write(const char *data, std::size_t length) override {
+    output_->append(data, length);
+    return true;
+  }
+
+private:
+  std::string *output_;
+};
+
+bool set_present(ValidatorRequest &out, RequestField field,
+                 JsonParser &parser) noexcept {
+  const auto flag = static_cast<std::uint8_t>(field);
+  if ((out.present & flag) != 0) {
+    (void)parser.fail("duplicate validator request field");
+    return false;
+  }
+  out.present |= flag;
+  return true;
+}
+
+ObjectFieldStatus parse_request_field(std::string_view field,
+                                      JsonParser &parser, BufPool &pool,
+                                      ValidatorRequest &out) noexcept {
+  if (field == "contractVersion") {
+    if (!set_present(out, RequestField::ContractVersion, parser)) {
+      return ObjectFieldStatus::Error;
+    }
+    return json::to_object_field_status(
+        json::parse_integer(parser, pool, out.contract_version));
+  }
+  if (field == "requestId") {
+    if (!set_present(out, RequestField::RequestId, parser)) {
+      return ObjectFieldStatus::Error;
+    }
+    return json::to_object_field_status(
+        json::parse_text(parser, pool, out.request_id));
+  }
+  if (field == "kind") {
+    if (!set_present(out, RequestField::Kind, parser)) {
+      return ObjectFieldStatus::Error;
+    }
+    return json::to_object_field_status(
+        json::parse_text(parser, pool, out.kind));
+  }
+  if (field == "project") {
+    if (!set_present(out, RequestField::Project, parser)) {
+      return ObjectFieldStatus::Error;
+    }
+    return json::to_object_field_status(
+        json::parse_text(parser, pool, out.project));
+  }
+  if (field == "payloadBase64") {
+    if (!set_present(out, RequestField::Payload, parser)) {
+      return ObjectFieldStatus::Error;
+    }
+    return json::to_object_field_status(
+        json::parse_text(parser, pool, out.payload_base64));
+  }
+  (void)parser.fail("unknown validator request field");
+  return ObjectFieldStatus::Error;
+}
+
+ParseStatus parse_request(JsonParser &parser, BufPool &pool,
+                          ValidatorRequest &out) noexcept {
+  return json::parse_object_fields<parse_request_field>(parser, pool, out);
+}
+
+std::optional<ValidationError> decode_request(std::string_view input,
+                                              ValidatorRequest &request,
+                                              BufPool &pool) {
+  JsonParser parser;
+  if (!parser.feed(input.data(), input.size())) {
+    const json::ParseError &error = parser.error();
+    return ValidationError{
+        .code = "invalid_request",
+        .field = "request",
+        .offset = error.offset,
+        .message =
+            error.message ? error.message : "invalid validator request JSON",
+    };
+  }
+  parser.finish();
+  if (json::parse_document<parse_request>(parser, pool, request) !=
+      ParseStatus::Done) {
+    const json::ParseError &error = parser.error();
+    return ValidationError{
+        .code = "invalid_request",
+        .field = "request",
+        .offset = error.offset,
+        .message =
+            error.message ? error.message : "invalid validator request JSON",
+    };
+  }
+  constexpr std::uint8_t required =
+      RequestField::ContractVersion | RequestField::RequestId |
+      RequestField::Kind | RequestField::Project | RequestField::Payload;
+  if ((request.present & required) != required) {
+    return ValidationError{
+        .code = "invalid_request",
+        .field = "request",
+        .message = "validator request is missing a required field",
+    };
+  }
+  if (request.contract_version != kNativeValidatorContractVersion) {
+    return ValidationError{
+        .code = "unsupported_contract",
+        .field = "contractVersion",
+        .message = "validator contract version is not supported",
+    };
+  }
+  if (request.request_id.empty() || request.request_id.size() > 128) {
+    return ValidationError{
+        .code = "invalid_request",
+        .field = "requestId",
+        .message = "requestId must be 1-128 bytes",
+    };
+  }
+  if (request.kind != "project_route" && request.kind != "gray_rules") {
+    return ValidationError{
+        .code = "invalid_request",
+        .field = "kind",
+        .message = "validator kind is not supported",
+    };
+  }
+  if (request.kind == "project_route" &&
+      (request.project.empty() || request.project.size() > 255 ||
+       request.project.find(';') != std::string_view::npos)) {
+    return ValidationError{
+        .code = "invalid_request",
+        .field = "project",
+        .message = "project name is invalid",
+    };
+  }
+  return std::nullopt;
+}
+
+std::string_view access_error_code(AccessConfigErrorCode code) noexcept {
+  switch (code) {
+  case AccessConfigErrorCode::InvalidJson:
+    return "invalid_json";
+  case AccessConfigErrorCode::InvalidRoot:
+    return "invalid_root";
+  case AccessConfigErrorCode::InvalidField:
+    return "invalid_field";
+  case AccessConfigErrorCode::OutOfRange:
+    return "out_of_range";
+  case AccessConfigErrorCode::InvalidCombination:
+    return "invalid_combination";
+  case AccessConfigErrorCode::Conflict:
+    return "conflict";
+  }
+  return "invalid_configuration";
+}
+
+ValidationError to_validation_error(AccessConfigError error) {
+  return ValidationError{
+      .code = std::string(access_error_code(error.code)),
+      .field = std::move(error.field),
+      .offset = error.offset,
+      .message = std::move(error.message),
+  };
+}
+
+ValidationResult validate_project(std::string_view project,
+                                  std::string_view payload) {
+  auto parsed = parse_project_config(payload);
+  if (!parsed) {
+    return ValidationResult{
+        .errors = {to_validation_error(std::move(parsed.error()))}};
+  }
+  if (!*parsed) {
+    return ValidationResult{
+        .valid = true,
+        .summary =
+            {
+                .project_version = 0,
+                .host_count = 0,
+                .route_count = 0,
+            },
+    };
+  }
+
+  AccessScriptRuntime scripts;
+  auto compiled =
+      compile_project_config(project, **parsed, scripts.compiler_adapter());
+  if (!compiled) {
+    return ValidationResult{
+        .errors = {to_validation_error(std::move(compiled.error()))}};
+  }
+  const std::size_t host_count = *compiled ? (**compiled).hosts().size() : 0;
+  const std::size_t route_count = *compiled ? (**compiled).routes().size() : 0;
+  return ValidationResult{
+      .valid = true,
+      .summary =
+          {
+              .project_version = (**parsed).version,
+              .host_count = host_count,
+              .route_count = route_count,
+          },
+  };
+}
+
+std::optional<ValidationError>
+validate_gray_entry(const GrayMatchConfigEntry &entry, std::size_t index,
+                    std::unordered_set<std::string> &entries) {
+  const std::string prefix = "rules[" + std::to_string(index) + ']';
+  if (entry.entry != "vdi" && entry.entry != "desktop" &&
+      entry.entry != "internet" && entry.entry != "custom") {
+    return ValidationError{
+        .code = "invalid_field",
+        .field = prefix + ".entry",
+        .message = "gray entry is not recognized",
+    };
+  }
+  if (!entries.emplace(entry.entry).second) {
+    return ValidationError{
+        .code = "conflict",
+        .field = prefix + ".entry",
+        .message = "gray entry is duplicate",
+    };
+  }
+  if (entry.ratio < 0 || entry.ratio > 10000) {
+    return ValidationError{
+        .code = "out_of_range",
+        .field = prefix + ".ratio",
+        .message = "gray ratio must be between 0 and 10000",
+    };
+  }
+  for (std::size_t cidr_index = 0; cidr_index < entry.cidrs.size();
+       ++cidr_index) {
+    const std::string field =
+        prefix + ".cidrs[" + std::to_string(cidr_index) + ']';
+    if (!entry.cidrs[cidr_index]) {
+      return ValidationError{
+          .code = "invalid_field",
+          .field = field,
+          .message = "gray CIDR must not be null",
+      };
+    }
+    auto cidr = Cidr::parse(*entry.cidrs[cidr_index], field);
+    if (!cidr) {
+      AccessConfigError error = std::move(cidr.error());
+      error.field = field;
+      return to_validation_error(std::move(error));
+    }
+  }
+  return std::nullopt;
+}
+
+ValidationResult validate_gray(std::string_view payload) {
+  auto parsed = parse_gray_match_config(payload);
+  if (!parsed) {
+    return ValidationResult{
+        .errors = {to_validation_error(std::move(parsed.error()))}};
+  }
+  if (!*parsed) {
+    return ValidationResult{
+        .valid = true,
+        .summary = {.gray_rule_count = 0},
+    };
+  }
+
+  std::unordered_set<std::string> entries;
+  for (std::size_t index = 0; index < (**parsed).size(); ++index) {
+    if (auto error = validate_gray_entry((**parsed)[index], index, entries)) {
+      return ValidationResult{.errors = {std::move(*error)}};
+    }
+  }
+  GrayMatchStore store;
+  auto applied = store.apply(*parsed);
+  if (!applied) {
+    return ValidationResult{
+        .errors = {to_validation_error(std::move(applied.error()))}};
+  }
+  return ValidationResult{
+      .valid = true,
+      .summary = {.gray_rule_count = store.rule_count()},
+  };
+}
+
+bool generated(Generator::Result result) noexcept {
+  return result == Generator::Result::OK;
+}
+
+bool write_key(Generator &generator, std::string_view key) {
+  return generated(generator.string(key.data(), key.size()));
+}
+
+bool write_string(Generator &generator, std::string_view value) {
+  return generated(generator.string(value.data(), value.size()));
+}
+
+std::string encode_response(const ValidationResult &result) {
+  std::string output;
+  StringSink sink(output);
+  Generator generator(sink);
+  generator.set_option(Generator::Option::ValidateUtf8);
+
+  bool ok = generated(generator.map_open()) &&
+            write_key(generator, "contractVersion") &&
+            generated(generator.integer(kNativeValidatorContractVersion)) &&
+            write_key(generator, "valid") &&
+            generated(generator.bool_value(result.valid));
+  if (ok && result.valid) {
+    ok = write_key(generator, "normalized") && generated(generator.map_open());
+    if (ok && result.summary.project_version) {
+      ok = write_key(generator, "projectVersion") &&
+           generated(generator.integer(*result.summary.project_version));
+    }
+    if (ok && result.summary.host_count) {
+      ok = write_key(generator, "hostCount") &&
+           generated(generator.integer(
+               static_cast<std::int64_t>(*result.summary.host_count)));
+    }
+    if (ok && result.summary.route_count) {
+      ok = write_key(generator, "routeCount") &&
+           generated(generator.integer(
+               static_cast<std::int64_t>(*result.summary.route_count)));
+    }
+    if (ok && result.summary.gray_rule_count) {
+      ok = write_key(generator, "grayRuleCount") &&
+           generated(generator.integer(
+               static_cast<std::int64_t>(*result.summary.gray_rule_count)));
+    }
+    ok = ok && generated(generator.map_close());
+  }
+  ok =
+      ok && write_key(generator, "errors") && generated(generator.array_open());
+  for (const ValidationError &error : result.errors) {
+    ok =
+        ok && generated(generator.map_open()) && write_key(generator, "code") &&
+        write_string(generator, error.code) && write_key(generator, "field") &&
+        write_string(generator, error.field) &&
+        write_key(generator, "offset") &&
+        generated(generator.integer(static_cast<std::int64_t>(error.offset))) &&
+        write_key(generator, "message") &&
+        write_string(generator, error.message) &&
+        generated(generator.map_close());
+    if (!ok) {
+      break;
+    }
+  }
+  ok = ok && generated(generator.array_close()) &&
+       generated(generator.map_close());
+  if (!ok) {
+    return R"({"contractVersion":1,"valid":false,"errors":[{"code":"encoding_failed","field":"response","offset":0,"message":"validator response encoding failed"}]})";
+  }
+  return output;
+}
+
+} // namespace
+
+std::string process_native_validator_request(std::string_view input) {
+  ValidatorRequest request;
+  BufPool pool;
+  if (auto error = decode_request(input, request, pool)) {
+    return encode_response(ValidationResult{.errors = {std::move(*error)}});
+  }
+
+  std::string payload;
+  if (!util::base64_decode(request.payload_base64, payload)) {
+    return encode_response(ValidationResult{
+        .errors = {{
+            .code = "invalid_request",
+            .field = "payloadBase64",
+            .message = "payloadBase64 is not valid basic Base64",
+        }},
+    });
+  }
+  return encode_response(request.kind == "project_route"
+                             ? validate_project(request.project, payload)
+                             : validate_gray(payload));
+}
+
+std::string native_validator_input_too_large_response() {
+  return encode_response(ValidationResult{
+      .errors = {{
+          .code = "input_too_large",
+          .field = "request",
+          .message = "validator request exceeds the protocol input limit",
+      }},
+  });
+}
+
+} // namespace fiber::access_server

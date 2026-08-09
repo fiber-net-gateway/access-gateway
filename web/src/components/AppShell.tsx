@@ -14,8 +14,8 @@ interface NavigationItem {
 }
 
 const navigation: NavigationItem[] = [
-  { label: '运行总览', detail: 'Overview', active: true },
-  { label: '项目与路由', detail: '即将开放' },
+  { label: '环境与项目', detail: 'Workspace', active: true },
+  { label: '草稿与校验', detail: 'API 就绪' },
   { label: '灰度规则', detail: '即将开放' },
   { label: '发布中心', detail: '即将开放' },
   { label: '运行实例', detail: '即将开放' },

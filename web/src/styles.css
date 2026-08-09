@@ -346,6 +346,140 @@ code {
   display: block;
 }
 
+.workspace-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.workspace-panel {
+  overflow: hidden;
+  border: 1px solid #d9ded6;
+  border-radius: 18px;
+  background: rgb(255 255 255 / 70%);
+}
+
+.panel-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 22px 24px;
+  border-bottom: 1px solid #e3e7e0;
+}
+
+.panel-heading h2,
+.compact-form h3 {
+  margin: 0;
+  color: #1c2c25;
+}
+
+.panel-heading > span {
+  color: #69766f;
+  font-family: 'SFMono-Regular', Consolas, monospace;
+}
+
+.entity-list {
+  display: grid;
+  min-height: 130px;
+  padding: 10px;
+}
+
+.entity-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  width: 100%;
+  min-height: 64px;
+  padding: 12px 14px;
+  border: 1px solid transparent;
+  border-radius: 11px;
+  background: transparent;
+  color: #27362f;
+  text-align: left;
+}
+
+button.entity-row {
+  cursor: pointer;
+}
+
+.entity-row:hover,
+.entity-row-active {
+  border-color: #cad5ca;
+  background: #f3f6f0;
+}
+
+.entity-row strong,
+.entity-row small {
+  display: block;
+}
+
+.entity-row small {
+  margin-top: 5px;
+  color: #7c8881;
+  font-size: 0.74rem;
+}
+
+.empty-state {
+  align-self: center;
+  margin: 0;
+  padding: 20px;
+  color: #7d8882;
+  font-size: 0.84rem;
+  text-align: center;
+}
+
+.compact-form {
+  display: grid;
+  gap: 13px;
+  padding: 20px 24px 24px;
+  border-top: 1px solid #e3e7e0;
+  background: #f7f8f4;
+}
+
+.compact-form h3 {
+  font-size: 0.92rem;
+}
+
+.form-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.compact-form label {
+  display: grid;
+  gap: 6px;
+  color: #56635c;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.compact-form input {
+  width: 100%;
+  padding: 10px 11px;
+  border: 1px solid #cbd3ca;
+  border-radius: 8px;
+  background: #fff;
+  color: #17221e;
+}
+
+.compact-form button {
+  justify-self: start;
+  padding: 10px 15px;
+  border: 0;
+  border-radius: 8px;
+  background: #203d31;
+  color: #eef5e9;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.compact-form button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
 .next-step-list strong {
   margin-bottom: 5px;
   font-size: 0.88rem;
@@ -393,6 +527,10 @@ code {
   }
 
   .foundation-panel {
+    grid-template-columns: 1fr;
+  }
+
+  .workspace-grid {
     grid-template-columns: 1fr;
   }
 }

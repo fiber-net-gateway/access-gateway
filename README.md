@@ -16,10 +16,12 @@ The repository is under active development in two first-class areas:
   Host/Path/condition matching, RESPONSE and PROXY execution, WebSocket tunneling, service
   discovery, gray routing, CAT tracing, Prometheus metrics, and structured access logs. Production
   script-corpus differential verification and final cutover gates are still in progress.
-- **Console** — the React/Vite frontend and Fastify backend foundation is available, including
-  strict configuration parsing, a health endpoint, local API proxying, and workspace-wide quality
-  commands. Authentication, persistence, configuration editors, Nacos publication, release
-  management, and per-instance activation evidence are not implemented yet.
+- **Console** — the first MySQL-backed vertical slice is available: deterministic migrations,
+  development identity and environment RBAC, environment/project APIs, encrypted immutable draft
+  revisions, optimistic locking, audit events, and a React environment/project workspace. Release
+  and publication tables, the release state machine, publication conflict decisions, and a
+  fail-closed Native Validator subprocess adapter are present. OIDC, Nacos publication workers,
+  full route editors, and per-instance activation collection remain to be implemented.
 
 The console therefore reports unavailable or unknown state where the supporting workflow does not
 exist. It does not fabricate publication or activation success.
@@ -117,6 +119,32 @@ The default development endpoints are:
 Vite proxies browser requests under `/api` to Fastify. To run one side independently, use
 `npm run dev:web` or `npm run dev:server`.
 
+The API starts without MySQL for UI/API development, but persistent endpoints return `503` and
+`/api/health/ready` reports degraded state. To enable persistence, create a MySQL 8.4 database,
+set `MYSQL_ENABLED=true`, `MYSQL_PASSWORD`, and a local 32-byte document key in `server/.env`, then
+run migrations before starting the API:
+
+```bash
+openssl rand -base64 32
+# Put the result in DOCUMENT_ENCRYPTION_KEY_BASE64 inside server/.env.
+npm run db:migrate
+npm run dev
+```
+
+Migrations are checksum protected and serialized with a MySQL advisory lock. The API never runs
+them automatically. `AUTH_MODE=development` creates a local platform administrator and is rejected
+when `NODE_ENV=production`. Production OIDC startup remains fail-closed until its provider adapter
+is implemented.
+
+The implemented control-plane endpoints include:
+
+- `/api/health`, `/api/health/live`, `/api/health/ready`, and `/api/system/status`;
+- environment list/create/get and project list/create/get;
+- active project draft get/create, immutable revision save with `If-Match`, and revision retrieval.
+
+Draft model documents are envelope-encrypted with AES-256-GCM before MySQL storage. The local key
+configuration is intended for development only; production must use an external key provider.
+
 Validate all console workspaces with:
 
 ```bash
@@ -133,6 +161,7 @@ The root workspace exposes the common native workflow:
 ```bash
 npm run configure:native
 npm run build:native
+npm run build:native-validator
 npm run test:native
 ```
 
@@ -142,11 +171,17 @@ The equivalent CMake commands are:
 cmake -S native -B native/build -G Ninja \
   -DCMAKE_BUILD_TYPE=Release -DFIBER_BUILD_TESTS=ON
 cmake --build native/build --target fiber_app_access_server --parallel
+cmake --build native/build --target fiber_app_access_gateway_validator --parallel
 cmake --build native/build --target fiber_access_server_tests --parallel
 ctest --test-dir native/build --output-on-failure -L access-server
 ```
 
 The executable is written to `native/build/apps/access-server`.
+The offline control-plane validator is written to
+`native/build/apps/access-gateway-validator`; configure its absolute path with
+`NATIVE_VALIDATOR_PATH`. It accepts one bounded, versioned JSON request on stdin and returns one
+JSON result on stdout. It reuses the native codec, script compiler, and compiled route model, and
+does not connect to Nacos or external services.
 
 ## Run Access Server
 

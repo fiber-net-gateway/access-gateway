@@ -14,6 +14,9 @@ connection pool，以及 Nacos、CAT、Prometheus 组件。迁移不要求这些
 以及 PROXY 请求、普通响应和 WebSocket 101 tunnel：
 
 - CMake 已注册 `fiber_app_access_server`，产物名为 `access-server`；
+- 已注册离线 `fiber_app_access_gateway_validator`，产物名为
+  `access-gateway-validator`；它复用相同 codec、脚本编译和 compiled model，按版本化
+  stdin/stdout JSON 协议为 Console 提供 fail-closed 权威校验，且不连接 Nacos/CAT/公网；
 - 已建立 `access_server_core` 和 `fiber_access_server_tests`；
 - 已实现项目列表、`ProjectConf`、`HostStrategy`、`RouteItem`、Duration/DataSize 的
   Java 兼容解码；
@@ -96,6 +99,7 @@ git submodule update --init --recursive
 cmake -S native -B native/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DFIBER_BUILD_TESTS=ON
 cmake --build native/build --target fiber_app_access_server --parallel
+cmake --build native/build --target fiber_app_access_gateway_validator --parallel
 cmake --build native/build --target fiber_access_server_tests --parallel
 ctest --test-dir native/build --output-on-failure -L access-server
 ```
@@ -104,7 +108,28 @@ ctest --test-dir native/build --output-on-failure -L access-server
 
 ```text
 native/build/apps/access-server
+native/build/apps/access-gateway-validator
 ```
+
+### 离线 Validator
+
+`access-gateway-validator` 读取一条 contract version 1 JSON 请求，payload 使用 basic
+Base64，单次协议输入上限为 8 MiB：
+
+```json
+{
+  "contractVersion": 1,
+  "requestId": "request-id",
+  "kind": "project_route",
+  "project": "example",
+  "payloadBase64": "..."
+}
+```
+
+`kind` 支持 `project_route` 和 `gray_rules`。项目配置会执行完整 codec、Host/Path/CIDR、
+模板和 condition 脚本编译；gray 校验额外阻止未知 entry、重复 entry、越界 ratio 和非法
+CIDR。结果始终是单条 JSON，包含 `contractVersion`、`valid`、`normalized` 和脱敏的
+`errors`，不会回显 payload。
 
 ## 运行
 
@@ -176,6 +201,7 @@ listener 只在 Nacos client/config/naming、两类 watcher 和项目列表首�
 - `src/runtime/`：本地脚本 runtime、候选快照编译/原子发布、Nacos 配置 watcher、
   production gray、NamingService selector、per-worker DNS/pool、HTTP server 和进程
   runtime；
+- `src/validation/`：离线 Native Validator 的有界版本协议与权威校验编排；
 - `scripts/`：测试环境 Nacos 配置图的无代理导出、rnacos 发布和回读校验工具；
 - `tests/`：access-server 聚焦测试和 Java golden fixtures；
 - `docs/migration-plan.md`：范围边界、C++ 模块划分、工作包和阶段门槛；

@@ -1,9 +1,25 @@
-import type { ApiConnectionState, HealthResponse } from '../api/types'
+import { useState, type FormEvent } from 'react'
+
+import type {
+  ApiConnectionState,
+  CreateEnvironmentInput,
+  EnvironmentView,
+  HealthResponse,
+  ProjectView,
+  SystemStatusResponse,
+} from '../api/types'
 
 interface OverviewPageProps {
   apiState: ApiConnectionState
   health: HealthResponse | null
+  systemStatus: SystemStatusResponse | null
+  environments: readonly EnvironmentView[]
+  selectedEnvironmentId: string | null
+  projects: readonly ProjectView[]
   errorMessage: string | null
+  onSelectEnvironment(id: string): void
+  onCreateEnvironment(input: CreateEnvironmentInput): Promise<void>
+  onCreateProject(name: string): Promise<void>
 }
 
 interface SummaryCard {
@@ -13,7 +29,52 @@ interface SummaryCard {
   tone: 'ready' | 'pending' | 'unknown'
 }
 
-export function OverviewPage({ apiState, health, errorMessage }: OverviewPageProps) {
+function capabilityCard(
+  label: string,
+  capability: { status: string; detail: string } | undefined,
+): SummaryCard {
+  return {
+    label,
+    value:
+      capability?.status === 'ready'
+        ? '可用'
+        : capability?.status === 'unavailable'
+          ? '不可用'
+          : '未配置',
+    hint: capability?.detail ?? '正在获取能力状态',
+    tone:
+      capability?.status === 'ready'
+        ? 'ready'
+        : capability?.status === 'unavailable'
+          ? 'pending'
+          : 'unknown',
+  }
+}
+
+export function OverviewPage(props: OverviewPageProps) {
+  const {
+    apiState,
+    health,
+    systemStatus,
+    environments,
+    selectedEnvironmentId,
+    projects,
+    errorMessage,
+    onSelectEnvironment,
+    onCreateEnvironment,
+    onCreateProject,
+  } = props
+  const [environmentForm, setEnvironmentForm] = useState<CreateEnvironmentInput>({
+    code: '',
+    name: '',
+    tier: 'local',
+    nacosEndpoint: 'http://127.0.0.1:8848',
+  })
+  const [projectName, setProjectName] = useState('')
+  const [actionError, setActionError] = useState<string | null>(null)
+  const [saving, setSaving] = useState(false)
+  const selectedEnvironment = environments.find((item) => item.id === selectedEnvironmentId)
+
   const cards: SummaryCard[] = [
     {
       label: 'Console API',
@@ -21,40 +82,58 @@ export function OverviewPage({ apiState, health, errorMessage }: OverviewPagePro
       hint: health ? `${health.service} · v${health.version}` : '等待后端健康检查',
       tone: apiState === 'online' ? 'ready' : apiState === 'loading' ? 'unknown' : 'pending',
     },
-    {
-      label: '配置数据源',
-      value: '未接入',
-      hint: '后续接入数据库与 rnacos 环境配置',
-      tone: 'pending',
-    },
-    {
-      label: '实例激活状态',
-      value: '未知',
-      hint: '尚无 access-server 实例级激活证据',
-      tone: 'unknown',
-    },
+    capabilityCard('MySQL / Schema', systemStatus?.dependencies.database),
+    capabilityCard('Native Validator', systemStatus?.dependencies.nativeValidator),
   ]
+
+  const submitEnvironment = async (event: FormEvent): Promise<void> => {
+    event.preventDefault()
+    setSaving(true)
+    setActionError(null)
+    try {
+      await onCreateEnvironment(environmentForm)
+      setEnvironmentForm((current) => ({ ...current, code: '', name: '' }))
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : '创建环境失败')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const submitProject = async (event: FormEvent): Promise<void> => {
+    event.preventDefault()
+    setSaving(true)
+    setActionError(null)
+    try {
+      await onCreateProject(projectName)
+      setProjectName('')
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : '创建项目失败')
+    } finally {
+      setSaving(false)
+    }
+  }
 
   return (
     <div className="overview-page">
       <header className="page-header">
         <div>
-          <p className="eyebrow">ACCESS GATEWAY / 本地开发环境</p>
-          <h1>控制面工作台</h1>
+          <p className="eyebrow">ACCESS GATEWAY / CONTROL PLANE</p>
+          <h1>环境与项目</h1>
           <p className="page-description">
-            管理项目路由、灰度规则和不可变发布记录。当前阶段已完成前后端基础联通。
+            管理环境隔离、项目路由草稿和发布前能力。数据库、校验器和 Worker 的状态来自后端真实探测。
           </p>
         </div>
         <div className="environment-badge">
           <span>环境</span>
-          <strong>LOCAL</strong>
+          <strong>{selectedEnvironment?.code.toUpperCase() ?? 'NONE'}</strong>
         </div>
       </header>
 
-      {errorMessage ? (
+      {errorMessage || actionError ? (
         <div className="error-banner" role="alert">
-          <strong>Console API 暂不可用</strong>
-          <span>{errorMessage}</span>
+          <strong>操作未完成</strong>
+          <span>{actionError ?? errorMessage}</span>
         </div>
       ) : null}
 
@@ -70,38 +149,124 @@ export function OverviewPage({ apiState, health, errorMessage }: OverviewPagePro
         ))}
       </section>
 
-      <section className="foundation-panel">
-        <div>
-          <p className="eyebrow">FOUNDATION READY</p>
-          <h2>基础框架已建立</h2>
-          <p>
-            Web 使用 React + Vite，API 使用 Node.js + Fastify。开发环境通过同源
-            <code>/api</code> 代理联通，后续业务模块可以按领域逐步接入。
-          </p>
-        </div>
-        <ol className="next-step-list">
-          <li>
-            <span>01</span>
+      <section className="workspace-grid">
+        <article className="workspace-panel">
+          <div className="panel-heading">
             <div>
-              <strong>环境与身份</strong>
-              <small>环境隔离、登录会话和权限边界</small>
+              <p className="eyebrow">ENVIRONMENTS</p>
+              <h2>环境</h2>
             </div>
-          </li>
-          <li>
-            <span>02</span>
+            <span>{environments.length}</span>
+          </div>
+          <div className="entity-list">
+            {environments.map((environment) => (
+              <button
+                className={
+                  environment.id === selectedEnvironmentId
+                    ? 'entity-row entity-row-active'
+                    : 'entity-row'
+                }
+                key={environment.id}
+                onClick={() => onSelectEnvironment(environment.id)}
+                type="button"
+              >
+                <span>
+                  <strong>{environment.name}</strong>
+                  <small>{environment.nacos.endpoint}</small>
+                </span>
+                <code>{environment.code}</code>
+              </button>
+            ))}
+            {environments.length === 0 ? <p className="empty-state">尚未创建环境。</p> : null}
+          </div>
+          <form className="compact-form" onSubmit={(event) => void submitEnvironment(event)}>
+            <h3>新建环境</h3>
+            <div className="form-row">
+              <label>
+                Code
+                <input
+                  required
+                  value={environmentForm.code}
+                  onChange={(event) =>
+                    setEnvironmentForm((current) => ({ ...current, code: event.target.value }))
+                  }
+                />
+              </label>
+              <label>
+                名称
+                <input
+                  required
+                  value={environmentForm.name}
+                  onChange={(event) =>
+                    setEnvironmentForm((current) => ({ ...current, name: event.target.value }))
+                  }
+                />
+              </label>
+            </div>
+            <label>
+              Nacos Endpoint
+              <input
+                required
+                type="url"
+                value={environmentForm.nacosEndpoint}
+                onChange={(event) =>
+                  setEnvironmentForm((current) => ({
+                    ...current,
+                    nacosEndpoint: event.target.value,
+                  }))
+                }
+              />
+            </label>
+            <button
+              disabled={saving || systemStatus?.dependencies.database.status !== 'ready'}
+              type="submit"
+            >
+              创建环境
+            </button>
+          </form>
+        </article>
+
+        <article className="workspace-panel">
+          <div className="panel-heading">
             <div>
-              <strong>项目配置</strong>
-              <small>结构化编辑与 native codec 校验</small>
+              <p className="eyebrow">PROJECT ROUTES</p>
+              <h2>{selectedEnvironment?.name ?? '项目'}</h2>
             </div>
-          </li>
-          <li>
-            <span>03</span>
-            <div>
-              <strong>发布工作流</strong>
-              <small>不可变 release、rnacos 写入与证据</small>
-            </div>
-          </li>
-        </ol>
+            <span>{projects.length}</span>
+          </div>
+          <div className="entity-list">
+            {projects.map((project) => (
+              <div className="entity-row" key={project.id}>
+                <span>
+                  <strong>{project.name}</strong>
+                  <small>
+                    {project.draft
+                      ? `草稿 r${project.draft.revision} · ${project.draft.state}`
+                      : '尚无活动草稿'}
+                  </small>
+                </span>
+                <span className="status-chip status-chip-unknown">激活未知</span>
+              </div>
+            ))}
+            {selectedEnvironmentId && projects.length === 0 ? (
+              <p className="empty-state">这个环境还没有项目。</p>
+            ) : null}
+          </div>
+          <form className="compact-form" onSubmit={(event) => void submitProject(event)}>
+            <h3>新建项目</h3>
+            <label>
+              项目名
+              <input
+                required
+                value={projectName}
+                onChange={(event) => setProjectName(event.target.value)}
+              />
+            </label>
+            <button disabled={saving || !selectedEnvironmentId} type="submit">
+              创建项目
+            </button>
+          </form>
+        </article>
       </section>
     </div>
   )

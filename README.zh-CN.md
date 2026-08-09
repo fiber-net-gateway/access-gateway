@@ -14,9 +14,10 @@ Access Gateway 是由 C++23 数据面与 Web 管理控制台组成的高性能�
 - **Access Server**：原生运行时已支持 Nacos 驱动的项目与路由配置、Host/Path/条件
   匹配、RESPONSE 与 PROXY 执行、WebSocket 隧道、服务发现、灰度路由、CAT 链路追踪、
   Prometheus 指标和结构化访问日志。生产脚本语料差分验证与最终切流门槛仍在推进中。
-- **Console**：已经具备 React/Vite 前端与 Fastify 后端基础框架，包括严格的配置解析、
-  健康检查接口、本地 API 代理和工作区统一质量命令。身份认证、数据持久化、配置编辑器、
-  Nacos 发布、版本管理和实例级生效证据尚未实现。
+- **Console**：首个基于 MySQL 的纵向链路已经可用，包括确定性 migration、开发身份与环境
+  RBAC、环境/项目 API、加密的不可变草稿 revision、乐观锁、审计事件，以及 React 环境/项目
+  工作台。Release/发布表、Release 状态机、发布冲突判定和 fail-closed Native Validator
+  子进程适配器已经落地。OIDC、Nacos 发布 Worker、完整路由编辑器和实例级生效采集仍待实现。
 
 因此，对于尚无配套工作流的状态，控制台会明确显示“不可用”或“未知”，不会伪造发布或
 生效成功。
@@ -110,6 +111,31 @@ npm run dev
 Vite 会把浏览器的 `/api` 请求代理到 Fastify。需要单独运行一端时，使用
 `npm run dev:web` 或 `npm run dev:server`。
 
+API 可以在未配置 MySQL 时启动，便于开发前后端联通；此时持久化接口返回 `503`，
+`/api/health/ready` 会报告降级。要启用持久化，请创建 MySQL 8.4 数据库，在
+`server/.env` 中设置 `MYSQL_ENABLED=true`、`MYSQL_PASSWORD` 和本地 32 字节文档密钥，
+然后先执行 migration：
+
+```bash
+openssl rand -base64 32
+# 把结果写入 server/.env 的 DOCUMENT_ENCRYPTION_KEY_BASE64。
+npm run db:migrate
+npm run dev
+```
+
+Migration 使用 checksum 防篡改，并通过 MySQL advisory lock 串行执行；API 不会自动迁移。
+`AUTH_MODE=development` 会建立本地平台管理员，且在 `NODE_ENV=production` 下被拒绝。
+生产 OIDC provider adapter 完成前，OIDC 模式会拒绝启动。
+
+目前实现的控制面接口包括：
+
+- `/api/health`、`/api/health/live`、`/api/health/ready` 和 `/api/system/status`；
+- 环境的列表/创建/详情，以及项目的列表/创建/详情；
+- 项目活动草稿的获取/创建、带 `If-Match` 的不可变 revision 保存与 revision 获取。
+
+草稿模型在写入 MySQL 前使用 AES-256-GCM 信封加密。本地密钥配置只用于开发环境；生产
+环境应接入外部密钥服务。
+
 使用以下命令验证全部 Console 工作区：
 
 ```bash
@@ -126,6 +152,7 @@ npm run build
 ```bash
 npm run configure:native
 npm run build:native
+npm run build:native-validator
 npm run test:native
 ```
 
@@ -135,11 +162,16 @@ npm run test:native
 cmake -S native -B native/build -G Ninja \
   -DCMAKE_BUILD_TYPE=Release -DFIBER_BUILD_TESTS=ON
 cmake --build native/build --target fiber_app_access_server --parallel
+cmake --build native/build --target fiber_app_access_gateway_validator --parallel
 cmake --build native/build --target fiber_access_server_tests --parallel
 ctest --test-dir native/build --output-on-failure -L access-server
 ```
 
 可执行文件输出到 `native/build/apps/access-server`。
+离线控制面校验器输出到 `native/build/apps/access-gateway-validator`，通过绝对路径
+`NATIVE_VALIDATOR_PATH` 配置。它从 stdin 读取一条有大小上限、带版本的 JSON 请求，并在
+stdout 返回一条 JSON 结果；校验直接复用原生 codec、脚本编译器和 compiled route model，
+不会连接 Nacos 或外部服务。
 
 ## 运行 Access Server
 

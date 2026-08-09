@@ -88,12 +88,11 @@ flowchart LR
 ```text
 server/
 ├── migrations/
-│   ├── 0001_schema_migrations.sql
-│   ├── 0002_identity_and_environments.sql
-│   ├── 0003_projects_and_drafts.sql
-│   ├── 0004_releases_and_publication.sql
-│   ├── 0005_activation_and_audit.sql
-│   └── ...
+│   ├── 0001_identity_and_environments.sql
+│   ├── 0002_projects_and_drafts.sql
+│   ├── 0003_releases_and_publication.sql
+│   ├── 0004_activation.sql
+│   └── ...                         # schema_migrations 由 migration runner 建立
 └── src/
     ├── app.ts
     ├── config/
@@ -178,8 +177,8 @@ export interface TransactionOptions {
 
 export async function withTransaction<T>(
   pool: DatabasePool,
-  options: TransactionOptions,
   operation: (transaction: DatabaseTransaction) => Promise<T>,
+  options?: TransactionOptions,
 ): Promise<T>
 ```
 
@@ -505,8 +504,8 @@ CREATE TABLE release_resources (
     release_id BIGINT UNSIGNED NOT NULL,
     project_id BIGINT UNSIGNED NULL,
     kind VARCHAR(32) NOT NULL,
-    data_id VARCHAR(512) NOT NULL,
-    group_name VARCHAR(255) NOT NULL,
+    data_id VARCHAR(512) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    group_name VARCHAR(255) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
     operation VARCHAR(16) NOT NULL,
     publish_order INT UNSIGNED NOT NULL,
     required_resource BOOLEAN NOT NULL DEFAULT TRUE,
