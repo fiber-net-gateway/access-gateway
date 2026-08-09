@@ -7,7 +7,11 @@ import { createApplicationRuntime } from './runtime.js'
 async function main(): Promise<void> {
   const config = loadServerConfig()
   const runtime = await createApplicationRuntime(config)
-  const app = buildApp({ logger: { level: config.logLevel }, services: runtime.services })
+  const app = buildApp({
+    logger: { level: config.logLevel },
+    services: runtime.services,
+    staticRoot: config.staticRoot,
+  })
   let closing = false
 
   async function shutdown(signal: NodeJS.Signals): Promise<void> {

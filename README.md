@@ -154,6 +154,40 @@ npm run format:check
 npm run build
 ```
 
+## Local Docker demo
+
+The repository includes a Docker Compose demo containing the combined React Console and Fastify
+API, MySQL 8.4, R-Nacos, and the native Access Server. Generate local-only random secrets and start
+the stack:
+
+```bash
+npm run demo:init
+npm run demo:up
+```
+
+The first native image build downloads the pinned C++ build dependencies and can take several
+minutes. Compose applies the MySQL migrations, idempotently creates a Console demo environment,
+publishes a compatible demo route directly to R-Nacos, and starts Access Server only after that
+bootstrap succeeds.
+
+Fastify serves both the `/api/*` endpoints and the built React single-page application from one
+Console container. The complete stack therefore contains four long-running containers and three
+one-shot migration/bootstrap containers.
+
+Once all services are ready:
+
+- Console: `http://localhost:8088`
+- Access Server demo: `curl -H 'Host: demo.local' http://localhost:16688/`
+- Access Server metrics: `http://localhost:16689/metrics`
+- R-Nacos Console: `http://localhost:10848/rnacos/`
+- MySQL: `127.0.0.1:3307`
+
+R-Nacos Console credentials and database secrets are stored only in the ignored local `.env` file.
+The bootstrap writes directly to R-Nacos because the Console publication worker is not implemented
+yet; the UI continues to report publication and per-instance activation as unavailable or unknown.
+Use `npm run demo:ps`, `npm run demo:logs`, and `npm run demo:down` to operate the stack. Add
+`--volumes` to `docker compose down` only when you intentionally want to delete all demo data.
+
 ## Build and test Access Server
 
 The root workspace exposes the common native workflow:

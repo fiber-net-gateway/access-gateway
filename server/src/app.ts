@@ -1,3 +1,4 @@
+import fastifyStatic from '@fastify/static'
 import Fastify, { type FastifyError, type FastifyServerOptions } from 'fastify'
 
 import { UnavailableNativeValidator } from './integrations/native-validator/subprocess.js'
@@ -31,6 +32,7 @@ export interface ApiErrorResponse {
 export interface BuildAppOptions {
   logger?: FastifyServerOptions['logger']
   services?: ApplicationServices
+  staticRoot?: string | null
 }
 
 const healthResponseSchema = {
@@ -50,6 +52,17 @@ export function buildApp(options: BuildAppOptions = {}) {
     requestIdHeader: 'x-request-id',
   })
   const services = options.services ?? createUnavailableServices()
+
+  if (options.staticRoot) {
+    void app.register(fastifyStatic, {
+      root: options.staticRoot,
+      immutable: true,
+      maxAge: '30d',
+    })
+    app.get('/', async (_request, reply) =>
+      reply.sendFile('index.html', { immutable: false, maxAge: 0 }),
+    )
+  }
 
   app.get<{ Reply: HealthResponse }>(
     '/api/health',
@@ -71,6 +84,16 @@ export function buildApp(options: BuildAppOptions = {}) {
   registerDraftRoutes(app, services.auth, services.drafts)
 
   app.setNotFoundHandler(async (request, reply) => {
+    const pathname = request.url.split('?', 1)[0] ?? request.url
+    const isApiPath = pathname === '/api' || pathname.startsWith('/api/')
+    if (
+      options.staticRoot &&
+      !isApiPath &&
+      (request.method === 'GET' || request.method === 'HEAD')
+    ) {
+      return reply.sendFile('index.html', { immutable: false, maxAge: 0 })
+    }
+
     const body: ApiErrorResponse = {
       error: {
         code: 'NOT_FOUND',

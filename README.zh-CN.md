@@ -145,6 +145,36 @@ npm run format:check
 npm run build
 ```
 
+## 本机 Docker 演示
+
+仓库提供了完整的 Docker Compose 演示环境，包含合并部署的 React Console 与 Fastify API、
+MySQL 8.4、R-Nacos 和原生 Access Server。先生成仅保存在本机的随机 Secret，再启动全部服务：
+
+```bash
+npm run demo:init
+npm run demo:up
+```
+
+首次构建原生镜像会下载固定版本的 C++ 构建依赖，可能需要几分钟。Compose 会自动执行
+MySQL migration，通过 Console API 幂等创建演示环境和项目，将兼容路由直接写入 R-Nacos，
+并在 bootstrap 成功后启动 Access Server。
+
+Fastify 在同一个 Console 容器中同时提供 `/api/*` 接口和 React 单页应用。完整环境因此包含
+4 个长期运行容器和 3 个 migration/bootstrap 一次性容器。
+
+全部服务就绪后可访问：
+
+- Console：`http://localhost:8088`
+- Access Server 演示：`curl -H 'Host: demo.local' http://localhost:16688/`
+- Access Server 指标：`http://localhost:16689/metrics`
+- R-Nacos Console：`http://localhost:10848/rnacos/`
+- MySQL：`127.0.0.1:3307`
+
+R-Nacos Console 凭据和数据库 Secret 只保存在 Git 已忽略的本机 `.env` 文件中。由于 Console
+发布 Worker 尚未实现，bootstrap 会直接写入 R-Nacos；UI 仍会如实把发布与实例生效状态显示为
+“不可用”或“未知”。可使用 `npm run demo:ps`、`npm run demo:logs` 和 `npm run demo:down`
+管理演示环境。只有在确定要删除全部演示数据时，才为 `docker compose down` 添加 `--volumes`。
+
 ## 构建和测试 Access Server
 
 根工作区提供了常用的原生开发流程：

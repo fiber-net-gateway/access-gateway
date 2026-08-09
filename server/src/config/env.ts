@@ -42,6 +42,7 @@ export interface ServerConfig {
   port: number
   logLevel: LogLevel
   environment: AppEnvironment
+  staticRoot: string | null
   database: DatabaseConfig
   documentEncryption: DocumentEncryptionConfig
   auth: AuthConfig
@@ -185,12 +186,17 @@ export function loadServerConfig(env: NodeJS.ProcessEnv = process.env): ServerCo
   if (nativeValidatorPath && !isAbsolute(nativeValidatorPath)) {
     throw new Error('NATIVE_VALIDATOR_PATH must be an absolute path')
   }
+  const staticRoot = env.CONSOLE_STATIC_ROOT?.trim() || null
+  if (staticRoot && !isAbsolute(staticRoot)) {
+    throw new Error('CONSOLE_STATIC_ROOT must be an absolute path')
+  }
 
   return {
     host: parseHost(env.APP_HOST),
     port: parsePort(env.APP_PORT, 'APP_PORT', 3000),
     logLevel: parseLogLevel(env.LOG_LEVEL),
     environment,
+    staticRoot,
     database: {
       enabled: databaseEnabled,
       host: parseNonEmpty(env.MYSQL_HOST, 'MYSQL_HOST', '127.0.0.1'),
