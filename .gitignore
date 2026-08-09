@@ -67,3 +67,14 @@ vcpkg_installed/
 # test output & cache
 Testing/
 .cache/
+
+# Local configuration and credentials
+*.env
+.env
+.env.*
+!*.env.example
+
+# Local migration/integration data
+temp/
+__pycache__/
+*.pyc
