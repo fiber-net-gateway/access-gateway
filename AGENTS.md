@@ -21,10 +21,10 @@ exposes typed per-instance evidence, display activation as unknown rather than i
 
 ## Current Bootstrap State
 
-The repository currently contains only the initial README, license, and C++-oriented `.gitignore`.
-The directory layout and commands below are the target repository contract and become executable as
-their manifests are added. Do not claim that a build or test command passed when the corresponding
-project files do not exist yet.
+The repository currently contains its guidelines and a pinned upstream submodule, but no native or
+console build manifests yet. The directory layout and commands below are the target repository
+contract and become executable as their manifests are added. Do not claim that a build or test
+command passed when the corresponding project files do not exist yet.
 
 Bootstrap in coherent vertical steps: establish the pinned native build and migrated test target,
 then the independently testable console API and web shell, then persistence/publication workflows,
@@ -37,21 +37,21 @@ step.
   the complete upstream application, including its `src/`, `tests/`, `docs/`, fixtures, scripts,
   example environment file, and CMake target definitions.
 - Record the exact source revision in `native/access-server/UPSTREAM.md` and preserve the applicable
-  upstream Apache-2.0 license in `native/access-server/LICENSE.upstream`. The upstream `master`
-  revision observed during repository initialization was
-  `0fda7764bf94944aca4b674ab5ab311184703118`; verify and deliberately pin the import revision when
-  performing the migration rather than silently following a moving branch.
+  upstream Apache-2.0 license in `native/access-server/LICENSE.upstream`. The initial submodule and
+  application migration baseline is `0fda7764bf94944aca4b674ab5ab311184703118`; verify the gitlink
+  and deliberately record the import revision when performing the migration.
 - After import, `native/access-server/` is maintained here. Implement product fixes here. Do not
   build or import the upstream `apps/access-server` copy as a second application target.
-- Keep the reusable Fiber runtime, HTTP, script/JSON, Nacos, CAT, and Prometheus modules as a pinned
-  `fiber-gateway-cpp` CMake dependency. Pin both the revision and source archive SHA-256. Updating
-  that runtime pin is separate from updating the historical application import and requires native
-  regression tests.
+- `third_party/fiber-gateway-cpp/` is the canonical read-only upstream reference and the pinned
+  source for reusable Fiber runtime, HTTP, script/JSON, Nacos, CAT, and Prometheus CMake targets.
+  Native CMake must consume this checked-out submodule rather than downloading a second moving copy.
+- Do not edit files inside the submodule as part of this repository. Make product changes in
+  `native/access-server/`; make reusable fixes upstream and then deliberately update the gitlink.
+  A submodule update is separate from the historical application import and requires review of the
+  upstream range plus native regression tests.
 - If an upstream compatibility patch is unavoidable, keep it narrow under `native/patches/`, tie it
   to the pinned revision, document the upstream Issue or PR, and remove it once the dependency pin
   includes the fix.
-- An ignored `.temp/fiber-gateway-cpp/` checkout may be used for source research only. Never import
-  from it at build time, develop the product in it, or commit it.
 - Preserve the Java compatibility baseline already documented by upstream access-server:
   `ploto-gateway` commit `22c2bf543b96b52c0ccecd4ceb07d4911c502f45`. If that baseline changes,
   update compatibility docs, fixtures, and differential records before changing behavior.
@@ -74,13 +74,15 @@ Use this top-level organization unless a committed design decision supersedes it
 - `native/access-server/src/`: migrated modules grouped as upstream does: `config/`, `routing/`,
   `execution/`, `runtime/`, and `observability/`.
 - `native/access-server/tests/`: GoogleTest coverage and Java compatibility fixtures.
+- `third_party/fiber-gateway-cpp/`: pinned git submodule used for upstream reference and reusable
+  native dependencies; never place repository-owned code in it.
 - `deploy/`, root container files, and `compose.yaml`: the reproducible end-to-end stack.
 - `docs/`: cross-component architecture, release, deployment, and operational decisions that do
   not belong to one component.
 
-Generated or private paths such as `node_modules/`, all `dist/` directories, `native/build*/`,
-`.temp/`, local database data, and environment/credential files must remain ignored and must not be
-edited or committed.
+Generated or private paths such as `node_modules/`, all `dist/` directories, `native/build*/`, local
+database data, and environment/credential files must remain ignored and must not be edited or
+committed.
 
 ## Architecture and Configuration Boundaries
 
@@ -127,6 +129,14 @@ delivery. Redact secrets in API responses and operational diagnostics.
 
 ## Build, Test, and Development Commands
 
+Clone with `--recurse-submodules`, or initialize an existing checkout before configuring native
+code:
+
+```bash
+git submodule update --init --recursive
+```
+
+Do not use `git submodule update --remote` in routine builds because it changes the reviewed pin.
 Run project commands from the repository root. Establish a root npm workspace so the intended
 control-plane command surface is:
 
@@ -208,8 +218,9 @@ Prefer views, reusable buffers, fixed-size structures, immutable snapshots, intr
 ownership, and compile-time callables where lifetimes permit.
 
 Keep native CMake source lists and dependencies explicit; do not glob application sources or test
-files. Do not update the pinned Fiber revision or archive hash without reviewing upstream changes,
-updating provenance, and running the native regression matrix.
+files. Fail configuration with a clear message when the submodule is not initialized. Do not update
+the Fiber submodule gitlink without reviewing upstream changes, updating provenance, and running the
+native regression matrix.
 
 ## Testing and Compatibility Expectations
 
