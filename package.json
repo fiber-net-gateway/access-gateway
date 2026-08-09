@@ -1,0 +1,30 @@
+{
+  "name": "access-gateway",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Access Gateway data plane and management console",
+  "workspaces": [
+    "web",
+    "server"
+  ],
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "scripts": {
+    "dev": "concurrently --kill-others-on-fail -n web,server -c cyan,magenta \"npm run dev:web\" \"npm run dev:server\"",
+    "dev:web": "npm run dev --workspace web",
+    "dev:server": "npm run dev --workspace server",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "build": "npm run build --workspaces --if-present",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "configure:native": "cmake -S native -B native/build -G Ninja -DCMAKE_BUILD_TYPE=Release -DFIBER_BUILD_TESTS=ON",
+    "build:native": "cmake --build native/build --target fiber_app_access_server --parallel",
+    "test:native": "cmake --build native/build --target fiber_access_server_tests --parallel && ctest --test-dir native/build --output-on-failure -L access-server"
+  },
+  "devDependencies": {
+    "concurrently": "^10.0.4",
+    "prettier": "^3.9.6"
+  }
+}
