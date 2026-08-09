@@ -78,3 +78,9 @@ Testing/
 temp/
 __pycache__/
 *.pyc
+
+# Node.js and TypeScript
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
