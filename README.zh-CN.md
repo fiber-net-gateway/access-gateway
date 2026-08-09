@@ -1,0 +1,187 @@
+# Access Gateway
+
+[English](README.md) | 简体中文
+
+Access Gateway 是由 C++23 数据面与 Web 管理控制台组成的高性能网关产品。数据面迁移自
+[`fiber-gateway-cpp/apps/access-server`](https://github.com/fiber-net-gateway/fiber-gateway-cpp/tree/master/apps/access-server)，
+并继续使用固定版本的 Fiber 框架作为运行时基础。控制面前后端均采用 TypeScript，前端
+使用 React，后端使用 Node.js。
+
+## 项目状态
+
+本仓库同时持续开发两个一等组件：
+
+- **Access Server**：原生运行时已支持 Nacos 驱动的项目与路由配置、Host/Path/条件
+  匹配、RESPONSE 与 PROXY 执行、WebSocket 隧道、服务发现、灰度路由、CAT 链路追踪、
+  Prometheus 指标和结构化访问日志。生产脚本语料差分验证与最终切流门槛仍在推进中。
+- **Console**：已经具备 React/Vite 前端与 Fastify 后端基础框架，包括严格的配置解析、
+  健康检查接口、本地 API 代理和工作区统一质量命令。身份认证、数据持久化、配置编辑器、
+  Nacos 发布、版本管理和实例级生效证据尚未实现。
+
+因此，对于尚无配套工作流的状态，控制台会明确显示“不可用”或“未知”，不会伪造发布或
+生效成功。
+
+## 架构
+
+```mermaid
+flowchart LR
+    User[运维人员] --> Web[React Console]
+    Web --> API[Node.js / Fastify API]
+    API --> DB[(控制面数据库)]
+    API --> Nacos[(Nacos / rnacos)]
+    Nacos --> Access[原生 Access Server]
+    Discovery[Nacos NamingService] --> Access
+    Client[网关客户端] --> Access
+    Access --> Upstream[上游服务]
+    Access --> Obs[CAT / Prometheus / 日志]
+```
+
+Console 负责配置编写和发布流程，只有 `access-server` 位于网关流量链路中。草稿、已发布
+和已生效是相互独立的状态：Nacos 写入成功不代表某个服务实例已经启用新快照。
+
+## 仓库结构
+
+```text
+access-gateway/
+├── native/
+│   ├── CMakeLists.txt             # 原生构建与固定版本 Fiber 集成
+│   └── access-server/             # 本仓库维护的 C++23 数据面
+├── server/                        # TypeScript、Node.js、Fastify Console API
+├── web/                           # TypeScript、React、Vite Console 前端
+├── third_party/
+│   └── fiber-gateway-cpp/         # 固定版本、只读的 Git 子模块
+├── AGENTS.md                      # 仓库开发规范
+└── package.json                   # 根 npm 工作区与统一命令
+```
+
+应用特有的数据面行为放在 `native/access-server`。可复用的 Fiber 运行时、HTTP、Nacos、
+CAT、Prometheus、JSON 和脚本组件来自固定版本的子模块。
+
+## 环境要求
+
+Console 开发需要：
+
+- Node.js 20.19 或更高版本；
+- 支持 workspace 的 npm。
+
+原生代码目前面向 Linux，需要：
+
+- CMake 4.1 或更高版本；
+- Ninja；
+- Clang 17 或更高版本，或者 GCC 13 或更高版本；
+- 支持 C++23 的工具链。
+
+首次配置原生构建时可能下载第三方构建依赖。运行 CMake 前必须先初始化固定版本的子模块。
+
+## 克隆仓库
+
+同时克隆仓库和 Fiber 依赖：
+
+```bash
+git clone --recurse-submodules https://github.com/fiber-net-gateway/access-gateway.git
+cd access-gateway
+```
+
+对于已有工作区：
+
+```bash
+git submodule update --init --recursive
+```
+
+日常构建不要使用 `git submodule update --remote`；依赖升级应作为明确的 gitlink 变更进行
+审查和提交。
+
+## Console 开发
+
+安装根工作区依赖，创建后端本地配置，然后同时启动前后端开发服务：
+
+```bash
+npm install
+cp server/.env.example server/.env
+npm run dev
+```
+
+默认开发地址：
+
+- Console：`http://localhost:5173`
+- Console API：`http://127.0.0.1:3000`
+- 健康检查：`http://127.0.0.1:3000/api/health`
+
+Vite 会把浏览器的 `/api` 请求代理到 Fastify。需要单独运行一端时，使用
+`npm run dev:web` 或 `npm run dev:server`。
+
+使用以下命令验证全部 Console 工作区：
+
+```bash
+npm run typecheck
+npm test
+npm run format:check
+npm run build
+```
+
+## 构建和测试 Access Server
+
+根工作区提供了常用的原生开发流程：
+
+```bash
+npm run configure:native
+npm run build:native
+npm run test:native
+```
+
+等价的 CMake 命令是：
+
+```bash
+cmake -S native -B native/build -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release -DFIBER_BUILD_TESTS=ON
+cmake --build native/build --target fiber_app_access_server --parallel
+cmake --build native/build --target fiber_access_server_tests --parallel
+ctest --test-dir native/build --output-on-failure -L access-server
+```
+
+可执行文件输出到 `native/build/apps/access-server`。
+
+## 运行 Access Server
+
+复制原生示例配置，并至少按环境修改 Nacos 地址：
+
+```bash
+cp native/access-server/access-server.env.example access-server.env
+./native/build/apps/access-server access-server.env
+```
+
+未传参数时，进程读取当前目录下的 `access-server.env`。默认监听地址为：
+
+- 网关 HTTP：`0.0.0.0:16688`；
+- Prometheus 指标：`0.0.0.0:16689`。
+
+配置文件采用严格的 `KEY=VALUE` 格式，未知键和重复键都会导致启动失败。不要提交本地环境
+文件或凭据。全部配置项参见
+[`native/access-server/access-server.env.example`](native/access-server/access-server.env.example)。
+
+## Nacos 配置契约
+
+原生 codec 是输入值、默认值和更新行为的事实来源。默认兼容契约如下：
+
+| 用途         | Data ID                                | Group           |
+| ------------ | -------------------------------------- | --------------- |
+| 项目列表     | `ploto.unified-access.projects`        | `ACCESS-SERVER` |
+| 项目路由     | `ploto.unified-access.route.<project>` | `ACCESS-SERVER` |
+| 生产灰度规则 | `ploto.unified-access.gray-match`      | `DEFAULT_GROUP` |
+
+项目列表是分号分隔的字符串，而不是 JSON。路由和灰度规则载荷保持 Java 兼容的 wire 行为。
+候选配置必须先完成全部解析和编译，再以不可变快照发布；候选无效时继续保留上一份生效快照。
+
+## 文档
+
+- [Access Server 指南](native/access-server/README.md)
+- [兼容性契约](native/access-server/docs/compatibility-contract.md)
+- [迁移计划](native/access-server/docs/migration-plan.md)
+- [脚本语料差分状态](native/access-server/docs/script-corpus-differential.md)
+- [上游来源记录](native/access-server/UPSTREAM.md)
+- [开发规范](AGENTS.md)
+
+## 许可证
+
+本项目使用 [Apache License 2.0](LICENSE)。迁移的应用代码保留了对应的
+[上游许可证声明](native/access-server/LICENSE.upstream)。
