@@ -1,0 +1,160 @@
+name: access-gateway-demo
+
+x-console-environment: &console-environment
+  APP_HOST: 0.0.0.0
+  APP_PORT: 3000
+  LOG_LEVEL: info
+  NODE_ENV: development
+  AUTH_MODE: development
+  AUTH_DEVELOPMENT_SUBJECT: docker-demo
+  AUTH_DEVELOPMENT_DISPLAY_NAME: Docker Demo Administrator
+  MYSQL_ENABLED: 'true'
+  MYSQL_HOST: mysql
+  MYSQL_PORT: 3306
+  MYSQL_DATABASE: access_gateway
+  MYSQL_USER: access_gateway
+  MYSQL_PASSWORD: ${MYSQL_PASSWORD:?Run ./deploy/demo/init-env.sh before Docker Compose}
+  MYSQL_CONNECTION_LIMIT: 10
+  MYSQL_SSL_MODE: disabled
+  DOCUMENT_ENCRYPTION_KEY_ID: docker-demo-v1
+  DOCUMENT_ENCRYPTION_KEY_BASE64: ${DOCUMENT_ENCRYPTION_KEY_BASE64:?Run ./deploy/demo/init-env.sh before Docker Compose}
+  NATIVE_VALIDATOR_PATH: /usr/local/bin/access-gateway-validator
+  NATIVE_VALIDATOR_CONTRACT_VERSION: 1
+  NATIVE_VALIDATOR_TIMEOUT_MILLIS: 10000
+  NATIVE_VALIDATOR_MAX_INPUT_BYTES: 4194304
+  NATIVE_VALIDATOR_MAX_OUTPUT_BYTES: 1048576
+
+services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Run ./deploy/demo/init-env.sh before Docker Compose}
+      MYSQL_DATABASE: access_gateway
+      MYSQL_USER: access_gateway
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?Run ./deploy/demo/init-env.sh before Docker Compose}
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+    ports:
+      - '127.0.0.1:${MYSQL_PUBLISHED_PORT:-3307}:3306'
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - MYSQL_PWD="$$MYSQL_ROOT_PASSWORD" mysqladmin ping --host=127.0.0.1 --user=root --silent
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 20s
+    restart: unless-stopped
+
+  rnacos:
+    image: qingpan/rnacos:v0.8.4
+    environment:
+      RNACOS_HTTP_PORT: 8848
+      RNACOS_GRPC_PORT: 9848
+      RNACOS_HTTP_CONSOLE_PORT: 10848
+      RNACOS_INIT_ADMIN_USERNAME: ${RNACOS_ADMIN_USERNAME:?Run ./deploy/demo/init-env.sh before Docker Compose}
+      RNACOS_INIT_ADMIN_PASSWORD: ${RNACOS_ADMIN_PASSWORD:?Run ./deploy/demo/init-env.sh before Docker Compose}
+      RNACOS_ENABLE_OPEN_API_AUTH: 'false'
+      RNACOS_CONSOLE_ENABLE_CAPTCHA: 'false'
+      RNACOS_GMT_OFFSET_HOURS: 8
+      RUST_LOG: warn
+    ports:
+      - '127.0.0.1:${RNACOS_HTTP_PORT:-8848}:8848'
+      - '127.0.0.1:${RNACOS_GRPC_PORT:-9848}:9848'
+      - '127.0.0.1:${RNACOS_CONSOLE_PORT:-10848}:10848'
+    volumes:
+      - rnacos-data:/io
+    restart: unless-stopped
+
+  rnacos-bootstrap:
+    image: mirror.gcr.io/library/node:22-trixie-slim
+    environment:
+      RNACOS_URL: http://rnacos:8848
+    command: ['node', '/demo/bootstrap-rnacos.mjs']
+    volumes:
+      - ./deploy/demo:/demo:ro
+    depends_on:
+      rnacos:
+        condition: service_started
+    restart: 'no'
+
+  console-migrate:
+    image: access-gateway-demo-runtime:local
+    pull_policy: never
+    environment: *console-environment
+    command: ['node', 'server/dist/processes/migrate.js']
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: 'no'
+
+  console:
+    image: access-gateway-demo-runtime:local
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+      target: demo-runtime
+      args:
+        NATIVE_BUILD_JOBS: ${NATIVE_BUILD_JOBS:-2}
+    environment: *console-environment
+    ports:
+      - '127.0.0.1:${CONSOLE_HTTP_PORT:-8088}:3000'
+    depends_on:
+      console-migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:3000/api/health/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    restart: unless-stopped
+
+  console-bootstrap:
+    image: mirror.gcr.io/library/node:22-trixie-slim
+    environment:
+      CONSOLE_API_URL: http://console:3000
+      DEMO_NACOS_ENDPOINT: http://localhost:${RNACOS_HTTP_PORT:-8848}
+    command: ['node', '/demo/bootstrap-console.mjs']
+    volumes:
+      - ./deploy/demo:/demo:ro
+    depends_on:
+      console:
+        condition: service_healthy
+    restart: 'no'
+
+  access-server:
+    image: access-gateway-demo-runtime:local
+    pull_policy: never
+    entrypoint: ['/usr/local/bin/access-server-entrypoint']
+    environment:
+      RNACOS_HOST: rnacos
+    ports:
+      - '127.0.0.1:${ACCESS_SERVER_HTTP_PORT:-16688}:16688'
+      - '127.0.0.1:${ACCESS_SERVER_METRICS_PORT:-16689}:16689'
+    depends_on:
+      rnacos-bootstrap:
+        condition: service_completed_successfully
+    cpus: 2
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:16688/health',{headers:{Host:'demo.local'}}).then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+    restart: unless-stopped
+
+volumes:
+  mysql-data:
+  rnacos-data:

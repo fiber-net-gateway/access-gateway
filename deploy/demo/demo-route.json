@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "host": {
+    "demo.local": {
+      "https": "S_NOT_MUST"
+    },
+    "localhost": {
+      "https": "S_NOT_MUST"
+    },
+    "127.0.0.1": {
+      "https": "S_NOT_MUST"
+    }
+  },
+  "routes": [
+    {
+      "path": "/health",
+      "type": "RESPONSE",
+      "status": 200,
+      "body": {
+        "type": "TEXT",
+        "content": "ok"
+      },
+      "response_headers": {
+        "Content-Type": "text/plain; charset=utf-8",
+        "X-Access-Gateway-Demo": "healthy"
+      }
+    },
+    {
+      "path": "/",
+      "type": "RESPONSE",
+      "status": 200,
+      "body": {
+        "type": "TEXT",
+        "content": "Access Gateway Docker demo is running.\n"
+      },
+      "response_headers": {
+        "Content-Type": "text/plain; charset=utf-8",
+        "X-Access-Gateway-Project": "demo"
+      }
+    }
+  ]
+}
