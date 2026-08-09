@@ -30,10 +30,22 @@ test('unknown API routes return a stable machine-readable error', async (context
   })
 
   assert.equal(response.statusCode, 404)
-  assert.deepEqual(response.json(), {
-    error: {
-      code: 'NOT_FOUND',
-      message: 'Route not found',
-    },
-  })
+  const body = response.json()
+  assert.equal(body.error.code, 'NOT_FOUND')
+  assert.equal(body.error.message, 'Route not found')
+  assert.equal(typeof body.error.requestId, 'string')
+})
+
+test('readiness and persistent APIs fail closed when MySQL is unconfigured', async (context) => {
+  const app = buildApp()
+  context.after(() => app.close())
+
+  const readiness = await app.inject({ method: 'GET', url: '/api/health/ready' })
+  assert.equal(readiness.statusCode, 503)
+  assert.equal(readiness.json().status, 'degraded')
+  assert.equal(readiness.json().dependencies.database.status, 'unconfigured')
+
+  const environments = await app.inject({ method: 'GET', url: '/api/environments' })
+  assert.equal(environments.statusCode, 503)
+  assert.equal(environments.json().error.code, 'DATABASE_UNCONFIGURED')
 })

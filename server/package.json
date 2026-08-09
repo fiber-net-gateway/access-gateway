@@ -11,11 +11,13 @@
     "start": "node dist/index.js",
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit -p tsconfig.json --pretty false",
-    "test": "node --import tsx --test src/app.test.ts src/config/env.test.ts"
+    "test": "node --import tsx --test src/app.test.ts src/config/env.test.ts src/crypto/document-cipher.test.ts src/integrations/native-validator/subprocess.test.ts src/modules/releases/state.test.ts src/modules/publication/decision.test.ts src/shared/time.test.ts",
+    "db:migrate": "tsx src/processes/migrate.ts"
   },
   "dependencies": {
     "dotenv": "^17.4.2",
-    "fastify": "^5.11.3"
+    "fastify": "^5.11.3",
+    "mysql2": "^3.23.2"
   },
   "devDependencies": {
     "@types/node": "^20.19.0",

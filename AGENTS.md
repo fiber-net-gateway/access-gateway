@@ -35,11 +35,12 @@ through `native/CMakeLists.txt`. Its application and focused CTest targets are a
 script-corpus differential verification and final cutover gates remain unfinished; preserve that
 qualification in user-facing documentation until the gates are complete.
 
-The `web` and `server` npm workspaces provide a React/Vite shell, a Fastify API, deterministic
-environment parsing, tests, and `/api/health` connectivity. Authentication, database persistence,
-rnacos publication, environment management, business editors, and instance activation evidence
-are not yet implemented. UI and APIs must label these states as unavailable or unknown rather than
-simulating them.
+The `web` and `server` npm workspaces now include MySQL migrations, development identity and RBAC,
+environment/project persistence, encrypted immutable draft revisions, optimistic locking, audit
+events, system capability reporting, release/publication domain primitives, and a React
+environment/project workspace. OIDC, rnacos publication workers, full business editors, and
+instance activation collection are not yet implemented. UI and APIs must label those states as
+unavailable or unknown rather than simulating them.
 
 Develop both components in coherent vertical increments. A configuration feature is incomplete if
 the console can author data that the native codec cannot consume, or if native wire behavior changes
@@ -90,7 +91,7 @@ HTTP, client, pool, protocol, observability, or framework behavior belongs in
   publication evidence.
 - `native/CMakeLists.txt`: top-level native build and pinned Fiber integration.
 - `native/access-server/src/`: application modules grouped by responsibility: `config/`,
-  `routing/`, `execution/`, `runtime/`, and `observability/`.
+  `routing/`, `execution/`, `runtime/`, `observability/`, and `validation/`.
 - `native/access-server/tests/`: GoogleTest coverage and Java compatibility fixtures.
 - `third_party/fiber-gateway-cpp/`: pinned submodule; never place repository-owned code in it.
 - `deploy/`, root container files, and `compose.yaml`: reproducible end-to-end deployment.
@@ -175,12 +176,14 @@ Useful root commands are:
 
 - `npm run dev`: start Vite and Fastify in watch mode.
 - `npm run dev:web` / `npm run dev:server`: start one console workspace.
+- `npm run db:migrate`: apply checksum-protected MySQL migrations before starting a persistent API.
 - `npm run typecheck`: run strict TypeScript checking in all workspaces.
 - `npm test`: run configured frontend and backend tests.
 - `npm run format` / `npm run format:check`: apply or verify Prettier formatting.
 - `npm run build`: build both console workspaces.
 - `npm run configure:native`: configure the Release native build with tests.
 - `npm run build:native`: build `fiber_app_access_server`.
+- `npm run build:native-validator`: build the offline `fiber_app_access_gateway_validator`.
 - `npm run test:native`: build and run focused access-server tests.
 
 The expanded native workflow is:
