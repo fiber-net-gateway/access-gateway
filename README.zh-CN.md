@@ -174,6 +174,8 @@ cp native/access-server/access-server.env.example access-server.env
 
 ## 文档
 
+- [Console 产品需求](docs/console-requirements.md)
+- [Console 详细设计](docs/console-detailed-design.md)
 - [Access Server 指南](native/access-server/README.md)
 - [兼容性契约](native/access-server/docs/compatibility-contract.md)
 - [迁移计划](native/access-server/docs/migration-plan.md)

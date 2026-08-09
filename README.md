@@ -185,6 +185,8 @@ compiled before immutable publication; invalid candidates retain the previous ac
 
 ## Documentation
 
+- [Console product requirements](docs/console-requirements.md)
+- [Console detailed design](docs/console-detailed-design.md)
 - [Access Server guide](native/access-server/README.md)
 - [Compatibility contract](native/access-server/docs/compatibility-contract.md)
 - [Migration plan](native/access-server/docs/migration-plan.md)
