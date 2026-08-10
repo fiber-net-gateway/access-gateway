@@ -1,10 +1,14 @@
 # Access Gateway Console 详细设计
 
-- 状态：Draft v0.1
+- 状态：Draft v0.1（待按新版需求重写，不再作为实现依据）
 - 上游需求：[Access Gateway Console 产品需求文档](console-requirements.md)
 - 技术范围：React Web、Fastify API、后台 Worker、MySQL、Nacos、Native Validator 和
   access-server 状态采集
 - 数据库决定：MySQL 8.4 LTS 基线，InnoDB；不以 MariaDB 兼容为目标
+
+> 注意：本文基于旧的环境、Gray 和整份结构化 Project 模型。新版需求已改为单部署、域名
+> Project、逐条 YAML Route 和证书优先，详见上游需求文档。完成对应详细设计前，本文仅作为
+> 现有数据库与发布状态机的参考。
 
 ## 1. 设计目标
 
