@@ -77,7 +77,38 @@ test('readiness and persistent APIs fail closed when MySQL is unconfigured', asy
   assert.equal(readiness.json().status, 'degraded')
   assert.equal(readiness.json().dependencies.database.status, 'unconfigured')
 
-  const environments = await app.inject({ method: 'GET', url: '/api/environments' })
-  assert.equal(environments.statusCode, 503)
-  assert.equal(environments.json().error.code, 'DATABASE_UNCONFIGURED')
+  const projects = await app.inject({ method: 'GET', url: '/api/projects' })
+  assert.equal(projects.statusCode, 503)
+  assert.equal(projects.json().error.code, 'DATABASE_UNCONFIGURED')
+})
+
+test('YAML route APIs accept schema v2 and reject the legacy whole-project request shape', async (context) => {
+  const app = buildApp()
+  context.after(() => app.close())
+  const projectId = '00000000-0000-4000-8000-000000000001'
+  const routeId = '00000000-0000-4000-8000-000000000002'
+
+  const accepted = await app.inject({
+    method: 'POST',
+    url: `/api/projects/${projectId}/routes/validate`,
+    payload: {
+      model: {
+        schemaVersion: 2,
+        kind: 'project_routes_yaml',
+        routes: [{ id: routeId, source: 'path: /health\ntype: RESPONSE\nstatus: 200' }],
+      },
+    },
+  })
+  assert.equal(accepted.statusCode, 503)
+  assert.equal(accepted.json().error.code, 'DATABASE_UNCONFIGURED')
+
+  const rejected = await app.inject({
+    method: 'POST',
+    url: `/api/projects/${projectId}/routes/validate`,
+    payload: {
+      model: { schemaVersion: 1, kind: 'project_route', hosts: [], routes: [] },
+    },
+  })
+  assert.equal(rejected.statusCode, 400)
+  assert.equal(rejected.json().error.code, 'VALIDATION_ERROR')
 })

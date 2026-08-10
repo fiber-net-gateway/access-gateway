@@ -16,10 +16,11 @@ Access Gateway 是由 C++23 数据面与 Web 管理控制台组成的高性能�
   匹配、RESPONSE 与 PROXY 执行、WebSocket 隧道、服务发现、灰度路由、CAT 链路追踪、
   Prometheus 指标和结构化访问日志。生产脚本语料差分验证与最终切流门槛仍在推进中。
 - **Console**：首个基于 MySQL 的纵向链路已经可用，包括确定性 migration、开发身份与固定
-  工作区 RBAC、域名项目 API、加密的不可变路由草稿 revision、乐观锁、审计事件，以及 React
-  域名/完整 JSON 路由工作台。Release/发布表、Release 状态机、发布冲突判定和 fail-closed
-  Native Validator 子进程适配器已经落地。OIDC、Nacos 发布 Worker、结构化路由表单和实例级
-  生效采集仍待实现。
+  部署 RBAC、不含环境参数的域名 Project API、加密的不可变路由草稿 revision、乐观锁、审计
+  事件，以及 route-first React 工作台。每条 Route 使用独立挂载的 CodeMirror YAML 编辑器，
+  并确定性编译为 native JSON wire model。Release/发布表、Release 状态机、发布冲突判定和
+  fail-closed Native Validator 适配器已经落地。OIDC、Nacos 发布 Worker、证书库存/运行时交付
+  和实例级生效采集仍待实现。
 
 因此，对于尚无配套工作流的状态，控制台会明确显示“不可用”或“未知”，不会伪造发布或
 生效成功。
@@ -133,12 +134,14 @@ Migration 使用 checksum 防篡改，并通过 MySQL advisory lock 串行执行
 
 - `/api/health`、`/api/health/live`、`/api/health/ready` 和 `/api/system/status`；
 - 固定工作区获取，以及仅供部署 bootstrap 使用的一次性环境创建接口；
-- 域名项目的列表/创建/详情；
+- 不含环境参数的 `/api/projects` 列表/创建，以及 Project 详情；
 - 项目活动草稿的获取/创建、当前 revision 获取、带 `If-Match` 的不可变 revision 保存与
-  revision 获取。
+  revision 获取；
+- Project YAML Route 校验和确定性的 native wire 预览。
 
-草稿模型在写入 MySQL 前使用 AES-256-GCM 信封加密。本地密钥配置只用于开发环境；生产
-环境应接入外部密钥服务。
+每个草稿保存有序 Route ID 和精确 YAML 原文；旧的整份 Project JSON revision 会在读取时升级为
+稳定的 YAML Route Item。草稿模型在写入 MySQL 前使用 AES-256-GCM 信封加密。本地密钥配置只
+用于开发环境；生产环境应接入外部密钥服务。
 
 使用以下命令验证全部 Console 工作区：
 

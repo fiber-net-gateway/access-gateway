@@ -14,11 +14,11 @@ interface NavigationItem {
 }
 
 const navigation: NavigationItem[] = [
-  { label: '环境与项目', detail: 'Workspace', active: true },
-  { label: '草稿与校验', detail: 'API 就绪' },
-  { label: '灰度规则', detail: '即将开放' },
-  { label: '发布中心', detail: '即将开放' },
-  { label: '运行实例', detail: '即将开放' },
+  { label: 'Projects', detail: '域名与路由', active: true },
+  { label: 'Certificates', detail: '未接入运行时' },
+  { label: 'Releases', detail: 'Worker 未接入' },
+  { label: 'Audit', detail: '即将开放' },
+  { label: 'System', detail: '部署能力' },
 ]
 
 const connectionLabel: Record<ApiConnectionState, string> = {

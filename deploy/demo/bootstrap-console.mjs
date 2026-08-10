@@ -51,10 +51,10 @@ if (environmentList.items.length === 0) {
   environment = await request('/api/workspace')
 }
 
-const projectList = await request(`/api/environments/${environment.id}/projects`)
+const projectList = await request('/api/projects')
 let project = projectList.items.find((item) => item.domain === 'demo.local')
 if (!project) {
-  const created = await request(`/api/environments/${environment.id}/projects`, {
+  const created = await request('/api/projects', {
     method: 'POST',
     body: JSON.stringify({ domain: 'demo.local' }),
   })
@@ -75,16 +75,33 @@ if (draft.currentRevision === 0) {
     body: JSON.stringify({
       changeSummary: 'Initialize the Docker demo route',
       model: {
-        schemaVersion: 1,
-        kind: 'project_route',
-        hosts: [{ pattern: 'demo.local' }, { pattern: 'localhost' }],
+        schemaVersion: 2,
+        kind: 'project_routes_yaml',
         routes: [
-          { path: '/', type: 'RESPONSE', status: 200 },
-          { path: '/health', type: 'RESPONSE', status: 200 },
+          {
+            id: '00000000-0000-4000-8000-000000000001',
+            source: `path: /
+type: RESPONSE
+status: 200
+body:
+  type: TEXT
+  content: Access Gateway Docker demo is running.
+`,
+          },
+          {
+            id: '00000000-0000-4000-8000-000000000002',
+            source: `path: /health
+type: RESPONSE
+status: 200
+body:
+  type: TEXT
+  content: ok
+`,
+          },
         ],
       },
     }),
   })
 }
 
-console.log(`Console demo data is ready (environment=${environment.id}, project=${project.id})`)
+console.log(`Console demo data is ready (project=${project.id})`)

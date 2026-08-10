@@ -1,6 +1,5 @@
 export interface ProjectView {
   id: string
-  environmentId: string
   domain: string
   status: 'active' | 'archived'
   lockVersion: string

@@ -1,8 +1,8 @@
 import type {
   DraftRevisionView,
-  EnvironmentView,
   HealthResponse,
-  ProjectRouteModel,
+  ProjectRoutesModel,
+  ProjectRoutesValidationView,
   ProjectView,
   SystemStatusResponse,
 } from './types'
@@ -38,35 +38,25 @@ function isSystemStatus(value: unknown): value is SystemStatusResponse {
   )
 }
 
-function isEnvironment(value: unknown): value is EnvironmentView {
-  return (
-    isRecord(value) &&
-    typeof value.id === 'string' &&
-    typeof value.code === 'string' &&
-    typeof value.name === 'string' &&
-    typeof value.tier === 'string' &&
-    isRecord(value.nacos) &&
-    typeof value.nacos.endpoint === 'string'
-  )
-}
-
 function isProject(value: unknown): value is ProjectView {
   return (
     isRecord(value) &&
     typeof value.id === 'string' &&
-    typeof value.environmentId === 'string' &&
     typeof value.domain === 'string' &&
     typeof value.status === 'string'
   )
 }
 
-function isProjectRouteModel(value: unknown): value is ProjectRouteModel {
+function isProjectRoutesModel(value: unknown): value is ProjectRoutesModel {
   return (
     isRecord(value) &&
-    value.schemaVersion === 1 &&
-    value.kind === 'project_route' &&
-    Array.isArray(value.hosts) &&
-    Array.isArray(value.routes)
+    value.schemaVersion === 2 &&
+    value.kind === 'project_routes_yaml' &&
+    Array.isArray(value.routes) &&
+    value.routes.every(
+      (route) =>
+        isRecord(route) && typeof route.id === 'string' && typeof route.source === 'string',
+    )
   )
 }
 
@@ -76,7 +66,7 @@ function isDraftRevision(value: unknown): value is DraftRevisionView {
     typeof value.id === 'string' &&
     typeof value.draftId === 'string' &&
     typeof value.revision === 'number' &&
-    isProjectRouteModel(value.model) &&
+    isProjectRoutesModel(value.model) &&
     typeof value.modelSha256 === 'string' &&
     typeof value.validationState === 'string'
   )
@@ -114,16 +104,9 @@ export async function fetchSystemStatus(signal?: AbortSignal): Promise<SystemSta
   return requestJson('/api/system/status', { signal }, isSystemStatus)
 }
 
-export async function fetchWorkspace(signal?: AbortSignal): Promise<EnvironmentView> {
-  return requestJson('/api/workspace', { signal }, isEnvironment)
-}
-
-export async function fetchProjects(
-  environmentId: string,
-  signal?: AbortSignal,
-): Promise<readonly ProjectView[]> {
+export async function fetchProjects(signal?: AbortSignal): Promise<readonly ProjectView[]> {
   const response = await requestJson(
-    `/api/environments/${encodeURIComponent(environmentId)}/projects`,
+    '/api/projects',
     { signal },
     (value): value is { items: ProjectView[] } =>
       isRecord(value) && Array.isArray(value.items) && value.items.every(isProject),
@@ -131,12 +114,9 @@ export async function fetchProjects(
   return response.items
 }
 
-export async function createProject(
-  environmentId: string,
-  domain: string,
-): Promise<{ id: string }> {
+export async function createProject(domain: string): Promise<{ id: string }> {
   return requestJson(
-    `/api/environments/${encodeURIComponent(environmentId)}/projects`,
+    '/api/projects',
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -164,7 +144,7 @@ export async function fetchCurrentDraftRevision(
 export async function saveDraftRevision(
   draftId: string,
   lockVersion: string,
-  model: ProjectRouteModel,
+  model: ProjectRoutesModel,
 ): Promise<DraftRevisionView> {
   return requestJson(
     `/api/drafts/${encodeURIComponent(draftId)}/revisions`,
@@ -177,5 +157,44 @@ export async function saveDraftRevision(
       body: JSON.stringify({ changeSummary: 'Update routes from Console', model }),
     },
     isDraftRevision,
+  )
+}
+
+function isProjectRoutesValidation(value: unknown): value is ProjectRoutesValidationView {
+  return (
+    isRecord(value) &&
+    typeof value.valid === 'boolean' &&
+    Array.isArray(value.issues) &&
+    value.issues.every(
+      (issue) =>
+        isRecord(issue) &&
+        typeof issue.routeId === 'string' &&
+        typeof issue.path === 'string' &&
+        typeof issue.line === 'number' &&
+        typeof issue.column === 'number' &&
+        typeof issue.code === 'string' &&
+        typeof issue.message === 'string',
+    ) &&
+    (value.wirePreview === null || typeof value.wirePreview === 'string') &&
+    (value.wireSha256 === null || typeof value.wireSha256 === 'string') &&
+    (value.validator === null ||
+      (isRecord(value.validator) &&
+        typeof value.validator.contractVersion === 'number' &&
+        typeof value.validator.revision === 'string'))
+  )
+}
+
+export async function validateProjectRoutes(
+  projectId: string,
+  model: ProjectRoutesModel,
+): Promise<ProjectRoutesValidationView> {
+  return requestJson(
+    `/api/projects/${encodeURIComponent(projectId)}/routes/validate`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model }),
+    },
+    isProjectRoutesValidation,
   )
 }

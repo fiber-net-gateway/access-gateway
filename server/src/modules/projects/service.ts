@@ -8,14 +8,9 @@ import type { CreateProjectInput, ProjectListResult, ProjectView } from './model
 import { ProjectRepository } from './repository.js'
 
 export interface ProjectService {
-  list(actor: Actor, environmentId: string): Promise<ProjectListResult>
+  list(actor: Actor): Promise<ProjectListResult>
   get(actor: Actor, projectId: string): Promise<ProjectView>
-  create(
-    actor: Actor,
-    environmentId: string,
-    input: CreateProjectInput,
-    requestId: string,
-  ): Promise<{ id: string }>
+  create(actor: Actor, input: CreateProjectInput, requestId: string): Promise<{ id: string }>
 }
 
 export function normalizeProjectDomain(value: string): string {
@@ -49,12 +44,12 @@ export class DefaultProjectService implements ProjectService {
     this.#environments = environments
   }
 
-  async list(actor: Actor, environmentId: string): Promise<ProjectListResult> {
-    const environment = await this.#environments.findAccessibleByPublicId(actor, environmentId)
+  async list(actor: Actor): Promise<ProjectListResult> {
+    const environment = await this.#environments.findWorkspace(actor)
     if (!environment) {
-      throw notFound('Environment')
+      throw notFound('Deployment workspace')
     }
-    return { items: await this.#projects.list(actor, environmentId) }
+    return { items: await this.#projects.list(actor, environment.id) }
   }
 
   async get(actor: Actor, projectId: string): Promise<ProjectView> {
@@ -67,26 +62,28 @@ export class DefaultProjectService implements ProjectService {
 
   async create(
     actor: Actor,
-    environmentId: string,
     input: CreateProjectInput,
     requestId: string,
   ): Promise<{ id: string }> {
-    const role = await this.#environments.role(actor, environmentId)
+    const environment = await this.#environments.findWorkspace(actor)
+    if (!environment) {
+      throw notFound('Deployment workspace')
+    }
+    const role = await this.#environments.role(actor, environment.id)
     if (!role) {
-      throw notFound('Environment')
+      throw notFound('Deployment workspace')
     }
     if (!['admin', 'maintainer'].includes(role)) {
       throw forbidden()
     }
-    const environmentInternalId = await this.#environments.internalIdForActor(actor, environmentId)
+    const environmentInternalId = await this.#environments.internalIdForActor(actor, environment.id)
     if (!environmentInternalId) {
-      throw notFound('Environment')
+      throw notFound('Deployment workspace')
     }
     return {
       id: await this.#projects.create(
         actor,
         environmentInternalId,
-        environmentId,
         normalizeProjectDomain(input.domain),
         requestId,
       ),

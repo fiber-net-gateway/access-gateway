@@ -129,7 +129,7 @@ export async function createApplicationRuntime(config: ServerConfig): Promise<Ap
       auth,
       environments: new DefaultEnvironmentService(environments),
       projects: new DefaultProjectService(projects, environments),
-      drafts: new DefaultDraftService(drafts, projects, environments),
+      drafts: new DefaultDraftService(drafts, projects, environments, validator),
       system: new DefaultSystemStatusService(
         pool,
         auth,
