@@ -18,7 +18,7 @@ import {
 } from '@codemirror/language'
 import { yaml } from '@codemirror/lang-yaml'
 import { highlightSelectionMatches, searchKeymap } from '@codemirror/search'
-import { EditorState } from '@codemirror/state'
+import { Compartment, EditorState } from '@codemirror/state'
 import {
   crosshairCursor,
   drawSelection,
@@ -132,6 +132,9 @@ const editorTheme = EditorView.theme({
 export function YamlCodeEditor({ ariaLabel, value, onChange, onSave }: YamlCodeEditorProps) {
   const hostRef = useRef<HTMLDivElement | null>(null)
   const editorRef = useRef<EditorView | null>(null)
+  const ariaLabelCompartmentRef = useRef<Compartment | null>(null)
+  ariaLabelCompartmentRef.current ??= new Compartment()
+  const ariaLabelCompartment = ariaLabelCompartmentRef.current
   const changeRef = useRef(onChange)
   const saveRef = useRef(onSave)
   changeRef.current = onChange
@@ -163,7 +166,7 @@ export function YamlCodeEditor({ ariaLabel, value, onChange, onSave }: YamlCodeE
           highlightSelectionMatches(),
           yaml(),
           editorTheme,
-          EditorView.contentAttributes.of({ 'aria-label': ariaLabel }),
+          ariaLabelCompartment.of(EditorView.contentAttributes.of({ 'aria-label': ariaLabel })),
           EditorView.updateListener.of((update) => {
             if (update.docChanged) changeRef.current(update.state.doc.toString())
           }),
@@ -191,7 +194,17 @@ export function YamlCodeEditor({ ariaLabel, value, onChange, onSave }: YamlCodeE
       editorRef.current = null
       view.destroy()
     }
-  }, [ariaLabel])
+  }, [])
+
+  useEffect(() => {
+    const view = editorRef.current
+    if (!view) return
+    view.dispatch({
+      effects: ariaLabelCompartment.reconfigure(
+        EditorView.contentAttributes.of({ 'aria-label': ariaLabel }),
+      ),
+    })
+  }, [ariaLabel, ariaLabelCompartment])
 
   useEffect(() => {
     const view = editorRef.current

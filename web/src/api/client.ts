@@ -1,11 +1,27 @@
 import type {
+  ConfigurationVersionDetail,
+  ConfigurationVersionListResult,
   DraftRevisionView,
   HealthResponse,
   ProjectRoutesModel,
   ProjectRoutesValidationView,
+  ProjectReleaseView,
   ProjectView,
+  SavedConfigurationVersion,
   SystemStatusResponse,
 } from './types'
+
+export class ApiClientError extends Error {
+  readonly status: number
+  readonly code: string
+
+  constructor(message: string, status: number, code: string) {
+    super(message)
+    this.name = 'ApiClientError'
+    this.status = status
+    this.code = code
+  }
+}
 
 function isHealthResponse(value: unknown): value is HealthResponse {
   if (typeof value !== 'object' || value === null) {
@@ -79,6 +95,12 @@ function apiErrorMessage(value: unknown, status: number): string {
   return `Console API request failed with status ${status}`
 }
 
+function apiErrorCode(value: unknown): string {
+  return isRecord(value) && isRecord(value.error) && typeof value.error.code === 'string'
+    ? value.error.code
+    : 'API_ERROR'
+}
+
 async function requestJson<T>(
   path: string,
   init: RequestInit,
@@ -92,7 +114,11 @@ async function requestJson<T>(
   })
   const body: unknown = await response.json().catch(() => null)
   if (!response.ok) {
-    throw new Error(apiErrorMessage(body, response.status))
+    throw new ApiClientError(
+      apiErrorMessage(body, response.status),
+      response.status,
+      apiErrorCode(body),
+    )
   }
   if (!validate(body)) {
     throw new Error('Console API returned an invalid response')
@@ -197,4 +223,193 @@ export async function validateProjectRoutes(
     },
     isProjectRoutesValidation,
   )
+}
+
+function isConfigurationVersionSummary(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    typeof value.id === 'string' &&
+    typeof value.projectId === 'string' &&
+    typeof value.number === 'number' &&
+    typeof value.changeSummary === 'string' &&
+    typeof value.routeCount === 'number' &&
+    typeof value.modelSha256 === 'string' &&
+    typeof value.validationState === 'string' &&
+    typeof value.publicationStatus === 'string' &&
+    typeof value.createdAt === 'string'
+  )
+}
+
+function isConfigurationVersionDetail(value: unknown): value is ConfigurationVersionDetail {
+  return (
+    isConfigurationVersionSummary(value) && isRecord(value) && isProjectRoutesModel(value.model)
+  )
+}
+
+function isSavedConfigurationVersion(value: unknown): value is SavedConfigurationVersion {
+  return (
+    isRecord(value) &&
+    isConfigurationVersionDetail(value.version) &&
+    typeof value.lockVersion === 'string'
+  )
+}
+
+function isProjectRelease(value: unknown): value is ProjectReleaseView {
+  return (
+    isRecord(value) &&
+    typeof value.id === 'string' &&
+    typeof value.sequence === 'string' &&
+    typeof value.projectId === 'string' &&
+    typeof value.title === 'string' &&
+    typeof value.status === 'string' &&
+    isRecord(value.sourceConfigurationVersion) &&
+    typeof value.sourceConfigurationVersion.id === 'string' &&
+    typeof value.sourceConfigurationVersion.number === 'number' &&
+    Array.isArray(value.resources) &&
+    isRecord(value.publication) &&
+    value.activationStatus === 'unknown'
+  )
+}
+
+export async function fetchConfigurationVersions(
+  projectId: string,
+  signal?: AbortSignal,
+): Promise<ConfigurationVersionListResult> {
+  return requestJson(
+    `/api/projects/${encodeURIComponent(projectId)}/configuration-versions`,
+    { signal },
+    (value): value is ConfigurationVersionListResult =>
+      isRecord(value) &&
+      Array.isArray(value.items) &&
+      value.items.every(isConfigurationVersionSummary) &&
+      (value.currentVersionId === null || typeof value.currentVersionId === 'string') &&
+      typeof value.lockVersion === 'string',
+  )
+}
+
+export async function fetchCurrentConfigurationVersion(
+  projectId: string,
+  signal?: AbortSignal,
+): Promise<SavedConfigurationVersion | null> {
+  try {
+    return await requestJson(
+      `/api/projects/${encodeURIComponent(projectId)}/configuration-versions/current`,
+      { signal },
+      isSavedConfigurationVersion,
+    )
+  } catch (error) {
+    if (error instanceof ApiClientError && error.status === 404) return null
+    throw error
+  }
+}
+
+export async function fetchConfigurationVersion(
+  projectId: string,
+  versionId: string,
+): Promise<ConfigurationVersionDetail> {
+  return requestJson(
+    `/api/projects/${encodeURIComponent(projectId)}/configuration-versions/${encodeURIComponent(versionId)}`,
+    {},
+    isConfigurationVersionDetail,
+  )
+}
+
+export async function saveConfigurationVersion(
+  projectId: string,
+  lockVersion: string,
+  baseVersionId: string | null,
+  changeSummary: string,
+  model: ProjectRoutesModel,
+  forceSameContent = false,
+): Promise<SavedConfigurationVersion> {
+  return requestJson(
+    `/api/projects/${encodeURIComponent(projectId)}/configuration-versions`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'If-Match': `"${lockVersion}"`,
+        'Idempotency-Key': crypto.randomUUID(),
+      },
+      body: JSON.stringify({ baseVersionId, changeSummary, forceSameContent, model }),
+    },
+    isSavedConfigurationVersion,
+  )
+}
+
+export async function restoreConfigurationVersion(
+  projectId: string,
+  versionId: string,
+  currentVersionId: string,
+  lockVersion: string,
+  changeSummary: string,
+): Promise<SavedConfigurationVersion> {
+  return requestJson(
+    `/api/projects/${encodeURIComponent(projectId)}/configuration-versions/${encodeURIComponent(versionId)}/restorations`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'If-Match': `"${lockVersion}"`,
+        'Idempotency-Key': crypto.randomUUID(),
+      },
+      body: JSON.stringify({
+        baseVersionId: currentVersionId,
+        changeSummary,
+        forceSameContent: false,
+      }),
+    },
+    isSavedConfigurationVersion,
+  )
+}
+
+export async function fetchProjectReleases(
+  projectId: string,
+  signal?: AbortSignal,
+): Promise<readonly ProjectReleaseView[]> {
+  const result = await requestJson(
+    `/api/projects/${encodeURIComponent(projectId)}/releases`,
+    { signal },
+    (value): value is { items: ProjectReleaseView[] } =>
+      isRecord(value) && Array.isArray(value.items) && value.items.every(isProjectRelease),
+  )
+  return result.items
+}
+
+export async function fetchRelease(releaseId: string): Promise<ProjectReleaseView> {
+  return requestJson(`/api/releases/${encodeURIComponent(releaseId)}`, {}, isProjectRelease)
+}
+
+export async function createRelease(
+  projectId: string,
+  sourceVersionId: string,
+  expectedCurrentVersionId: string,
+  title: string,
+  description: string,
+): Promise<ProjectReleaseView> {
+  return requestJson(
+    `/api/projects/${encodeURIComponent(projectId)}/releases`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Idempotency-Key': crypto.randomUUID(),
+      },
+      body: JSON.stringify({ sourceVersionId, expectedCurrentVersionId, title, description }),
+    },
+    isProjectRelease,
+  )
+}
+
+export async function queueReleasePublication(releaseId: string): Promise<ProjectReleaseView> {
+  const result = await requestJson(
+    `/api/releases/${encodeURIComponent(releaseId)}/publications`,
+    { method: 'POST', headers: { 'Idempotency-Key': crypto.randomUUID() } },
+    (value): value is { jobId: string; state: string; release: ProjectReleaseView } =>
+      isRecord(value) &&
+      typeof value.jobId === 'string' &&
+      typeof value.state === 'string' &&
+      isProjectRelease(value.release),
+  )
+  return result.release
 }

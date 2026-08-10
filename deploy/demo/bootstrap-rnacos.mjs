@@ -1,7 +1,4 @@
-import { readFile } from 'node:fs/promises'
-
 const rnacosUrl = process.env.RNACOS_URL ?? 'http://rnacos:8848'
-const route = await readFile('/demo/demo-route.json', 'utf8')
 const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds))
 
 async function waitForRnacos() {
@@ -22,35 +19,5 @@ async function waitForRnacos() {
   throw new Error('R-Nacos did not become reachable')
 }
 
-async function publish(dataId, group, content, type = 'text') {
-  const response = await fetch(new URL('/nacos/v1/cs/configs', rnacosUrl), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({ dataId, group, content, type }),
-  })
-  const result = await response.text()
-  if (!response.ok || result !== 'true') {
-    throw new Error(`R-Nacos rejected demo config ${group}/${dataId}`)
-  }
-}
-
-async function readConfig(dataId, group) {
-  const url = new URL('/nacos/v1/cs/configs', rnacosUrl)
-  url.search = new URLSearchParams({ dataId, group })
-  const response = await fetch(url)
-  if (!response.ok) {
-    throw new Error(`R-Nacos readback failed for ${group}/${dataId}`)
-  }
-  return response.text()
-}
-
 await waitForRnacos()
-await publish('ploto.unified-access.projects', 'ACCESS-SERVER', 'demo.local')
-await publish('ploto.unified-access.route.demo.local', 'ACCESS-SERVER', route, 'json')
-
-if ((await readConfig('ploto.unified-access.projects', 'ACCESS-SERVER')) !== 'demo.local') {
-  throw new Error('R-Nacos project-list readback did not match')
-}
-await readConfig('ploto.unified-access.route.demo.local', 'ACCESS-SERVER')
-
-console.log('R-Nacos demo configuration is ready')
+console.log('R-Nacos is ready for Console publication')

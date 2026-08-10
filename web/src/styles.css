@@ -845,6 +845,247 @@ button:disabled {
     monospace;
 }
 
+.lifecycle-grid {
+  display: grid;
+  gap: 16px;
+  margin-top: 22px;
+}
+
+.history-panel {
+  overflow: hidden;
+  border: 1px solid #d7ddd5;
+  border-radius: 13px;
+  background: #fff;
+}
+
+.panel-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 16px 17px;
+  border-bottom: 1px solid #e2e7e0;
+  background: #f7f9f5;
+}
+
+.panel-heading h3 {
+  margin: 0;
+  color: #25372f;
+  font-size: 0.94rem;
+}
+
+.panel-heading > span {
+  color: #78847d;
+  font-family: 'SFMono-Regular', Consolas, monospace;
+  font-size: 0.62rem;
+}
+
+.panel-empty {
+  margin: 0;
+  padding: 25px 17px;
+  color: #7b8780;
+  font-size: 0.72rem;
+}
+
+.version-list,
+.release-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.version-list li {
+  display: grid;
+  grid-template-columns: 72px minmax(180px, 1fr) auto auto;
+  align-items: center;
+  gap: 13px;
+  padding: 13px 16px;
+  border-bottom: 1px solid #edf0eb;
+}
+
+.version-list li:last-child,
+.release-list li:last-child {
+  border-bottom: 0;
+}
+
+.version-number,
+.version-summary,
+.release-list li > div {
+  display: grid;
+  gap: 4px;
+}
+
+.version-number strong,
+.release-list li > div:first-child strong {
+  color: #213b30;
+  font-family: 'SFMono-Regular', Consolas, monospace;
+  font-size: 0.8rem;
+}
+
+.version-number span,
+.version-summary small,
+.release-list small,
+.release-list li > div:first-child span {
+  color: #7a867f;
+  font-size: 0.62rem;
+}
+
+.version-summary > strong,
+.release-list li > div:nth-child(2) > strong {
+  overflow: hidden;
+  color: #34473e;
+  font-size: 0.72rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.version-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.version-actions .button-primary,
+.version-actions .button-secondary {
+  min-height: 31px;
+  padding: 0 9px;
+  font-size: 0.63rem;
+}
+
+.release-list li {
+  display: grid;
+  grid-template-columns: 80px minmax(180px, 1fr) auto;
+  align-items: center;
+  gap: 13px;
+  padding: 13px 16px;
+  border-bottom: 1px solid #edf0eb;
+}
+
+.release-state-stack {
+  justify-items: end;
+}
+
+.dialog-backdrop {
+  position: fixed;
+  z-index: 100;
+  inset: 0;
+  display: grid;
+  overflow: auto;
+  place-items: center;
+  padding: 24px;
+  background: rgb(12 25 20 / 62%);
+}
+
+.dialog-card {
+  width: min(520px, 100%);
+  padding: 24px;
+  border: 1px solid #d0d9cf;
+  border-radius: 16px;
+  background: #fbfcf9;
+  box-shadow: 0 28px 80px rgb(8 20 15 / 28%);
+}
+
+.dialog-card-wide {
+  width: min(860px, 100%);
+}
+
+.dialog-card h2 {
+  margin: 0;
+  color: #1e3128;
+  font-size: 1.28rem;
+}
+
+.dialog-card > p:not(.eyebrow) {
+  margin: 10px 0 17px;
+  color: #6e7b74;
+  font-size: 0.75rem;
+  line-height: 1.65;
+}
+
+.dialog-card label {
+  display: grid;
+  gap: 6px;
+  margin-top: 13px;
+  color: #536159;
+  font-size: 0.7rem;
+  font-weight: 720;
+}
+
+.dialog-card input,
+.dialog-card select,
+.dialog-card textarea {
+  width: 100%;
+  padding: 10px 11px;
+  border: 1px solid #c8d2c7;
+  border-radius: 9px;
+  background: #fff;
+  color: #23342c;
+  outline: none;
+  font-size: 0.75rem;
+}
+
+.dialog-card input:focus,
+.dialog-card select:focus,
+.dialog-card textarea:focus {
+  border-color: #789578;
+  box-shadow: 0 0 0 3px rgb(120 149 120 / 13%);
+}
+
+.dialog-warning {
+  margin: 13px 0;
+  padding: 10px 11px;
+  border: 1px solid #e0ad96;
+  border-radius: 9px;
+  background: #fff0e9;
+  color: #813b29;
+  font-size: 0.7rem;
+  line-height: 1.55;
+}
+
+.dialog-footnote {
+  font-family: 'SFMono-Regular', Consolas, monospace;
+  font-size: 0.64rem !important;
+}
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 21px;
+}
+
+.version-preview-routes {
+  display: grid;
+  gap: 10px;
+  overflow: auto;
+  max-height: min(60vh, 620px);
+}
+
+.version-preview-routes article {
+  overflow: hidden;
+  border: 1px solid #d8dfd6;
+  border-radius: 10px;
+}
+
+.version-preview-routes strong {
+  display: block;
+  padding: 8px 11px;
+  background: #f1f4ef;
+  color: #56645c;
+  font-size: 0.66rem;
+}
+
+.version-preview-routes pre {
+  overflow: auto;
+  margin: 0;
+  padding: 13px;
+  background: #12201a;
+  color: #e8eee9;
+  font:
+    0.69rem/1.6 'SFMono-Regular',
+    Consolas,
+    monospace;
+}
+
 @media (max-width: 1080px) {
   .project-workspace {
     grid-template-columns: 250px minmax(0, 1fr);
@@ -955,6 +1196,19 @@ button:disabled {
   .route-issues li {
     grid-template-columns: 1fr;
     gap: 3px;
+  }
+
+  .version-list li,
+  .release-list li {
+    grid-template-columns: 1fr;
+  }
+
+  .version-actions {
+    flex-wrap: wrap;
+  }
+
+  .release-state-stack {
+    justify-items: start;
   }
 }
 
