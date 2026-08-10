@@ -5,13 +5,6 @@ import { requireActor } from '../auth/http.js'
 import type { CreateProjectInput } from './model.js'
 import type { ProjectService } from './service.js'
 
-const environmentParameters = {
-  type: 'object',
-  additionalProperties: false,
-  required: ['envId'],
-  properties: { envId: { type: 'string', format: 'uuid' } },
-} as const
-
 const projectParameters = {
   type: 'object',
   additionalProperties: false,
@@ -24,7 +17,6 @@ const projectResponseSchema = {
   additionalProperties: false,
   required: [
     'id',
-    'environmentId',
     'domain',
     'status',
     'lockVersion',
@@ -36,7 +28,6 @@ const projectResponseSchema = {
   ],
   properties: {
     id: { type: 'string', format: 'uuid' },
-    environmentId: { type: 'string', format: 'uuid' },
     domain: { type: 'string' },
     status: { type: 'string', enum: ['active', 'archived'] },
     lockVersion: { type: 'string', pattern: '^(0|[1-9][0-9]*)$' },
@@ -68,11 +59,10 @@ export function registerProjectRoutes(
   auth: AuthService,
   projects: ProjectService,
 ): void {
-  app.get<{ Params: { envId: string } }>(
-    '/api/environments/:envId/projects',
+  app.get(
+    '/api/projects',
     {
       schema: {
-        params: environmentParameters,
         response: {
           200: {
             type: 'object',
@@ -83,14 +73,13 @@ export function registerProjectRoutes(
         },
       },
     },
-    async (request) => projects.list(await requireActor(auth), request.params.envId),
+    async () => projects.list(await requireActor(auth)),
   )
 
-  app.post<{ Params: { envId: string }; Body: CreateProjectInput }>(
-    '/api/environments/:envId/projects',
+  app.post<{ Body: CreateProjectInput }>(
+    '/api/projects',
     {
       schema: {
-        params: environmentParameters,
         body: {
           type: 'object',
           additionalProperties: false,
@@ -110,7 +99,6 @@ export function registerProjectRoutes(
     async (request, reply) => {
       const result = await projects.create(
         await requireActor(auth),
-        request.params.envId,
         request.body,
         String(request.id),
       )

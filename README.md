@@ -18,11 +18,13 @@ The repository is under active development in two first-class areas:
   discovery, gray routing, CAT tracing, Prometheus metrics, and structured access logs. Production
   script-corpus differential verification and final cutover gates are still in progress.
 - **Console** — the first MySQL-backed vertical slice is available: deterministic migrations,
-  development identity and fixed-workspace RBAC, domain project APIs, encrypted immutable route
-  revisions, optimistic locking, audit events, and a React domain/full-JSON route workspace.
-  Release and publication tables, the release state machine, publication conflict decisions, and
-  a fail-closed Native Validator subprocess adapter are present. OIDC, Nacos publication workers,
-  structured route forms, and per-instance activation collection remain to be implemented.
+  development identity and single-deployment RBAC, environment-free domain project APIs, encrypted
+  immutable route revisions, optimistic locking, audit events, and a route-first React workspace.
+  Each route has an independently mounted CodeMirror YAML editor and is deterministically compiled
+  to the native JSON wire model. Release/publication tables, the release state machine, publication
+  conflict decisions, and a fail-closed Native Validator adapter are present. OIDC, Nacos
+  publication workers, certificate inventory/runtime delivery, and per-instance activation
+  collection remain to be implemented.
 
 The console therefore reports unavailable or unknown state where the supporting workflow does not
 exist. It does not fabricate publication or activation success.
@@ -141,12 +143,15 @@ The implemented control-plane endpoints include:
 
 - `/api/health`, `/api/health/live`, `/api/health/ready`, and `/api/system/status`;
 - fixed workspace retrieval and a one-time environment bootstrap endpoint;
-- domain project list/create/get;
+- environment-free `/api/projects` list/create and project detail;
 - active project draft get/create, current revision retrieval, immutable revision save with
-  `If-Match`, and revision retrieval.
+  `If-Match`, and revision retrieval;
+- project YAML route validation and deterministic native-wire preview.
 
-Draft model documents are envelope-encrypted with AES-256-GCM before MySQL storage. The local key
-configuration is intended for development only; production must use an external key provider.
+Each draft stores ordered route IDs and exact YAML source. Legacy whole-project JSON revisions are
+upgraded to stable YAML route items when read. Draft model documents are envelope-encrypted with
+AES-256-GCM before MySQL storage. The local key configuration is intended for development only;
+production must use an external key provider.
 
 Validate all console workspaces with:
 

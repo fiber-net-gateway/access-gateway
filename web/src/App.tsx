@@ -6,44 +6,51 @@ import {
   fetchHealth,
   fetchProjects,
   fetchSystemStatus,
-  fetchWorkspace,
   saveDraftRevision,
+  validateProjectRoutes,
 } from './api/client'
 import type {
   ApiConnectionState,
-  EnvironmentView,
   HealthResponse,
+  ProjectRoutesModel,
+  ProjectRoutesValidationView,
   ProjectView,
   SystemStatusResponse,
 } from './api/types'
 import { AppShell } from './components/AppShell'
-import { OverviewPage } from './pages/OverviewPage'
-import { initialRouteModel, parseRouteModel } from './routes/model'
+import { ProjectsPage } from './pages/ProjectsPage'
+import { initialRouteModel } from './routes/model'
+
+function modelFingerprint(model: ProjectRoutesModel): string {
+  return JSON.stringify(model)
+}
 
 export default function App() {
   const [apiState, setApiState] = useState<ApiConnectionState>('loading')
   const [health, setHealth] = useState<HealthResponse | null>(null)
   const [systemStatus, setSystemStatus] = useState<SystemStatusResponse | null>(null)
-  const [workspace, setWorkspace] = useState<EnvironmentView | null>(null)
   const [projects, setProjects] = useState<readonly ProjectView[]>([])
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null)
-  const [routeDocument, setRouteDocument] = useState('')
-  const [savedRouteDocument, setSavedRouteDocument] = useState('')
+  const [model, setModel] = useState<ProjectRoutesModel>(initialRouteModel)
+  const [savedFingerprint, setSavedFingerprint] = useState(modelFingerprint(initialRouteModel()))
   const [routeLoading, setRouteLoading] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [validating, setValidating] = useState(false)
+  const [validation, setValidation] = useState<ProjectRoutesValidationView | null>(null)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
 
   const selectedProject = useMemo(
     () => projects.find((project) => project.id === selectedProjectId) ?? null,
     [projects, selectedProjectId],
   )
-  const hasUnsavedChanges = !routeLoading && routeDocument !== savedRouteDocument
+  const hasUnsavedChanges = !routeLoading && modelFingerprint(model) !== savedFingerprint
 
   const confirmDiscardChanges = useCallback((): boolean => {
-    return !hasUnsavedChanges || window.confirm('当前路由草稿尚未保存，确定放弃这些修改吗？')
+    return !hasUnsavedChanges || window.confirm('当前 YAML Route 尚未保存，确定放弃这些修改吗？')
   }, [hasUnsavedChanges])
 
-  const loadProjects = useCallback(async (environmentId: string, signal?: AbortSignal) => {
-    const items = await fetchProjects(environmentId, signal)
+  const loadProjects = useCallback(async (signal?: AbortSignal) => {
+    const items = await fetchProjects(signal)
     setProjects(items)
     setSelectedProjectId((current) =>
       current && items.some((item) => item.id === current) ? current : (items[0]?.id ?? null),
@@ -56,15 +63,13 @@ export default function App() {
     void Promise.all([
       fetchHealth(controller.signal),
       fetchSystemStatus(controller.signal),
-      fetchWorkspace(controller.signal),
+      loadProjects(controller.signal),
     ])
-      .then(([healthResponse, statusResponse, workspaceResponse]) => {
+      .then(([healthResponse, statusResponse]) => {
         setHealth(healthResponse)
         setSystemStatus(statusResponse)
-        setWorkspace(workspaceResponse)
         setApiState('online')
         setErrorMessage(null)
-        return loadProjects(workspaceResponse.id, controller.signal)
       })
       .catch((error: unknown) => {
         if (controller.signal.aborted) return
@@ -76,18 +81,20 @@ export default function App() {
 
   useEffect(() => {
     if (!selectedProject?.draft) {
-      setRouteDocument('')
-      setSavedRouteDocument('')
+      const empty = initialRouteModel()
+      setModel(empty)
+      setSavedFingerprint(modelFingerprint(empty))
+      setValidation(null)
       return
     }
     const controller = new AbortController()
     setRouteLoading(true)
     void fetchCurrentDraftRevision(selectedProject.draft.id, controller.signal)
       .then((revision) => {
-        const model = revision?.model ?? initialRouteModel(selectedProject.domain)
-        const document = JSON.stringify(model, null, 2)
-        setRouteDocument(document)
-        setSavedRouteDocument(document)
+        const next = revision?.model ?? initialRouteModel()
+        setModel(next)
+        setSavedFingerprint(modelFingerprint(next))
+        setValidation(null)
         setErrorMessage(null)
       })
       .catch((error: unknown) => {
@@ -99,7 +106,7 @@ export default function App() {
         if (!controller.signal.aborted) setRouteLoading(false)
       })
     return () => controller.abort()
-  }, [selectedProject])
+  }, [selectedProject?.draft?.id, selectedProject?.draft?.revision])
 
   useEffect(() => {
     if (!hasUnsavedChanges) return
@@ -118,40 +125,65 @@ export default function App() {
   }
 
   const handleCreateProject = async (domain: string): Promise<void> => {
-    if (!workspace) throw new Error('固定工作区尚未就绪')
     if (!confirmDiscardChanges()) {
-      throw new Error('已取消创建，当前路由草稿尚未保存')
+      throw new Error('已取消创建，当前 YAML Route 尚未保存')
     }
-    const created = await createProject(workspace.id, domain)
-    await loadProjects(workspace.id)
+    const created = await createProject(domain)
+    await loadProjects()
     setSelectedProjectId(created.id)
   }
 
+  const handleModelChange = (next: ProjectRoutesModel): void => {
+    setModel(next)
+    setValidation(null)
+  }
+
   const handleSaveRoutes = async (): Promise<void> => {
-    if (!workspace || !selectedProject?.draft) throw new Error('请选择一个域名项目')
-    const model = parseRouteModel(routeDocument)
-    await saveDraftRevision(selectedProject.draft.id, selectedProject.draft.lockVersion, model)
-    setSavedRouteDocument(routeDocument)
-    await loadProjects(workspace.id)
+    if (!selectedProject?.draft) throw new Error('请选择一个域名 Project')
+    if (!hasUnsavedChanges) return
+    setSaving(true)
+    try {
+      await saveDraftRevision(selectedProject.draft.id, selectedProject.draft.lockVersion, model)
+      setSavedFingerprint(modelFingerprint(model))
+      setErrorMessage(null)
+      await loadProjects()
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const handleValidateRoutes = async (): Promise<void> => {
+    if (!selectedProject) throw new Error('请选择一个域名 Project')
+    setValidating(true)
+    try {
+      const result = await validateProjectRoutes(selectedProject.id, model)
+      setValidation(result)
+      setErrorMessage(null)
+    } finally {
+      setValidating(false)
+    }
   }
 
   return (
     <AppShell apiState={apiState}>
-      <OverviewPage
+      <ProjectsPage
         apiState={apiState}
-        health={health}
-        systemStatus={systemStatus}
-        workspace={workspace}
-        projects={projects}
-        selectedProjectId={selectedProjectId}
-        routeDocument={routeDocument}
-        routeLoading={routeLoading}
-        hasUnsavedChanges={hasUnsavedChanges}
         errorMessage={errorMessage}
-        onSelectProject={handleSelectProject}
+        hasUnsavedChanges={hasUnsavedChanges}
+        health={health}
+        model={model}
+        projects={projects}
+        routeLoading={routeLoading}
+        saving={saving}
+        selectedProjectId={selectedProjectId}
+        systemStatus={systemStatus}
+        validating={validating}
+        validation={validation}
         onCreateProject={handleCreateProject}
-        onRouteDocumentChange={setRouteDocument}
+        onModelChange={handleModelChange}
         onSaveRoutes={handleSaveRoutes}
+        onSelectProject={handleSelectProject}
+        onValidateRoutes={handleValidateRoutes}
       />
     </AppShell>
   )

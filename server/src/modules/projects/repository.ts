@@ -13,7 +13,6 @@ import type { ProjectView } from './model.js'
 interface ProjectRow extends RowDataPacket {
   internal_id: string
   public_id: Buffer
-  environment_public_id: Buffer
   name: string
   status: 'active' | 'archived'
   lock_version: string
@@ -36,7 +35,6 @@ export interface ProjectIdentityRow extends RowDataPacket {
 function toView(row: ProjectRow): ProjectView {
   return {
     id: bufferToPublicId(row.public_id),
-    environmentId: bufferToPublicId(row.environment_public_id),
     domain: row.name,
     status: row.status,
     lockVersion: row.lock_version,
@@ -57,7 +55,7 @@ function toView(row: ProjectRow): ProjectView {
 
 const selectProjects = `
   SELECT
-    p.id AS internal_id, p.public_id, e.public_id AS environment_public_id,
+    p.id AS internal_id, p.public_id,
     p.name, p.status, p.lock_version,
     d.public_id AS draft_public_id, d.state AS draft_state,
     d.current_revision_no, d.lock_version AS draft_lock_version,
@@ -130,7 +128,6 @@ export class ProjectRepository {
   async create(
     actor: Actor,
     environmentInternalId: string,
-    environmentPublicId: string,
     domain: string,
     requestId: string,
   ): Promise<string> {
@@ -174,7 +171,7 @@ export class ProjectRepository {
             targetPublicId: projectPublicId,
             requestId,
             result: 'success',
-            summary: { environmentId: environmentPublicId, domain },
+            summary: { domain },
           })
           await this.#audit.append(transaction, {
             environmentInternalId,

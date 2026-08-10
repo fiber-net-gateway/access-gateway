@@ -65,6 +65,29 @@ const draftResponseSchema = {
   },
 } as const
 
+const projectRoutesModelSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['schemaVersion', 'kind', 'routes'],
+  properties: {
+    schemaVersion: { type: 'integer', const: 2 },
+    kind: { type: 'string', const: 'project_routes_yaml' },
+    routes: {
+      type: 'array',
+      maxItems: 5000,
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['id', 'source'],
+        properties: {
+          id: { type: 'string', format: 'uuid' },
+          source: { type: 'string', maxLength: 1048576 },
+        },
+      },
+    },
+  },
+} as const
+
 const revisionResponseSchema = {
   type: 'object',
   additionalProperties: false,
@@ -83,15 +106,7 @@ const revisionResponseSchema = {
     draftId: { type: 'string', format: 'uuid' },
     revision: { type: 'integer', minimum: 1 },
     model: {
-      type: 'object',
-      additionalProperties: false,
-      required: ['schemaVersion', 'kind', 'hosts', 'routes'],
-      properties: {
-        schemaVersion: { type: 'integer', const: 1 },
-        kind: { type: 'string', const: 'project_route' },
-        hosts: { type: 'array', items: {} },
-        routes: { type: 'array', items: {} },
-      },
+      ...projectRoutesModelSchema,
     },
     modelSha256: { type: 'string', pattern: '^[0-9a-f]{64}$' },
     validationState: { type: 'string', enum: ['not_run', 'pending', 'valid', 'invalid'] },
@@ -154,7 +169,7 @@ export function registerDraftRoutes(
           required: ['model'],
           properties: {
             changeSummary: { type: 'string', maxLength: 1024 },
-            model: { type: 'object', additionalProperties: true },
+            model: projectRoutesModelSchema,
           },
         },
         response: { 201: revisionResponseSchema },
@@ -192,5 +207,71 @@ export function registerDraftRoutes(
     '/api/drafts/:draftId/current-revision',
     { schema: { params: draftParameters, response: { 200: revisionResponseSchema } } },
     async (request) => drafts.getCurrentRevision(await requireActor(auth), request.params.draftId),
+  )
+
+  app.post<{ Params: { projectId: string }; Body: { model: unknown } }>(
+    '/api/projects/:projectId/routes/validate',
+    {
+      schema: {
+        params: projectParameters,
+        body: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['model'],
+          properties: { model: projectRoutesModelSchema },
+        },
+        response: {
+          200: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['valid', 'issues', 'wirePreview', 'wireSha256', 'validator'],
+            properties: {
+              valid: { type: 'boolean' },
+              issues: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  additionalProperties: false,
+                  required: ['routeId', 'path', 'line', 'column', 'code', 'message'],
+                  properties: {
+                    routeId: { type: 'string', format: 'uuid' },
+                    path: { type: 'string' },
+                    line: { type: 'integer', minimum: 1 },
+                    column: { type: 'integer', minimum: 1 },
+                    code: { type: 'string' },
+                    message: { type: 'string' },
+                  },
+                },
+              },
+              wirePreview: { anyOf: [{ type: 'string' }, { type: 'null' }] },
+              wireSha256: {
+                anyOf: [{ type: 'string', pattern: '^[0-9a-f]{64}$' }, { type: 'null' }],
+              },
+              validator: {
+                anyOf: [
+                  { type: 'null' },
+                  {
+                    type: 'object',
+                    additionalProperties: false,
+                    required: ['contractVersion', 'revision'],
+                    properties: {
+                      contractVersion: { type: 'integer', minimum: 1 },
+                      revision: { type: 'string' },
+                    },
+                  },
+                ],
+              },
+            },
+          },
+        },
+      },
+    },
+    async (request) =>
+      drafts.validate(
+        await requireActor(auth),
+        request.params.projectId,
+        request.body.model,
+        String(request.id),
+      ),
   )
 }

@@ -26,24 +26,8 @@ export interface SystemStatusResponse {
   }
 }
 
-export interface EnvironmentView {
-  id: string
-  code: string
-  name: string
-  tier: 'local' | 'test' | 'staging' | 'production'
-  status: 'active' | 'disabled'
-  nacos: {
-    endpoint: string
-    namespace: string
-    tenant: string
-    credentialConfigured: boolean
-  }
-  lockVersion: string
-}
-
 export interface ProjectView {
   id: string
-  environmentId: string
   domain: string
   status: 'active' | 'archived'
   draft: {
@@ -56,20 +40,44 @@ export interface ProjectView {
   activationStatus: 'unknown'
 }
 
-export interface ProjectRouteModel {
-  schemaVersion: 1
-  kind: 'project_route'
-  hosts: readonly unknown[]
-  routes: readonly unknown[]
+export interface RouteItemModel {
+  id: string
+  source: string
+}
+
+export interface ProjectRoutesModel {
+  schemaVersion: 2
+  kind: 'project_routes_yaml'
+  routes: readonly RouteItemModel[]
 }
 
 export interface DraftRevisionView {
   id: string
   draftId: string
   revision: number
-  model: ProjectRouteModel
+  model: ProjectRoutesModel
   modelSha256: string
   validationState: 'not_run' | 'pending' | 'valid' | 'invalid'
   changeSummary: string
   createdAt: string
+}
+
+export interface RouteValidationIssue {
+  routeId: string
+  path: string
+  line: number
+  column: number
+  code: string
+  message: string
+}
+
+export interface ProjectRoutesValidationView {
+  valid: boolean
+  issues: readonly RouteValidationIssue[]
+  wirePreview: string | null
+  wireSha256: string | null
+  validator: {
+    contractVersion: number
+    revision: string
+  } | null
 }

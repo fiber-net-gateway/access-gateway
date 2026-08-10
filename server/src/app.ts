@@ -50,6 +50,7 @@ export function buildApp(options: BuildAppOptions = {}) {
   const app = Fastify({
     logger: options.logger ?? false,
     requestIdHeader: 'x-request-id',
+    bodyLimit: 5 * 1024 * 1024,
   })
   const services = options.services ?? createUnavailableServices()
 

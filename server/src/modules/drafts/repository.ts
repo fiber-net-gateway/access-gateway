@@ -11,10 +11,10 @@ import { AuditRepository } from '../audit/repository.js'
 import type { Actor } from '../auth/model.js'
 import type { ProjectIdentityRow } from '../projects/repository.js'
 import {
-  isProjectRouteModel,
+  normalizeStoredProjectRoutesModel,
   type DraftRevisionView,
   type DraftView,
-  type ProjectRouteModel,
+  type ProjectRoutesModel,
 } from './model.js'
 
 interface DraftRow extends RowDataPacket {
@@ -161,7 +161,7 @@ export class DraftRepository {
     actor: Actor,
     draftPublicId: string,
     expectedLockVersion: string,
-    model: ProjectRouteModel,
+    model: ProjectRoutesModel,
     changeSummary: string,
     requestId: string,
   ): Promise<DraftRevisionView> {
@@ -278,14 +278,15 @@ export class DraftRepository {
       throw new Error('Draft model document was not found')
     }
     const parsed: unknown = JSON.parse(plaintext.toString('utf8'))
-    if (!isProjectRouteModel(parsed)) {
+    const model = normalizeStoredProjectRoutesModel(parsed)
+    if (!model) {
       throw new Error('Stored draft model is invalid')
     }
     return {
       id: bufferToPublicId(row.public_id),
       draftId: bufferToPublicId(row.draft_public_id),
       revision: row.revision_no,
-      model: parsed,
+      model,
       modelSha256: row.plaintext_sha256.toString('hex'),
       validationState: row.validation_state,
       changeSummary: row.change_summary,
