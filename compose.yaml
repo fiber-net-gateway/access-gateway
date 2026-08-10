@@ -137,8 +137,11 @@ services:
     environment:
       RNACOS_HOST: rnacos
     ports:
-      - '127.0.0.1:${ACCESS_SERVER_HTTP_PORT:-16688}:16688'
+      - '${ACCESS_SERVER_PUBLISHED_HOST:-0.0.0.0}:${ACCESS_SERVER_HTTPS_PORT:-16688}:16688/tcp'
+      - '${ACCESS_SERVER_PUBLISHED_HOST:-0.0.0.0}:${ACCESS_SERVER_HTTPS_PORT:-16688}:16688/udp'
       - '127.0.0.1:${ACCESS_SERVER_METRICS_PORT:-16689}:16689'
+    volumes:
+      - ./deploy/demo/certs:/run/access-gateway/tls:ro
     depends_on:
       rnacos-bootstrap:
         condition: service_completed_successfully
@@ -148,7 +151,7 @@ services:
         - CMD
         - node
         - -e
-        - fetch('http://127.0.0.1:16688/health',{headers:{Host:'demo.local'}}).then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))
+        - require('node:https').get({host:'127.0.0.1',port:16688,path:'/health',headers:{Host:'demo.local'},rejectUnauthorized:false},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))
       interval: 5s
       timeout: 3s
       retries: 30

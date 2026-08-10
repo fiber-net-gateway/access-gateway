@@ -1,3 +1,6 @@
+import { isIP } from 'node:net'
+import { domainToASCII } from 'node:url'
+
 import { badRequest, forbidden, notFound, unavailable } from '../../shared/errors.js'
 import type { Actor } from '../auth/model.js'
 import { EnvironmentRepository } from '../environments/repository.js'
@@ -15,16 +18,26 @@ export interface ProjectService {
   ): Promise<{ id: string }>
 }
 
-function validateProjectName(value: string): string {
-  const name = value.trim()
-  if (name.length === 0 || name.length > 255 || name.includes(';')) {
+export function normalizeProjectDomain(value: string): string {
+  const input = value.trim().replace(/\.$/u, '')
+  const domain = domainToASCII(input).toLowerCase()
+  const labels = domain.split('.')
+  const valid =
+    domain.length > 0 &&
+    domain.length <= 253 &&
+    isIP(domain) === 0 &&
+    labels.every(
+      (label) =>
+        label.length >= 1 && label.length <= 63 && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/u.test(label),
+    )
+  if (!valid) {
     throw badRequest(
-      'INVALID_PROJECT_NAME',
-      'Project name must be 1-255 characters and must not contain semicolons',
-      [{ path: 'name', code: 'INVALID_FORMAT', message: 'Invalid project name' }],
+      'INVALID_PROJECT_DOMAIN',
+      'Project domain must be a valid DNS hostname without a scheme, port, path, wildcard, or IP literal',
+      [{ path: 'domain', code: 'INVALID_FORMAT', message: 'Invalid project domain' }],
     )
   }
-  return name
+  return domain
 }
 
 export class DefaultProjectService implements ProjectService {
@@ -74,7 +87,7 @@ export class DefaultProjectService implements ProjectService {
         actor,
         environmentInternalId,
         environmentId,
-        validateProjectName(input.name),
+        normalizeProjectDomain(input.domain),
         requestId,
       ),
     }

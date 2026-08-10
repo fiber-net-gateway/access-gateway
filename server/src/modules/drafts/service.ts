@@ -22,6 +22,7 @@ export interface DraftService {
     requestId: string,
   ): Promise<DraftRevisionView>
   getRevision(actor: Actor, draftId: string, revisionId: string): Promise<DraftRevisionView>
+  getCurrentRevision(actor: Actor, draftId: string): Promise<DraftRevisionView>
 }
 
 function parseProjectRouteModel(value: unknown): ProjectRouteModel {
@@ -126,6 +127,22 @@ export class DefaultDraftService implements DraftService {
     return revision
   }
 
+  async getCurrentRevision(actor: Actor, draftId: string): Promise<DraftRevisionView> {
+    const draft = await this.#drafts.findByPublicId(draftId)
+    if (!draft) {
+      throw notFound('Draft revision')
+    }
+    const project = await this.#projects.findIdentity(actor, draft.projectId)
+    if (!project) {
+      throw notFound('Draft revision')
+    }
+    const revision = await this.#drafts.getCurrentRevision(draftId)
+    if (!revision) {
+      throw notFound('Draft revision')
+    }
+    return revision
+  }
+
   async requireEditor(actor: Actor, environmentId: string): Promise<void> {
     const role = await this.#environments.role(actor, environmentId)
     if (!role) {
@@ -151,6 +168,10 @@ export class UnavailableDraftService implements DraftService {
   }
 
   async getRevision(): Promise<never> {
+    throw unavailable('DATABASE_UNCONFIGURED', 'MySQL is not configured')
+  }
+
+  async getCurrentRevision(): Promise<never> {
     throw unavailable('DATABASE_UNCONFIGURED', 'MySQL is not configured')
   }
 }

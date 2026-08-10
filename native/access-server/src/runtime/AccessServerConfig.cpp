@@ -14,6 +14,10 @@ namespace {
 
 constexpr std::string_view kListenAddress = "ACCESS_SERVER_LISTEN_ADDRESS";
 constexpr std::string_view kListenPort = "ACCESS_SERVER_LISTEN_PORT";
+constexpr std::string_view kTlsEnabled = "ACCESS_SERVER_TLS_ENABLED";
+constexpr std::string_view kTlsCertificateFile = "ACCESS_SERVER_TLS_CERTIFICATE_FILE";
+constexpr std::string_view kTlsPrivateKeyFile = "ACCESS_SERVER_TLS_PRIVATE_KEY_FILE";
+constexpr std::string_view kHttp3Enabled = "ACCESS_SERVER_HTTP3_ENABLED";
 constexpr std::string_view kMetricsListenAddress = "ACCESS_SERVER_METRICS_LISTEN_ADDRESS";
 constexpr std::string_view kMetricsListenPort = "ACCESS_SERVER_METRICS_LISTEN_PORT";
 constexpr std::string_view kInitialConfigTimeout = "ACCESS_SERVER_INITIAL_CONFIG_TIMEOUT_MILLIS";
@@ -225,7 +229,8 @@ AccessServerConfigError nacos_error(const nacos::NacosConfigError &source) {
 
 } // namespace
 
-AccessServerConfig::AccessServerConfig(net::SocketAddress listen_address, net::SocketAddress metrics_listen_address,
+AccessServerConfig::AccessServerConfig(net::SocketAddress listen_address, http::HttpServerOptions http_server_options,
+                                       net::SocketAddress metrics_listen_address,
                                        std::chrono::milliseconds initial_config_timeout,
                                        std::size_t default_max_request_body_size, bool test_mode,
                                        std::optional<cat::CatClientConfig> cat_config,
@@ -233,9 +238,10 @@ AccessServerConfig::AccessServerConfig(net::SocketAddress listen_address, net::S
                                        AccessConfigWatcherOptions watcher_options,
                                        GrayConfigWatcherOptions gray_watcher_options,
                                        AccessServiceDiscoveryOptions service_discovery_options) noexcept :
-    listen_address_(std::move(listen_address)), metrics_listen_address_(std::move(metrics_listen_address)),
-    initial_config_timeout_(initial_config_timeout), default_max_request_body_size_(default_max_request_body_size),
-    test_mode_(test_mode), cat_config_(std::move(cat_config)), nacos_config_(std::move(nacos_config)),
+    listen_address_(std::move(listen_address)), http_server_options_(std::move(http_server_options)),
+    metrics_listen_address_(std::move(metrics_listen_address)), initial_config_timeout_(initial_config_timeout),
+    default_max_request_body_size_(default_max_request_body_size), test_mode_(test_mode),
+    cat_config_(std::move(cat_config)), nacos_config_(std::move(nacos_config)),
     watcher_options_(std::move(watcher_options)), gray_watcher_options_(std::move(gray_watcher_options)),
     service_discovery_options_(std::move(service_discovery_options)) {}
 
@@ -262,6 +268,10 @@ AccessServerConfig::load_from_string(std::string_view input) {
 
     net::IpAddress listen_ip = net::IpAddress::any_v4();
     std::uint16_t listen_port = 16688;
+    bool tls_enabled = true;
+    bool http3_enabled = true;
+    std::string tls_certificate_file;
+    std::string tls_private_key_file;
     std::optional<net::IpAddress> metrics_ip;
     std::optional<std::uint16_t> metrics_port;
     std::uint64_t timeout_millis = 60000;
@@ -290,6 +300,20 @@ AccessServerConfig::load_from_string(std::string_view input) {
             if (!parse_unsigned(value, listen_port) || listen_port == 0) {
                 return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, entry.line, entry.key,
                                              "expected a port in range 1..65535"));
+            }
+        } else if (entry.key == kTlsEnabled) {
+            if (!parse_boolean(value, tls_enabled)) {
+                return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, entry.line, entry.key,
+                                             "expected true or false"));
+            }
+        } else if (entry.key == kTlsCertificateFile) {
+            tls_certificate_file = entry.value;
+        } else if (entry.key == kTlsPrivateKeyFile) {
+            tls_private_key_file = entry.value;
+        } else if (entry.key == kHttp3Enabled) {
+            if (!parse_boolean(value, http3_enabled)) {
+                return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, entry.line, entry.key,
+                                             "expected true or false"));
             }
         } else if (entry.key == kMetricsListenAddress) {
             net::IpAddress address;
@@ -387,6 +411,18 @@ AccessServerConfig::load_from_string(std::string_view input) {
         return std::unexpected(
                 error(AccessServerConfigErrorCode::InvalidValue, 0, {}, "Nacos data IDs and groups must be non-empty"));
     }
+    if (!tls_enabled && http3_enabled) {
+        return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, 0, kHttp3Enabled,
+                                     "HTTP/3 requires ACCESS_SERVER_TLS_ENABLED=true"));
+    }
+    if (tls_enabled && tls_certificate_file.empty()) {
+        return std::unexpected(error(AccessServerConfigErrorCode::MissingRequiredKey, 0, kTlsCertificateFile,
+                                     "TLS certificate file is required when TLS is enabled"));
+    }
+    if (tls_enabled && tls_private_key_file.empty()) {
+        return std::unexpected(error(AccessServerConfigErrorCode::MissingRequiredKey, 0, kTlsPrivateKeyFile,
+                                     "TLS private key file is required when TLS is enabled"));
+    }
     auto nacos_config = nacos::NacosClientConfig::create(std::move(nacos_params));
     if (!nacos_config) {
         return std::unexpected(nacos_error(nacos_config.error()));
@@ -408,7 +444,13 @@ AccessServerConfig::load_from_string(std::string_view input) {
         }
         metrics_port = static_cast<std::uint16_t>(listen_port + 1);
     }
-    return AccessServerConfig(net::SocketAddress(listen_ip, listen_port),
+    http::HttpServerOptions http_options;
+    http_options.tls.enabled = tls_enabled;
+    http_options.tls.cert_file = std::move(tls_certificate_file);
+    http_options.tls.key_file = std::move(tls_private_key_file);
+    http_options.tls.alpn = {"h2", "http/1.1"};
+    http_options.http3.enabled = http3_enabled;
+    return AccessServerConfig(net::SocketAddress(listen_ip, listen_port), std::move(http_options),
                               net::SocketAddress(metrics_ip.value_or(listen_ip), *metrics_port),
                               std::chrono::milliseconds(timeout_millis), max_request_body, test_mode,
                               std::move(cat_config), std::move(*nacos_config), std::move(watcher_options),

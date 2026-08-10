@@ -73,6 +73,7 @@ Testing/
 .env
 .env.*
 !*.env.example
+deploy/demo/certs/
 
 # Local migration/integration data
 temp/

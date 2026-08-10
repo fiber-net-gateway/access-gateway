@@ -7,7 +7,9 @@ namespace {
 
 TEST(AccessServerConfigTest, LoadsJavaServerDefaultsAndNacosSettings) {
     auto config = AccessServerConfig::load_from_string(R"(
-        # Nacos is the only required process setting.
+        # Nacos and the default TLS listener identity are required process settings.
+        ACCESS_SERVER_TLS_CERTIFICATE_FILE=/run/secrets/tls.crt
+        ACCESS_SERVER_TLS_PRIVATE_KEY_FILE=/run/secrets/tls.key
         NACOS_SERVER_ADDRESSES=127.0.0.1,127.0.0.2
     )");
 
@@ -17,6 +19,10 @@ TEST(AccessServerConfigTest, LoadsJavaServerDefaultsAndNacosSettings) {
     EXPECT_EQ(config->initial_config_timeout(), std::chrono::seconds(60));
     EXPECT_EQ(config->default_max_request_body_size(), 400U << 20U);
     EXPECT_FALSE(config->test_mode());
+    EXPECT_TRUE(config->http_server_options().tls.enabled);
+    EXPECT_TRUE(config->http_server_options().http3.enabled);
+    EXPECT_EQ(config->http_server_options().tls.cert_file, "/run/secrets/tls.crt");
+    EXPECT_EQ(config->http_server_options().tls.key_file, "/run/secrets/tls.key");
     EXPECT_EQ(config->nacos_config().server_ips().size(), 2U);
     EXPECT_EQ(config->nacos_config().http_port(), 8848);
     EXPECT_EQ(config->nacos_config().grpc_port(), 9848);
@@ -32,6 +38,8 @@ TEST(AccessServerConfigTest, LoadsExplicitRuntimeAndCompatibilityKeys) {
     auto config = AccessServerConfig::load_from_string(R"(
         ACCESS_SERVER_LISTEN_ADDRESS=127.0.0.1
         ACCESS_SERVER_LISTEN_PORT=18080
+        ACCESS_SERVER_TLS_ENABLED=false
+        ACCESS_SERVER_HTTP3_ENABLED=false
         ACCESS_SERVER_METRICS_LISTEN_ADDRESS=127.0.0.2
         ACCESS_SERVER_METRICS_LISTEN_PORT=19090
         ACCESS_SERVER_INITIAL_CONFIG_TIMEOUT_MILLIS=2500
@@ -59,6 +67,8 @@ TEST(AccessServerConfigTest, LoadsExplicitRuntimeAndCompatibilityKeys) {
     EXPECT_EQ(config->initial_config_timeout(), std::chrono::milliseconds(2500));
     EXPECT_EQ(config->default_max_request_body_size(), 12345U);
     EXPECT_TRUE(config->test_mode());
+    EXPECT_FALSE(config->http_server_options().tls.enabled);
+    EXPECT_FALSE(config->http_server_options().http3.enabled);
     EXPECT_EQ(config->watcher_options().project_list_data_id, "custom.projects");
     EXPECT_EQ(config->watcher_options().project_route_data_id_prefix, "custom.route.");
     EXPECT_EQ(config->watcher_options().project_route_group, "CUSTOM-ROUTE");
@@ -73,6 +83,8 @@ TEST(AccessServerConfigTest, LoadsExplicitRuntimeAndCompatibilityKeys) {
 TEST(AccessServerConfigTest, LoadsOptionalCatClientSettings) {
     auto config = AccessServerConfig::load_from_string(R"(
         NACOS_SERVER_ADDRESSES=127.0.0.1
+        ACCESS_SERVER_TLS_CERTIFICATE_FILE=/run/secrets/tls.crt
+        ACCESS_SERVER_TLS_PRIVATE_KEY_FILE=/run/secrets/tls.key
         CAT_APP_KEY=unified-access-server
         CAT_HOSTNAME=access-0
         CAT_IP=127.0.0.1
@@ -93,6 +105,8 @@ TEST(AccessServerConfigTest, LoadsOptionalCatClientSettings) {
 
 TEST(AccessServerConfigTest, RejectsPartialCatClientSettings) {
     auto config = AccessServerConfig::load_from_string("NACOS_SERVER_ADDRESSES=127.0.0.1\n"
+                                                       "ACCESS_SERVER_TLS_ENABLED=false\n"
+                                                       "ACCESS_SERVER_HTTP3_ENABLED=false\n"
                                                        "CAT_APP_KEY=unified-access-server\n");
 
     ASSERT_FALSE(config);
@@ -101,7 +115,8 @@ TEST(AccessServerConfigTest, RejectsPartialCatClientSettings) {
 }
 
 TEST(AccessServerConfigTest, RejectsMissingNacosServerList) {
-    auto config = AccessServerConfig::load_from_string("");
+    auto config = AccessServerConfig::load_from_string("ACCESS_SERVER_TLS_ENABLED=false\n"
+                                                       "ACCESS_SERVER_HTTP3_ENABLED=false\n");
 
     ASSERT_FALSE(config);
     EXPECT_EQ(config.error().code, AccessServerConfigErrorCode::MissingRequiredKey);
@@ -142,6 +157,8 @@ TEST(AccessServerConfigTest, RejectsRemovedDefaultUpstreamClusterSetting) {
 
 TEST(AccessServerConfigTest, RequiresCompleteNacosCredentials) {
     auto config = AccessServerConfig::load_from_string("NACOS_SERVER_ADDRESSES=127.0.0.1\n"
+                                                       "ACCESS_SERVER_TLS_ENABLED=false\n"
+                                                       "ACCESS_SERVER_HTTP3_ENABLED=false\n"
                                                        "NACOS_USERNAME=user\n");
 
     ASSERT_FALSE(config);
@@ -155,6 +172,27 @@ TEST(AccessServerConfigTest, RejectsNonBooleanTestMode) {
     ASSERT_FALSE(config);
     EXPECT_EQ(config.error().code, AccessServerConfigErrorCode::InvalidValue);
     EXPECT_EQ(config.error().key, "ACCESS_SERVER_TEST_MODE");
+}
+
+TEST(AccessServerConfigTest, RequiresCertificateAndKeyForDefaultTlsListener) {
+    auto missing_certificate = AccessServerConfig::load_from_string("NACOS_SERVER_ADDRESSES=127.0.0.1\n");
+    ASSERT_FALSE(missing_certificate);
+    EXPECT_EQ(missing_certificate.error().code, AccessServerConfigErrorCode::MissingRequiredKey);
+    EXPECT_EQ(missing_certificate.error().key, "ACCESS_SERVER_TLS_CERTIFICATE_FILE");
+
+    auto missing_key = AccessServerConfig::load_from_string(
+            "NACOS_SERVER_ADDRESSES=127.0.0.1\nACCESS_SERVER_TLS_CERTIFICATE_FILE=/tmp/cert.pem\n");
+    ASSERT_FALSE(missing_key);
+    EXPECT_EQ(missing_key.error().code, AccessServerConfigErrorCode::MissingRequiredKey);
+    EXPECT_EQ(missing_key.error().key, "ACCESS_SERVER_TLS_PRIVATE_KEY_FILE");
+}
+
+TEST(AccessServerConfigTest, RejectsHttp3WithoutTls) {
+    auto config =
+            AccessServerConfig::load_from_string("NACOS_SERVER_ADDRESSES=127.0.0.1\nACCESS_SERVER_TLS_ENABLED=false\n");
+    ASSERT_FALSE(config);
+    EXPECT_EQ(config.error().code, AccessServerConfigErrorCode::InvalidValue);
+    EXPECT_EQ(config.error().key, "ACCESS_SERVER_HTTP3_ENABLED");
 }
 
 } // namespace

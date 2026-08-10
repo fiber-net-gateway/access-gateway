@@ -901,10 +901,15 @@ Metrics adapter 只抓取固定指标：requests result、duration 和 inflight�
 
 ### 12.2 Environment API
 
+当前部署模型固定为一个工作区：`environments` 表继续作为权限、审计和发布外键的隔离根，
+但产品 API 以 `GET /api/workspace` 返回唯一记录。`POST /api/environments` 仅供首次部署
+bootstrap 使用，并在已有记录时拒绝创建第二个环境。
+
 | Method | Path                                     | 权限              | 行为                                |
 | ------ | ---------------------------------------- | ----------------- | ----------------------------------- |
+| GET    | `/api/workspace`                         | 任一成员          | 返回唯一固定工作区                  |
 | GET    | `/api/environments`                      | 任一成员          | 仅返回有权限环境和摘要              |
-| POST   | `/api/environments`                      | platform admin    | 创建环境与默认 Data ID contract     |
+| POST   | `/api/environments`                      | platform admin    | 仅首次 bootstrap 创建固定工作区     |
 | GET    | `/api/environments/:id`                  | environment read  | 返回非秘密配置和 ETag               |
 | PATCH  | `/api/environments/:id`                  | environment admin | `If-Match` 更新；高风险字段单独审计 |
 | POST   | `/api/environments/:id/connection-tests` | environment admin | 202，执行只读 Nacos/Naming 测试     |
@@ -917,12 +922,13 @@ locator、ciphertext、用户名或密码。
 
 | Method   | Path                                         | 行为                                                 |
 | -------- | -------------------------------------------- | ---------------------------------------------------- |
-| GET/POST | `/api/environments/:envId/projects`          | 列表/创建项目                                        |
+| GET/POST | `/api/environments/:envId/projects`          | 列表/创建规范化域名项目                              |
 | POST     | `/api/environments/:envId/imports/nacos`     | 202 导入项目列表、route 和 gray observation          |
 | GET      | `/api/projects/:projectId`                   | 项目、当前 Nacos 摘要、Draft/Release/activation 摘要 |
 | GET/POST | `/api/projects/:projectId/drafts`            | 获取或创建活动 Draft                                 |
 | POST     | `/api/drafts/:draftId/revisions`             | `If-Match` 保存新 revision                           |
 | GET      | `/api/drafts/:draftId/revisions/:revisionId` | 解密并按权限返回结构化模型                           |
+| GET      | `/api/drafts/:draftId/current-revision`      | 返回当前草稿修订；revision 0 时为 404                |
 | POST     | `/api/draft-revisions/:id/validations`       | 202 执行 control/native validation                   |
 | GET      | `/api/validation-runs/:id`                   | 查询阶段、结果和 field errors                        |
 | GET      | `/api/draft-revisions/:id/wire-preview`      | 返回脱敏 diff、摘要和授权后的精确预览                |
@@ -983,21 +989,19 @@ Publication POST 返回 202 和 job location。前端轮询或通过后续事件
 ### 14.1 路由
 
 ```text
-/environments
-/e/:environmentCode/overview
-/e/:environmentCode/projects
-/e/:environmentCode/projects/:projectId
-/e/:environmentCode/projects/:projectId/drafts/:draftId
-/e/:environmentCode/gray
-/e/:environmentCode/releases
-/e/:environmentCode/releases/:releaseId
-/e/:environmentCode/instances
-/e/:environmentCode/audit
-/e/:environmentCode/settings
+/
+/projects/:projectId
+/projects/:projectId/drafts/:draftId
+/gray
+/releases
+/releases/:releaseId
+/instances
+/audit
+/settings
 ```
 
-Environment route loader 校验成员权限。切换 environment 时取消前一个 environment 的请求、
-清除 server cache namespace，并在有 dirty editor 时阻止导航。
+Workspace loader 校验成员权限并在启动时只加载一次固定工作区。路由不携带 environment code；
+有 dirty editor 时仍需阻止离开编辑页面。
 
 ### 14.2 状态分层
 

@@ -25,7 +25,7 @@ const projectResponseSchema = {
   required: [
     'id',
     'environmentId',
-    'name',
+    'domain',
     'status',
     'lockVersion',
     'draft',
@@ -37,7 +37,7 @@ const projectResponseSchema = {
   properties: {
     id: { type: 'string', format: 'uuid' },
     environmentId: { type: 'string', format: 'uuid' },
-    name: { type: 'string' },
+    domain: { type: 'string' },
     status: { type: 'string', enum: ['active', 'archived'] },
     lockVersion: { type: 'string', pattern: '^(0|[1-9][0-9]*)$' },
     draft: {
@@ -94,8 +94,8 @@ export function registerProjectRoutes(
         body: {
           type: 'object',
           additionalProperties: false,
-          required: ['name'],
-          properties: { name: { type: 'string', minLength: 1, maxLength: 255 } },
+          required: ['domain'],
+          properties: { domain: { type: 'string', minLength: 1, maxLength: 255 } },
         },
         response: {
           201: {

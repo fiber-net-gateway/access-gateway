@@ -166,6 +166,9 @@ std::uint8_t entry_bit(std::string_view entry) noexcept {
 
 bool is_https(const http::HttpExchange &exchange) noexcept {
     constexpr std::string_view kHttps = "https";
+    if (exchange.scheme().size() == kHttps.size() && http::http_header_name_equals_ci(exchange.scheme(), kHttps)) {
+        return true;
+    }
     const std::string_view forwarded = exchange.header("X-Forwarded-Proto");
     return forwarded.size() == kHttps.size() && http::http_header_name_equals_ci(forwarded, kHttps);
 }

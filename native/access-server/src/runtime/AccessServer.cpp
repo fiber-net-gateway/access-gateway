@@ -12,8 +12,7 @@
 namespace fiber::access_server {
 namespace {
 
-http::HttpServerOptions make_http_options() noexcept {
-    http::HttpServerOptions options;
+http::HttpServerOptions make_http_options(http::HttpServerOptions options = {}) noexcept {
     options.drain_unread_body = true;
     return options;
 }
@@ -33,11 +32,12 @@ AccessServer::AccessServer(event::EventLoop &accept_loop, event::EventLoopGroup 
              executor_.adapter()),
     metrics_(workers), cat_client_(options.cat_client),
     server_(
-            accept_loop, [this](http::HttpExchange &exchange) { return handle(exchange); }, make_http_options(),
-            &workers),
+            accept_loop, [this](http::HttpExchange &exchange) { return handle(exchange); },
+            make_http_options(std::move(options.http_server)), &workers),
     metrics_server_(
             accept_loop, [this](http::HttpExchange &exchange) { return handle_metrics(exchange); }, make_http_options(),
-            &workers) {
+            &workers),
+    http3_alt_svc_(std::move(options.http3_alt_svc)) {
     FIBER_ASSERT(workers.size() > 0);
 }
 
@@ -93,7 +93,7 @@ async::Task<void> AccessServer::shutdown_and_wait() noexcept {
         co_await metrics_server_.shutdown_and_wait();
         metrics_bound_ = false;
     }
-    co_await server_.shutdown_and_wait();
+    server_.close();
     metrics_.stop_collecting();
     co_await metrics_.wait_for_idle();
     co_await detach_cat_workers();
@@ -107,6 +107,9 @@ async::Task<void> AccessServer::shutdown_and_wait() noexcept {
 async::Task<void> AccessServer::handle(http::HttpExchange &exchange) noexcept {
     AccessServerMetrics::Worker &worker = metrics_.worker(event::EventLoop::current().group_index());
     AccessRequestTelemetry telemetry(exchange, &worker, cat_client_);
+    if (!http3_alt_svc_.empty()) {
+        (void) telemetry.response_headers().set("Alt-Svc", http3_alt_svc_);
+    }
     co_await handler_.handle(exchange, telemetry);
 }
 

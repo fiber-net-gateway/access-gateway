@@ -187,4 +187,10 @@ export function registerDraftRoutes(
         request.params.revisionId,
       ),
   )
+
+  app.get<{ Params: { draftId: string } }>(
+    '/api/drafts/:draftId/current-revision',
+    { schema: { params: draftParameters, response: { 200: revisionResponseSchema } } },
+    async (request) => drafts.getCurrentRevision(await requireActor(auth), request.params.draftId),
+  )
 }

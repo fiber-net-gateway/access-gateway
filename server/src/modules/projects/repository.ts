@@ -37,7 +37,7 @@ function toView(row: ProjectRow): ProjectView {
   return {
     id: bufferToPublicId(row.public_id),
     environmentId: bufferToPublicId(row.environment_public_id),
-    name: row.name,
+    domain: row.name,
     status: row.status,
     lockVersion: row.lock_version,
     draft: row.draft_public_id
@@ -131,10 +131,11 @@ export class ProjectRepository {
     actor: Actor,
     environmentInternalId: string,
     environmentPublicId: string,
-    name: string,
+    domain: string,
     requestId: string,
   ): Promise<string> {
     const projectPublicId = createPublicId()
+    const draftPublicId = createPublicId()
     try {
       await withTransaction(
         this.#pool,
@@ -143,12 +144,27 @@ export class ProjectRepository {
             `INSERT INTO projects
               (public_id, environment_id, name, status, created_by)
              VALUES (?, ?, ?, 'active', ?)`,
-            [publicIdToBuffer(projectPublicId), environmentInternalId, name, actor.internalId],
+            [publicIdToBuffer(projectPublicId), environmentInternalId, domain, actor.internalId],
           )
           const projectInternalId = result.insertId.toString()
           await transaction.execute(
             'INSERT INTO project_version_counters (project_id, last_allocated_version) VALUES (?, 0)',
             [projectInternalId],
+          )
+          await transaction.execute(
+            `INSERT INTO drafts
+              (public_id, environment_id, project_id, scope_key, kind, state, title,
+               created_by, updated_by)
+             VALUES (?, ?, ?, ?, 'project_route', 'editing', ?, ?, ?)`,
+            [
+              publicIdToBuffer(draftPublicId),
+              environmentInternalId,
+              projectInternalId,
+              `project:${projectInternalId}`,
+              `${domain} route configuration`,
+              actor.internalId,
+              actor.internalId,
+            ],
           )
           await this.#audit.append(transaction, {
             environmentInternalId,
@@ -158,7 +174,17 @@ export class ProjectRepository {
             targetPublicId: projectPublicId,
             requestId,
             result: 'success',
-            summary: { environmentId: environmentPublicId, name },
+            summary: { environmentId: environmentPublicId, domain },
+          })
+          await this.#audit.append(transaction, {
+            environmentInternalId,
+            actorInternalId: actor.internalId,
+            eventType: 'draft.created',
+            targetType: 'draft',
+            targetPublicId: draftPublicId,
+            requestId,
+            result: 'success',
+            summary: { projectId: projectPublicId, domain },
           })
         },
         { retryOnDeadlock: true },
@@ -166,7 +192,7 @@ export class ProjectRepository {
       return projectPublicId
     } catch (error) {
       if (isDuplicateKeyError(error)) {
-        throw conflict('PROJECT_NAME_EXISTS', 'A project with this name already exists')
+        throw conflict('PROJECT_DOMAIN_EXISTS', 'A project with this domain already exists')
       }
       throw error
     }
