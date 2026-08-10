@@ -2,7 +2,10 @@ import { lazy, Suspense, useEffect, useMemo, useState, type FormEvent } from 're
 
 import type {
   ApiConnectionState,
+  ConfigurationVersionDetail,
+  ConfigurationVersionSummary,
   HealthResponse,
+  ProjectReleaseView,
   ProjectRoutesModel,
   ProjectRoutesValidationView,
   ProjectView,
@@ -29,16 +32,26 @@ interface ProjectsPageProps {
   projects: readonly ProjectView[]
   selectedProjectId: string | null
   model: ProjectRoutesModel
+  versions: readonly ConfigurationVersionSummary[]
+  currentVersionId: string | null
+  configurationLockVersion: string
+  releases: readonly ProjectReleaseView[]
+  previewVersion: ConfigurationVersionDetail | null
   routeLoading: boolean
   hasUnsavedChanges: boolean
   saving: boolean
+  publishing: boolean
   validating: boolean
   validation: ProjectRoutesValidationView | null
   errorMessage: string | null
   onSelectProject(id: string): void
   onCreateProject(domain: string): Promise<void>
   onModelChange(model: ProjectRoutesModel): void
-  onSaveRoutes(): Promise<void>
+  onSaveRoutes(changeSummary: string): Promise<void>
+  onRestoreVersion(versionId: string, number: number): Promise<void>
+  onPublishVersion(versionId: string, title: string, description: string): Promise<void>
+  onViewVersion(versionId: string): Promise<void>
+  onClosePreview(): void
   onValidateRoutes(): Promise<void>
 }
 
@@ -74,9 +87,15 @@ export function ProjectsPage(props: ProjectsPageProps) {
     projects,
     selectedProjectId,
     model,
+    versions,
+    currentVersionId,
+    configurationLockVersion,
+    releases,
+    previewVersion,
     routeLoading,
     hasUnsavedChanges,
     saving,
+    publishing,
     validating,
     validation,
     errorMessage,
@@ -84,12 +103,22 @@ export function ProjectsPage(props: ProjectsPageProps) {
     onCreateProject,
     onModelChange,
     onSaveRoutes,
+    onRestoreVersion,
+    onPublishVersion,
+    onViewVersion,
+    onClosePreview,
     onValidateRoutes,
   } = props
   const [domain, setDomain] = useState('')
   const [query, setQuery] = useState('')
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set())
   const [actionError, setActionError] = useState<string | null>(null)
+  const [saveDialogOpen, setSaveDialogOpen] = useState(false)
+  const [changeSummary, setChangeSummary] = useState('')
+  const [publishDialogOpen, setPublishDialogOpen] = useState(false)
+  const [publishVersionId, setPublishVersionId] = useState('')
+  const [releaseTitle, setReleaseTitle] = useState('')
+  const [releaseDescription, setReleaseDescription] = useState('')
   const selectedProject = projects.find((item) => item.id === selectedProjectId) ?? null
   const filteredProjects = useMemo(() => {
     const normalized = query.trim().toLowerCase()
@@ -97,6 +126,7 @@ export function ProjectsPage(props: ProjectsPageProps) {
   }, [projects, query])
   const validatorCapability = capabilityStatus(systemStatus?.dependencies.nativeValidator)
   const publicationCapability = capabilityStatus(systemStatus?.dependencies.publicationWorker)
+  const currentVersion = versions.find((version) => version.id === currentVersionId) ?? null
   const localIssueCount = model.routes.reduce(
     (total, route) => total + analyzeRouteSource(route).issues.length,
     0,
@@ -112,6 +142,13 @@ export function ProjectsPage(props: ProjectsPageProps) {
       return model.routes[0] ? new Set([model.routes[0].id]) : new Set()
     })
   }, [model.routes, selectedProjectId])
+
+  useEffect(() => {
+    setSaveDialogOpen(false)
+    setPublishDialogOpen(false)
+    setChangeSummary('')
+    setPublishVersionId('')
+  }, [selectedProjectId])
 
   const updateRoutes = (routes: readonly RouteItemModel[]): void => {
     onModelChange({ ...model, routes })
@@ -135,6 +172,31 @@ export function ProjectsPage(props: ProjectsPageProps) {
     } catch (error) {
       setActionError(error instanceof Error ? error.message : '操作失败')
     }
+  }
+
+  const submitVersion = async (event: FormEvent): Promise<void> => {
+    event.preventDefault()
+    await runAction(async () => {
+      await onSaveRoutes(changeSummary)
+      setSaveDialogOpen(false)
+      setChangeSummary('')
+    })
+  }
+
+  const openPublishDialog = (version: ConfigurationVersionSummary): void => {
+    onClosePreview()
+    setPublishVersionId(version.id)
+    setReleaseTitle(`发布 V${version.number} · ${selectedProject?.domain ?? ''}`)
+    setReleaseDescription(version.changeSummary)
+    setPublishDialogOpen(true)
+  }
+
+  const submitRelease = async (event: FormEvent): Promise<void> => {
+    event.preventDefault()
+    await runAction(async () => {
+      await onPublishVersion(publishVersionId, releaseTitle, releaseDescription)
+      setPublishDialogOpen(false)
+    })
   }
 
   const addRoute = (template: RouteTemplate): void => {
@@ -185,10 +247,10 @@ export function ProjectsPage(props: ProjectsPageProps) {
           <button
             className="button-primary"
             disabled={!selectedProject || routeLoading || saving || !hasUnsavedChanges}
-            onClick={() => void runAction(onSaveRoutes)}
+            onClick={() => setSaveDialogOpen(true)}
             type="button"
           >
-            {saving ? '保存中…' : '保存草稿'}
+            {saving ? '保存中…' : '保存为版本'}
           </button>
         </div>
       </header>
@@ -258,7 +320,8 @@ export function ProjectsPage(props: ProjectsPageProps) {
                 <span>
                   <strong>{project.domain}</strong>
                   <small>
-                    {project.draft ? `草稿 r${project.draft.revision}` : '空草稿'} · 激活未知
+                    {project.draft?.revision ? `当前 V${project.draft.revision}` : '尚无版本'} ·
+                    激活未知
                   </small>
                 </span>
               </button>
@@ -295,9 +358,15 @@ export function ProjectsPage(props: ProjectsPageProps) {
                   <h2>{selectedProject.domain}</h2>
                   <div className="project-status-row">
                     <span className="status-chip status-chip-pending">
-                      {hasUnsavedChanges ? '有未保存修改' : '草稿已保存'}
+                      {hasUnsavedChanges ? '工作区有未保存修改' : '工作区已同步'}
                     </span>
-                    <span>发布：{selectedProject.publishedVersion ?? '尚未发布'}</span>
+                    <span>当前：{currentVersion ? `V${currentVersion.number}` : '尚无版本'}</span>
+                    <span>
+                      已发布：
+                      {selectedProject.publishedVersion
+                        ? `V${selectedProject.publishedVersion}`
+                        : '尚未发布'}
+                    </span>
                     <span>激活：未知</span>
                     <span>证书：动态部署未接入</span>
                   </div>
@@ -339,7 +408,7 @@ export function ProjectsPage(props: ProjectsPageProps) {
                   ) : (
                     <span className="status-chip status-chip-unknown">尚未校验</span>
                   )}
-                  <span>Ctrl/Cmd + S 保存</span>
+                  <span>Ctrl/Cmd + S 保存为版本</span>
                 </div>
               </section>
 
@@ -469,7 +538,7 @@ export function ProjectsPage(props: ProjectsPageProps) {
                                     ),
                                   )
                                 }
-                                onSave={() => void runAction(onSaveRoutes)}
+                                onSave={() => setSaveDialogOpen(true)}
                               />
                             </Suspense>
                             {issues.length > 0 ? (
@@ -507,6 +576,116 @@ export function ProjectsPage(props: ProjectsPageProps) {
                   <pre>{JSON.stringify(JSON.parse(validation.wirePreview), null, 2)}</pre>
                 </details>
               ) : null}
+
+              <div className="lifecycle-grid">
+                <section className="history-panel" aria-labelledby="version-history-title">
+                  <header className="panel-heading">
+                    <div>
+                      <p className="eyebrow">IMMUTABLE CONFIGURATION</p>
+                      <h3 id="version-history-title">配置版本</h3>
+                    </div>
+                    <span>
+                      {versions.length} 个版本 · ETag {configurationLockVersion}
+                    </span>
+                  </header>
+                  {versions.length === 0 ? (
+                    <p className="panel-empty">
+                      编辑 Route 后保存，系统会创建第一个不可变版本 V1。
+                    </p>
+                  ) : (
+                    <ol className="version-list">
+                      {versions.map((version) => (
+                        <li key={version.id}>
+                          <div className="version-number">
+                            <strong>V{version.number}</strong>
+                            <span>{version.relation === 'current' ? '当前' : '历史'}</span>
+                          </div>
+                          <div className="version-summary">
+                            <strong>{version.changeSummary}</strong>
+                            <small>
+                              {version.routeCount} Routes · {version.createdBy.displayName} ·{' '}
+                              {new Date(version.createdAt).toLocaleString('zh-CN')}
+                            </small>
+                          </div>
+                          <div className="version-state">
+                            <span className="status-chip status-chip-unknown">
+                              {version.publicationStatus === 'never'
+                                ? '未发布'
+                                : version.publicationStatus}
+                            </span>
+                          </div>
+                          <div className="version-actions">
+                            <button
+                              className="button-secondary"
+                              onClick={() => void runAction(() => onViewVersion(version.id))}
+                              type="button"
+                            >
+                              查看
+                            </button>
+                            <button
+                              className="button-primary"
+                              disabled={publishing || publicationCapability.tone !== 'ready'}
+                              onClick={() => openPublishDialog(version)}
+                              type="button"
+                            >
+                              发布
+                            </button>
+                            {version.relation === 'historical' ? (
+                              <button
+                                className="button-secondary"
+                                disabled={saving}
+                                onClick={() =>
+                                  void runAction(() => onRestoreVersion(version.id, version.number))
+                                }
+                                type="button"
+                              >
+                                恢复为新版本
+                              </button>
+                            ) : null}
+                          </div>
+                        </li>
+                      ))}
+                    </ol>
+                  )}
+                </section>
+
+                <section className="history-panel" aria-labelledby="release-history-title">
+                  <header className="panel-heading">
+                    <div>
+                      <p className="eyebrow">RNACOS PUBLICATION</p>
+                      <h3 id="release-history-title">Release 记录</h3>
+                    </div>
+                    <span>激活状态始终单独统计</span>
+                  </header>
+                  {releases.length === 0 ? (
+                    <p className="panel-empty">尚未创建 Release。工作区内容不能直接发布。</p>
+                  ) : (
+                    <ol className="release-list">
+                      {releases.map((release) => (
+                        <li key={release.id}>
+                          <div>
+                            <strong>R{release.sequence}</strong>
+                            <span>V{release.sourceConfigurationVersion.number}</span>
+                          </div>
+                          <div>
+                            <strong>{release.title}</strong>
+                            <small>
+                              wire v{release.allocatedWireVersion} ·{' '}
+                              {new Date(release.createdAt).toLocaleString('zh-CN')}
+                            </small>
+                          </div>
+                          <div className="release-state-stack">
+                            <span className="status-chip status-chip-unknown">
+                              {release.status}
+                            </span>
+                            <small>实例激活：未知</small>
+                          </div>
+                        </li>
+                      ))}
+                    </ol>
+                  )}
+                </section>
+              </div>
             </>
           ) : (
             <div className="route-empty-state">
@@ -516,6 +695,151 @@ export function ProjectsPage(props: ProjectsPageProps) {
           )}
         </main>
       </div>
+
+      {saveDialogOpen ? (
+        <div className="dialog-backdrop" role="presentation">
+          <form
+            aria-labelledby="save-version-title"
+            className="dialog-card"
+            onSubmit={(event) => void submitVersion(event)}
+            role="dialog"
+          >
+            <p className="eyebrow">CREATE IMMUTABLE VERSION</p>
+            <h2 id="save-version-title">保存为配置版本</h2>
+            <p>
+              本次会创建 {currentVersion ? `V${currentVersion.number + 1}` : 'V1'}
+              。保存后内容不可修改， 后续修改会继续创建新版本。
+            </p>
+            <label>
+              变更摘要
+              <input
+                autoFocus
+                maxLength={200}
+                placeholder="例如：新增 /api 代理路由"
+                required
+                value={changeSummary}
+                onChange={(event) => setChangeSummary(event.target.value)}
+              />
+            </label>
+            <div className="dialog-actions">
+              <button
+                className="button-secondary"
+                disabled={saving}
+                onClick={() => setSaveDialogOpen(false)}
+                type="button"
+              >
+                取消
+              </button>
+              <button className="button-primary" disabled={saving} type="submit">
+                {saving ? '保存中…' : '创建版本'}
+              </button>
+            </div>
+          </form>
+        </div>
+      ) : null}
+
+      {publishDialogOpen ? (
+        <div className="dialog-backdrop" role="presentation">
+          <form
+            aria-labelledby="publish-version-title"
+            className="dialog-card"
+            onSubmit={(event) => void submitRelease(event)}
+            role="dialog"
+          >
+            <p className="eyebrow">CREATE & PUBLISH RELEASE</p>
+            <h2 id="publish-version-title">发布配置版本</h2>
+            {hasUnsavedChanges ? (
+              <div className="dialog-warning">
+                工作区还有未保存修改；本次只发布所选历史快照，不包含这些修改。
+              </div>
+            ) : null}
+            <label>
+              发布版本
+              <select
+                required
+                value={publishVersionId}
+                onChange={(event) => setPublishVersionId(event.target.value)}
+              >
+                {versions.map((version) => (
+                  <option key={version.id} value={version.id}>
+                    V{version.number} · {version.relation === 'current' ? '当前' : '历史'} ·{' '}
+                    {version.changeSummary}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Release 标题
+              <input
+                maxLength={255}
+                required
+                value={releaseTitle}
+                onChange={(event) => setReleaseTitle(event.target.value)}
+              />
+            </label>
+            <label>
+              说明
+              <textarea
+                maxLength={4000}
+                rows={3}
+                value={releaseDescription}
+                onChange={(event) => setReleaseDescription(event.target.value)}
+              />
+            </label>
+            <p className="dialog-footnote">
+              创建 Release 时会分配新的 native wire version，并用当前 Native Validator 重新校验。
+            </p>
+            <div className="dialog-actions">
+              <button
+                className="button-secondary"
+                disabled={publishing}
+                onClick={() => setPublishDialogOpen(false)}
+                type="button"
+              >
+                取消
+              </button>
+              <button className="button-primary" disabled={publishing} type="submit">
+                {publishing ? '发布中…' : '创建并发布'}
+              </button>
+            </div>
+          </form>
+        </div>
+      ) : null}
+
+      {previewVersion ? (
+        <div className="dialog-backdrop" role="presentation">
+          <section
+            aria-labelledby="preview-version-title"
+            className="dialog-card dialog-card-wide"
+            role="dialog"
+          >
+            <p className="eyebrow">READ-ONLY SNAPSHOT</p>
+            <h2 id="preview-version-title">V{previewVersion.number} · 配置快照</h2>
+            <p>{previewVersion.changeSummary}</p>
+            <div className="version-preview-routes">
+              {previewVersion.model.routes.map((route, index) => (
+                <article key={route.id}>
+                  <strong>Route {index + 1}</strong>
+                  <pre>{route.source}</pre>
+                </article>
+              ))}
+            </div>
+            <div className="dialog-actions">
+              <button className="button-secondary" onClick={onClosePreview} type="button">
+                关闭
+              </button>
+              <button
+                className="button-primary"
+                disabled={publishing || publicationCapability.tone !== 'ready'}
+                onClick={() => openPublishDialog(previewVersion)}
+                type="button"
+              >
+                发布这个版本
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
     </div>
   )
 }

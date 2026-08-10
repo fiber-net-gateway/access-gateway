@@ -12,18 +12,9 @@ import type {
 } from './model.js'
 import { isProjectRoutesModel } from './model.js'
 import { DraftRepository } from './repository.js'
-import { compileProjectRoutes, type RouteValidationIssue } from './compiler.js'
+import { validateProjectRoutesCandidate, type ProjectRoutesValidationView } from './validation.js'
 
-export interface ProjectRoutesValidationView {
-  valid: boolean
-  issues: readonly RouteValidationIssue[]
-  wirePreview: string | null
-  wireSha256: string | null
-  validator: {
-    contractVersion: number
-    revision: string
-  } | null
-}
+export type { ProjectRoutesValidationView } from './validation.js'
 
 export interface DraftService {
   get(actor: Actor, projectId: string): Promise<DraftView>
@@ -179,47 +170,15 @@ export class DefaultDraftService implements DraftService {
     }
     await this.requireEditor(actor, bufferToPublicId(project.environment_public_id))
     const parsed = parseProjectRoutesModel(model)
-    const result = compileProjectRoutes(project.name, parsed)
-    if (!result.compiled) {
-      return {
-        valid: false,
-        issues: result.issues,
-        wirePreview: null,
-        wireSha256: null,
-        validator: null,
-      }
-    }
-    const native = await this.#validator.validate(
-      {
-        requestId,
-        kind: 'project_route',
-        project: project.name,
-        payload: result.compiled.payload,
-      },
+    return validateProjectRoutesCandidate(
+      this.#validator,
+      project.name,
+      projectId,
+      parsed,
+      requestId,
+      1,
       signal,
     )
-    const issues: RouteValidationIssue[] = native.errors.map((error) => {
-      const match = /^routes\[(\d+)\](?:\.(.*))?$/u.exec(error.field ?? '')
-      const route = match?.[1] ? parsed.routes[Number(match[1])] : undefined
-      return {
-        routeId: route?.id ?? parsed.routes[0]?.id ?? projectId,
-        path: match?.[2] ?? error.field ?? '',
-        line: 1,
-        column: 1,
-        code: error.code,
-        message: error.message,
-      }
-    })
-    return {
-      valid: native.valid,
-      issues,
-      wirePreview: result.compiled.payloadText,
-      wireSha256: result.compiled.sha256,
-      validator: {
-        contractVersion: native.contractVersion,
-        revision: native.validatorRevision,
-      },
-    }
   }
 
   async requireEditor(actor: Actor, environmentId: string): Promise<void> {

@@ -34,6 +34,7 @@ export class DefaultSystemStatusService implements SystemStatusService {
   readonly #validator: NativeValidator
   readonly #validatorDetail: string
   readonly #validatorConfigured: boolean
+  readonly #publicationConfigured: boolean
 
   constructor(
     pool: DatabasePool | null,
@@ -41,12 +42,14 @@ export class DefaultSystemStatusService implements SystemStatusService {
     validator: NativeValidator,
     validatorDetail = validator.available ? 'configured' : 'not configured',
     validatorConfigured = validator.available,
+    publicationConfigured = false,
   ) {
     this.#pool = pool
     this.#auth = auth
     this.#validator = validator
     this.#validatorDetail = validatorDetail
     this.#validatorConfigured = validatorConfigured
+    this.#publicationConfigured = publicationConfigured
   }
 
   async get(): Promise<SystemStatusView> {
@@ -94,8 +97,10 @@ export class DefaultSystemStatusService implements SystemStatusService {
         revision: this.#validator.revision,
       },
       publicationWorker: {
-        status: 'unconfigured',
-        detail: 'publication worker and Nacos adapter are not configured',
+        status: this.#publicationConfigured ? 'ready' : 'unconfigured',
+        detail: this.#publicationConfigured
+          ? 'publication queue and Nacos adapter are configured'
+          : 'publication worker and Nacos adapter are not configured',
       },
       activationCollector: {
         status: 'unconfigured',

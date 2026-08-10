@@ -9,8 +9,12 @@ import { registerEnvironmentRoutes } from './modules/environments/routes.js'
 import { UnavailableEnvironmentService } from './modules/environments/service.js'
 import { registerProjectRoutes } from './modules/projects/routes.js'
 import { UnavailableProjectService } from './modules/projects/service.js'
+import { registerReleaseRoutes } from './modules/releases/routes.js'
+import { UnavailableReleaseService } from './modules/releases/service.js'
 import { registerSystemRoutes } from './modules/system/routes.js'
 import { DefaultSystemStatusService } from './modules/system/service.js'
+import { registerConfigurationVersionRoutes } from './modules/versions/routes.js'
+import { UnavailableConfigurationVersionService } from './modules/versions/service.js'
 import type { ApplicationServices } from './services.js'
 import { AppError, type ErrorField } from './shared/errors.js'
 
@@ -83,6 +87,8 @@ export function buildApp(options: BuildAppOptions = {}) {
   registerEnvironmentRoutes(app, services.auth, services.environments)
   registerProjectRoutes(app, services.auth, services.projects)
   registerDraftRoutes(app, services.auth, services.drafts)
+  registerConfigurationVersionRoutes(app, services.auth, services.versions)
+  registerReleaseRoutes(app, services.auth, services.releases)
 
   app.setNotFoundHandler(async (request, reply) => {
     const pathname = request.url.split('?', 1)[0] ?? request.url
@@ -156,6 +162,8 @@ function createUnavailableServices(): ApplicationServices {
     environments: new UnavailableEnvironmentService(),
     projects: new UnavailableProjectService(),
     drafts: new UnavailableDraftService(),
+    versions: new UnavailableConfigurationVersionService(),
+    releases: new UnavailableReleaseService(),
     system: new DefaultSystemStatusService(null, auth, validator),
   }
 }

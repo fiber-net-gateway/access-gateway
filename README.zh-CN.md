@@ -16,11 +16,11 @@ Access Gateway 是由 C++23 数据面与 Web 管理控制台组成的高性能�
   匹配、RESPONSE 与 PROXY 执行、WebSocket 隧道、服务发现、灰度路由、CAT 链路追踪、
   Prometheus 指标和结构化访问日志。生产脚本语料差分验证与最终切流门槛仍在推进中。
 - **Console**：首个基于 MySQL 的纵向链路已经可用，包括确定性 migration、开发身份与固定
-  部署 RBAC、不含环境参数的域名 Project API、加密的不可变路由草稿 revision、乐观锁、审计
+  部署 RBAC、不含环境参数的域名 Project API、加密的不可变配置版本、乐观锁、审计
   事件，以及 route-first React 工作台。每条 Route 使用独立挂载的 CodeMirror YAML 编辑器，
   并确定性编译为 native JSON wire model。Release/发布表、Release 状态机、发布冲突判定和
-  fail-closed Native Validator 适配器已经落地。OIDC、Nacos 发布 Worker、证书库存/运行时交付
-  和实例级生效采集仍待实现。
+  fail-closed Native Validator 适配器、当前/历史版本 Release 创建和带 lease/回读证据的 rnacos
+  发布 Worker 已经落地。OIDC、资源级发布重试与恢复、证书库存/运行时交付和实例级生效采集仍待实现。
 
 因此，对于尚无配套工作流的状态，控制台会明确显示“不可用”或“未知”，不会伪造发布或
 生效成功。
@@ -135,12 +135,12 @@ Migration 使用 checksum 防篡改，并通过 MySQL advisory lock 串行执行
 - `/api/health`、`/api/health/live`、`/api/health/ready` 和 `/api/system/status`；
 - 固定工作区获取，以及仅供部署 bootstrap 使用的一次性环境创建接口；
 - 不含环境参数的 `/api/projects` 列表/创建，以及 Project 详情；
-- 项目活动草稿的获取/创建、当前 revision 获取、带 `If-Match` 的不可变 revision 保存与
-  revision 获取；
-- Project YAML Route 校验和确定性的 native wire 预览。
+- 带 `If-Match` 与幂等键的 Configuration Version 列表、保存、详情、恢复和校验；
+- Project YAML Route 校验和确定性的 native wire 预览；
+- 从当前或历史版本创建 Release、加入发布队列和查询执行状态。
 
-每个草稿保存有序 Route ID 和精确 YAML 原文；旧的整份 Project JSON revision 会在读取时升级为
-稳定的 YAML Route Item。草稿模型在写入 MySQL 前使用 AES-256-GCM 信封加密。本地密钥配置只
+每个 Configuration Version 保存有序 Route ID 和精确 YAML 原文；旧的整份 Project JSON revision
+会在读取时升级为稳定的 YAML Route Item。模型文档在写入 MySQL 前使用 AES-256-GCM 信封加密。本地密钥配置只
 用于开发环境；生产环境应接入外部密钥服务。
 
 使用以下命令验证全部 Console 工作区：
@@ -164,11 +164,11 @@ npm run demo:up
 ```
 
 首次构建原生镜像会下载固定版本的 C++ 构建依赖，可能需要几分钟。Compose 会自动执行
-MySQL migration，通过 Console API 幂等创建演示环境和项目，将兼容路由直接写入 R-Nacos，
-并在 bootstrap 成功后启动 Access Server。
+MySQL migration，通过 Console API 幂等创建演示项目与 Configuration Version，由发布 Worker
+将 Release 写入 R-Nacos 并回读校验，成功后再启动 Access Server。
 
 Fastify 在同一个 Console 容器中同时提供 `/api/*` 接口和 React 单页应用。完整环境因此包含
-4 个长期运行容器和 3 个 migration/bootstrap 一次性容器。
+5 个长期运行容器和 3 个 migration/bootstrap 一次性容器。
 
 全部服务就绪后可访问：
 
@@ -186,9 +186,9 @@ HTTP/3，可在 WSL 运行 `hostname -I` 取得 WSL 地址，在 Windows hosts �
 `<WSL-IP> demo.local`，然后访问 `https://demo.local:16688/`。如只需在 WSL 内访问，可在
 `.env` 设置 `ACCESS_SERVER_PUBLISHED_HOST=127.0.0.1` 收紧监听范围。
 浏览器只有在信任该演示证书时才会协商 QUIC；不要在生产环境信任或复用这个本机自签名证书。
-由于 Console 发布 Worker 尚未实现，bootstrap 会直接写入 R-Nacos；UI 仍会如实把发布与实例
-生效状态显示为
-“不可用”或“未知”。可使用 `npm run demo:ps`、`npm run demo:logs` 和 `npm run demo:down`
+demo bootstrap 通过 Console API 创建 Configuration Version 和 Release，发布 Worker 负责写入
+R-Nacos 并回读校验。由于实例激活证据采集尚未实现，UI 仍会如实显示“激活未知”。可使用
+`npm run demo:ps`、`npm run demo:logs` 和 `npm run demo:down`
 管理演示环境。只有在确定要删除全部演示数据时，才为 `docker compose down` 添加 `--volumes`。
 
 ## 构建和测试 Access Server

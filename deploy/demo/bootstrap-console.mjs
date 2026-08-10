@@ -1,5 +1,5 @@
 const apiUrl = process.env.CONSOLE_API_URL ?? 'http://console-api:3000'
-const nacosEndpoint = process.env.DEMO_NACOS_ENDPOINT ?? 'http://localhost:8848'
+const nacosEndpoint = process.env.DEMO_NACOS_ENDPOINT ?? 'http://rnacos:8848'
 
 const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds))
 
@@ -14,7 +14,10 @@ async function request(path, init = {}) {
   })
   const body = await response.json().catch(() => null)
   if (!response.ok) {
-    throw new Error(`Console API ${init.method ?? 'GET'} ${path} failed (${response.status})`)
+    const code = body?.error?.code ?? 'UNKNOWN'
+    throw new Error(
+      `Console API ${init.method ?? 'GET'} ${path} failed (${response.status}, ${code})`,
+    )
   }
   return body
 }
@@ -34,9 +37,8 @@ async function waitForConsole() {
 await waitForConsole()
 
 const environmentList = await request('/api/environments')
-let environment
 if (environmentList.items.length === 0) {
-  environment = await request('/api/environments', {
+  await request('/api/environments', {
     method: 'POST',
     body: JSON.stringify({
       code: 'demo',
@@ -47,8 +49,6 @@ if (environmentList.items.length === 0) {
       zone: 'local-demo',
     }),
   })
-} else {
-  environment = await request('/api/workspace')
 }
 
 const projectList = await request('/api/projects')
@@ -61,19 +61,17 @@ if (!project) {
   project = await request(`/api/projects/${created.id}`)
 }
 
-let draft
-try {
-  draft = await request(`/api/projects/${project.id}/drafts`)
-} catch {
-  draft = await request(`/api/projects/${project.id}/drafts`, { method: 'POST' })
-}
-
-if (draft.currentRevision === 0) {
-  await request(`/api/drafts/${draft.id}/revisions`, {
+let versionList = await request(`/api/projects/${project.id}/configuration-versions`)
+if (versionList.items.length === 0) {
+  const saved = await request(`/api/projects/${project.id}/configuration-versions`, {
     method: 'POST',
-    headers: { 'If-Match': `"${draft.lockVersion}"` },
+    headers: {
+      'If-Match': `"${versionList.lockVersion}"`,
+      'Idempotency-Key': 'docker-demo-initial-version',
+    },
     body: JSON.stringify({
-      changeSummary: 'Initialize the Docker demo route',
+      baseVersionId: null,
+      changeSummary: 'Initialize the Docker demo routes',
       model: {
         schemaVersion: 2,
         kind: 'project_routes_yaml',
@@ -102,6 +100,55 @@ body:
       },
     }),
   })
+  versionList = await request(`/api/projects/${project.id}/configuration-versions`)
+  if (versionList.currentVersionId !== saved.version.id) {
+    throw new Error('Saved demo version did not become current')
+  }
 }
 
-console.log(`Console demo data is ready (project=${project.id})`)
+const currentVersion = versionList.items.find(
+  (version) => version.id === versionList.currentVersionId,
+)
+if (!currentVersion) throw new Error('Demo project has no current configuration version')
+
+let releaseList = await request(`/api/projects/${project.id}/releases`)
+let release = releaseList.items.find((item) =>
+  ['ready', 'queued', 'publishing', 'published'].includes(item.status),
+)
+if (!release) {
+  release = await request(`/api/projects/${project.id}/releases`, {
+    method: 'POST',
+    headers: { 'Idempotency-Key': `docker-demo-release-v${currentVersion.number}` },
+    body: JSON.stringify({
+      sourceVersionId: currentVersion.id,
+      expectedCurrentVersionId: currentVersion.id,
+      title: `Docker demo V${currentVersion.number}`,
+      description: 'Publish the deterministic Docker demo routes to rnacos',
+    }),
+  })
+}
+if (release.status === 'ready') {
+  const queued = await request(`/api/releases/${release.id}/publications`, {
+    method: 'POST',
+    headers: { 'Idempotency-Key': `docker-demo-publish-${release.id}` },
+  })
+  release = queued.release
+}
+
+for (let attempt = 0; attempt < 120 && release.status !== 'published'; attempt += 1) {
+  if (
+    ['partially_published', 'publish_failed', 'validation_failed', 'abandoned'].includes(
+      release.status,
+    )
+  ) {
+    throw new Error(`Demo Release stopped in ${release.status}`)
+  }
+  await sleep(1_000)
+  release = await request(`/api/releases/${release.id}`)
+}
+if (release.status !== 'published')
+  throw new Error('Demo Release did not publish within 120 seconds')
+
+console.log(
+  `Console demo data is ready (project=${project.id}, version=V${currentVersion.number}, release=R${release.sequence})`,
+)

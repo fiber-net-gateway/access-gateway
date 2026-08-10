@@ -37,6 +37,15 @@ export interface NativeValidatorConfig {
   maxOutputBytes: number
 }
 
+export interface PublicationConfig {
+  enabled: boolean
+  endpointOverride: string | null
+  requestTimeoutMillis: number
+  maxResponseBytes: number
+  pollIntervalMillis: number
+  leaseMillis: number
+}
+
 export interface ServerConfig {
   host: string
   port: number
@@ -47,6 +56,7 @@ export interface ServerConfig {
   documentEncryption: DocumentEncryptionConfig
   auth: AuthConfig
   nativeValidator: NativeValidatorConfig
+  publication: PublicationConfig
 }
 
 function isLogLevel(value: string): value is LogLevel {
@@ -130,6 +140,28 @@ function parseNonEmpty(value: string | undefined, name: string, defaultValue: st
     throw new Error(`${name} must not be empty`)
   }
   return parsed
+}
+
+function parseOptionalHttpEndpoint(value: string | undefined, name: string): string | null {
+  const raw = value?.trim()
+  if (!raw) return null
+  let endpoint: URL
+  try {
+    endpoint = new URL(raw)
+  } catch {
+    throw new Error(`${name} must be an absolute HTTP(S) URL`)
+  }
+  if (
+    !['http:', 'https:'].includes(endpoint.protocol) ||
+    endpoint.username ||
+    endpoint.password ||
+    endpoint.search ||
+    endpoint.hash ||
+    endpoint.pathname !== '/'
+  ) {
+    throw new Error(`${name} must be an HTTP(S) origin without credentials, path, or query data`)
+  }
+  return endpoint.origin
 }
 
 function parseLogLevel(value: string | undefined): LogLevel {
@@ -258,6 +290,33 @@ export function loadServerConfig(env: NodeJS.ProcessEnv = process.env): ServerCo
         env.NATIVE_VALIDATOR_MAX_OUTPUT_BYTES,
         'NATIVE_VALIDATOR_MAX_OUTPUT_BYTES',
         1_048_576,
+      ),
+    },
+    publication: {
+      enabled: parseBoolean(env.PUBLICATION_WORKER_ENABLED, 'PUBLICATION_WORKER_ENABLED', false),
+      endpointOverride: parseOptionalHttpEndpoint(
+        env.PUBLICATION_NACOS_ENDPOINT,
+        'PUBLICATION_NACOS_ENDPOINT',
+      ),
+      requestTimeoutMillis: parsePositiveInteger(
+        env.NACOS_REQUEST_TIMEOUT_MILLIS,
+        'NACOS_REQUEST_TIMEOUT_MILLIS',
+        5_000,
+      ),
+      maxResponseBytes: parsePositiveInteger(
+        env.NACOS_MAX_RESPONSE_BYTES,
+        'NACOS_MAX_RESPONSE_BYTES',
+        5_242_880,
+      ),
+      pollIntervalMillis: parsePositiveInteger(
+        env.PUBLICATION_POLL_INTERVAL_MILLIS,
+        'PUBLICATION_POLL_INTERVAL_MILLIS',
+        1_000,
+      ),
+      leaseMillis: parsePositiveInteger(
+        env.PUBLICATION_LEASE_MILLIS,
+        'PUBLICATION_LEASE_MILLIS',
+        30_000,
       ),
     },
   }

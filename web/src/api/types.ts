@@ -81,3 +81,78 @@ export interface ProjectRoutesValidationView {
     revision: string
   } | null
 }
+
+export type ConfigurationVersionValidationState = 'not_run' | 'pending' | 'valid' | 'invalid'
+
+export interface ConfigurationVersionSummary {
+  id: string
+  projectId: string
+  number: number
+  relation: 'current' | 'historical'
+  baseVersionId: string | null
+  restoredFromVersionId: string | null
+  changeSummary: string
+  routeCount: number
+  modelSha256: string
+  validationState: ConfigurationVersionValidationState
+  publicationStatus: string
+  createdBy: { id: string; displayName: string }
+  createdAt: string
+}
+
+export interface ConfigurationVersionDetail extends ConfigurationVersionSummary {
+  model: ProjectRoutesModel
+}
+
+export interface ConfigurationVersionListResult {
+  items: readonly ConfigurationVersionSummary[]
+  nextCursor: string | null
+  currentVersionId: string | null
+  lockVersion: string
+}
+
+export interface SavedConfigurationVersion {
+  version: ConfigurationVersionDetail
+  lockVersion: string
+}
+
+export type ReleaseStatus =
+  | 'creating'
+  | 'validating'
+  | 'validation_failed'
+  | 'ready'
+  | 'queued'
+  | 'publishing'
+  | 'published'
+  | 'partially_published'
+  | 'publish_failed'
+  | 'canceled'
+  | 'superseded'
+  | 'abandoned'
+
+export interface ProjectReleaseView {
+  id: string
+  sequence: string
+  projectId: string
+  title: string
+  description: string
+  status: ReleaseStatus
+  sourceConfigurationVersion: {
+    id: string
+    number: number
+    relationAtCreation: 'current' | 'historical' | 'unknown'
+  }
+  currentConfigurationVersionAtCreation: { id: string; number: number }
+  allocatedWireVersion: number
+  resources: readonly {
+    id: string
+    kind: 'project_route' | 'project_list'
+    dataId: string
+    group: string
+    status: string
+  }[]
+  publication: { jobId: string | null; state: string | null }
+  activationStatus: 'unknown'
+  createdAt: string
+  publishedAt: string | null
+}
