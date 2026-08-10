@@ -20,6 +20,7 @@ interface ProjectRow extends RowDataPacket {
   draft_state: string | null
   current_revision_no: number | null
   draft_lock_version: string | null
+  published_revision_no: number | null
   created_at: string
   updated_at: string
 }
@@ -46,7 +47,7 @@ function toView(row: ProjectRow): ProjectView {
           lockVersion: row.draft_lock_version!,
         }
       : null,
-    publishedVersion: null,
+    publishedVersion: row.published_revision_no,
     activationStatus: 'unknown',
     createdAt: mysqlDateTimeToRfc3339(row.created_at),
     updatedAt: mysqlDateTimeToRfc3339(row.updated_at),
@@ -59,6 +60,16 @@ const selectProjects = `
     p.name, p.status, p.lock_version,
     d.public_id AS draft_public_id, d.state AS draft_state,
     d.current_revision_no, d.lock_version AS draft_lock_version,
+    (
+      SELECT revision.revision_no
+      FROM releases release_record
+      INNER JOIN release_items release_item
+        ON release_item.release_id = release_record.id AND release_item.kind = 'project_route'
+      INNER JOIN draft_revisions revision ON revision.id = release_item.draft_revision_id
+      WHERE release_item.project_id = p.id AND release_record.status = 'published'
+      ORDER BY release_record.published_at DESC, release_record.id DESC
+      LIMIT 1
+    ) AS published_revision_no,
     p.created_at, p.updated_at
   FROM projects p
   INNER JOIN environments e ON e.id = p.environment_id

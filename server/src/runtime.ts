@@ -13,6 +13,7 @@ import {
   SubprocessNativeValidator,
   UnavailableNativeValidator,
 } from './integrations/native-validator/subprocess.js'
+import { HttpNacosClient, UnavailableNacosClient } from './integrations/nacos/http.js'
 import { AuthRepository } from './modules/auth/repository.js'
 import { FixedActorAuthService, UnavailableAuthService } from './modules/auth/service.js'
 import { DraftRepository } from './modules/drafts/repository.js'
@@ -24,7 +25,14 @@ import {
 } from './modules/environments/service.js'
 import { ProjectRepository } from './modules/projects/repository.js'
 import { DefaultProjectService, UnavailableProjectService } from './modules/projects/service.js'
+import { ReleaseRepository } from './modules/releases/repository.js'
+import { DefaultReleaseService, UnavailableReleaseService } from './modules/releases/service.js'
 import { DefaultSystemStatusService } from './modules/system/service.js'
+import { ConfigurationVersionRepository } from './modules/versions/repository.js'
+import {
+  DefaultConfigurationVersionService,
+  UnavailableConfigurationVersionService,
+} from './modules/versions/service.js'
 import type { ApplicationRuntime, ApplicationServices } from './services.js'
 
 async function createNativeValidator(config: ServerConfig): Promise<{
@@ -81,12 +89,15 @@ function unavailableServices(
     environments: new UnavailableEnvironmentService(),
     projects: new UnavailableProjectService(),
     drafts: new UnavailableDraftService(),
+    versions: new UnavailableConfigurationVersionService(),
+    releases: new UnavailableReleaseService(),
     system: new DefaultSystemStatusService(
       null,
       auth,
       validator,
       validatorDetail,
       config.nativeValidator.path !== null,
+      config.publication.enabled,
     ),
   }
 }
@@ -125,17 +136,36 @@ export async function createApplicationRuntime(config: ServerConfig): Promise<Ap
       ),
     )
     const drafts = new DraftRepository(pool, documents)
+    const versions = new ConfigurationVersionRepository(pool, documents)
+    const nacos = config.publication.enabled
+      ? new HttpNacosClient({
+          timeoutMillis: config.publication.requestTimeoutMillis,
+          maxResponseBytes: config.publication.maxResponseBytes,
+          endpointOverride: config.publication.endpointOverride,
+        })
+      : new UnavailableNacosClient()
+    const releases = new ReleaseRepository(pool, documents)
     const services: ApplicationServices = {
       auth,
       environments: new DefaultEnvironmentService(environments),
       projects: new DefaultProjectService(projects, environments),
       drafts: new DefaultDraftService(drafts, projects, environments, validator),
+      versions: new DefaultConfigurationVersionService(versions, projects, environments, validator),
+      releases: new DefaultReleaseService(
+        releases,
+        versions,
+        projects,
+        environments,
+        validator,
+        nacos,
+      ),
       system: new DefaultSystemStatusService(
         pool,
         auth,
         validator,
         validatorDetail,
         config.nativeValidator.path !== null,
+        config.publication.enabled,
       ),
     }
     return {

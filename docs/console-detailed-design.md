@@ -1,1216 +1,685 @@
 # Access Gateway Console 详细设计
 
-- 状态：Draft v0.1（待按新版需求重写，不再作为实现依据）
+- 状态：Draft v0.3
 - 上游需求：[Access Gateway Console 产品需求文档](console-requirements.md)
-- 技术范围：React Web、Fastify API、后台 Worker、MySQL、Nacos、Native Validator 和
-  access-server 状态采集
-- 数据库决定：MySQL 8.4 LTS 基线，InnoDB；不以 MariaDB 兼容为目标
-
-> 注意：本文基于旧的环境、Gray 和整份结构化 Project 模型。新版需求已改为单部署、域名
-> Project、逐条 YAML Route 和证书优先，详见上游需求文档。完成对应详细设计前，本文仅作为
-> 现有数据库与发布状态机的参考。
+- 核心流程：逐条 YAML Route → 保存配置版本 → 选择当前/历史版本 → 创建 Release → 发布到 rnacos
+- 适用范围：`web/`、`server/`、MySQL migration、rnacos publication worker，以及必要的
+  `native/access-server/` 校验和激活证据接口
+- 实现基线：Configuration Version API 与历史 UI、按当前/历史版本创建 Release、Native Validator
+  重校验、rnacos publication worker、逐资源回读证据和 Docker demo 已实现；版本 diff、资源级重试、
+  崩溃后自动重新领取 running job、证书动态交付和实例激活采集尚未实现
 
 ## 1. 设计目标
 
-本文把 Console 产品需求细化为可以分模块实现和测试的技术方案，重点解决：
+本文把“路由配置保存为版本，并选择当前或历史版本发布”细化为可实现、可迁移、可测试的技术
+方案。设计必须同时满足：
 
-- MySQL 中环境、项目、草稿、Release、发布证据、实例证据和审计数据的持久化；
-- 数据库事务与 Nacos 外部写入无法形成分布式事务时的一致性和恢复；
-- 项目 `version` 分配、乐观并发、幂等请求和同环境发布串行化；
-- TypeScript 快速校验与 C++ Native Validator 权威校验的边界；
-- Fastify API、后台发布 Worker、实例采集 Worker 和前端编辑器的模块接口；
-- 配置内容、Nacos 凭据和审计信息的安全边界。
+1. 用户每次显式保存都会得到不可变、可审计的配置版本；
+2. 发布请求引用具体配置版本 ID，不在后台把“当前版本”解析成一个可能变化的指针；
+3. 当前配置版本和任一历史配置版本都可以成为新 Release 的来源；
+4. 发布历史版本不改变当前配置版本，不覆盖未保存内容，也不改写历史记录；
+5. 每次发布都重新校验并分配新的 native wire `version`；
+6. Console 保存、rnacos 发布和 access-server 激活保持三套独立状态及证据；
+7. rnacos 多 Data ID 写入不是事务，部分成功、重试和崩溃恢复必须如实记录；
+8. 新 API 不暴露环境选择，不引入 Gray 配置，也不让 Console 成为流量代理。
 
-本文不实现具体页面视觉，不决定企业身份供应商，也不新增 access-server 业务流量能力。
-所有“已激活”判断仍必须来自 access-server 明确提供的实例证据。
+## 2. 术语与强制不变量
 
-## 2. 核心设计决定
+### 2.1 术语
 
-| 编号   | 决定                                                                | 原因                                                                  |
-| ------ | ------------------------------------------------------------------- | --------------------------------------------------------------------- |
-| DD-001 | MySQL 使用 InnoDB、UTC 和 `READ COMMITTED`                          | 需要 ACID、行锁、短事务和明确的最新行读取                             |
-| DD-002 | API、发布 Worker、实例采集 Worker 分为独立进程                      | 外部 I/O、重试和轮询不能阻塞 API 生命周期                             |
-| DD-003 | 使用 `mysql2/promise` 连接池和参数化 `execute`                      | 与当前 Node.js/TypeScript 技术栈直接集成，保持 SQL 显式可审查         |
-| DD-004 | 不使用 ORM 自动同步 schema                                          | 迁移必须确定、可回滚评审，索引和锁语义必须显式                        |
-| DD-005 | 配置正文和精确 Nacos payload 使用应用层信封加密后存入 BLOB          | route header/template 可能敏感，且精确 bytes 不能被 MySQL JSON 归一化 |
-| DD-006 | Release 和 Release Resource 不可变；执行结果放在独立状态/attempt 行 | 保留完整审计和崩溃恢复证据                                            |
-| DD-007 | 每个环境同一时间只允许一个 Release 写 Nacos                         | 防止两个发布计划交错导致 base 摘要失效                                |
-| DD-008 | 后台任务用数据库队列、租约和 `FOR UPDATE SKIP LOCKED` 领取          | 支持多 Worker、崩溃恢复和无重复并发执行                               |
-| DD-009 | 项目 version 在数据库事务中单调分配，允许出现空洞                   | 保证不复用；校验失败或取消不回收已分配 version                        |
-| DD-010 | 网络调用不放在数据库事务中                                          | 避免长事务、锁等待和不确定外部延迟                                    |
-| DD-011 | Native Validator 是发布前 fail-closed 依赖                          | C++ codec/compiled model 是最终事实来源                               |
-| DD-012 | 激活证据和发布证据分别存储和聚合                                    | Nacos 回读不能证明实例已启用目标快照                                  |
+| 术语                          | 含义                                                                      |
+| ----------------------------- | ------------------------------------------------------------------------- |
+| Working Copy                  | 浏览器中正在编辑、尚未保存为版本的 Route 集合                             |
+| Configuration Version / `Vn`  | Project 内第 n 个不可变配置快照；内部由 `draft_revisions` 承载            |
+| Current Configuration Version | Project 最新保存的 Configuration Version                                  |
+| Historical Version            | 早于 Current Configuration Version 的任一不可变版本                       |
+| Release / `Rn`                | 从一个具体 Configuration Version 编译出的不可变发布计划                   |
+| Wire Version                  | 写入 project route JSON 的单调整数 `version`，供 access-server 热更新比较 |
+| Published Source Version      | 最近成功写入并回读一致的 Release 所引用的 Configuration Version           |
+| Activation Evidence           | 具体 access-server 实例报告其实际采用的 wire version/摘要                 |
 
-## 3. 总体架构
+### 2.2 不变量
+
+- Configuration Version 的 YAML、Route ID、Route 顺序、说明、作者和创建时间一经保存不可修改。
+- Configuration Version 只覆盖 route wire payload 的创作模型；Project domain 是项目身份，证书
+  私钥、rnacos 连接和运行时激活证据不进入版本文档。
+- Current Configuration Version 只能前进到新插入的版本号，不能指回历史行。
+- Release 必须引用具体且同属该 Project 的 Configuration Version 主键。
+- 创建 Release 后，来源版本 ID、编译器 revision、validator revision、wire version 和 payload bytes
+  不可修改。
+- 发布历史版本只创建新 Release；`drafts.current_revision_no` 和浏览器 Working Copy 均保持不变。
+- 恢复历史版本只复制历史内容并创建下一个 Configuration Version，不能修改历史版本或倒退版本号。
+- `V12` 和 wire `version=12` 没有关联；API 和 UI 必须使用完整字段名，禁止用含义不明的
+  `version` 同时表达二者。
+- 同一 Project 的 wire version 严格单调递增；分配后即使 Release 失败也不回收，允许有空洞。
+- rnacos readback 成功只能证明 Published，不能证明 Active。
+- 历史版本必须使用当前服务端编译器和 Native Validator 重新验证；旧校验成功不是发布授权。
+
+## 3. 总体架构与职责
 
 ```mermaid
 flowchart LR
-    Browser[React Web] --> API[Fastify API]
-    API --> DB[(MySQL / InnoDB)]
-    API --> Validator[Native Validator CLI]
-    API --> Secrets[Secret Provider]
-
-    Publisher[Publication Worker] --> DB
-    Publisher --> Secrets
-    Publisher --> Nacos[(Nacos / rnacos)]
-
-    Collector[Activation Collector] --> DB
-    Collector --> Secrets
-    Collector --> Status[access-server Status API]
-    Collector --> Metrics[access-server Prometheus]
-
-    Outbox[Outbox Worker] --> DB
-    Outbox --> Notify[Notification Integrations]
+    User[维护者 / 发布者] --> Web[React Console]
+    Web --> API[Fastify API]
+    API --> MySQL[(MySQL)]
+    API --> Validator[Native Validator]
+    API --> Jobs[(Publication Jobs)]
+    Worker[Publication Worker] --> Jobs
+    Worker --> MySQL
+    Worker --> Rnacos[(rnacos)]
+    Access[access-server instances] --> Rnacos
+    Collector[Activation Collector] --> Access
+    Collector --> MySQL
+    Web -.状态查询.-> API
 ```
 
-### 3.1 进程职责
+| 组件                 | 负责                                                      | 不负责                                  |
+| -------------------- | --------------------------------------------------------- | --------------------------------------- |
+| Web                  | Working Copy、版本选择、diff、确认、状态展示和未保存保护  | 分配 wire version、直接写 rnacos        |
+| Console API          | 鉴权、版本事务、校验编排、Release 创建、查询和审计        | 在请求生命周期内执行长时间 publication  |
+| Version Repository   | 不可变版本存取、当前指针、乐观锁和稳定分页                | 编译 YAML 或调用 rnacos                 |
+| Release Service      | 固定 sourceVersionId、分配 wire version、生成不可变资源图 | 把 rnacos 回读当作激活证据              |
+| Native Validator     | 使用数据面事实模型验证完整 wire candidate                 | 保存配置、分配版本、访问 MySQL          |
+| Publication Worker   | lease、冲突检查、逐资源写入/回读、幂等重试和恢复          | 修改 Release payload 或选择其他来源版本 |
+| Activation Collector | 收集有界、鉴权、逐实例证据并计算激活聚合                  | 推断 rnacos 写入即实例激活              |
 
-| 进程                   | 职责                                                  | 明确不做                                        |
-| ---------------------- | ----------------------------------------------------- | ----------------------------------------------- |
-| `console-api`          | HTTP schema、认证授权、草稿、校验、Release 创建、查询 | 不在请求协程中完成长时间发布或实例轮询          |
-| `publication-worker`   | 领取发布任务、冲突检查、Nacos 写入/回读、状态聚合     | 不修改 Release payload，不代替 Native Validator |
-| `activation-collector` | 轮询有界状态接口、保存证据、计算实例激活状态          | 不根据业务流量或 Prometheus 推导配置已激活      |
-| `outbox-worker`        | 投递通知、审计导出等事务后副作用                      | 不作为业务事实的唯一存储                        |
-| `migration`            | 串行执行带 checksum 的 SQL migration                  | 不和 API 自动并发修改 schema                    |
+数据库、rnacos、validator 和实例客户端都位于 typed service/adapter 后。Fastify handler 不包含 SQL、
+rnacos 协议或 subprocess 细节。单元测试构造 API 时不打开任何外部连接。
 
-首期可以把 Worker 构建在同一个 `server` workspace 中，但部署时使用不同入口和进程。各进程
-共享 domain、repository 和 integration 代码，不共享内存状态。
+## 4. 生命周期与状态
 
-### 3.2 组件边界
-
-- MySQL 是 Console 草稿、Release、执行证据和审计的事实来源，不是 access-server 的
-  runtime 配置来源。
-- Nacos 是 access-server 消费的已发布 wire payload 来源。
-- Native Validator 只读 stdin、写 stdout，不连接 Nacos、MySQL、CAT 或公网。
-- access-server 状态接口只提供有界、脱敏的版本证据；不允许 Console 读取进程内存。
-- Secret Provider 解析凭据引用。业务表只保存 reference 和加密材料，不保存可回显明文。
-
-## 4. Server 代码组织
-
-目标结构：
-
-```text
-server/
-├── migrations/
-│   ├── 0001_identity_and_environments.sql
-│   ├── 0002_projects_and_drafts.sql
-│   ├── 0003_releases_and_publication.sql
-│   ├── 0004_activation.sql
-│   └── ...                         # schema_migrations 由 migration runner 建立
-└── src/
-    ├── app.ts
-    ├── config/
-    ├── database/
-    │   ├── pool.ts
-    │   ├── transaction.ts
-    │   ├── migrate.ts
-    │   └── errors.ts
-    ├── crypto/
-    ├── integrations/
-    │   ├── nacos/
-    │   ├── native-validator/
-    │   ├── access-server-status/
-    │   └── secrets/
-    ├── modules/
-    │   ├── auth/
-    │   ├── environments/
-    │   ├── projects/
-    │   ├── drafts/
-    │   ├── validation/
-    │   ├── releases/
-    │   ├── publication/
-    │   ├── instances/
-    │   └── audit/
-    └── processes/
-        ├── api.ts
-        ├── publication-worker.ts
-        ├── activation-collector.ts
-        └── outbox-worker.ts
-```
-
-每个 `modules/<domain>/` 包含：
-
-```text
-routes.ts          Fastify route 和 schema
-service.ts         权限后业务编排与事务边界
-repository.ts      参数化 SQL；不调用 Nacos/Validator
-model.ts           domain 类型与状态转换
-errors.ts          稳定 machine-readable error
-*.test.ts          领域和 route 测试
-```
-
-Fastify `buildApp()` 通过显式依赖参数接收 service/repository adapter。进程入口负责创建
-MySQL pool、Secret Provider 和 integration client，并按相反顺序关闭；测试通过 fake 或
-Fastify injection 构造应用，不打开生产连接。
-
-## 5. MySQL 基线与连接规范
-
-### 5.1 数据库能力基线
-
-- MySQL 8.4 LTS，InnoDB；生产开启 crash recovery 和定期备份。
-- 数据库、表默认 `CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin`，避免项目名、Data ID
-  和模板 key 被大小写不敏感 collation 合并。
-- 所有业务时间使用 `DATETIME(6)`，连接建立后执行 `SET time_zone = '+00:00'`。
-- 事务默认 `READ COMMITTED`；需要并发保护的行显式使用 `SELECT ... FOR UPDATE`。
-- SQL mode 至少包含 `STRICT_TRANS_TABLES`、`NO_ZERO_DATE`、
-  `ERROR_FOR_DIVISION_BY_ZERO` 和 `NO_ENGINE_SUBSTITUTION`。
-- 使用 `ROW` binlog。`SKIP LOCKED` 只用于队列领取，不用于普通业务查询。
-- 数据库 JSON 只存保护策略、脱敏摘要和稳定错误结构；精确配置 bytes 存加密 BLOB。
-
-### 5.2 连接池
-
-使用 `mysql2/promise`：
-
-- API 和每类 Worker 使用独立 pool；不跨进程共享连接。
-- `connectionLimit` 由部署配置给出，默认从较小值开始；总连接数必须按副本数计算。
-- `waitForConnections=true`，设置有限 queue limit、connect timeout、idle timeout 和 TLS。
-- 事务必须从 pool 获取单个 connection，在 `finally` 中 rollback/release。
-- 普通 SQL 使用 `execute(sql, params)`；动态排序字段、表名和列名只能来自代码 allowlist。
-- `BIGINT` 不转换为 JavaScript `number`。Repository 读取为 decimal string 或 `bigint`，
-  API 只暴露 UUID public ID。
-
-### 5.3 事务帮助函数
-
-统一事务包装器：
-
-```ts
-export interface TransactionOptions {
-  isolation?: 'READ COMMITTED'
-  retryOnDeadlock?: boolean
-}
-
-export async function withTransaction<T>(
-  pool: DatabasePool,
-  operation: (transaction: DatabaseTransaction) => Promise<T>,
-  options?: TransactionOptions,
-): Promise<T>
-```
-
-只对满足以下条件的事务自动重试：
-
-- MySQL 明确返回 deadlock 或可重试 lock timeout；
-- operation 没有执行数据库外副作用；
-- operation 使用稳定 idempotency input；
-- 最多进行有限次数带抖动退避的完整事务重试。
-
-Nacos、Validator、Secret Provider 和状态接口调用都不能放入可自动重试的数据库事务。
-
-### 5.4 运行配置
-
-在 `server/src/config/` 集中解析，禁止模块直接读取 `process.env`。至少支持：
-
-- MySQL host、port、database、user、password secret/file、TLS CA/cert/key；
-- pool connection/max-idle/queue limit、connect/query/transaction timeout；
-- process role：API、publication、activation、outbox 或 migration；
-- document KEK provider/key ID、Native Validator 绝对路径和 contract version；
-- Worker lease/heartbeat、poll interval、并发和 retry 上限；
-- session signing/encryption secret reference 和 trusted proxy/origin allowlist。
-
-配置解析失败使进程启动失败。日志只输出非秘密的生效配置摘要；API/Worker 不自动执行
-migration，也不接受在 URL query 中携带数据库密码。
-
-## 6. 标识、摘要与加密
-
-### 6.1 标识
-
-- 表内部主键为 `BIGINT UNSIGNED AUTO_INCREMENT`，用于紧凑外键和聚簇索引。
-- 对外实体同时包含应用生成的 RFC 4122 UUID `public_id BINARY(16)`，API 使用标准 UUID
-  string。
-- `BIGINT` 内部 ID 不进入 URL、审计 summary 或前端类型。
-- environment `code` 是不可变、大小写敏感的 ASCII 字符串；显示名称可修改。
-
-### 6.2 摘要
-
-- `sha256 BINARY(32)`：Console 对精确 plaintext bytes 计算，用于 diff、回读和幂等判断。
-- `nacos_md5 BINARY(16)`：保存 Nacos 返回的 MD5 证据；不能代替 SHA-256 或安全校验。
-- API 使用小写 hex 编码摘要。
-- 摘要输入必须是实际写入的 bytes，不能对 parse/stringify 后的 JSON 再计算。
-
-### 6.3 配置文档加密
-
-`config_documents` 保存草稿结构、导入原文和 Release payload：
-
-1. 每个文档生成随机 256-bit DEK；
-2. 使用 AES-256-GCM 加密 plaintext，随机 96-bit nonce；
-3. 使用外部 KMS/Secret Provider 的 KEK 包装 DEK；
-4. MySQL 保存 ciphertext、nonce、auth tag、wrapped DEK、key ID、plaintext SHA-256 和长度；
-5. 解密仅发生在授权 service/worker 内存中，plaintext 不进入日志或 error object。
-
-开发环境可以使用环境变量提供的本地 KEK，生产 KEK 不能保存在同一 MySQL 中。密钥轮换
-通过新 key ID 写新文档、后台重包 DEK 完成，不修改 Release 的 plaintext 摘要。
-
-## 7. 数据模型
-
-### 7.1 关系概览
+### 4.1 编辑和保存
 
 ```mermaid
-erDiagram
-    USERS ||--o{ ENVIRONMENT_MEMBERSHIPS : joins
-    ENVIRONMENTS ||--o{ ENVIRONMENT_MEMBERSHIPS : grants
-    ENVIRONMENTS ||--o{ PROJECTS : owns
-    ENVIRONMENTS ||--o{ CONFIG_DOCUMENTS : encrypts
-    PROJECTS ||--|| PROJECT_VERSION_COUNTERS : allocates
-    PROJECTS ||--o{ DRAFTS : edits
-    DRAFTS ||--o{ DRAFT_REVISIONS : versions
-    DRAFT_REVISIONS ||--o{ VALIDATION_RUNS : validates
-    ENVIRONMENTS ||--o{ RELEASES : publishes
-    RELEASES ||--o{ RELEASE_ITEMS : snapshots
-    RELEASES ||--o{ RELEASE_RESOURCES : writes
-    RELEASE_RESOURCES ||--o{ PUBLICATION_ATTEMPTS : attempts
-    ENVIRONMENTS ||--o{ NACOS_RESOURCE_OBSERVATIONS : observes
-    ENVIRONMENTS ||--o{ ACCESS_SERVER_INSTANCES : contains
-    ACCESS_SERVER_INSTANCES ||--o{ INSTANCE_OBSERVATIONS : reports
-    INSTANCE_OBSERVATIONS ||--o{ INSTANCE_PROJECT_OBSERVATIONS : projects
-    RELEASES ||--o{ RELEASE_INSTANCE_ACTIVATIONS : aggregates
-    ENVIRONMENTS ||--o{ AUDIT_EVENTS : audits
+stateDiagram-v2
+    [*] --> Clean: 打开 Vn
+    Clean --> Dirty: 编辑 Route
+    Dirty --> Saving: 保存为版本
+    Saving --> Dirty: 校验请求格式失败 / 并发冲突
+    Saving --> Clean: 创建 Vn+1
+    Clean --> ReadOnlyHistory: 查看历史 Vx
+    ReadOnlyHistory --> Dirty: 基于 Vx 恢复/继续编辑
 ```
 
-### 7.2 表清单
+Working Copy 状态只存在于前端。服务端正式版本状态为：
 
-| 领域        | 表                                                                                                                  | 用途                                      |
-| ----------- | ------------------------------------------------------------------------------------------------------------------- | ----------------------------------------- |
-| migration   | `schema_migrations`                                                                                                 | migration version、checksum 和执行时间    |
-| identity    | `users`, `user_sessions`                                                                                            | 身份映射和安全会话                        |
-| environment | `environments`, `environment_memberships`, `secret_references`                                                      | 环境、RBAC 和 secret locator              |
-| document    | `config_documents`                                                                                                  | 加密的结构化模型、导入原文和 wire payload |
-| project     | `projects`, `project_version_counters`                                                                              | 稳定项目身份和单调 version                |
-| draft       | `drafts`, `draft_revisions`, `validation_runs`                                                                      | 可编辑头和不可变 revision/校验证据        |
-| nacos       | `nacos_resource_observations`                                                                                       | 每次读取的精确资源证据                    |
-| release     | `releases`, `release_items`, `release_resources`, `release_resource_dependencies`, `release_approvals`              | 不可变计划和资源图                        |
-| publication | `publication_jobs`, `publication_attempts`, `environment_publish_leases`                                            | 后台执行、重试和同环境互斥                |
-| activation  | `access_server_instances`, `instance_observations`, `instance_project_observations`, `release_instance_activations` | 实例证据和聚合                            |
-| support     | `audit_events`, `outbox_events`, `api_idempotency_records`                                                          | 审计、通知和 HTTP 幂等                    |
+- `not_run`：已保存，尚无与该内容摘要匹配的完整校验结果；
+- `pending`：校验运行中；
+- `valid`：当前 compiler/validator 组合已通过；
+- `invalid`：存在 YAML、schema、project 或 native 错误。
 
-### 7.3 关键字段约定
+版本列表上的校验状态是最近一次匹配 `model_sha256 + compiler_revision + validator_revision` 的结果。
+validator 升级后，旧 `valid` 结果可以展示为“曾通过 / 需重新校验”，不能直接用于创建 Ready
+Release。
 
-所有可修改的头表包含：
+### 4.2 Release 和 publication
 
-- `lock_version BIGINT UNSIGNED NOT NULL DEFAULT 0`：乐观锁；
-- `created_at DATETIME(6)`、`updated_at DATETIME(6)`：UTC；
-- `created_by`/`updated_by`：可为空以表示系统 worker；
-- archive 使用明确 `archived_at`，不对历史事实做软删除伪装。
+```mermaid
+stateDiagram-v2
+    [*] --> Creating
+    Creating --> Validating
+    Validating --> ValidationFailed
+    Validating --> Ready
+    Ready --> Queued: 请求发布
+    Ready --> Canceled
+    Queued --> Publishing
+    Queued --> Canceled
+    Publishing --> Published
+    Publishing --> PartiallyPublished
+    Publishing --> PublishFailed
+    Published --> Superseded: 后续 Release Published
+```
 
-所有状态使用小写 snake_case 的 `VARCHAR`，TypeScript 定义封闭 union 并在 service 层校验
-状态转换。避免 MySQL `ENUM` 让每次增加状态都必须重建列。
+Release 状态沿用 `server/src/modules/releases/state.ts` 中的稳定枚举。`Published` 只表示全部必需
+Release Resource 已写入且 readback 摘要一致。激活聚合单独返回：`unknown`、`pending`、`active`、
+`degraded`，不写入 Release 主状态。
 
-### 7.4 核心 DDL 契约
+### 4.3 三个“当前”值
 
-以下 DDL 表达 schema 契约。实际实现按 migration 拆分，并为所有 foreign key/index 使用
-稳定名称。
+Project 查询必须同时返回以下值，UI 不得合并：
+
+| 字段                                 | 示例        | 更新时机                                  |
+| ------------------------------------ | ----------- | ----------------------------------------- |
+| `currentConfigurationVersion.number` | `V18`       | 保存或恢复产生新 Configuration Version    |
+| `publishedRelease.sourceVersion`     | `V12 / R31` | 新 Release 全部必需资源 readback verified |
+| `activation.summary`                 | `unknown`   | 收到逐实例、未过期、typed evidence        |
+
+因此允许出现“当前配置 V18，rnacos 发布来源 V12，激活未知”。这是正常事实，不是错误状态。
+
+## 5. 数据模型
+
+### 5.1 复用现有表
+
+现有模型无需复制一套 `configuration_versions` 表：
+
+- `drafts`：一个 Project 一个活动记录；`current_revision_no` 是当前配置版本号，`lock_version` 用于
+  保存并发控制；
+- `draft_revisions`：不可变 Configuration Version；`revision_no` 是 Project 内展示号；
+- `config_documents`：AES-256-GCM 信封加密的精确模型文档及 plaintext SHA-256；
+- `validation_runs`：绑定 `draft_revision_id` 和 model digest 的校验证据；
+- `release_items.draft_revision_id`：Release 对具体来源版本的不可变引用；
+- `release_items.allocated_project_version` 与 `release_resources.allocated_project_version`：wire
+  version；
+- `release_resources`、`publication_jobs`、`publication_attempts`：资源计划和外部副作用证据；
+- `instance_project_observations`、`release_instance_activations`：激活证据及聚合。
+
+代码层使用 `ConfigurationVersion` 命名，不把用户界面继续暴露为 `DraftRevision`。旧 API 可以在
+迁移窗口内保留，但新 Web 只使用版本 API。
+
+### 5.2 增量 migration
+
+建议新增 `0005_route_configuration_versions.sql`：
 
 ```sql
-CREATE TABLE schema_migrations (
-    version VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin PRIMARY KEY,
-    checksum BINARY(32) NOT NULL,
-    applied_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
-) ENGINE = InnoDB;
+ALTER TABLE draft_revisions
+    ADD COLUMN restored_from_revision_id BIGINT UNSIGNED NULL AFTER parent_revision_id,
+    ADD COLUMN route_count INT UNSIGNED NOT NULL DEFAULT 0 AFTER validation_state,
+    ADD CONSTRAINT fk_draft_revisions_restored_from
+        FOREIGN KEY (restored_from_revision_id) REFERENCES draft_revisions (id),
+    ADD KEY ix_draft_revisions_history (draft_id, revision_no DESC);
 
-CREATE TABLE users (
-    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
-    public_id BINARY(16) NOT NULL,
-    subject VARCHAR(255) NOT NULL,
-    display_name VARCHAR(255) NOT NULL,
-    email VARCHAR(320) NULL,
-    status VARCHAR(32) NOT NULL,
-    is_platform_admin BOOLEAN NOT NULL DEFAULT FALSE,
-    created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-    updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-    UNIQUE KEY uk_users_public_id (public_id),
-    UNIQUE KEY uk_users_subject (subject)
-) ENGINE = InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
+ALTER TABLE release_items
+    ADD COLUMN source_relation VARCHAR(32) NULL AFTER draft_revision_id,
+    ADD KEY ix_release_items_project_version (project_id, draft_revision_id, release_id);
 
-CREATE TABLE secret_references (
-    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
-    public_id BINARY(16) NOT NULL,
-    provider VARCHAR(32) NOT NULL,
-    locator VARCHAR(1024) NOT NULL,
-    display_name VARCHAR(255) NOT NULL,
-    metadata_json JSON NULL,
-    created_by BIGINT UNSIGNED NULL,
-    created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-    rotated_at DATETIME(6) NULL,
-    UNIQUE KEY uk_secret_references_public_id (public_id),
-    CONSTRAINT fk_secret_references_created_by
-        FOREIGN KEY (created_by) REFERENCES users (id)
-) ENGINE = InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
-
-CREATE TABLE environments (
-    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
-    public_id BINARY(16) NOT NULL,
-    code VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
-    name VARCHAR(255) NOT NULL,
-    tier VARCHAR(32) NOT NULL,
-    status VARCHAR(32) NOT NULL,
-    nacos_endpoint VARCHAR(2048) NOT NULL,
-    nacos_namespace VARCHAR(255) NOT NULL,
-    nacos_tenant VARCHAR(255) NOT NULL,
-    nacos_secret_ref_id BIGINT UNSIGNED NULL,
-    projects_data_id VARCHAR(512) NOT NULL,
-    route_data_id_prefix VARCHAR(512) NOT NULL,
-    route_group VARCHAR(255) NOT NULL,
-    gray_data_id VARCHAR(512) NOT NULL,
-    gray_group VARCHAR(255) NOT NULL,
-    naming_group VARCHAR(255) NOT NULL,
-    zone VARCHAR(255) NOT NULL,
-    protection_policy JSON NOT NULL,
-    last_release_sequence BIGINT UNSIGNED NOT NULL DEFAULT 0,
-    lock_version BIGINT UNSIGNED NOT NULL DEFAULT 0,
-    created_by BIGINT UNSIGNED NOT NULL,
-    updated_by BIGINT UNSIGNED NOT NULL,
-    created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-    updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-    UNIQUE KEY uk_environments_public_id (public_id),
-    UNIQUE KEY uk_environments_code (code),
-    CONSTRAINT fk_environments_nacos_secret
-        FOREIGN KEY (nacos_secret_ref_id) REFERENCES secret_references (id),
-    CONSTRAINT fk_environments_created_by FOREIGN KEY (created_by) REFERENCES users (id),
-    CONSTRAINT fk_environments_updated_by FOREIGN KEY (updated_by) REFERENCES users (id)
-) ENGINE = InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
-
-CREATE TABLE environment_memberships (
-    environment_id BIGINT UNSIGNED NOT NULL,
-    user_id BIGINT UNSIGNED NOT NULL,
-    role VARCHAR(32) NOT NULL,
-    created_by BIGINT UNSIGNED NOT NULL,
-    created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-    PRIMARY KEY (environment_id, user_id),
-    KEY ix_environment_memberships_user (user_id, environment_id),
-    CONSTRAINT fk_memberships_environment
-        FOREIGN KEY (environment_id) REFERENCES environments (id),
-    CONSTRAINT fk_memberships_user FOREIGN KEY (user_id) REFERENCES users (id),
-    CONSTRAINT fk_memberships_created_by FOREIGN KEY (created_by) REFERENCES users (id)
-) ENGINE = InnoDB;
-
-CREATE TABLE config_documents (
-    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
-    public_id BINARY(16) NOT NULL,
-    environment_id BIGINT UNSIGNED NOT NULL,
-    purpose VARCHAR(32) NOT NULL,
-    content_type VARCHAR(128) NOT NULL,
-    schema_version INT UNSIGNED NULL,
-    plaintext_sha256 BINARY(32) NOT NULL,
-    plaintext_size BIGINT UNSIGNED NOT NULL,
-    key_id VARCHAR(255) NOT NULL,
-    wrapped_dek VARBINARY(1024) NOT NULL,
-    nonce BINARY(12) NOT NULL,
-    auth_tag BINARY(16) NOT NULL,
-    ciphertext LONGBLOB NOT NULL,
-    created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-    UNIQUE KEY uk_config_documents_public_id (public_id),
-    KEY ix_config_documents_digest (environment_id, plaintext_sha256),
-    CONSTRAINT fk_config_documents_environment
-        FOREIGN KEY (environment_id) REFERENCES environments (id)
-) ENGINE = InnoDB;
-
-CREATE TABLE projects (
-    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
-    public_id BINARY(16) NOT NULL,
-    environment_id BIGINT UNSIGNED NOT NULL,
-    name VARCHAR(255) NOT NULL,
-    status VARCHAR(32) NOT NULL,
-    lock_version BIGINT UNSIGNED NOT NULL DEFAULT 0,
-    created_by BIGINT UNSIGNED NOT NULL,
-    created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-    updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-    archived_at DATETIME(6) NULL,
-    UNIQUE KEY uk_projects_public_id (public_id),
-    UNIQUE KEY uk_projects_environment_name (environment_id, name),
-    KEY ix_projects_environment_status (environment_id, status, name),
-    CONSTRAINT fk_projects_environment FOREIGN KEY (environment_id) REFERENCES environments (id),
-    CONSTRAINT fk_projects_created_by FOREIGN KEY (created_by) REFERENCES users (id)
-) ENGINE = InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
-
-CREATE TABLE project_version_counters (
-    project_id BIGINT UNSIGNED NOT NULL PRIMARY KEY,
-    last_allocated_version INT NOT NULL DEFAULT 0,
-    updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-    CONSTRAINT fk_project_version_counters_project
-        FOREIGN KEY (project_id) REFERENCES projects (id),
-    CONSTRAINT ck_project_version_nonnegative CHECK (last_allocated_version >= 0)
-) ENGINE = InnoDB;
-
-CREATE TABLE drafts (
-    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
-    public_id BINARY(16) NOT NULL,
-    environment_id BIGINT UNSIGNED NOT NULL,
-    project_id BIGINT UNSIGNED NULL,
-    scope_key VARCHAR(320) NOT NULL,
-    kind VARCHAR(32) NOT NULL,
-    state VARCHAR(32) NOT NULL,
-    title VARCHAR(255) NOT NULL,
-    current_revision_no INT UNSIGNED NOT NULL DEFAULT 0,
-    lock_version BIGINT UNSIGNED NOT NULL DEFAULT 0,
-    created_by BIGINT UNSIGNED NOT NULL,
-    updated_by BIGINT UNSIGNED NOT NULL,
-    created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-    updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-    archived_at DATETIME(6) NULL,
-    UNIQUE KEY uk_drafts_public_id (public_id),
-    UNIQUE KEY uk_drafts_environment_scope (environment_id, scope_key),
-    KEY ix_drafts_environment_state (environment_id, state, updated_at),
-    CONSTRAINT fk_drafts_environment FOREIGN KEY (environment_id) REFERENCES environments (id),
-    CONSTRAINT fk_drafts_project FOREIGN KEY (project_id) REFERENCES projects (id),
-    CONSTRAINT fk_drafts_created_by FOREIGN KEY (created_by) REFERENCES users (id),
-    CONSTRAINT fk_drafts_updated_by FOREIGN KEY (updated_by) REFERENCES users (id)
-) ENGINE = InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
-
-CREATE TABLE draft_revisions (
-    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
-    public_id BINARY(16) NOT NULL,
-    draft_id BIGINT UNSIGNED NOT NULL,
-    revision_no INT UNSIGNED NOT NULL,
-    parent_revision_id BIGINT UNSIGNED NULL,
-    model_document_id BIGINT UNSIGNED NOT NULL,
-    source_document_id BIGINT UNSIGNED NULL,
-    base_nacos_observation_id BIGINT UNSIGNED NULL,
-    validation_state VARCHAR(32) NOT NULL,
-    change_summary VARCHAR(1024) NOT NULL,
-    created_by BIGINT UNSIGNED NOT NULL,
-    created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-    UNIQUE KEY uk_draft_revisions_public_id (public_id),
-    UNIQUE KEY uk_draft_revisions_number (draft_id, revision_no),
-    CONSTRAINT fk_draft_revisions_draft FOREIGN KEY (draft_id) REFERENCES drafts (id),
-    CONSTRAINT fk_draft_revisions_parent FOREIGN KEY (parent_revision_id) REFERENCES draft_revisions (id),
-    CONSTRAINT fk_draft_revisions_model FOREIGN KEY (model_document_id) REFERENCES config_documents (id),
-    CONSTRAINT fk_draft_revisions_source FOREIGN KEY (source_document_id) REFERENCES config_documents (id),
-    CONSTRAINT fk_draft_revisions_created_by FOREIGN KEY (created_by) REFERENCES users (id)
-) ENGINE = InnoDB;
-
-CREATE TABLE releases (
-    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
-    public_id BINARY(16) NOT NULL,
-    environment_id BIGINT UNSIGNED NOT NULL,
-    sequence_no BIGINT UNSIGNED NOT NULL,
-    kind VARCHAR(32) NOT NULL,
-    status VARCHAR(32) NOT NULL,
-    title VARCHAR(255) NOT NULL,
-    description TEXT NOT NULL,
-    rollback_of_release_id BIGINT UNSIGNED NULL,
-    native_validator_contract INT UNSIGNED NOT NULL,
-    native_validator_revision VARCHAR(64) NOT NULL,
-    lock_version BIGINT UNSIGNED NOT NULL DEFAULT 0,
-    created_by BIGINT UNSIGNED NOT NULL,
-    created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-    ready_at DATETIME(6) NULL,
-    publish_started_at DATETIME(6) NULL,
-    published_at DATETIME(6) NULL,
-    UNIQUE KEY uk_releases_public_id (public_id),
-    UNIQUE KEY uk_releases_sequence (environment_id, sequence_no),
-    KEY ix_releases_environment_status (environment_id, status, created_at),
-    CONSTRAINT fk_releases_environment FOREIGN KEY (environment_id) REFERENCES environments (id),
-    CONSTRAINT fk_releases_rollback FOREIGN KEY (rollback_of_release_id) REFERENCES releases (id),
-    CONSTRAINT fk_releases_created_by FOREIGN KEY (created_by) REFERENCES users (id)
-) ENGINE = InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
-
-CREATE TABLE release_resources (
-    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
-    public_id BINARY(16) NOT NULL,
-    release_id BIGINT UNSIGNED NOT NULL,
-    project_id BIGINT UNSIGNED NULL,
-    kind VARCHAR(32) NOT NULL,
-    data_id VARCHAR(512) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
-    group_name VARCHAR(255) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
-    operation VARCHAR(16) NOT NULL,
-    publish_order INT UNSIGNED NOT NULL,
-    required_resource BOOLEAN NOT NULL DEFAULT TRUE,
-    payload_document_id BIGINT UNSIGNED NULL,
-    base_observation_id BIGINT UNSIGNED NULL,
-    target_sha256 BINARY(32) NULL,
-    allocated_project_version INT NULL,
-    status VARCHAR(32) NOT NULL,
-    verified_nacos_md5 BINARY(16) NULL,
-    verified_sha256 BINARY(32) NULL,
-    verified_at DATETIME(6) NULL,
-    lock_version BIGINT UNSIGNED NOT NULL DEFAULT 0,
-    UNIQUE KEY uk_release_resources_public_id (public_id),
-    UNIQUE KEY uk_release_resources_data_id (release_id, data_id, group_name),
-    KEY ix_release_resources_execution (release_id, status, publish_order),
-    CONSTRAINT fk_release_resources_release FOREIGN KEY (release_id) REFERENCES releases (id),
-    CONSTRAINT fk_release_resources_project FOREIGN KEY (project_id) REFERENCES projects (id),
-    CONSTRAINT fk_release_resources_payload FOREIGN KEY (payload_document_id) REFERENCES config_documents (id)
-) ENGINE = InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
-
-CREATE TABLE publication_attempts (
-    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
-    public_id BINARY(16) NOT NULL,
-    release_resource_id BIGINT UNSIGNED NOT NULL,
-    attempt_no INT UNSIGNED NOT NULL,
-    idempotency_key VARCHAR(128) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
-    result VARCHAR(32) NOT NULL,
-    before_exists BOOLEAN NULL,
-    before_nacos_md5 BINARY(16) NULL,
-    before_sha256 BINARY(32) NULL,
-    after_nacos_md5 BINARY(16) NULL,
-    after_sha256 BINARY(32) NULL,
-    error_code VARCHAR(64) NULL,
-    error_detail_json JSON NULL,
-    started_at DATETIME(6) NOT NULL,
-    finished_at DATETIME(6) NULL,
-    UNIQUE KEY uk_publication_attempts_public_id (public_id),
-    UNIQUE KEY uk_publication_attempts_number (release_resource_id, attempt_no),
-    UNIQUE KEY uk_publication_attempts_idempotency (idempotency_key),
-    CONSTRAINT fk_publication_attempts_resource
-        FOREIGN KEY (release_resource_id) REFERENCES release_resources (id)
-) ENGINE = InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
+ALTER TABLE releases
+    ADD COLUMN compiler_revision VARCHAR(64) NULL AFTER rollback_of_release_id;
 ```
 
-`draft_revisions.base_nacos_observation_id` 和 `release_resources.base_observation_id` 的 foreign
-key 在创建 `nacos_resource_observations` 后补充，避免 migration 的建表顺序形成循环。
+约束由 migration 与 service 双重保证：
 
-### 7.5 其余表字段
+- 新 Release 的 `source_relation ∈ {current, historical}`；它记录创建瞬间相对 current pointer 的
+  关系，后续 current pointer 前进时不重算。旧 Release 无法证明时保持 `NULL/unknown`；
+- 新 Release 必须写入 `compiler_revision`；旧 Release 为 `NULL` 时只能展示历史证据，不能重新编译
+  或据此恢复执行；
+- `restored_from_revision_id` 必须同 draft；`parent_revision_id` 指保存时的原当前版本，二者用途不同；
+- `route_count` 是列表投影，写入时从已验证的控制面模型计算，不能信任客户端；
+- 内容摘要复用 `config_documents.plaintext_sha256`，不再存一份可能漂移的 digest；
+- 历史版本是否曾发布、最近发布结果和 Published 来源均通过 `release_items + releases` 派生；允许
+  建受控缓存，但缓存不是事实来源。
 
-#### `validation_runs`
-
-- `draft_revision_id`、`model_sha256`；
-- `stage`：`control_plane` 或 `native`；
-- `status`：`running`、`passed`、`failed`、`unavailable`、`canceled`；
-- `validator_contract_version`、`validator_revision`；
-- `errors_json`：只保存脱敏后的 `code/field/offset/message`；
-- `started_at`、`finished_at`。
-
-相同 revision 和 model digest 的成功结果可复用，但创建 Release 时仍需对最终已分配 version
-的精确 wire payload 再运行 native validation。
-
-#### `nacos_resource_observations`
-
-- environment、Data ID、group、`exists`；
-- encrypted `payload_document_id`；
-- `nacos_md5`、`sha256`、`fetched_at`；
-- `source`：import、preflight、before_write、readback、recovery；
-- 脱敏的 client/error code。
-
-该表 append-only。查询“当前值”使用 `(environment_id, data_id, group_name, fetched_at, id)`
-索引取最新 observation，不原地覆盖历史证据。
-
-#### `release_items`
-
-- release、kind、project、draft revision；
-- normalized model document；
-- assigned project version；
-- change kind 和脱敏 diff summary。
-
-#### `release_resource_dependencies`
-
-复合主键 `(resource_id, depends_on_resource_id)`。新增项目的 project-list resource 依赖对应
-route resource verified；移除 route 的可选清理依赖 project-list verified。插入时检查同一
-Release 且无环。
-
-#### `release_approvals`
-
-包含 release、actor、decision、comment、created_at；同一用户对同一 release 只保留一个
-最终 decision，但历史 decision 通过审计事件保留。发布策略在执行时重新计算，不仅依赖
-缓存 approval count。
-
-#### `publication_jobs`
-
-- release 唯一；
-- state、requested_by、requested_at；
-- lease owner/token/expires、heartbeat；
-- cancel_requested、last_error、next_run_at、attempt_count。
-
-领取索引为 `(state, next_run_at, lease_expires_at, id)`。Worker 在短事务内使用
-`FOR UPDATE SKIP LOCKED` 领取，提交后才执行外部 I/O。
-
-#### `environment_publish_leases`
-
-environment 为主键，保存 release、job、lease token、owner 和 expires。Worker 必须同时
-持有 job lease 与 environment lease 才能写 Nacos；续租失败立即停止新的写入，并在当前
-外部调用返回后进入恢复读取。
-
-#### 激活表
-
-- `access_server_instances`：environment、稳定 instance key、status endpoint、secret ref、
-  source、enabled、poll interval、last seen；
-- `instance_observations`：instance、build/revision、runtime/watcher state、project-list MD5、
-  gray MD5/rule count、observed_at、expires_at、poll result；
-- `instance_project_observations`：observation、project name、version、MD5、status 和脱敏的
-  `AccessConfigError`；
-- `release_instance_activations`：release、instance、status、supporting observation、
-  evaluated_at、expires_at。
-
-实例 observation append-only，按环境策略保留详细数据；聚合行可重建。过期 observation
-不能支持 `active`。
-
-#### 支撑表
-
-- `audit_events`：append-only，包含 environment、actor、event type、target type/public ID、
-  request ID、result、脱敏 summary JSON、created_at；
-- `outbox_events`：topic、dedupe key、payload JSON、state、attempt、next run、lease；
-- `api_idempotency_records`：actor、environment、operation、key、request hash、response status、
-  encrypted response document、expires_at。
-
-审计写入与产生业务事实的数据库事务同提交。Runtime 数据库账号对 `audit_events` 不授予
-UPDATE/DELETE；归档由独立受控账号执行。
-
-## 8. 状态机与并发控制
-
-### 8.1 Draft
-
-状态：`editing -> validating -> ready`，任何内容变更产生新 revision 并回到 `editing`。
-
-保存流程：
-
-1. API 验证 `If-Match`/`lockVersion` 和权限；
-2. 在事务外完成 schema parse、摘要和配置文档加密；
-3. 事务中 `SELECT drafts ... FOR UPDATE`；
-4. 再次比较 `lock_version`，冲突返回 409；
-5. 插入 `config_documents`、`draft_revisions`，递增 current revision 和 lock version；
-6. 插入 audit/outbox；
-7. 提交后返回新 ETag。
-
-同一 base revision 的第二个保存请求不会静默覆盖第一个。客户端必须重新加载并显式合并。
-
-### 8.2 项目 version 分配
-
-每个项目使用 `project_version_counters`：
-
-```text
-last_allocated = max(database counter, latest imported/published version)
-target = last_allocated + 1
-```
-
-在一个事务中按 project ID 升序锁定所有 counter，避免多项目 Release 产生死锁。分配前检查
-target 不超过 Java/C++ signed int32 最大值。Version 一旦写入 Release 即不回收；失败产生
-空洞没有运行语义问题，复用 version 会被 runtime 忽略，因此严禁复用。
-
-外部系统可能在分配后发布更高 version。发布前 base 摘要冲突会阻止覆盖；重新导入后 bump
-counter，再创建新 Release。
-
-### 8.3 Release
-
-允许的主要转换：
-
-```text
-creating -> validating -> ready -> queued -> publishing
-validating -> validation_failed
-publishing -> published
-publishing -> partially_published
-publishing -> publish_failed
-ready/queued -> canceled
-published -> superseded
-```
-
-- Release 元数据和资源图在进入 `ready` 后不可修改。
-- 状态转换 SQL 必须带预期旧状态与 lock version；受影响行数不是 1 时报告并发冲突。
-- `published` 仅由所有 required resource `verified` 聚合得到。
-- 任意 required resource 已改变目标环境但整体未完成时为 `partially_published`，不能降级成
-  `publish_failed` 掩盖影响。
-
-### 8.4 Release 创建
-
-1. API 收集 draft revision，读取 Nacos 基线并写 observation；
-2. 控制面校验在事务外完成；
-3. 事务中锁 environment 行、递增 `last_release_sequence`，再锁 project version counter；
-4. 分配 release sequence/project version，插入 `creating` Release 和 item；
-5. 提交后渲染精确 payload，计算摘要并调用 Native Validator；
-6. 校验失败时保存 validation result，Release 转 `validation_failed`；
-7. 校验成功时事务插入加密 payload、resource 和 dependency，Release 转 `ready`；
-8. 写 audit/outbox。
-
-进程在步骤 4 后崩溃会留下 `creating` Release。Recovery job 将其转为 `abandoned`，或根据
-完整 item 重新执行步骤 5；不会回收 version。
-
-### 8.5 Rollback
-
-Rollback API 不复制旧 resource 的 version bytes直接发布：
-
-1. 解密历史 Release 的 normalized model；
-2. 建立新的 draft revision，base 指向当前 Nacos observation；
-3. 重新分配高于当前值的 project version；
-4. 使用当前 validator contract 重新校验；
-5. 创建 `kind=rollback` 且 `rollback_of_release_id` 指向历史 Release 的新 Release。
-
-如果当前 native validator 已不接受历史内容，rollback 创建失败并明确报告，不绕过校验。
-
-## 9. Native Validator 设计
-
-### 9.1 进程协议
-
-API/Worker 使用 `child_process.spawn` 的 argv array 启动固定路径二进制，不使用 shell，也不把
-payload 放入命令行或临时文件。stdin/stdout 使用一行版本化 JSON，payload 采用 base64：
-
-```json
-{
-  "contractVersion": 1,
-  "requestId": "uuid",
-  "kind": "project_route",
-  "project": "example",
-  "payloadBase64": "..."
-}
-```
-
-成功：
-
-```json
-{
-  "contractVersion": 1,
-  "valid": true,
-  "normalized": {
-    "projectVersion": 12,
-    "hostCount": 2,
-    "routeCount": 8
-  },
-  "errors": []
-}
-```
-
-失败：
-
-```json
-{
-  "contractVersion": 1,
-  "valid": false,
-  "errors": [
-    {
-      "code": "invalid_field",
-      "field": "routes[3].condition",
-      "offset": 128,
-      "message": "expression compilation failed"
-    }
-  ]
-}
-```
-
-### 9.2 运行约束
-
-- 单次输入、输出和 stderr 设置 byte 上限；超限终止并返回 validator protocol error。
-- 设置 deadline、最大并发和子进程退出清理；请求取消时终止对应子进程。
-- 只接受已配置的 contract version，并记录二进制 revision。
-- stderr 仅作为受控诊断，不直接写应用日志；必须先去除 payload 和业务值。
-- unavailable、timeout、crash、malformed output 均 fail closed。
-- validation cache key 为 validator revision + contract + kind + project + payload SHA-256。
-
-Gray payload 使用同一协议的 `kind=gray_rules`。项目列表由 Console 自身确定性序列化并进行
-项目名/重复项校验，不通过 Native Validator 推测 route 是否已存在。
-
-## 10. Nacos Adapter 与发布算法
-
-### 10.1 Adapter
+### 5.3 Configuration Version 逻辑模型
 
 ```ts
-export interface NacosResourceRevision {
-  exists: boolean
-  payload: Uint8Array | null
-  nacosMd5: string | null
-  sha256: string | null
-}
-
-export interface NacosConfigAdapter {
-  get(resource: ResourceKey, signal: AbortSignal): Promise<NacosResourceRevision>
-  publish(resource: ResourceKey, payload: Uint8Array, signal: AbortSignal): Promise<void>
-  remove(resource: ResourceKey, signal: AbortSignal): Promise<void>
-  testConnection(signal: AbortSignal): Promise<ConnectionTestResult>
+interface ConfigurationVersionSummary {
+  id: string
+  projectId: string
+  number: number
+  relation: 'current' | 'historical'
+  baseVersionId: string | null
+  restoredFromVersionId: string | null
+  changeSummary: string
+  routeCount: number
+  modelSha256: string
+  validation: 'not_validated' | 'validating' | 'valid' | 'invalid' | 'stale'
+  publication: 'never' | 'queued' | 'published' | 'failed' | 'superseded'
+  createdBy: { id: string; displayName: string }
+  createdAt: string
 }
 ```
 
-- Adapter 只允许访问 Environment 声明的项目/route/gray Data ID pattern。
-- 每次调用解析 secret reference，设置 deadline、响应大小上限和无代理策略。
-- 日志只包含 environment public ID、resource kind、Data ID 摘要、attempt 和结果，不包含
-  payload、密码或 token。
-- `remove` 只用于明确的 route cleanup，不能用 publish empty string 模拟删除。
+版本详情在 summary 基础上返回 `model: ProjectRoutesModel`。列表 API 不解密或返回完整 YAML，避免
+大列表泄露敏感 header 值并降低开销。
 
-### 10.2 Worker 领取
+### 5.4 Release 逻辑模型
 
-1. 短事务查询到期 job：`SELECT ... FOR UPDATE SKIP LOCKED LIMIT 1`；
-2. 写 lease token/owner/expires 并提交；
-3. 领取 environment publish lease；已有未过期 lease 时释放 job 等待；
-4. 在执行期间有限频率续租；
-5. 所有状态更新都校验 lease token，旧 Worker 不能覆盖新 Worker 的恢复结果。
-
-### 10.3 单资源执行
-
-对于 `upsert`：
-
-1. 创建 `publication_attempts(result=running)`；
-2. 从 Nacos 读取 before 并保存 observation；
-3. 若 before SHA 等于 target SHA，说明可能是崩溃恢复或人工等价写入，直接进入回读验证；
-4. 若从未成功写入且 before 不等于 Release base，标记 `conflict`，不覆盖；
-5. 若重试时 before 既不是 base 也不是 target，标记 `conflict_after_partial`；
-6. 调用 publish；
-7. 再次 get，逐 byte/SHA 比较 target；
-8. 一致则事务标记 resource `verified`、attempt success 并写 audit；
-9. 不一致则标记 `readback_mismatch`，保存实际摘要但不记录 plaintext。
-
-对于 `delete`：before 不存在视为幂等成功；存在时必须匹配 base，删除后回读必须为不存在。
-
-Nacos read-before-write 不是跨客户端原子 CAS。Worker 始终回读并保留第三方竞争写入风险；若
-部署使用的 Nacos API 提供可靠 CAS，adapter 可增加 capability，但不能删除现有冲突和回读
-证据。
-
-### 10.4 依赖和失败策略
-
-- 只有全部 dependency verified 的 resource 才能执行。
-- 新项目 route verified 后才能写包含该项目的 project list。
-- 移除项目时 project list verified 后才允许可选 route cleanup。
-- independent resource 可以在其他分支失败后继续；依赖失败的 resource 标记 blocked。
-- 默认不自动反向写回已 verified resource，因为补偿写同样不是事务。系统建议用户重试或
-  从明确基线创建恢复 Release。
-
-### 10.5 崩溃窗口
-
-| 崩溃位置                                  | 恢复行为                                                    |
-| ----------------------------------------- | ----------------------------------------------------------- |
-| 写 Nacos 前                               | lease 过期后重新读取 base，再决定写入                       |
-| Nacos 写成功、DB 未记录                   | before 已等于 target，回读一致后补记 verified，不重复盲写   |
-| DB 已记 resource verified、Release 未聚合 | recovery 重新聚合所有 resource 状态                         |
-| 部分项目完成                              | 保持 partially published，按 dependency 和实际 Nacos 值恢复 |
-| Worker 失去 environment lease             | 停止新写入；新 owner 从 Nacos 事实恢复                      |
-
-## 11. 激活证据采集
-
-### 11.1 采集流程
-
-1. Collector 使用数据库队列选择到期实例，领取短 lease；
-2. 解析状态端点 secret，设置 mTLS/token、deadline 和响应大小上限；
-3. 验证 contract version、instance ID 稳定性和数据上限；
-4. 事务插入 instance/project observations；
-5. 对最近 Published Release 重新计算实例激活状态；
-6. 写 outbox 通知状态变化。
-
-采集失败只产生 `unreachable`/`unknown` 证据，不改变 Nacos 或 Release 发布状态。
-
-### 11.2 激活判定
-
-| 状态          | 条件                                                           |
-| ------------- | -------------------------------------------------------------- |
-| `unknown`     | 未配置端点、从未取得有效证据或 contract 不兼容                 |
-| `pending`     | 有未过期证据，实例仍明确报告较旧 version，且无目标配置拒绝错误 |
-| `active`      | 项目 version 和 MD5/SHA 与 Release verified resource 一致      |
-| `rejected`    | 实例报告目标 resource 的解析/编译失败，并仍 pin 旧 version     |
-| `stale`       | 最后一份支持证据已过期                                         |
-| `unreachable` | 轮询失败且环境策略已超过失败阈值                               |
-
-Release 创建时快照一份 activation target policy：目标实例集合、`all`/quorum/percentage 规则
-和 evidence TTL。后加入实例显示在环境运行页，不追溯改变历史 Release 的“当时目标集合”；
-可以另行展示当前全部实例一致性。
-
-### 11.3 Prometheus
-
-Metrics adapter 只抓取固定指标：requests result、duration 和 inflight。抓取结果用于当前
-运行概览，可以存短期 rollup 或直接接入现有监控系统；不写入激活表，不增加动态项目 label。
-
-## 12. API 详细设计
-
-### 12.1 通用约定
-
-- 基础路径 `/api`，JSON 使用 UTF-8；上传原始 payload 设置明确大小上限。
-- public ID 使用 UUID string；时间使用 RFC 3339 UTC；摘要使用 lowercase hex。
-- 列表按稳定 `(sort_column, public_id)` 游标分页，默认和最大 page size 固定。
-- 可修改资源返回 `ETag`，更新要求 `If-Match`；冲突返回 409。
-- 创建 Release、publish、retry、rollback 要求 `Idempotency-Key`；同 key 不同 request hash
-  返回 409。
-- 结构错误返回 400，认证 401，授权 403，不存在 404，并发/外部冲突 409，语义或 native
-  validation 失败 422，异步任务接受 202，依赖不可用 503。
-- Error 保持稳定 `code/message/requestId/fields`，不回显 SQL、secret 或 raw payload。
-
-### 12.2 Environment API
-
-当前部署模型固定为一个工作区：`environments` 表继续作为权限、审计和发布外键的隔离根，
-但产品 API 以 `GET /api/workspace` 返回唯一记录。`POST /api/environments` 仅供首次部署
-bootstrap 使用，并在已有记录时拒绝创建第二个环境。
-
-| Method | Path                                     | 权限              | 行为                                |
-| ------ | ---------------------------------------- | ----------------- | ----------------------------------- |
-| GET    | `/api/workspace`                         | 任一成员          | 返回唯一固定工作区                  |
-| GET    | `/api/environments`                      | 任一成员          | 仅返回有权限环境和摘要              |
-| POST   | `/api/environments`                      | platform admin    | 仅首次 bootstrap 创建固定工作区     |
-| GET    | `/api/environments/:id`                  | environment read  | 返回非秘密配置和 ETag               |
-| PATCH  | `/api/environments/:id`                  | environment admin | `If-Match` 更新；高风险字段单独审计 |
-| POST   | `/api/environments/:id/connection-tests` | environment admin | 202，执行只读 Nacos/Naming 测试     |
-| PUT    | `/api/environments/:id/members/:userId`  | environment admin | 更新角色，防止删除最后一个 admin    |
-
-Environment response 只返回 secret reference public ID、provider 和 display name，不返回
-locator、ciphertext、用户名或密码。
-
-### 12.3 Project/Draft API
-
-| Method   | Path                                         | 行为                                                 |
-| -------- | -------------------------------------------- | ---------------------------------------------------- |
-| GET/POST | `/api/environments/:envId/projects`          | 列表/创建规范化域名项目                              |
-| POST     | `/api/environments/:envId/imports/nacos`     | 202 导入项目列表、route 和 gray observation          |
-| GET      | `/api/projects/:projectId`                   | 项目、当前 Nacos 摘要、Draft/Release/activation 摘要 |
-| GET/POST | `/api/projects/:projectId/drafts`            | 获取或创建活动 Draft                                 |
-| POST     | `/api/drafts/:draftId/revisions`             | `If-Match` 保存新 revision                           |
-| GET      | `/api/drafts/:draftId/revisions/:revisionId` | 解密并按权限返回结构化模型                           |
-| GET      | `/api/drafts/:draftId/current-revision`      | 返回当前草稿修订；revision 0 时为 404                |
-| POST     | `/api/draft-revisions/:id/validations`       | 202 执行 control/native validation                   |
-| GET      | `/api/validation-runs/:id`                   | 查询阶段、结果和 field errors                        |
-| GET      | `/api/draft-revisions/:id/wire-preview`      | 返回脱敏 diff、摘要和授权后的精确预览                |
-
-Gray 使用 environment 下的同类 Draft API，`scope_key=gray`，不伪装成项目。
-
-### 12.4 Release/Publication API
-
-| Method | Path                                 | 行为                                                       |
-| ------ | ------------------------------------ | ---------------------------------------------------------- |
-| POST   | `/api/environments/:envId/releases`  | 从 revision 创建异步 Release                               |
-| GET    | `/api/releases/:id`                  | Release、resource graph、approval、publish/activation 聚合 |
-| GET    | `/api/releases/:id/diff`             | 脱敏结构化 diff；敏感值按权限遮罩                          |
-| POST   | `/api/releases/:id/approvals`        | 记录 approve/reject 和审计                                 |
-| POST   | `/api/releases/:id/publications`     | 校验保护策略后创建/唤醒 publication job                    |
-| POST   | `/api/release-resources/:id/retries` | 仅重试失败且依赖允许的 resource                            |
-| POST   | `/api/releases/:id/rollback-drafts`  | 从历史 normalized model 创建新 Draft                       |
-| POST   | `/api/publication-jobs/:id/cancel`   | 请求停止后续写入，不宣称撤回已写内容                       |
-
-Publication POST 返回 202 和 job location。前端轮询或通过后续事件通道更新，但页面刷新后
-必须完全从 API 恢复状态。
-
-### 12.5 Instance/Audit API
-
-| Method   | Path                                       | 行为                               |
-| -------- | ------------------------------------------ | ---------------------------------- |
-| GET/POST | `/api/environments/:envId/instances`       | 列表/配置静态状态端点              |
-| GET      | `/api/instances/:id/observations`          | 游标分页证据，不返回 route payload |
-| GET      | `/api/releases/:id/activations`            | 目标实例状态和证据过期时间         |
-| GET      | `/api/environments/:envId/metrics/summary` | 固定全局指标摘要                   |
-| GET      | `/api/environments/:envId/audit-events`    | 授权过滤和游标分页                 |
-
-## 13. 权限与会话
-
-### 13.1 权限矩阵
-
-| 操作                           | Admin | Maintainer | Publisher | Auditor |
-| ------------------------------ | ----- | ---------- | --------- | ------- |
-| 查看环境和证据                 | 是    | 是         | 是        | 是      |
-| 修改环境/成员/secret ref       | 是    | 否         | 否        | 否      |
-| 编辑 Draft/校验                | 是    | 是         | 否        | 否      |
-| 创建 Release                   | 是    | 是         | 是        | 否      |
-| approve/publish/retry/rollback | 是    | 策略决定   | 是        | 否      |
-| 查看审计                       | 是    | 自身相关   | 是        | 是      |
-
-保护策略可以要求创建者不能批准或发布自己的 Release。Service 在执行时查询当前 membership
-和 policy，不信任前端隐藏按钮。
-
-### 13.2 会话
-
-身份供应商通过 `AuthProvider` adapter 接入；MySQL `users.subject` 保存稳定外部 subject。
-会话 cookie 为 Secure、HttpOnly、SameSite，数据库只保存随机 session token 的 SHA-256、
-过期/撤销时间和必要设备摘要。所有修改请求验证 CSRF token 和 Origin；登录、权限变化、
-凭据变化和生产发布可以强制重新认证。
-
-## 14. Frontend 详细设计
-
-### 14.1 路由
-
-```text
-/
-/projects/:projectId
-/projects/:projectId/drafts/:draftId
-/gray
-/releases
-/releases/:releaseId
-/instances
-/audit
-/settings
+```ts
+interface ProjectReleaseView {
+  id: string
+  sequence: string
+  projectId: string
+  sourceConfigurationVersion: {
+    id: string
+    number: number
+    relationAtCreation: 'current' | 'historical'
+  }
+  allocatedWireVersion: number
+  status: ReleaseStatus
+  sourceModelSha256: string
+  wireSha256: string
+  nativeValidator: { contractVersion: number; revision: string }
+  publication: PublicationSummary
+  activation: ActivationSummary
+  createdAt: string
+}
 ```
 
-Workspace loader 校验成员权限并在启动时只加载一次固定工作区。路由不携带 environment code；
-有 dirty editor 时仍需阻止离开编辑页面。
+API 禁止返回裸 `version` 字段。Release 的 exact payload 存入独立 `config_documents`，不能在执行
+时从来源版本重新编译，否则 compiler 升级会改变已审批内容。
 
-### 14.2 状态分层
+## 6. 核心事务与算法
 
-- **Server state**：项目、revision、validation、Release 和实例证据；以 API ETag/游标为准。
-- **Editor state**：未保存 Host/Route/Gray 表单、示例请求和 UI 展开状态。
-- **URL state**：environment、project、tab、筛选、分页游标和选中 resource。
-- **Session state**：当前用户和权限，不持久化 secret。
+### 6.1 保存为版本
 
-保存成功后用服务端返回 revision/ETag 替换本地 base。后台 validation result 必须携带
-revision ID/model digest；过时结果不能覆盖新 revision 的错误面板。
+请求包含 `baseVersionId`、完整 `ProjectRoutesModel`、`changeSummary` 和 `forceSameContent`，并通过
+`If-Match` 提交 draft lock version。
 
-### 14.3 Editor 组件
+Repository 在一个 MySQL transaction 内：
+
+1. `SELECT ... FROM drafts WHERE public_id=? FOR UPDATE`；
+2. 验证 Project 归属、未归档、角色为 admin/maintainer；
+3. 比较 `If-Match`、`baseVersionId` 和当前 revision，任一不匹配返回
+   `CONFIG_VERSION_CONFLICT`；
+4. 在 API 边界验证 schema、Route ID 唯一性、大小上限，并计算 canonical model SHA-256；
+5. 如果 digest 与当前版本相同且未显式 `forceSameContent`，返回 `CONFIG_VERSION_UNCHANGED`；
+6. 加密精确模型并插入 `config_documents`；
+7. 插入 `draft_revisions(revision_no=current+1, parent_revision_id=current, ...)`；
+8. 原子更新 `drafts.current_revision_no` 和 `lock_version`；
+9. 写入脱敏 `configuration_version.created` audit event；
+10. commit 后返回新版本和新 ETag。
+
+保存允许 YAML 或 native 语义无效，因为“防止内容丢失”和“允许发布”是两个边界。API 仍拒绝超过
+大小限制、重复 Route ID、错误顶层 schema 或无法安全加密的输入。
+
+同一个 Idempotency-Key 的重试必须返回第一次创建的版本。事务失败不得留下 current pointer 指向
+不存在 revision 的状态。
+
+### 6.2 恢复历史版本为新当前版本
+
+恢复请求携带历史 `sourceVersionId`、当前 `baseVersionId`、说明和 `If-Match`。事务锁定当前 draft
+后，复制 source 的解密模型到新加密文档，插入下一个 revision：
+
+- `parent_revision_id = 恢复操作发生时的当前版本`；
+- `restored_from_revision_id = 用户选择的历史版本`；
+- `revision_no = current + 1`。
+
+恢复不复用历史校验结果，新版本初始状态为 `not_validated`。如果复制后的 model digest 与当前版本
+相同，仍默认提示无变化；用户确认后可用恢复原因强制创建，以保留明确操作意图。
+
+### 6.3 校验具体版本
+
+校验服务只接受不可变 `configurationVersionId`，不接受浏览器任意 model 作为可发布证据：
+
+1. 解密版本模型并验证存储摘要；
+2. 运行 YAML、Route schema 和 Project relationship 校验；
+3. 使用一个“未分配 wire version”的规范候选执行控制面编译检查；
+4. 调用 Native Validator；
+5. 保存 compiler revision、validator contract/revision、model SHA-256 和结构化错误；
+6. 结果仅更新派生校验状态，不修改 Configuration Version 内容。
+
+编辑器可继续提供对 Working Copy 的即时预检，但该结果标记为 `previewOnly=true`，不能被 Release
+Service 当作版本校验证据。
+
+### 6.4 从所选版本创建 Release
+
+`sourceVersionId` 和 `expectedCurrentVersionId` 必须由请求显式传入。Release Service 执行：
+
+1. 校验 publisher 权限、Project 未归档、source version 属于该 Project；
+2. 对比用户确认页面中的 `expectedCurrentVersionId`；如果 current pointer 已变化，返回
+   `CONFIG_VERSION_CONFLICT`，要求用户基于最新上下文重新确认；
+3. 在一个短事务中先锁定 draft，再次比较 `expectedCurrentVersionId` 并确定 current/source
+   relation；匹配后才锁定 `project_version_counters`、分配 `last_allocated_version + 1`、插入
+   `creating` Release 并提交；同 Idempotency-Key 重试返回同一 Release，wire version 不回收；
+4. 把 Release 转为 `validating`，使用创建时记录的 compiler revision 将 source model、Project
+   domain 和新 wire version 编译为 exact JSON；
+5. 使用 Native Validator 校验 exact payload；失败时保存 `validation_failed` Release 和错误证据；
+6. 读取 rnacos 目标 Data ID 形成 base observations；只读失败时 fail closed；
+7. 计算与 base 的语义 diff、资源依赖和 exact target SHA-256；
+8. 在第二个短事务中插入 `release_items`、`release_resources` 和加密 payload document，把 Release
+   置为 `ready`；
+9. 返回确认页所需的来源版本、当前版本、Published 来源、wire version、diff 和风险。
+
+编译、subprocess 校验和 rnacos read 都不能发生在 MySQL transaction 内。进程若在 `creating` 或
+`validating` 中崩溃，只能在 compiler/validator revision 与创建时记录完全一致时恢复准备；否则把
+Release 标记为 `abandoned`，由用户创建新 Release。已分配 wire version 仍不回收。
+
+历史版本过去的 payload 不能复用，因为它含有旧 wire version，也可能由旧 compiler 生成。历史内容
+只作为 source model；本次 Release 的 payload 和所有校验证据必须重新生成并冻结。
+
+如果 source 是历史版本，Release 创建和发布全过程都不更新 `drafts`。如果创建期间另一个用户保存
+了新当前版本，Release 仍绑定原 sourceVersionId；页面刷新后展示新的“当前配置版本”，但不偷偷
+更换 Release 来源。
+
+### 6.5 rnacos 资源计划
+
+保持既有 wire contract：
+
+| 资源          | Data ID                               | Group           | 内容                 |
+| ------------- | ------------------------------------- | --------------- | -------------------- |
+| Project list  | `ploto.unified-access.projects`       | `ACCESS-SERVER` | 分号分隔 domain      |
+| Project route | `ploto.unified-access.route.<domain>` | `ACCESS-SERVER` | Java-compatible JSON |
+
+单 Project 修改通常只有 route resource。新增 Project 的资源依赖为 `route -> project list`：先验证
+route 写入，再把 domain 暴露给订阅图。归档顺序相反：先从 list 移除并回读，再把 route 清理作为
+独立资源。Gray Data ID 永远不进入本工作流。
+
+### 6.6 Publication Worker
+
+Worker 使用有期限 lease 领取 job；同一固定 workspace 同时只允许一个 Release 写 rnacos。每个资源
+执行：
+
+1. read current external bytes；
+2. 若等于 target，记录 `skipped_already_applied` 并完成 readback；
+3. 若与 frozen base 摘要不同且不等于 target，记录 `external_conflict` 并停止依赖资源；
+4. write exact frozen bytes；
+5. readback，比较 Console SHA-256，并保存 rnacos MD5 作为外部证据；
+6. 保存 attempt 后才推进 resource/job 状态。
+
+完整恢复实现中，Worker 崩溃后必须先 read 外部事实。无法确定写是否成功时不能盲目重复写，也
+不能标记 Published。当前实现已有有期限 workspace lease、base 冲突检查和 already-at-target
+判定，但 running job 的自动重新领取和资源级 retry API 尚未实现，失败状态不会伪装成 Published。
+
+## 7. API 详细设计
+
+### 7.1 通用约定
+
+- API 统一位于 `/api`，新路径不包含 `environmentId`；
+- public ID 使用 UUID；版本号只是展示和排序字段，不能代替 ID 做修改操作；
+- 时间为 RFC 3339 UTC；计数器和 ETag 中的 bigint 使用十进制字符串；
+- 列表使用 `(revision_no, id)` 或 `(created_at, id)` 编码的不透明稳定 cursor；
+- 保存、恢复、创建 Release、开始发布和 retry 均要求 `Idempotency-Key`；
+- 错误结构为稳定 `code/message/requestId/fields`，不回显 SQL、密钥、凭据或完整敏感 YAML。
+
+### 7.2 Configuration Version API
+
+| Method | Path                                                                      | 权限     | 行为                       |
+| ------ | ------------------------------------------------------------------------- | -------- | -------------------------- |
+| GET    | `/api/projects/:projectId/configuration-versions`                         | read     | 倒序分页返回版本 summary   |
+| POST   | `/api/projects/:projectId/configuration-versions`                         | maintain | 从 Working Copy 保存新版本 |
+| GET    | `/api/projects/:projectId/configuration-versions/current`                 | read     | 返回当前版本与配置 ETag    |
+| GET    | `/api/projects/:projectId/configuration-versions/:versionId`              | read     | 返回只读精确模型           |
+| POST   | `/api/projects/:projectId/configuration-versions/:versionId/validations`  | maintain | 校验不可变版本             |
+| POST   | `/api/projects/:projectId/configuration-versions/:versionId/restorations` | maintain | 复制历史内容为新当前版本   |
+
+版本 comparison/diff API 为下一增量，当前 UI 只提供只读历史快照。
+
+保存请求：
+
+```json
+{
+  "baseVersionId": "uuid-or-null",
+  "changeSummary": "为用户接口增加 30s 超时",
+  "forceSameContent": false,
+  "model": {
+    "schemaVersion": 2,
+    "kind": "project_routes_yaml",
+    "routes": [{ "id": "uuid", "source": "path: /api/*\ntype: PROXY\n..." }]
+  }
+}
+```
+
+响应使用 `ETag: "<draft-lock-version>"`，并返回 `ConfigurationVersionSummary`。版本详情不得返回
+配置文档加密元数据或任何 secret reference locator。
+
+### 7.3 Release API
+
+| Method | Path                                    | 权限    | 行为                                      |
+| ------ | --------------------------------------- | ------- | ----------------------------------------- |
+| POST   | `/api/projects/:projectId/releases`     | publish | 从明确 sourceVersionId 创建 Release       |
+| GET    | `/api/projects/:projectId/releases`     | read    | 项目发布历史                              |
+| GET    | `/api/releases/:releaseId`              | read    | Release、resource、publication/activation |
+| POST   | `/api/releases/:releaseId/publications` | publish | 把 Ready Release 加入发布队列             |
+
+资源级 retry 与 job cancel 是已保留的数据模型能力，当前 API 尚未开放。
+
+创建请求：
+
+```json
+{
+  "sourceVersionId": "uuid",
+  "expectedCurrentVersionId": "uuid",
+  "title": "发布稳定路由版本",
+  "description": "选择 V12；当前配置 V18 保持不变"
+}
+```
+
+请求不能只传 `source: "current"`。前端在用户打开确认框时把默认 current 解析为具体 ID，并固定
+当时看到的 current ID；任一 ID 发生上下文冲突时重新打开确认流程。响应明确返回：
+
+```json
+{
+  "sourceConfigurationVersion": {
+    "id": "uuid",
+    "number": 12,
+    "relationAtCreation": "historical"
+  },
+  "currentConfigurationVersion": { "id": "uuid", "number": 18 },
+  "allocatedWireVersion": 43,
+  "status": "ready"
+}
+```
+
+### 7.4 稳定错误码
+
+| Code                              | HTTP | 场景                                  |
+| --------------------------------- | ---- | ------------------------------------- |
+| `CONFIG_VERSION_CONFLICT`         | 409  | base version 或 ETag 已过期           |
+| `CONFIG_VERSION_UNCHANGED`        | 409  | 相同内容且未确认强制保存              |
+| `CONFIG_VERSION_NOT_PUBLISHABLE`  | 422  | 所选版本校验失败                      |
+| `CONFIG_VERSION_PROJECT_MISMATCH` | 404  | source version 不属于当前授权 Project |
+| `NATIVE_VALIDATOR_UNAVAILABLE`    | 503  | 权威校验不可用或 contract 不匹配      |
+| `WIRE_VERSION_EXHAUSTED`          | 409  | native 支持的整数版本空间耗尽         |
+| `RNACOS_BASE_CONFLICT`            | 409  | 外部内容不同于 frozen base 和 target  |
+| `IDEMPOTENCY_KEY_REUSED`          | 409  | 同 key 对应不同请求摘要               |
+
+为防止对象枚举，未授权或跨 Project 的 version/release 查询统一返回 404。
+
+## 8. Web 详细设计
+
+### 8.1 页面结构
 
 ```text
-ProjectEditor
-├── ProjectSummary
-├── HostStrategyTable
+/projects/:projectId/routes
+├── ProjectVersionBar
+│   ├── 当前配置 Vn
+│   ├── 未保存状态
+│   ├── rnacos 来源 Vx / Release Ry
+│   └── 激活状态
 ├── RouteList
-│   └── RouteEditor
-│       ├── CommonRouteFields
-│       ├── ConditionEditor
-│       ├── ResponseRouteFields | ProxyRouteFields
-│       ├── HeaderTemplateTable
-│       ├── CidrRuleTable
-│       └── NormalizedValuePreview
-├── ValidationPanel
-├── WirePreview
-└── UnsavedChangesGuard
+│   └── YamlCodeEditor[]
+├── SaveVersionButton
+└── PublishVersionButton
+
+/projects/:projectId/versions
+├── VersionFilters
+├── VersionTimeline
+│   └── VersionRow[]
+└── VersionViewer / VersionDiff
+
+/projects/:projectId/releases
+└── ReleaseTimeline / ResourceAttempts / ActivationEvidence
 ```
 
-大型 Route 列表使用稳定 route client ID、局部分段渲染和拖拽后的显式顺序。Field error 使用
-JSON path 映射到控件；目标控件未挂载时先展开对应 route，再聚焦。Raw payload 只能只读
-预览，直到 expert mode 另行评审。
+### 8.2 保存为版本
 
-### 14.4 发布页面
+- Routes 页主按钮文案为“保存为版本”，快捷键 `Ctrl/Cmd+S` 打开保存弹窗；
+- 弹窗展示 base version、Route 数和变更摘要，版本说明必填；
+- 保存期间编辑器不被服务端旧响应覆盖；请求绑定提交时的 local fingerprint；
+- 成功后 Working Copy base 更新到新 version ID，dirty 置为 false，历史列表插入新行；
+- `CONFIG_VERSION_CONFLICT` 打开三方选择：查看差异、以最新版本重新应用、放弃本地修改；
+- `CONFIG_VERSION_UNCHANGED` 先提示无内容变化，只有填写原因后才允许强制保存。
 
-- 顶部同时显示 Release status、Nacos publication status 和 activation status；
-- 资源图按 dependency/order 展示 base/target/verified 摘要；
-- attempt timeline 展示 read、write、readback、retry 和脱敏错误；
-- 部分成功使用阻止式提示，列出已改变 Data ID；
-- Cancel 按钮文案为“停止后续发布”，不得暗示撤回已完成写入；
-- 回滚入口先创建新 Draft，不直接从浏览器触发 Nacos 写入。
+可选的浏览器崩溃恢复副本放在受限 local storage/IndexedDB，按用户和 Project 隔离并设置 TTL。它
+必须显示为“恢复副本”，不能出现在版本列表，不能直接发布，并且不得缓存服务端未授权的历史 YAML。
 
-## 15. 审计、日志与可观测性
+### 8.3 版本历史
 
-### 15.1 审计事件
+版本列表默认倒序，当前版本固定显示“当前”。每行至少展示：
 
-事件类型至少包括：
+- `Vn`、说明、作者、相对/绝对时间和 Route 数；
+- 校验状态；
+- 是否发布过、最近 Release 及其 Published/失败状态；
+- `restored from Vx`；
+- “查看”“比较”“基于此版本编辑”“发布此版本”。
 
-- environment created/updated、membership changed、secret reference rotated；
-- draft revision saved/imported/validated；
-- release created/approved/rejected/queued/canceled；
-- resource conflict/write/readback/retry/verified；
-- rollback draft created；
-- instance endpoint changed、activation changed；
-- authentication success/failure/session revoked。
+历史 YAML 只读展示。点击“基于此版本编辑”不会立即改变当前版本：用户先在 Working Copy 中查看
+内容，再通过“恢复并保存为新版本”创建新版本。可提供直接恢复弹窗，但后端语义仍是插入新版本。
 
-Audit summary 保存字段名称、对象摘要和遮罩后的 diff，不保存完整 payload。每个外部调用日志
-和 audit event 关联 request ID/job ID/attempt public ID。
+### 8.4 发布版本弹窗
 
-### 15.2 Console 指标
+弹窗分三步：
 
-建议固定指标，不使用 environment/project 名称作为无界 label：
+1. **选择来源**：默认当前版本；可按版本号/说明搜索历史版本；无效或 stale 版本禁用并说明原因；
+2. **校验与差异**：展示来源版本与当前配置、Published 来源和 rnacos base 的差异，以及目标 Data
+   ID、新 wire version、validator revision；
+3. **确认发布**：历史来源使用阻止式提示“将发布历史版本 Vn；当前配置仍为 Vm”。
 
-- API request count/duration，按 route template、method、status class；
-- MySQL pool active/queued、transaction retry、deadlock；
-- validation count/duration/result；
-- publication job/resource count、duration、result；
-- Nacos call duration/result；
-- activation poll count/result 和 evidence age；
-- outbox backlog/age。
+存在 dirty Working Copy 时，在第一步显示：
 
-环境、Release 和 project 细节进入结构化日志/审计查询，不进入高基数 Prometheus label。
+- “先保存为新版本”（推荐）；
+- “继续发布已保存版本”（未保存修改不进入本次 Release）；
+- “取消”。
 
-### 15.3 Health
+任何选项都不得静默丢弃 Working Copy。Release 创建完成后，前端持有 release ID；后续 current
+version 变化不能改变确认页或 publication job 的来源。
 
-- `/api/health/live`：进程 EventLoop 可响应，不检查外部系统；
-- `/api/health/ready`：配置有效、MySQL 可在短 deadline 内查询、migration version 匹配；
-- Nacos/Validator/Secret Provider 的失败展示在 dependency status，不让短暂故障反复重启 API；
-- Worker readiness 额外检查其必要依赖，失去依赖时停止领取新任务。
+### 8.5 状态文案
 
-## 16. 安全设计
+| 事实                  | 文案示例                           |
+| --------------------- | ---------------------------------- |
+| 编辑基线              | `基于 V18 编辑 · 有未保存修改`     |
+| 当前配置              | `当前配置 V18`                     |
+| 历史发布              | `rnacos 已发布：V12 / Release R31` |
+| 无激活证据            | `实例激活：未知`                   |
+| 历史版本被选择        | `将发布历史版本 V12，当前仍为 V18` |
+| historical validation | `V7 曾通过旧校验器，需要重新校验`  |
 
-- API、Worker、migration 使用不同 MySQL 账号。Migration 有 DDL；API/Worker 只有所需 DML；
-  审计表禁止 runtime UPDATE/DELETE。
-- 生产 MySQL 强制 TLS、最小网络访问、加密备份和定期恢复演练。
-- 所有 SQL 值参数化；用户可选 sort/filter 映射到固定 SQL fragment。
-- Nacos endpoint 和 status endpoint 进行 scheme、host、port allowlist 及 DNS rebinding/SSRF
-  防护；禁止访问 link-local、metadata endpoint 和非授权网段。
-- Native Validator 二进制路径来自只读部署配置，使用无 shell spawn、资源/时间限制和低权限
-  用户。
-- Secret Provider 返回的凭据只活在最短作用域；错误和 trace 不挂载 request body、cookie、
-  Authorization 或 route header/template 值。
-- Config document decrypt API 按环境权限检查，敏感 diff 默认遮罩，并对查看明文产生审计。
-- 导入和预览限制大小、深度和数量；HTML/template 内容只作为文本安全编码，不在 Console
-  DOM 中执行。
+状态不能只用颜色区分。版本选择、弹窗、diff、Route 折叠/排序和错误跳转均需支持键盘操作；焦点关闭
+弹窗后回到触发按钮。
 
-## 17. Migration、部署与备份
+## 9. 权限、安全与审计
 
-### 17.1 Migration
+### 9.1 权限
 
-- SQL 文件名称递增且一经应用不可修改；`schema_migrations` 保存 SHA-256。
-- 部署流水线只运行一个 migration job，成功后再滚动 API/Worker。
-- Expand/contract：先加兼容列/表，部署双读写，再回填，最后在后续版本移除旧结构。
-- 大表 DDL 必须评估 metadata lock 和在线能力，不由 API 启动自动执行。
-- 每个 migration 在空库、上一版本快照和包含最大验收规模数据的数据库上测试。
+| 操作               | Admin | Maintainer | Publisher | Auditor |
+| ------------------ | ----- | ---------- | --------- | ------- |
+| 查看版本/YAML/diff | 是    | 是         | 是        | 是      |
+| 保存/恢复版本      | 是    | 是         | 否        | 否      |
+| 校验版本           | 是    | 是         | 是        | 否      |
+| 创建/发布 Release  | 是    | 策略决定   | 是        | 否      |
+| retry/cancel       | 是    | 否         | 是        | 否      |
 
-### 17.2 部署单元
+服务端每次执行时查询当前 membership 和 policy，不信任前端隐藏按钮。生产策略可要求创建者不能审批或
+发布自己的 Release，并可要求重新认证。
 
-```text
-console-web
-console-api (N replicas)
-publication-worker (N replicas, DB lease coordination)
-activation-collector (N replicas, DB lease coordination)
-outbox-worker (N replicas)
-mysql
-secret-provider / KMS
-native-validator binary mounted read-only
-```
+### 9.2 安全
 
-API 扩缩容无会话内存依赖。Worker 可多副本，但同环境 publication lease 保证写入串行。
+- Route YAML 和 compiled payload 使用现有 envelope encryption；列表只返回摘要；
+- parser 禁止 alias、anchor、merge、自定义 tag 和多文档输入；
+- Native Validator 使用固定 argv、无 shell、限时/限内存/限 stdout，并记录 binary revision；
+- rnacos 凭据只在 adapter 内使用，日志和错误不包含 username/password/token；
+- Authorization、Cookie、请求/响应 body 和敏感 route header 值不得进入日志、trace 或审计；
+- diff 默认遮罩已标记敏感的 header 值，精确 payload 预览要求额外权限；
+- 所有 SQL 参数化；cursor 不包含 secret 或可篡改的内部主键。
 
-### 17.3 备份与恢复
+### 9.3 审计事件
 
-- MySQL 做加密全量备份和 binlog point-in-time recovery；明确 RPO/RTO 后再进入生产。
-- Secret Provider/KMS key metadata 与数据库备份分别保护；只有数据库备份不能解密配置。
-- 恢复到新环境后默认禁止 publication worker，先验证 migration、文档解密和 Release 摘要。
-- 恢复不会自动重放历史 publication job；运维确认目标 Nacos 后才解除环境写保护。
+至少记录：
 
-## 18. 测试设计
+- `configuration_version.created`、`configuration_version.restored`、
+  `configuration_version.validation_completed`；
+- `release.created_from_current`、`release.created_from_history`、`release.validation_failed`；
+- `publication.queued`、resource conflict/write/readback/retry、`publication.completed`；
+- activation changed 和 permission denied。
 
-### 18.1 单元测试
+版本审计保存 source/current version ID 和 number、model digest、Route 数、说明、actor、request ID、
+结果和时间；不保存完整 YAML。历史发布事件必须同时记录当时 current version，便于回答“为何发布
+V12 而不是 V18”。
 
-- schema/领域状态转换、权限、version 边界、摘要和加密 round trip；
-- project list deterministic serialization；
-- Release dependency graph 和状态聚合；
-- publication recovery decision table；
-- activation evidence TTL/aggregate；
-- error redaction、SSRF allowlist 和 idempotency request hash。
+## 10. 并发、幂等与故障恢复
 
-### 18.2 MySQL 集成测试
+- Working Copy 保存使用 draft ETag + baseVersionId 双重检查；
+- Version ID 一旦解析即固定，不能因 current pointer 更新而漂移；
+- Project wire version 通过 `SELECT ... FOR UPDATE` 串行分配；
+- Release 创建幂等记录请求 canonical hash；同 key 不同 sourceVersionId 必须冲突；
+- 固定 workspace publication lease 防止两个 Release 资源写入交错；
+- Worker lease 包含 owner/token/expiry，更新必须携带 token，过期 worker 不能继续写；
+- API 进程退出不取消已入库 publication job；
+- cancel 只停止尚未发生的后续写入，UI 文案不得暗示撤销已 verified 的资源；
+- MySQL 恢复后不自动重放历史 job，先校验 rnacos 目标、lease 和 attempt 事实；
+- rnacos 不可达时保持 queued/retryable 或明确 failed，不更新 Published；
+- Native Validator 不可用时 fail closed，但 Configuration Version 仍可保存。
 
-使用 disposable MySQL 8.4，不能以 SQLite 代替：
+## 11. 测试设计
 
-- migration 从空库和上一版本升级；
-- binary collation 下项目名唯一性；
-- `READ COMMITTED`、row lock、deadlock retry；
-- 多 Worker `SKIP LOCKED` 不重复领取；
-- environment lease 过期和 fencing token；
-- 乐观锁、version 并发分配、idempotency unique key；
-- audit/outbox 与业务事务同提交；
-- config BLOB 大小、加密、摘要和备份恢复。
+### 11.1 Server 单元与 API 测试
 
-### 18.3 Adapter/Contract 测试
+- 保存 V1/V2 的单调号、不可变内容、ETag 和 parent relation；
+- 相同内容默认拒绝、带原因强制保存、并发 base 冲突；
+- V3 恢复为 V9 时 parent=V8、restoredFrom=V3；
+- 列表稳定 cursor、summary 不含完整 YAML、跨 Project 返回 404；
+- current/historical source relation 在 Release 创建时冻结；
+- 用户确认后 current version 变化时创建 Release 返回冲突且不消耗 wire version；
+- 当前 V6 发布 V3 后 current pointer 仍为 V6；
+- 同一 V3 重复发布分配不同且递增的 wire version；
+- 历史校验结果过期时重新调用当前 Native Validator；
+- Idempotency-Key 重试不重复创建版本、Release 或分配 wire version；
+- secret redaction、权限矩阵和审计字段。
 
-- Native Validator 使用 access-server golden fixtures 验证 contract；
-- disposable rnacos 覆盖 read/write/readback/delete、认证、超时、冲突和部分成功；
-- fake Nacos 精确注入“写成功后进程崩溃”窗口；
-- access-server 状态 contract 覆盖 active/older/rejected/malformed/oversized/timeout；
-- Secret Provider 覆盖 rotation 和 unavailable，确保错误不包含 secret。
+测试使用 Fastify injection、fake repository/adapter 和 fake validator，不要求 MySQL、rnacos、
+公网或 wall clock。
 
-### 18.4 API/Frontend/E2E
+### 11.2 MySQL 集成测试
 
-- Fastify injection 覆盖 schema、RBAC、环境隔离、ETag、幂等和稳定 error；
-- 前端覆盖 Host/Route/Gray 编辑、field path 聚焦、dirty guard、diff 和 partial publication；
-- E2E 覆盖 RESPONSE、service PROXY、static PROXY、外部冲突、部分发布、崩溃恢复和回滚；
-- 所有日志/审计测试使用 canary secret，断言输出中不存在该值。
+- migration 从当前 `0004_activation` 升级和空库安装；
+- 保存/恢复事务在注入失败时不产生孤儿 pointer/document；
+- 两连接并发保存仅一个成功；
+- 两连接分配 wire version 不重复；
+- 删除/归档 Project 不破坏版本、Release 和 audit 外键；
+- 最大 Route 数和文档大小下的版本分页与 Release 查询计划。
 
-## 19. 实施顺序
+### 11.3 Compiler、native 与 rnacos 测试
 
-1. MySQL pool、transaction helper、migration runner、health/readiness；
-2. identity/environment/RBAC、Secret Provider interface、audit/outbox；
-3. project/draft/revision、config document encryption、Nacos read/import；
-4. Native Validator CLI contract、validation run 和 field error；
-5. Release/version/resource graph 和 immutable payload；
-6. publication job/lease/attempt、Nacos write/readback 和恢复；
-7. rollback、approval/production policy；
-8. access-server status contract、activation collector 和实例页面；
-9. Prometheus summary、notification 和运维增强。
+- 当前/历史版本相同 source model 在不同 wire version 下生成预期 exact payload；
+- RESPONSE、service/static PROXY、condition、template、CIDR、body limit 和 WebSocket golden；
+- 旧 schema 可迁移时确定性升级，不可迁移时 fail closed；
+- same-version candidate 被数据面忽略，新 Release 总是使用更高 wire version；
+- invalid candidate 保留旧 native snapshot；
+- disposable rnacos 覆盖 write/readback、外部冲突、部分成功、超时和 worker 崩溃恢复。
 
-每一步必须保持 API 可启动、migration 可重复验证、旧数据可读，并按变更范围运行 Console
-完整质量命令。引入 Native Validator 或状态 contract 时同时运行 focused native tests。
+不能仅凭单元测试声明生产兼容；原生生产脚本语料差分和最终切流 gate 完成前继续保留当前资格说明。
 
-## 20. 需求追踪
+### 11.4 Frontend/E2E
 
-| 需求范围             | 详细设计章节         |
-| -------------------- | -------------------- |
-| CON-AUTH / CON-ENV   | 5、7、12.2、13、16   |
-| CON-OVW              | 11、14、15           |
-| CON-PRJ              | 7、8.1、12.3、14.3   |
-| Host/Route/Gray 编辑 | 6、9、12.3、14.3     |
-| CON-VAL              | 8.4、9、12.3         |
-| CON-REL              | 7、8、10、12.4、14.4 |
-| CON-ACT              | 7、11、12.5          |
-| CON-AUD              | 7.5、15、16          |
-| 非功能需求           | 5、6、15、16、17、18 |
+- YAML 编辑不重建 CodeMirror，不因临时解析错误丢失焦点；
+- dirty Working Copy 的保存、切项目、选版本和发布保护；
+- 当前/历史版本选择、只读历史、diff、恢复为新版本；
+- 发布 V3 时页面持续显示 current V6，不将两者混淆；
+- validation stale/invalid 禁止发布并可聚焦错误；
+- 键盘操作、焦点恢复、屏幕阅读器标签和非颜色状态；
+- 页面刷新后从 API 恢复 Release/resource/activation 状态。
 
-## 21. 技术参考
+## 12. Migration 与兼容策略
 
-- [MySQL releases: Innovation and LTS](https://dev.mysql.com/doc/refman/8.4/en/mysql-releases.html)
-- [MySQL 8.4 InnoDB locking reads](https://dev.mysql.com/doc/refman/8.4/en/innodb-locking-reads.html)
-- [MySQL 8.4 transaction isolation levels](https://dev.mysql.com/doc/refman/8.4/en/innodb-transaction-isolation-levels.html)
-- [MySQL 8.4 JSON data type](https://dev.mysql.com/doc/refman/8.4/en/json.html)
-- [MySQL 8.4 InnoDB error handling](https://dev.mysql.com/doc/refman/8.4/en/innodb-error-handling.html)
-- [MySQL utf8mb4 character set](https://dev.mysql.com/doc/refman/8.4/en/charset-unicode-utf8mb4.html)
-- [mysql2 Promise wrapper and connection pools](https://sidorares.github.io/node-mysql2/docs)
-- [Access Server compatibility contract](../native/access-server/docs/compatibility-contract.md)
-- [Console product requirements](console-requirements.md)
+1. 增加 nullable/有默认值字段和索引，不重写旧 revision 或 Release；
+2. 后端先提供 Configuration Version facade API，内部继续读取 `draft_revisions`；
+3. 旧 schema v1 revision 在读取时按现有规则升级为稳定 Route ID/YAML，原始加密文档保留；
+4. 回填 `route_count` 时解密批量限速、失败可恢复，不把私密内容写日志；
+5. Release 查询同时兼容旧 `source_relation` 默认值，通过创建时的 revision/current 信息尽可能
+   推导；无法证明时展示 `unknown`，不伪造 current；
+6. Web 切换到版本 API 后，旧 `/api/drafts/.../revisions` 标记 deprecated，至少保留一个发布周期；
+7. 确认无旧客户端后再删除旧写入口；历史表名无需为了 UI 术语做高风险 rename。
+
+部署顺序为 migration → 兼容 API → Web → publication worker。Worker 在 API schema 未就绪或
+rnacos adapter 未配置时保持 unavailable，UI 不模拟发布成功。
+
+## 13. 实施顺序
+
+1. 已完成 migration、Configuration Version model/repository 和保存/列表/详情 API；
+2. 已完成恢复、validation-by-version 和审计；语义 diff 待实现；
+3. 已完成 Web 保存弹窗、版本历史、只读查看、当前/历史状态；
+4. 已完成 Release Service 的 sourceVersionId、wire version、exact payload 冻结和 API；
+5. 已完成 Web 发布版本弹窗、历史确认和 dirty Working Copy 隔离；
+6. 已完成 rnacos adapter、publication worker 和逐资源证据；资源级重试与崩溃恢复待实现；
+7. 增加实例 typed activation evidence；能力缺失期间保持 Activation unknown；
+8. 完成 disposable rnacos E2E、native compatibility matrix 和运维文档。
+
+每个增量都必须保持“能保存版本但不能伪发布”的安全退化路径。仅完成版本 UI 而无 worker 时，
+发布按钮显示能力未配置；仅完成 rnacos 写入而无 activation API 时，Published 后显示激活未知。
+
+## 14. 需求追踪
+
+| 需求范围                 | 详细设计章节             |
+| ------------------------ | ------------------------ |
+| 保存不可变配置版本       | 2、4.1、5、6.1、7.2、8.2 |
+| 当前/历史版本列表与 diff | 4.3、5.3、7.2、8.3       |
+| 选择历史版本发布         | 2.2、6.4、7.3、8.4       |
+| 恢复历史版本             | 5.2、6.2、7.2            |
+| wire version 与兼容校验  | 2.2、5.4、6.3、6.4       |
+| rnacos 多资源发布        | 4.2、6.5、6.6、10        |
+| 发布/激活状态分离        | 4.2、4.3、8.5            |
+| 权限、安全和审计         | 7.4、9                   |
+| Migration 和测试         | 11、12、13               |
+
+实现时还必须遵守仓库根 `AGENTS.md` 中的 native wire contract、秘密保护、不可变 Release、失败保留
+旧快照和实例证据边界。

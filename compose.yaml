@@ -23,6 +23,12 @@ x-console-environment: &console-environment
   NATIVE_VALIDATOR_TIMEOUT_MILLIS: 10000
   NATIVE_VALIDATOR_MAX_INPUT_BYTES: 4194304
   NATIVE_VALIDATOR_MAX_OUTPUT_BYTES: 1048576
+  PUBLICATION_WORKER_ENABLED: 'true'
+  PUBLICATION_NACOS_ENDPOINT: http://rnacos:8848
+  NACOS_REQUEST_TIMEOUT_MILLIS: 5000
+  NACOS_MAX_RESPONSE_BYTES: 5242880
+  PUBLICATION_POLL_INTERVAL_MILLIS: 1000
+  PUBLICATION_LEASE_MILLIS: 30000
 
 services:
   mysql:
@@ -105,6 +111,8 @@ services:
     depends_on:
       console-migrate:
         condition: service_completed_successfully
+      rnacos-bootstrap:
+        condition: service_completed_successfully
     healthcheck:
       test:
         - CMD
@@ -117,17 +125,31 @@ services:
       start_period: 5s
     restart: unless-stopped
 
+  console-publisher:
+    image: access-gateway-demo-runtime:local
+    pull_policy: never
+    environment: *console-environment
+    command: ['node', 'server/dist/processes/publication-worker.js']
+    depends_on:
+      console-migrate:
+        condition: service_completed_successfully
+      rnacos-bootstrap:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
   console-bootstrap:
     image: mirror.gcr.io/library/node:22-trixie-slim
     environment:
       CONSOLE_API_URL: http://console:3000
-      DEMO_NACOS_ENDPOINT: http://localhost:${RNACOS_HTTP_PORT:-8848}
+      DEMO_NACOS_ENDPOINT: http://rnacos:8848
     command: ['node', '/demo/bootstrap-console.mjs']
     volumes:
       - ./deploy/demo:/demo:ro
     depends_on:
       console:
         condition: service_healthy
+      console-publisher:
+        condition: service_started
     restart: 'no'
 
   access-server:
@@ -143,7 +165,7 @@ services:
     volumes:
       - ./deploy/demo/certs:/run/access-gateway/tls:ro
     depends_on:
-      rnacos-bootstrap:
+      console-bootstrap:
         condition: service_completed_successfully
     cpus: 2
     healthcheck:
