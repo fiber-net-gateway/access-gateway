@@ -10,6 +10,7 @@ import { EnvironmentRepository } from './repository.js'
 
 export interface EnvironmentService {
   list(actor: Actor): Promise<EnvironmentListResult>
+  getWorkspace(actor: Actor): Promise<EnvironmentView>
   get(actor: Actor, id: string): Promise<EnvironmentView>
   create(actor: Actor, input: CreateEnvironmentInput, requestId: string): Promise<EnvironmentView>
 }
@@ -87,6 +88,14 @@ export class DefaultEnvironmentService implements EnvironmentService {
     return { items: await this.#repository.list(actor) }
   }
 
+  async getWorkspace(actor: Actor): Promise<EnvironmentView> {
+    const environment = await this.#repository.findWorkspace(actor)
+    if (!environment) {
+      throw notFound('Workspace')
+    }
+    return environment
+  }
+
   async get(actor: Actor, id: string): Promise<EnvironmentView> {
     const environment = await this.#repository.findAccessibleByPublicId(actor, id)
     if (!environment) {
@@ -129,6 +138,10 @@ export class UnavailableEnvironmentService implements EnvironmentService {
   }
 
   async get(): Promise<never> {
+    throw unavailable('DATABASE_UNCONFIGURED', 'MySQL is not configured')
+  }
+
+  async getWorkspace(): Promise<never> {
     throw unavailable('DATABASE_UNCONFIGURED', 'MySQL is not configured')
   }
 

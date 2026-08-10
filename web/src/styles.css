@@ -359,6 +359,106 @@ code {
   background: rgb(255 255 255 / 70%);
 }
 
+.route-editor-panel {
+  grid-column: 1 / -1;
+}
+
+.workspace-details {
+  display: grid;
+  gap: 14px;
+  margin: 0;
+  padding: 24px;
+}
+
+.workspace-details div {
+  display: grid;
+  grid-template-columns: 110px minmax(0, 1fr);
+  gap: 14px;
+}
+
+.workspace-details dt {
+  color: #7a867f;
+  font-size: 0.74rem;
+  font-weight: 750;
+  text-transform: uppercase;
+}
+
+.workspace-details dd {
+  overflow-wrap: anywhere;
+  margin: 0;
+  color: #27362f;
+  font-family: 'SFMono-Regular', Consolas, monospace;
+  font-size: 0.78rem;
+}
+
+.panel-note {
+  margin: 0;
+  padding: 0 24px 22px;
+  color: #748079;
+  font-size: 0.78rem;
+  line-height: 1.6;
+}
+
+.route-editor {
+  display: block;
+  width: calc(100% - 48px);
+  min-height: 420px;
+  margin: 0 24px;
+  padding: 18px;
+  resize: vertical;
+  border: 1px solid #cbd3ca;
+  border-radius: 12px;
+  background: #18251f;
+  color: #e8eee9;
+  font:
+    0.79rem/1.65 'SFMono-Regular',
+    Consolas,
+    monospace;
+  tab-size: 2;
+}
+
+.route-editor:focus {
+  border-color: #789578;
+  outline: 3px solid rgb(120 149 120 / 18%);
+}
+
+.route-editor:disabled {
+  opacity: 0.66;
+}
+
+.route-editor-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 18px 24px 24px;
+  color: #748079;
+  font-size: 0.75rem;
+}
+
+.route-editor-actions > span {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.route-editor-actions button {
+  flex: 0 0 auto;
+  padding: 10px 15px;
+  border: 0;
+  border-radius: 8px;
+  background: #203d31;
+  color: #eef5e9;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.route-editor-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
 .panel-heading {
   display: flex;
   align-items: center;
@@ -547,6 +647,16 @@ button.entity-row {
 
   .summary-grid {
     grid-template-columns: 1fr;
+  }
+
+  .workspace-details div {
+    grid-template-columns: 1fr;
+    gap: 4px;
+  }
+
+  .route-editor-actions {
+    align-items: stretch;
+    flex-direction: column;
   }
 }
 

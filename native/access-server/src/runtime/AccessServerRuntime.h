@@ -25,6 +25,7 @@
 #include <fiber/common/NonMovable.h>
 #include <fiber/event/EventLoop.h>
 #include <fiber/event/EventLoopGroup.h>
+#include <fiber/http/HttpExchange.h>
 #include <fiber/nacos/ConfigService.h>
 #include <fiber/nacos/NacosClient.h>
 #include <fiber/nacos/NacosCreateError.h>
@@ -96,10 +97,11 @@ private:
 
     AccessServerRuntime(event::EventLoop &accept_loop, event::EventLoop &nacos_loop, event::EventLoop &cat_loop,
                         event::EventLoopGroup &http_workers, net::SocketAddress listen_address,
-                        net::SocketAddress metrics_listen_address, net::ListenOptions listen_options,
-                        std::chrono::milliseconds initial_config_timeout, std::size_t default_max_request_body_size,
-                        bool test_mode, AccessConfigWatcherOptions watcher_options,
-                        GrayConfigWatcherOptions gray_options, AccessServiceDiscoveryOptions service_discovery_options,
+                        http::HttpServerOptions http_server_options, net::SocketAddress metrics_listen_address,
+                        net::ListenOptions listen_options, std::chrono::milliseconds initial_config_timeout,
+                        std::size_t default_max_request_body_size, bool test_mode,
+                        AccessConfigWatcherOptions watcher_options, GrayConfigWatcherOptions gray_options,
+                        AccessServiceDiscoveryOptions service_discovery_options,
                         std::unique_ptr<cat::CatClient> cat_client, std::unique_ptr<nacos::NacosClient> nacos_client,
                         std::unique_ptr<nacos::ConfigService> config_service,
                         std::unique_ptr<nacos::NamingService> naming_service) noexcept;

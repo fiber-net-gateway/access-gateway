@@ -292,4 +292,17 @@ export class DraftRepository {
       createdAt: mysqlDateTimeToRfc3339(row.created_at),
     }
   }
+
+  async getCurrentRevision(draftPublicId: string): Promise<DraftRevisionView | null> {
+    const [rows] = await this.#pool.execute<(RowDataPacket & { public_id: Buffer })[]>(
+      `SELECT r.public_id
+       FROM draft_revisions r
+       INNER JOIN drafts d ON d.id = r.draft_id
+       WHERE d.public_id = ? AND d.archived_at IS NULL
+         AND r.revision_no = d.current_revision_no
+       LIMIT 1`,
+      [publicIdToBuffer(draftPublicId)],
+    )
+    return rows[0] ? this.getRevision(draftPublicId, bufferToPublicId(rows[0].public_id)) : null
+  }
 }

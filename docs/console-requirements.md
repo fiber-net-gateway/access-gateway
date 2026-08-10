@@ -5,6 +5,8 @@
   证据所需的少量 `access-server` 配套能力
 - 事实基线：当前仓库 `native/access-server` 实现及其 Java 兼容契约
 - 配套设计：[Access Gateway Console 详细设计](console-detailed-design.md)
+- 当前固定工作区与安全监听器增量设计：
+  [固定工作区、域名项目与安全监听器设计](fixed-workspace-and-secure-listener-design.md)
 
 ## 1. 文档目的
 
@@ -49,7 +51,7 @@ DDL。未在 `access-server` 中存在的能力会明确标记为“配套依赖
 
 ### 3.1 产品目标
 
-- 为多个隔离环境提供统一的项目 route 与 production gray 配置管理。
+- 为一个部署级固定工作区提供统一的域名项目 route 与 production gray 配置管理。
 - 使用结构化表单降低配置错误，同时允许安全导入已有 Nacos 配置。
 - 在写入 Nacos 前完成字段、跨资源和 native authoritative validation。
 - 建立可审计的草稿、release、发布、回读、回滚和实例激活证据链。
@@ -81,9 +83,10 @@ DDL。未在 `access-server` 中存在的能力会明确标记为“配套依赖
 
 ### 5.1 核心对象
 
-- **Environment**：一个隔离的 Nacos namespace/tenant、Data ID 契约、Naming group、
-  access-server 状态端点集合和凭据引用。
-- **Project**：项目标识及其当前草稿、历史 release、Host 和 route 配置。
+- **Environment/Workspace**：数据库内部保留的唯一隔离根，承载 Nacos namespace/tenant、
+  Data ID 契约、Naming group、access-server 状态端点集合和凭据引用；普通用户不创建或切换。
+- **Project**：以规范化 exact 域名为标识的项目及其当前草稿、历史 release、Host 和 route
+  配置。
 - **Draft Revision**：可编辑的配置版本。每次保存产生可追溯 revision，发布后内容不再
   原地修改。
 - **Release**：一次发布计划的不可变快照，包含项目列表、一个或多个项目 route、可选
@@ -133,10 +136,10 @@ Console 顶层导航建议为：
 4. **发布中心**：release 差异、发布计划、逐资源结果、回滚和审批。
 5. **实例与运行状态**：access-server 实例、配置版本、最近拒绝原因和全局指标。
 6. **审计日志**：配置和管理操作的不可变事件。
-7. **环境与权限**：Nacos、状态端点、凭据引用、成员和保护策略。
+7. **工作区与权限**：固定工作区的 Nacos、状态端点、凭据引用、成员和保护策略。
 
-所有页面必须持续显示当前环境。生产环境使用文字、图标和颜色组合进行区分，不能只依赖
-颜色。切换环境时应清空未提交请求和跨环境缓存，并对未保存草稿给出阻止式确认。
+所有页面必须持续显示固定工作区。工作区由部署 bootstrap 建立，Web 不提供创建、选择或
+切换环境入口。离开未保存草稿时仍需给出阻止式确认。
 
 ## 7. 功能需求
 
@@ -386,16 +389,16 @@ clamp。gray 是环境级资源，发布和回滚记录不能附着到任意单�
 API 统一位于 `/api`，使用显式 request/response schema。建议按以下资源组织，最终路径可在
 接口设计阶段细化：
 
-| 领域         | 最小 API 能力                                               |
-| ------------ | ----------------------------------------------------------- |
-| Session      | 登录状态、注销、当前用户和权限                              |
-| Environments | 列表、详情、连接测试、成员、保护策略、secret reference 更新 |
-| Projects     | 列表、导入、草稿 revision、Host/route 结构化模型、diff      |
-| Validation   | 控制面校验、native validation、wire 预览、依赖预检          |
-| Gray Rules   | 草稿、导入、模拟、diff                                      |
-| Releases     | 创建、详情、审批、发布、资源级重试、回滚                    |
-| Instances    | 列表、证据采集、项目版本、最近配置错误、指标摘要            |
-| Audit        | 过滤、游标分页和授权后的导出                                |
+| 领域       | 最小 API 能力                                                   |
+| ---------- | --------------------------------------------------------------- |
+| Session    | 登录状态、注销、当前用户和权限                                  |
+| Workspace  | 唯一工作区详情、连接测试、成员、保护策略、secret reference 更新 |
+| Projects   | 列表、导入、草稿 revision、Host/route 结构化模型、diff          |
+| Validation | 控制面校验、native validation、wire 预览、依赖预检              |
+| Gray Rules | 草稿、导入、模拟、diff                                          |
+| Releases   | 创建、详情、审批、发布、资源级重试、回滚                        |
+| Instances  | 列表、证据采集、项目版本、最近配置错误、指标摘要                |
+| Audit      | 过滤、游标分页和授权后的导出                                    |
 
 错误响应延续稳定 machine-readable code，并增加字段路径和 request ID：
 
@@ -471,7 +474,7 @@ API 在请求断开后不能遗失已经发生的外部写入结果。
 
 - 关键状态同时使用文字、图标和颜色；支持键盘操作、焦点管理和屏幕阅读器标签。
 - 导航和编辑器适配常用桌面分辨率；移动端至少支持只读状态和紧急发布查看。
-- 离开未保存草稿、切换环境、卸载项目、发布和回滚均有明确防误操作保护。
+- 离开未保存草稿、卸载项目、发布和回滚均有明确防误操作保护。
 - 首个版本以简体中文为主，文案和枚举不得硬编码在领域逻辑中，为后续国际化留出边界。
 
 ### 10.5 测试与运维

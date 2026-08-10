@@ -12,16 +12,17 @@ TypeScript across a React frontend and a Node.js backend.
 
 The repository is under active development in two first-class areas:
 
-- **Access Server** — the native runtime supports Nacos-driven project and route configuration,
+- **Access Server** — the native runtime supports HTTPS, HTTP/2, and HTTP/3 enabled by default,
+  PEM certificate configuration, Nacos-driven project and route configuration,
   Host/Path/condition matching, RESPONSE and PROXY execution, WebSocket tunneling, service
   discovery, gray routing, CAT tracing, Prometheus metrics, and structured access logs. Production
   script-corpus differential verification and final cutover gates are still in progress.
 - **Console** — the first MySQL-backed vertical slice is available: deterministic migrations,
-  development identity and environment RBAC, environment/project APIs, encrypted immutable draft
-  revisions, optimistic locking, audit events, and a React environment/project workspace. Release
-  and publication tables, the release state machine, publication conflict decisions, and a
-  fail-closed Native Validator subprocess adapter are present. OIDC, Nacos publication workers,
-  full route editors, and per-instance activation collection remain to be implemented.
+  development identity and fixed-workspace RBAC, domain project APIs, encrypted immutable route
+  revisions, optimistic locking, audit events, and a React domain/full-JSON route workspace.
+  Release and publication tables, the release state machine, publication conflict decisions, and
+  a fail-closed Native Validator subprocess adapter are present. OIDC, Nacos publication workers,
+  structured route forms, and per-instance activation collection remain to be implemented.
 
 The console therefore reports unavailable or unknown state where the supporting workflow does not
 exist. It does not fabricate publication or activation success.
@@ -139,8 +140,10 @@ is implemented.
 The implemented control-plane endpoints include:
 
 - `/api/health`, `/api/health/live`, `/api/health/ready`, and `/api/system/status`;
-- environment list/create/get and project list/create/get;
-- active project draft get/create, immutable revision save with `If-Match`, and revision retrieval.
+- fixed workspace retrieval and a one-time environment bootstrap endpoint;
+- domain project list/create/get;
+- active project draft get/create, current revision retrieval, immutable revision save with
+  `If-Match`, and revision retrieval.
 
 Draft model documents are envelope-encrypted with AES-256-GCM before MySQL storage. The local key
 configuration is intended for development only; production must use an external key provider.
@@ -157,8 +160,8 @@ npm run build
 ## Local Docker demo
 
 The repository includes a Docker Compose demo containing the combined React Console and Fastify
-API, MySQL 8.4, R-Nacos, and the native Access Server. Generate local-only random secrets and start
-the stack:
+API, MySQL 8.4, R-Nacos, and the native Access Server. Generate local-only random secrets and a
+self-signed demo certificate, then start the stack:
 
 ```bash
 npm run demo:init
@@ -177,12 +180,20 @@ one-shot migration/bootstrap containers.
 Once all services are ready:
 
 - Console: `http://localhost:8088`
-- Access Server demo: `curl -H 'Host: demo.local' http://localhost:16688/`
+- Access Server HTTPS/HTTP2 demo: `curl -k --http2 -H 'Host: demo.local' https://localhost:16688/`
 - Access Server metrics: `http://localhost:16689/metrics`
 - R-Nacos Console: `http://localhost:10848/rnacos/`
 - MySQL: `127.0.0.1:3307`
 
-R-Nacos Console credentials and database secrets are stored only in the ignored local `.env` file.
+R-Nacos Console credentials and database secrets are stored only in the ignored local `.env` file;
+the self-signed certificate is under the ignored `deploy/demo/certs/` directory. Access Server port
+16688 publishes both TCP (HTTPS/HTTP2) and UDP (HTTP3) on all WSL interfaces by default; the other
+demo ports remain loopback-only. WSL2 NAT normally forwards TCP, but not UDP, from Windows
+`localhost`. To verify HTTP3 from a Windows browser, obtain the WSL address with `hostname -I`, add
+`<WSL-IP> demo.local` temporarily to the Windows hosts file, and open
+`https://demo.local:16688/`. Set `ACCESS_SERVER_PUBLISHED_HOST=127.0.0.1` in `.env` when the gateway
+should only be reachable inside WSL. Browsers negotiate QUIC only after trusting the demo
+certificate; never trust or reuse this local self-signed certificate in production.
 The bootstrap writes directly to R-Nacos because the Console publication worker is not implemented
 yet; the UI continues to report publication and per-instance activation as unavailable or unknown.
 Use `npm run demo:ps`, `npm run demo:logs`, and `npm run demo:down` to operate the stack. Add
@@ -219,7 +230,8 @@ does not connect to Nacos or external services.
 
 ## Run Access Server
 
-Copy the native example configuration and set at least the Nacos address for your environment:
+Copy the native example configuration, mount a PEM certificate/private key, and set at least the
+Nacos address for your environment:
 
 ```bash
 cp native/access-server/access-server.env.example access-server.env
@@ -229,11 +241,14 @@ cp native/access-server/access-server.env.example access-server.env
 Without an argument, the process reads `access-server.env` from the current directory. The default
 listeners are:
 
-- gateway HTTP: `0.0.0.0:16688`;
+- gateway HTTPS: `0.0.0.0:16688/tcp` with HTTP/1.1 and HTTP/2 through ALPN;
+- gateway HTTP/3: `0.0.0.0:16688/udp`;
 - Prometheus metrics: `0.0.0.0:16689`.
 
-The configuration format is strict `KEY=VALUE`. Unknown or duplicate keys fail startup. Do not
-commit local environment files or credentials. See
+TLS and HTTP/3 are enabled by default. A missing certificate, mismatched private key, or failed
+TCP/UDP bind fails startup. Legacy plaintext HTTP requires both `ACCESS_SERVER_TLS_ENABLED=false`
+and `ACCESS_SERVER_HTTP3_ENABLED=false`. The configuration format is strict `KEY=VALUE`; unknown or
+duplicate keys fail startup. Do not commit local environment files, private keys, or credentials. See
 [`native/access-server/access-server.env.example`](native/access-server/access-server.env.example)
 for the full configuration surface.
 
@@ -256,6 +271,7 @@ compiled before immutable publication; invalid candidates retain the previous ac
 
 - [Console product requirements](docs/console-requirements.md)
 - [Console detailed design](docs/console-detailed-design.md)
+- [Fixed workspace and secure listener design](docs/fixed-workspace-and-secure-listener-design.md)
 - [Access Server guide](native/access-server/README.md)
 - [Compatibility contract](native/access-server/docs/compatibility-contract.md)
 - [Migration plan](native/access-server/docs/migration-plan.md)

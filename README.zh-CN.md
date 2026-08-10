@@ -11,13 +11,15 @@ Access Gateway 是由 C++23 数据面与 Web 管理控制台组成的高性能�
 
 本仓库同时持续开发两个一等组件：
 
-- **Access Server**：原生运行时已支持 Nacos 驱动的项目与路由配置、Host/Path/条件
+- **Access Server**：原生运行时已支持默认开启的 HTTPS、HTTP/2 与 HTTP/3、PEM 证书配置、
+  Nacos 驱动的项目与路由配置、Host/Path/条件
   匹配、RESPONSE 与 PROXY 执行、WebSocket 隧道、服务发现、灰度路由、CAT 链路追踪、
   Prometheus 指标和结构化访问日志。生产脚本语料差分验证与最终切流门槛仍在推进中。
-- **Console**：首个基于 MySQL 的纵向链路已经可用，包括确定性 migration、开发身份与环境
-  RBAC、环境/项目 API、加密的不可变草稿 revision、乐观锁、审计事件，以及 React 环境/项目
-  工作台。Release/发布表、Release 状态机、发布冲突判定和 fail-closed Native Validator
-  子进程适配器已经落地。OIDC、Nacos 发布 Worker、完整路由编辑器和实例级生效采集仍待实现。
+- **Console**：首个基于 MySQL 的纵向链路已经可用，包括确定性 migration、开发身份与固定
+  工作区 RBAC、域名项目 API、加密的不可变路由草稿 revision、乐观锁、审计事件，以及 React
+  域名/完整 JSON 路由工作台。Release/发布表、Release 状态机、发布冲突判定和 fail-closed
+  Native Validator 子进程适配器已经落地。OIDC、Nacos 发布 Worker、结构化路由表单和实例级
+  生效采集仍待实现。
 
 因此，对于尚无配套工作流的状态，控制台会明确显示“不可用”或“未知”，不会伪造发布或
 生效成功。
@@ -130,8 +132,10 @@ Migration 使用 checksum 防篡改，并通过 MySQL advisory lock 串行执行
 目前实现的控制面接口包括：
 
 - `/api/health`、`/api/health/live`、`/api/health/ready` 和 `/api/system/status`；
-- 环境的列表/创建/详情，以及项目的列表/创建/详情；
-- 项目活动草稿的获取/创建、带 `If-Match` 的不可变 revision 保存与 revision 获取。
+- 固定工作区获取，以及仅供部署 bootstrap 使用的一次性环境创建接口；
+- 域名项目的列表/创建/详情；
+- 项目活动草稿的获取/创建、当前 revision 获取、带 `If-Match` 的不可变 revision 保存与
+  revision 获取。
 
 草稿模型在写入 MySQL 前使用 AES-256-GCM 信封加密。本地密钥配置只用于开发环境；生产
 环境应接入外部密钥服务。
@@ -148,7 +152,8 @@ npm run build
 ## 本机 Docker 演示
 
 仓库提供了完整的 Docker Compose 演示环境，包含合并部署的 React Console 与 Fastify API、
-MySQL 8.4、R-Nacos 和原生 Access Server。先生成仅保存在本机的随机 Secret，再启动全部服务：
+MySQL 8.4、R-Nacos 和原生 Access Server。先生成仅保存在本机的随机 Secret 和自签名演示
+证书，再启动全部服务：
 
 ```bash
 npm run demo:init
@@ -165,13 +170,21 @@ Fastify 在同一个 Console 容器中同时提供 `/api/*` 接口和 React 单�
 全部服务就绪后可访问：
 
 - Console：`http://localhost:8088`
-- Access Server 演示：`curl -H 'Host: demo.local' http://localhost:16688/`
+- Access Server HTTPS/HTTP2 演示：`curl -k --http2 -H 'Host: demo.local' https://localhost:16688/`
 - Access Server 指标：`http://localhost:16689/metrics`
 - R-Nacos Console：`http://localhost:10848/rnacos/`
 - MySQL：`127.0.0.1:3307`
 
-R-Nacos Console 凭据和数据库 Secret 只保存在 Git 已忽略的本机 `.env` 文件中。由于 Console
-发布 Worker 尚未实现，bootstrap 会直接写入 R-Nacos；UI 仍会如实把发布与实例生效状态显示为
+R-Nacos Console 凭据和数据库 Secret 只保存在 Git 已忽略的本机 `.env` 文件中，自签名证书
+位于同样被忽略的 `deploy/demo/certs/`。Access Server 的 16688 端口同时发布 TCP（HTTPS、
+HTTP/2）和 UDP（HTTP/3），并默认绑定全部 WSL 接口；其他演示端口仍只绑定环回地址。
+WSL2 的 NAT 模式通常只为 Windows `localhost` 自动转发 TCP。要从 Windows 浏览器验证
+HTTP/3，可在 WSL 运行 `hostname -I` 取得 WSL 地址，在 Windows hosts 文件中临时加入
+`<WSL-IP> demo.local`，然后访问 `https://demo.local:16688/`。如只需在 WSL 内访问，可在
+`.env` 设置 `ACCESS_SERVER_PUBLISHED_HOST=127.0.0.1` 收紧监听范围。
+浏览器只有在信任该演示证书时才会协商 QUIC；不要在生产环境信任或复用这个本机自签名证书。
+由于 Console 发布 Worker 尚未实现，bootstrap 会直接写入 R-Nacos；UI 仍会如实把发布与实例
+生效状态显示为
 “不可用”或“未知”。可使用 `npm run demo:ps`、`npm run demo:logs` 和 `npm run demo:down`
 管理演示环境。只有在确定要删除全部演示数据时，才为 `docker compose down` 添加 `--volumes`。
 
@@ -205,7 +218,7 @@ stdout 返回一条 JSON 结果；校验直接复用原生 codec、脚本编译�
 
 ## 运行 Access Server
 
-复制原生示例配置，并至少按环境修改 Nacos 地址：
+复制原生示例配置，挂载 PEM 证书/私钥，并至少按环境修改 Nacos 地址：
 
 ```bash
 cp native/access-server/access-server.env.example access-server.env
@@ -214,11 +227,14 @@ cp native/access-server/access-server.env.example access-server.env
 
 未传参数时，进程读取当前目录下的 `access-server.env`。默认监听地址为：
 
-- 网关 HTTP：`0.0.0.0:16688`；
+- 网关 HTTPS：`0.0.0.0:16688/tcp`，通过 ALPN 支持 HTTP/1.1 与 HTTP/2；
+- 网关 HTTP/3：`0.0.0.0:16688/udp`；
 - Prometheus 指标：`0.0.0.0:16689`。
 
-配置文件采用严格的 `KEY=VALUE` 格式，未知键和重复键都会导致启动失败。不要提交本地环境
-文件或凭据。全部配置项参见
+TLS 和 HTTP/3 默认开启；证书缺失、私钥不匹配或 TCP/UDP 任一绑定失败都会使启动失败。旧的
+明文 HTTP 部署必须同时显式设置 `ACCESS_SERVER_TLS_ENABLED=false` 和
+`ACCESS_SERVER_HTTP3_ENABLED=false`。配置文件采用严格的 `KEY=VALUE` 格式，未知键和重复键
+都会导致启动失败。不要提交本地环境文件、证书私钥或凭据。全部配置项参见
 [`native/access-server/access-server.env.example`](native/access-server/access-server.env.example)。
 
 ## Nacos 配置契约
@@ -238,6 +254,7 @@ cp native/access-server/access-server.env.example access-server.env
 
 - [Console 产品需求](docs/console-requirements.md)
 - [Console 详细设计](docs/console-detailed-design.md)
+- [固定工作区与安全监听器设计](docs/fixed-workspace-and-secure-listener-design.md)
 - [Access Server 指南](native/access-server/README.md)
 - [兼容性契约](native/access-server/docs/compatibility-contract.md)
 - [迁移计划](native/access-server/docs/migration-plan.md)

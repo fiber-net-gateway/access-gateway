@@ -42,7 +42,7 @@ std::string_view access_server_runtime_stage_name(AccessServerRuntimeErrorCode c
         case AccessServerRuntimeErrorCode::InitialConfigTimeout:
             return "wait for initial project list";
         case AccessServerRuntimeErrorCode::Bind:
-            return "bind HTTP listener";
+            return "bind gateway listener";
         case AccessServerRuntimeErrorCode::BindMetrics:
             return "bind Prometheus listener";
     }
@@ -98,10 +98,11 @@ AccessServerRuntime::create(event::EventLoop &accept_loop, event::EventLoop &nac
     }
 
     auto runtime = std::unique_ptr<AccessServerRuntime>(new (std::nothrow) AccessServerRuntime(
-            accept_loop, nacos_loop, cat_loop, http_workers, config.listen_address(), config.metrics_listen_address(),
-            listen_options, config.initial_config_timeout(), config.default_max_request_body_size(), config.test_mode(),
-            config.watcher_options(), config.gray_watcher_options(), config.service_discovery_options(),
-            std::move(cat_client), std::move(*client), std::move(*config_service), std::move(*naming_service)));
+            accept_loop, nacos_loop, cat_loop, http_workers, config.listen_address(), config.http_server_options(),
+            config.metrics_listen_address(), listen_options, config.initial_config_timeout(),
+            config.default_max_request_body_size(), config.test_mode(), config.watcher_options(),
+            config.gray_watcher_options(), config.service_discovery_options(), std::move(cat_client),
+            std::move(*client), std::move(*config_service), std::move(*naming_service)));
     if (!runtime) {
         return std::unexpected(AccessServerRuntimeError{
                 .code = AccessServerRuntimeErrorCode::AllocateRuntime,
@@ -114,11 +115,12 @@ AccessServerRuntime::create(event::EventLoop &accept_loop, event::EventLoop &nac
 AccessServerRuntime::AccessServerRuntime(
         event::EventLoop &accept_loop, event::EventLoop &nacos_loop, event::EventLoop &cat_loop,
         event::EventLoopGroup &http_workers, net::SocketAddress listen_address,
-        net::SocketAddress metrics_listen_address, net::ListenOptions listen_options,
-        std::chrono::milliseconds initial_config_timeout, std::size_t default_max_request_body_size, bool test_mode,
-        AccessConfigWatcherOptions watcher_options, GrayConfigWatcherOptions gray_options,
-        AccessServiceDiscoveryOptions service_discovery_options, std::unique_ptr<cat::CatClient> cat_client,
-        std::unique_ptr<nacos::NacosClient> nacos_client, std::unique_ptr<nacos::ConfigService> config_service,
+        http::HttpServerOptions http_server_options, net::SocketAddress metrics_listen_address,
+        net::ListenOptions listen_options, std::chrono::milliseconds initial_config_timeout,
+        std::size_t default_max_request_body_size, bool test_mode, AccessConfigWatcherOptions watcher_options,
+        GrayConfigWatcherOptions gray_options, AccessServiceDiscoveryOptions service_discovery_options,
+        std::unique_ptr<cat::CatClient> cat_client, std::unique_ptr<nacos::NacosClient> nacos_client,
+        std::unique_ptr<nacos::ConfigService> config_service,
         std::unique_ptr<nacos::NamingService> naming_service) noexcept :
     accept_loop_(&accept_loop), nacos_loop_(&nacos_loop), cat_loop_(&cat_loop),
     listen_address_(std::move(listen_address)), metrics_listen_address_(std::move(metrics_listen_address)),
@@ -137,6 +139,10 @@ AccessServerRuntime::AccessServerRuntime(
                     .script_adapter = script_runtime_.request_adapter(),
                     .cat_client = cat_client_.get(),
                     .test_mode = test_mode,
+                    .http_server = http_server_options,
+                    .http3_alt_svc = http_server_options.http3.enabled
+                                             ? "h3=\":" + std::to_string(listen_address_.port()) + "\"; ma=86400"
+                                             : std::string{},
             }) {
     FIBER_ASSERT(accept_loop_ != nacos_loop_);
     FIBER_ASSERT(accept_loop_ != cat_loop_);

@@ -8,6 +8,7 @@
 #include "RouteConfigStore.h"
 
 #include <cstddef>
+#include <string>
 
 #include <fiber/async/Task.h>
 #include <fiber/async/WaitGroup.h>
@@ -17,6 +18,7 @@
 #include <fiber/event/EventLoop.h>
 #include <fiber/event/EventLoopGroup.h>
 #include <fiber/http/Http1Server.h>
+#include <fiber/http/HttpServer.h>
 #include <fiber/http/StealableHttp1ConnectionPoolSet.h>
 #include <fiber/net/SocketAddress.h>
 #include <fiber/net/TcpListener.h>
@@ -33,6 +35,8 @@ struct AccessServerOptions {
     ProxyExecutorOptions executor;
     cat::CatClient *cat_client = nullptr;
     bool test_mode = false;
+    http::HttpServerOptions http_server;
+    std::string http3_alt_svc;
 };
 
 class AccessServer final : public common::NonCopyable, public common::NonMovable {
@@ -66,11 +70,12 @@ private:
     AccessRequestHandler handler_;
     AccessServerMetrics metrics_;
     cat::CatClient *cat_client_ = nullptr;
-    http::Http1Server server_;
+    http::HttpServer server_;
     http::Http1Server metrics_server_;
     async::WaitGroup cat_detach_tasks_;
     bool initialized_ = false;
     bool metrics_bound_ = false;
+    std::string http3_alt_svc_;
 };
 
 } // namespace fiber::access_server

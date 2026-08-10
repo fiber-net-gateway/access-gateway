@@ -142,9 +142,10 @@ cp native/access-server/access-server.env.example access-server.env
 
 不传参数时默认读取当前目录的 `access-server.env`。`--help` 只打印命令行用法。
 
-Java 兼容的进程默认值是：
+进程默认值与安全监听器约束是：
 
-- HTTP 监听 `0.0.0.0:16688`；
+- HTTPS 监听 `0.0.0.0:16688/tcp`，ALPN 提供 HTTP/2 与 HTTP/1.1；
+- HTTP/3 在相同地址和端口监听 UDP，并通过 `Alt-Svc` 发布；
 - Prometheus 监听 `0.0.0.0:16689`；
 - HTTP worker 数在启动时根据进程 CPU affinity 和 cgroup v1/v2 CPU quota 自动确定；
 - 默认 request body 上限 400 MiB；
@@ -157,7 +158,9 @@ Java 兼容的进程默认值是：
 
 完整键和值示例见 [`access-server.env.example`](access-server.env.example)。配置文件采用
 严格的 `KEY=VALUE` 行格式，空行和以 `#` 开头的注释会忽略；重复键和未知键会使进程
-启动失败。`NACOS_SERVER_ADDRESSES` 当前要求逗号分隔的 IP literal。
+启动失败。TLS 与 HTTP/3 默认开启，必须提供 PEM 证书和私钥；证书加载、密钥匹配或 TCP/UDP
+绑定失败时进程 fail closed。兼容明文 HTTP 时必须同时显式关闭 TLS 与 HTTP/3。
+`NACOS_SERVER_ADDRESSES` 当前要求逗号分隔的 IP literal。
 CAT 默认关闭；任一 `CAT_*` 设置非空后必须给出完整 app key、hostname、IP，以及
 至少一个 router 或 bootstrap collector。CAT 不可用会在启动阶段 fail closed，不会
 静默退化为无 trace 的生产实例。

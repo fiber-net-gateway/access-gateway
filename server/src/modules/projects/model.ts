@@ -1,7 +1,7 @@
 export interface ProjectView {
   id: string
   environmentId: string
-  name: string
+  domain: string
   status: 'active' | 'archived'
   lockVersion: string
   draft: {
@@ -17,7 +17,7 @@ export interface ProjectView {
 }
 
 export interface CreateProjectInput {
-  name: string
+  domain: string
 }
 
 export interface ProjectListResult {

@@ -15,6 +15,7 @@ third_party/fiber-gateway-cpp/build
 third_party/fiber-gateway-cpp/build-*
 
 .env
+deploy/demo/certs
 *.env
 *.log
 coverage

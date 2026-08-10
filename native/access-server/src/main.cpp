@@ -217,8 +217,11 @@ int main(int argc, char **argv) {
             co_return;
         }
         const fiber::net::SocketAddress metrics_address(config.metrics_listen_address().ip(), *metrics_port);
-        std::cout << "access-server listening on http://" << address.to_string() << ", metrics=http://"
-                  << metrics_address.to_string() << ", http workers=" << http_workers.size()
+        const bool tls_enabled = config.http_server_options().tls.enabled;
+        const bool http3_enabled = config.http_server_options().http3.enabled;
+        std::cout << "access-server listening on " << (tls_enabled ? "https://" : "http://") << address.to_string()
+                  << ", protocols=" << (tls_enabled ? "http/1.1,h2" : "http/1.1") << (http3_enabled ? ",h3" : "")
+                  << ", metrics=http://" << metrics_address.to_string() << ", http workers=" << http_workers.size()
                   << ", nacos servers=" << config.nacos_config().server_ips().size() << std::endl;
         LOG(LOG_LIFECYCLE, INFO) << "server listening address=" << fiber::log::quoted(address.to_string())
                                  << " metrics_address=" << fiber::log::quoted(metrics_address.to_string())
@@ -228,7 +231,8 @@ int main(int argc, char **argv) {
                                  << " cpu_concurrency_source=" << fiber::util::cpu_concurrency_source_name(cpu.source)
                                  << " cgroup_probe_failed=" << cpu.cgroup_probe_failed
                                  << " nacos_servers=" << config.nacos_config().server_ips().size()
-                                 << " cat_enabled=" << config.cat_config().has_value();
+                                 << " cat_enabled=" << config.cat_config().has_value() << " tls_enabled=" << tls_enabled
+                                 << " http2_enabled=" << tls_enabled << " http3_enabled=" << http3_enabled;
 
         auto signal = co_await fiber::async::when_any([]() { return fiber::async::wait_signal(SIGINT); },
                                                       []() { return fiber::async::wait_signal(SIGTERM); });

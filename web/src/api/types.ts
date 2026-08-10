@@ -44,7 +44,7 @@ export interface EnvironmentView {
 export interface ProjectView {
   id: string
   environmentId: string
-  name: string
+  domain: string
   status: 'active' | 'archived'
   draft: {
     id: string
@@ -56,9 +56,20 @@ export interface ProjectView {
   activationStatus: 'unknown'
 }
 
-export interface CreateEnvironmentInput {
-  code: string
-  name: string
-  tier: EnvironmentView['tier']
-  nacosEndpoint: string
+export interface ProjectRouteModel {
+  schemaVersion: 1
+  kind: 'project_route'
+  hosts: readonly unknown[]
+  routes: readonly unknown[]
+}
+
+export interface DraftRevisionView {
+  id: string
+  draftId: string
+  revision: number
+  model: ProjectRouteModel
+  modelSha256: string
+  validationState: 'not_run' | 'pending' | 'valid' | 'invalid'
+  changeSummary: string
+  createdAt: string
 }

@@ -34,8 +34,8 @@ async function waitForConsole() {
 await waitForConsole()
 
 const environmentList = await request('/api/environments')
-let environment = environmentList.items.find((item) => item.code === 'demo')
-if (!environment) {
+let environment
+if (environmentList.items.length === 0) {
   environment = await request('/api/environments', {
     method: 'POST',
     body: JSON.stringify({
@@ -47,14 +47,16 @@ if (!environment) {
       zone: 'local-demo',
     }),
   })
+} else {
+  environment = await request('/api/workspace')
 }
 
 const projectList = await request(`/api/environments/${environment.id}/projects`)
-let project = projectList.items.find((item) => item.name === 'demo')
+let project = projectList.items.find((item) => item.domain === 'demo.local')
 if (!project) {
   const created = await request(`/api/environments/${environment.id}/projects`, {
     method: 'POST',
-    body: JSON.stringify({ name: 'demo' }),
+    body: JSON.stringify({ domain: 'demo.local' }),
   })
   project = await request(`/api/projects/${created.id}`)
 }

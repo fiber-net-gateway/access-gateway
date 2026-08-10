@@ -54,7 +54,7 @@ const capabilityDataIdsSchema = {
   },
 } as const
 
-const environmentResponseSchema = {
+export const environmentResponseSchema = {
   type: 'object',
   additionalProperties: false,
   required: [
@@ -102,6 +102,12 @@ export function registerEnvironmentRoutes(
   auth: AuthService,
   environments: EnvironmentService,
 ): void {
+  app.get(
+    '/api/workspace',
+    { schema: { response: { 200: environmentResponseSchema } } },
+    async () => environments.getWorkspace(await requireActor(auth)),
+  )
+
   app.get(
     '/api/environments',
     {

@@ -45,12 +45,12 @@ async function readConfig(dataId, group) {
 }
 
 await waitForRnacos()
-await publish('ploto.unified-access.projects', 'ACCESS-SERVER', 'demo')
-await publish('ploto.unified-access.route.demo', 'ACCESS-SERVER', route, 'json')
+await publish('ploto.unified-access.projects', 'ACCESS-SERVER', 'demo.local')
+await publish('ploto.unified-access.route.demo.local', 'ACCESS-SERVER', route, 'json')
 
-if ((await readConfig('ploto.unified-access.projects', 'ACCESS-SERVER')) !== 'demo') {
+if ((await readConfig('ploto.unified-access.projects', 'ACCESS-SERVER')) !== 'demo.local') {
   throw new Error('R-Nacos project-list readback did not match')
 }
-await readConfig('ploto.unified-access.route.demo', 'ACCESS-SERVER')
+await readConfig('ploto.unified-access.route.demo.local', 'ACCESS-SERVER')
 
 console.log('R-Nacos demo configuration is ready')

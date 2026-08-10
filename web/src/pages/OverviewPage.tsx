@@ -2,7 +2,6 @@ import { useState, type FormEvent } from 'react'
 
 import type {
   ApiConnectionState,
-  CreateEnvironmentInput,
   EnvironmentView,
   HealthResponse,
   ProjectView,
@@ -13,13 +12,17 @@ interface OverviewPageProps {
   apiState: ApiConnectionState
   health: HealthResponse | null
   systemStatus: SystemStatusResponse | null
-  environments: readonly EnvironmentView[]
-  selectedEnvironmentId: string | null
+  workspace: EnvironmentView | null
   projects: readonly ProjectView[]
+  selectedProjectId: string | null
+  routeDocument: string
+  routeLoading: boolean
+  hasUnsavedChanges: boolean
   errorMessage: string | null
-  onSelectEnvironment(id: string): void
-  onCreateEnvironment(input: CreateEnvironmentInput): Promise<void>
-  onCreateProject(name: string): Promise<void>
+  onSelectProject(id: string): void
+  onCreateProject(domain: string): Promise<void>
+  onRouteDocumentChange(value: string): void
+  onSaveRoutes(): Promise<void>
 }
 
 interface SummaryCard {
@@ -56,24 +59,22 @@ export function OverviewPage(props: OverviewPageProps) {
     apiState,
     health,
     systemStatus,
-    environments,
-    selectedEnvironmentId,
+    workspace,
     projects,
+    selectedProjectId,
+    routeDocument,
+    routeLoading,
+    hasUnsavedChanges,
     errorMessage,
-    onSelectEnvironment,
-    onCreateEnvironment,
+    onSelectProject,
     onCreateProject,
+    onRouteDocumentChange,
+    onSaveRoutes,
   } = props
-  const [environmentForm, setEnvironmentForm] = useState<CreateEnvironmentInput>({
-    code: '',
-    name: '',
-    tier: 'local',
-    nacosEndpoint: 'http://127.0.0.1:8848',
-  })
-  const [projectName, setProjectName] = useState('')
+  const [domain, setDomain] = useState('')
   const [actionError, setActionError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
-  const selectedEnvironment = environments.find((item) => item.id === selectedEnvironmentId)
+  const selectedProject = projects.find((item) => item.id === selectedProjectId) ?? null
 
   const cards: SummaryCard[] = [
     {
@@ -86,29 +87,27 @@ export function OverviewPage(props: OverviewPageProps) {
     capabilityCard('Native Validator', systemStatus?.dependencies.nativeValidator),
   ]
 
-  const submitEnvironment = async (event: FormEvent): Promise<void> => {
-    event.preventDefault()
-    setSaving(true)
-    setActionError(null)
-    try {
-      await onCreateEnvironment(environmentForm)
-      setEnvironmentForm((current) => ({ ...current, code: '', name: '' }))
-    } catch (error) {
-      setActionError(error instanceof Error ? error.message : '创建环境失败')
-    } finally {
-      setSaving(false)
-    }
-  }
-
   const submitProject = async (event: FormEvent): Promise<void> => {
     event.preventDefault()
     setSaving(true)
     setActionError(null)
     try {
-      await onCreateProject(projectName)
-      setProjectName('')
+      await onCreateProject(domain)
+      setDomain('')
     } catch (error) {
-      setActionError(error instanceof Error ? error.message : '创建项目失败')
+      setActionError(error instanceof Error ? error.message : '创建域名失败')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const saveRoutes = async (): Promise<void> => {
+    setSaving(true)
+    setActionError(null)
+    try {
+      await onSaveRoutes()
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : '保存路由失败')
     } finally {
       setSaving(false)
     }
@@ -119,14 +118,14 @@ export function OverviewPage(props: OverviewPageProps) {
       <header className="page-header">
         <div>
           <p className="eyebrow">ACCESS GATEWAY / CONTROL PLANE</p>
-          <h1>环境与项目</h1>
+          <h1>域名与路由</h1>
           <p className="page-description">
-            管理环境隔离、项目路由草稿和发布前能力。数据库、校验器和 Worker 的状态来自后端真实探测。
+            当前部署使用一个固定工作区。创建域名项目后，在同一页面维护完整的 Host 与 Route 草稿。
           </p>
         </div>
         <div className="environment-badge">
-          <span>环境</span>
-          <strong>{selectedEnvironment?.code.toUpperCase() ?? 'NONE'}</strong>
+          <span>固定工作区</span>
+          <strong>{workspace?.code.toUpperCase() ?? 'LOADING'}</strong>
         </div>
       </header>
 
@@ -153,119 +152,114 @@ export function OverviewPage(props: OverviewPageProps) {
         <article className="workspace-panel">
           <div className="panel-heading">
             <div>
-              <p className="eyebrow">ENVIRONMENTS</p>
-              <h2>环境</h2>
+              <p className="eyebrow">FIXED WORKSPACE</p>
+              <h2>{workspace?.name ?? '工作区加载中'}</h2>
             </div>
-            <span>{environments.length}</span>
+            <span>1</span>
           </div>
-          <div className="entity-list">
-            {environments.map((environment) => (
-              <button
-                className={
-                  environment.id === selectedEnvironmentId
-                    ? 'entity-row entity-row-active'
-                    : 'entity-row'
-                }
-                key={environment.id}
-                onClick={() => onSelectEnvironment(environment.id)}
-                type="button"
-              >
-                <span>
-                  <strong>{environment.name}</strong>
-                  <small>{environment.nacos.endpoint}</small>
-                </span>
-                <code>{environment.code}</code>
-              </button>
-            ))}
-            {environments.length === 0 ? <p className="empty-state">尚未创建环境。</p> : null}
-          </div>
-          <form className="compact-form" onSubmit={(event) => void submitEnvironment(event)}>
-            <h3>新建环境</h3>
-            <div className="form-row">
-              <label>
-                Code
-                <input
-                  required
-                  value={environmentForm.code}
-                  onChange={(event) =>
-                    setEnvironmentForm((current) => ({ ...current, code: event.target.value }))
-                  }
-                />
-              </label>
-              <label>
-                名称
-                <input
-                  required
-                  value={environmentForm.name}
-                  onChange={(event) =>
-                    setEnvironmentForm((current) => ({ ...current, name: event.target.value }))
-                  }
-                />
-              </label>
+          <dl className="workspace-details">
+            <div>
+              <dt>Nacos</dt>
+              <dd>{workspace?.nacos.endpoint ?? '—'}</dd>
             </div>
-            <label>
-              Nacos Endpoint
-              <input
-                required
-                type="url"
-                value={environmentForm.nacosEndpoint}
-                onChange={(event) =>
-                  setEnvironmentForm((current) => ({
-                    ...current,
-                    nacosEndpoint: event.target.value,
-                  }))
-                }
-              />
-            </label>
-            <button
-              disabled={saving || systemStatus?.dependencies.database.status !== 'ready'}
-              type="submit"
-            >
-              创建环境
-            </button>
-          </form>
+            <div>
+              <dt>Namespace</dt>
+              <dd>{workspace?.nacos.namespace || 'public'}</dd>
+            </div>
+            <div>
+              <dt>Zone</dt>
+              <dd>{workspace?.code ?? '—'}</dd>
+            </div>
+          </dl>
+          <p className="panel-note">工作区由部署初始化，不在 Console 中创建或切换。</p>
         </article>
 
         <article className="workspace-panel">
           <div className="panel-heading">
             <div>
-              <p className="eyebrow">PROJECT ROUTES</p>
-              <h2>{selectedEnvironment?.name ?? '项目'}</h2>
+              <p className="eyebrow">DOMAIN PROJECTS</p>
+              <h2>域名项目</h2>
             </div>
             <span>{projects.length}</span>
           </div>
           <div className="entity-list">
             {projects.map((project) => (
-              <div className="entity-row" key={project.id}>
+              <button
+                className={
+                  project.id === selectedProjectId ? 'entity-row entity-row-active' : 'entity-row'
+                }
+                key={project.id}
+                onClick={() => onSelectProject(project.id)}
+                type="button"
+              >
                 <span>
-                  <strong>{project.name}</strong>
+                  <strong>{project.domain}</strong>
                   <small>
                     {project.draft
                       ? `草稿 r${project.draft.revision} · ${project.draft.state}`
                       : '尚无活动草稿'}
                   </small>
                 </span>
-                <span className="status-chip status-chip-unknown">激活未知</span>
-              </div>
+                <span className="status-chip status-chip-unknown">未发布</span>
+              </button>
             ))}
-            {selectedEnvironmentId && projects.length === 0 ? (
-              <p className="empty-state">这个环境还没有项目。</p>
-            ) : null}
+            {projects.length === 0 ? <p className="empty-state">还没有域名项目。</p> : null}
           </div>
           <form className="compact-form" onSubmit={(event) => void submitProject(event)}>
-            <h3>新建项目</h3>
+            <h3>添加域名</h3>
             <label>
-              项目名
+              域名
               <input
+                autoComplete="off"
+                placeholder="api.example.com"
                 required
-                value={projectName}
-                onChange={(event) => setProjectName(event.target.value)}
+                value={domain}
+                onChange={(event) => setDomain(event.target.value)}
               />
             </label>
-            <button disabled={saving || !selectedEnvironmentId} type="submit">
-              创建项目
+            <button disabled={saving || !workspace} type="submit">
+              创建域名项目
             </button>
           </form>
+        </article>
+
+        <article className="workspace-panel route-editor-panel">
+          <div className="panel-heading">
+            <div>
+              <p className="eyebrow">PROJECT ROUTE DRAFT</p>
+              <h2>{selectedProject?.domain ?? '选择域名后配置路由'}</h2>
+            </div>
+            <span>{selectedProject?.draft ? `r${selectedProject.draft.revision}` : '—'}</span>
+          </div>
+          <p className="panel-note">
+            编辑完整 project_route JSON。保存只创建 MySQL 草稿修订，不表示已经发布到 R-Nacos。
+          </p>
+          <textarea
+            aria-label="路由 JSON"
+            className="route-editor"
+            disabled={!selectedProject || routeLoading || saving}
+            onChange={(event) => onRouteDocumentChange(event.target.value)}
+            spellCheck={false}
+            value={routeLoading ? '正在加载路由草稿…' : routeDocument}
+          />
+          <div className="route-editor-actions">
+            <span>
+              支持 RESPONSE、PROXY、condition、rewrite、headers、CIDR 与 body limit。
+              <span
+                aria-live="polite"
+                className={`status-chip status-chip-${hasUnsavedChanges ? 'pending' : 'ready'}`}
+              >
+                {hasUnsavedChanges ? '有未保存修改' : '草稿已保存'}
+              </span>
+            </span>
+            <button
+              disabled={!selectedProject?.draft || routeLoading || saving}
+              onClick={() => void saveRoutes()}
+              type="button"
+            >
+              保存草稿修订
+            </button>
+          </div>
         </article>
       </section>
     </div>

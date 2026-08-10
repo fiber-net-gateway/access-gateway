@@ -1,7 +1,8 @@
 import type {
-  CreateEnvironmentInput,
+  DraftRevisionView,
   EnvironmentView,
   HealthResponse,
+  ProjectRouteModel,
   ProjectView,
   SystemStatusResponse,
 } from './types'
@@ -54,8 +55,30 @@ function isProject(value: unknown): value is ProjectView {
     isRecord(value) &&
     typeof value.id === 'string' &&
     typeof value.environmentId === 'string' &&
-    typeof value.name === 'string' &&
+    typeof value.domain === 'string' &&
     typeof value.status === 'string'
+  )
+}
+
+function isProjectRouteModel(value: unknown): value is ProjectRouteModel {
+  return (
+    isRecord(value) &&
+    value.schemaVersion === 1 &&
+    value.kind === 'project_route' &&
+    Array.isArray(value.hosts) &&
+    Array.isArray(value.routes)
+  )
+}
+
+function isDraftRevision(value: unknown): value is DraftRevisionView {
+  return (
+    isRecord(value) &&
+    typeof value.id === 'string' &&
+    typeof value.draftId === 'string' &&
+    typeof value.revision === 'number' &&
+    isProjectRouteModel(value.model) &&
+    typeof value.modelSha256 === 'string' &&
+    typeof value.validationState === 'string'
   )
 }
 
@@ -91,26 +114,8 @@ export async function fetchSystemStatus(signal?: AbortSignal): Promise<SystemSta
   return requestJson('/api/system/status', { signal }, isSystemStatus)
 }
 
-export async function fetchEnvironments(signal?: AbortSignal): Promise<readonly EnvironmentView[]> {
-  const response = await requestJson(
-    '/api/environments',
-    { signal },
-    (value): value is { items: EnvironmentView[] } =>
-      isRecord(value) && Array.isArray(value.items) && value.items.every(isEnvironment),
-  )
-  return response.items
-}
-
-export async function createEnvironment(input: CreateEnvironmentInput): Promise<EnvironmentView> {
-  return requestJson(
-    '/api/environments',
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(input),
-    },
-    isEnvironment,
-  )
+export async function fetchWorkspace(signal?: AbortSignal): Promise<EnvironmentView> {
+  return requestJson('/api/workspace', { signal }, isEnvironment)
 }
 
 export async function fetchProjects(
@@ -126,14 +131,51 @@ export async function fetchProjects(
   return response.items
 }
 
-export async function createProject(environmentId: string, name: string): Promise<{ id: string }> {
+export async function createProject(
+  environmentId: string,
+  domain: string,
+): Promise<{ id: string }> {
   return requestJson(
     `/api/environments/${encodeURIComponent(environmentId)}/projects`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name }),
+      body: JSON.stringify({ domain }),
     },
     (value): value is { id: string } => isRecord(value) && typeof value.id === 'string',
+  )
+}
+
+export async function fetchCurrentDraftRevision(
+  draftId: string,
+  signal?: AbortSignal,
+): Promise<DraftRevisionView | null> {
+  const response = await fetch(`/api/drafts/${encodeURIComponent(draftId)}/current-revision`, {
+    signal,
+    headers: { Accept: 'application/json' },
+  })
+  if (response.status === 404) return null
+  const body: unknown = await response.json().catch(() => null)
+  if (!response.ok) throw new Error(apiErrorMessage(body, response.status))
+  if (!isDraftRevision(body)) throw new Error('Console API returned an invalid draft revision')
+  return body
+}
+
+export async function saveDraftRevision(
+  draftId: string,
+  lockVersion: string,
+  model: ProjectRouteModel,
+): Promise<DraftRevisionView> {
+  return requestJson(
+    `/api/drafts/${encodeURIComponent(draftId)}/revisions`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'If-Match': `"${lockVersion}"`,
+      },
+      body: JSON.stringify({ changeSummary: 'Update routes from Console', model }),
+    },
+    isDraftRevision,
   )
 }

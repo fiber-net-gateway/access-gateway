@@ -105,6 +105,20 @@ export class EnvironmentRepository {
     return rows.map(toView)
   }
 
+  async findWorkspace(actor: Actor): Promise<EnvironmentView | null> {
+    const [rows] = actor.platformAdmin
+      ? await this.#pool.execute<EnvironmentRow[]>(`${selectEnvironment} ORDER BY e.id LIMIT 1`)
+      : await this.#pool.execute<EnvironmentRow[]>(
+          `${selectEnvironment}
+           INNER JOIN environment_memberships m ON m.environment_id = e.id
+           WHERE m.user_id = ?
+           ORDER BY e.id
+           LIMIT 1`,
+          [actor.internalId],
+        )
+    return rows[0] ? toView(rows[0]) : null
+  }
+
   async findAccessibleByPublicId(actor: Actor, publicId: string): Promise<EnvironmentView | null> {
     const [rows] = actor.platformAdmin
       ? await this.#pool.execute<EnvironmentRow[]>(`${selectEnvironment} WHERE e.public_id = ?`, [
@@ -145,6 +159,15 @@ export class EnvironmentRepository {
       await withTransaction(
         this.#pool,
         async (transaction) => {
+          const [existing] = await transaction.execute<(RowDataPacket & { id: string })[]>(
+            'SELECT id FROM environments ORDER BY id LIMIT 1 FOR UPDATE',
+          )
+          if (existing.length !== 0) {
+            throw conflict(
+              'FIXED_WORKSPACE_EXISTS',
+              'This deployment already has its fixed workspace',
+            )
+          }
           const [result] = await transaction.execute<import('mysql2/promise').ResultSetHeader>(
             `INSERT INTO environments
               (public_id, code, name, tier, status, nacos_endpoint, nacos_namespace,

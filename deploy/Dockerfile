@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.7
+# syntax=mirror.gcr.io/docker/dockerfile:1.7
 
 FROM mirror.gcr.io/library/debian:trixie-slim AS native-build
 
@@ -23,7 +23,7 @@ COPY native/ native/
 RUN cmake -S native -B native/build -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
         -DFIBER_BUILD_TESTS=OFF \
-        -DFIBER_ENABLE_HTTP3=OFF \
+        -DFIBER_ENABLE_HTTP3=ON \
         -DFIBER_ENABLE_LTO=OFF \
     && cmake --build native/build \
         --target fiber_app_access_server fiber_app_access_gateway_validator \
@@ -44,7 +44,7 @@ COPY deploy/access-server/entrypoint.sh /usr/local/bin/access-server-entrypoint
 RUN chmod 0755 /usr/local/bin/access-server-entrypoint
 
 USER access-gateway:access-gateway
-EXPOSE 16688 16689
+EXPOSE 16688/tcp 16688/udp 16689/tcp
 ENTRYPOINT ["/usr/local/bin/access-server-entrypoint"]
 
 FROM mirror.gcr.io/library/node:22-trixie-slim AS console-build
