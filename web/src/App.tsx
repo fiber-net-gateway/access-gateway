@@ -2,16 +2,26 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 
 import {
   createProject,
-  fetchCurrentDraftRevision,
+  createRelease,
+  fetchConfigurationVersion,
+  fetchConfigurationVersions,
+  fetchCurrentConfigurationVersion,
   fetchHealth,
+  fetchProjectReleases,
   fetchProjects,
+  fetchRelease,
   fetchSystemStatus,
-  saveDraftRevision,
+  queueReleasePublication,
+  restoreConfigurationVersion,
+  saveConfigurationVersion,
   validateProjectRoutes,
 } from './api/client'
 import type {
   ApiConnectionState,
+  ConfigurationVersionDetail,
+  ConfigurationVersionSummary,
   HealthResponse,
+  ProjectReleaseView,
   ProjectRoutesModel,
   ProjectRoutesValidationView,
   ProjectView,
@@ -25,6 +35,16 @@ function modelFingerprint(model: ProjectRoutesModel): string {
   return JSON.stringify(model)
 }
 
+const terminalReleaseStatuses = new Set([
+  'published',
+  'partially_published',
+  'publish_failed',
+  'validation_failed',
+  'canceled',
+  'superseded',
+  'abandoned',
+])
+
 export default function App() {
   const [apiState, setApiState] = useState<ApiConnectionState>('loading')
   const [health, setHealth] = useState<HealthResponse | null>(null)
@@ -33,9 +53,15 @@ export default function App() {
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null)
   const [model, setModel] = useState<ProjectRoutesModel>(initialRouteModel)
   const [savedFingerprint, setSavedFingerprint] = useState(modelFingerprint(initialRouteModel()))
+  const [versions, setVersions] = useState<readonly ConfigurationVersionSummary[]>([])
+  const [currentVersionId, setCurrentVersionId] = useState<string | null>(null)
+  const [configurationLockVersion, setConfigurationLockVersion] = useState('0')
+  const [releases, setReleases] = useState<readonly ProjectReleaseView[]>([])
+  const [previewVersion, setPreviewVersion] = useState<ConfigurationVersionDetail | null>(null)
   const [routeLoading, setRouteLoading] = useState(false)
   const [saving, setSaving] = useState(false)
   const [validating, setValidating] = useState(false)
+  const [publishing, setPublishing] = useState(false)
   const [validation, setValidation] = useState<ProjectRoutesValidationView | null>(null)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
 
@@ -46,7 +72,7 @@ export default function App() {
   const hasUnsavedChanges = !routeLoading && modelFingerprint(model) !== savedFingerprint
 
   const confirmDiscardChanges = useCallback((): boolean => {
-    return !hasUnsavedChanges || window.confirm('当前 YAML Route 尚未保存，确定放弃这些修改吗？')
+    return !hasUnsavedChanges || window.confirm('当前工作区 YAML 尚未保存为版本，确定放弃吗？')
   }, [hasUnsavedChanges])
 
   const loadProjects = useCallback(async (signal?: AbortSignal) => {
@@ -56,6 +82,29 @@ export default function App() {
       current && items.some((item) => item.id === current) ? current : (items[0]?.id ?? null),
     )
     return items
+  }, [])
+
+  const loadWorkspace = useCallback(async (projectId: string, signal?: AbortSignal) => {
+    setRouteLoading(true)
+    try {
+      const [versionList, current, releaseList] = await Promise.all([
+        fetchConfigurationVersions(projectId, signal),
+        fetchCurrentConfigurationVersion(projectId, signal),
+        fetchProjectReleases(projectId, signal),
+      ])
+      const next = current?.version.model ?? initialRouteModel()
+      setVersions(versionList.items)
+      setCurrentVersionId(versionList.currentVersionId)
+      setConfigurationLockVersion(versionList.lockVersion)
+      setReleases(releaseList)
+      setModel(next)
+      setSavedFingerprint(modelFingerprint(next))
+      setValidation(null)
+      setPreviewVersion(null)
+      setErrorMessage(null)
+    } finally {
+      setRouteLoading(false)
+    }
   }, [])
 
   useEffect(() => {
@@ -80,33 +129,24 @@ export default function App() {
   }, [loadProjects])
 
   useEffect(() => {
-    if (!selectedProject?.draft) {
+    if (!selectedProjectId) {
       const empty = initialRouteModel()
       setModel(empty)
       setSavedFingerprint(modelFingerprint(empty))
-      setValidation(null)
+      setVersions([])
+      setCurrentVersionId(null)
+      setConfigurationLockVersion('0')
+      setReleases([])
       return
     }
     const controller = new AbortController()
-    setRouteLoading(true)
-    void fetchCurrentDraftRevision(selectedProject.draft.id, controller.signal)
-      .then((revision) => {
-        const next = revision?.model ?? initialRouteModel()
-        setModel(next)
-        setSavedFingerprint(modelFingerprint(next))
-        setValidation(null)
-        setErrorMessage(null)
-      })
-      .catch((error: unknown) => {
-        if (!controller.signal.aborted) {
-          setErrorMessage(error instanceof Error ? error.message : '加载路由草稿失败')
-        }
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) setRouteLoading(false)
-      })
+    void loadWorkspace(selectedProjectId, controller.signal).catch((error: unknown) => {
+      if (!controller.signal.aborted) {
+        setErrorMessage(error instanceof Error ? error.message : '加载配置版本失败')
+      }
+    })
     return () => controller.abort()
-  }, [selectedProject?.draft?.id, selectedProject?.draft?.revision])
+  }, [loadWorkspace, selectedProjectId])
 
   useEffect(() => {
     if (!hasUnsavedChanges) return
@@ -119,15 +159,11 @@ export default function App() {
   }, [hasUnsavedChanges])
 
   const handleSelectProject = (projectId: string): void => {
-    if (projectId !== selectedProjectId && confirmDiscardChanges()) {
-      setSelectedProjectId(projectId)
-    }
+    if (projectId !== selectedProjectId && confirmDiscardChanges()) setSelectedProjectId(projectId)
   }
 
   const handleCreateProject = async (domain: string): Promise<void> => {
-    if (!confirmDiscardChanges()) {
-      throw new Error('已取消创建，当前 YAML Route 尚未保存')
-    }
+    if (!confirmDiscardChanges()) throw new Error('已取消创建，工作区 YAML 尚未保存为版本')
     const created = await createProject(domain)
     await loadProjects()
     setSelectedProjectId(created.id)
@@ -138,17 +174,94 @@ export default function App() {
     setValidation(null)
   }
 
-  const handleSaveRoutes = async (): Promise<void> => {
-    if (!selectedProject?.draft) throw new Error('请选择一个域名 Project')
-    if (!hasUnsavedChanges) return
+  const refreshVersionList = async (projectId: string): Promise<void> => {
+    const result = await fetchConfigurationVersions(projectId)
+    setVersions(result.items)
+    setCurrentVersionId(result.currentVersionId)
+    setConfigurationLockVersion(result.lockVersion)
+  }
+
+  const handleSaveRoutes = async (changeSummary: string): Promise<void> => {
+    if (!selectedProject) throw new Error('请选择一个域名 Project')
+    if (!hasUnsavedChanges) throw new Error('当前工作区没有需要保存的修改')
     setSaving(true)
     try {
-      await saveDraftRevision(selectedProject.draft.id, selectedProject.draft.lockVersion, model)
-      setSavedFingerprint(modelFingerprint(model))
+      const saved = await saveConfigurationVersion(
+        selectedProject.id,
+        configurationLockVersion,
+        currentVersionId,
+        changeSummary,
+        model,
+      )
+      setModel(saved.version.model)
+      setSavedFingerprint(modelFingerprint(saved.version.model))
+      setCurrentVersionId(saved.version.id)
+      setConfigurationLockVersion(saved.lockVersion)
+      setValidation(null)
+      await Promise.all([refreshVersionList(selectedProject.id), loadProjects()])
       setErrorMessage(null)
-      await loadProjects()
     } finally {
       setSaving(false)
+    }
+  }
+
+  const handleRestoreVersion = async (versionId: string, number: number): Promise<void> => {
+    if (!selectedProject || !currentVersionId) throw new Error('当前项目还没有可恢复的配置版本')
+    if (hasUnsavedChanges && !window.confirm('恢复会丢弃当前未保存的工作区修改，是否继续？')) return
+    const saved = await restoreConfigurationVersion(
+      selectedProject.id,
+      versionId,
+      currentVersionId,
+      configurationLockVersion,
+      `从 V${number} 恢复`,
+    )
+    setModel(saved.version.model)
+    setSavedFingerprint(modelFingerprint(saved.version.model))
+    setCurrentVersionId(saved.version.id)
+    setConfigurationLockVersion(saved.lockVersion)
+    setValidation(null)
+    setPreviewVersion(null)
+    await Promise.all([refreshVersionList(selectedProject.id), loadProjects()])
+  }
+
+  const handleViewVersion = async (versionId: string): Promise<void> => {
+    if (!selectedProject) return
+    setPreviewVersion(await fetchConfigurationVersion(selectedProject.id, versionId))
+  }
+
+  const handlePublishVersion = async (
+    versionId: string,
+    title: string,
+    description: string,
+  ): Promise<void> => {
+    if (!selectedProject || !currentVersionId) throw new Error('请先保存一个配置版本')
+    setPublishing(true)
+    try {
+      const prepared = await createRelease(
+        selectedProject.id,
+        versionId,
+        currentVersionId,
+        title,
+        description,
+      )
+      let release = await queueReleasePublication(prepared.id)
+      setReleases((items) => [release, ...items.filter((item) => item.id !== release.id)])
+      for (
+        let attempt = 0;
+        attempt < 30 && !terminalReleaseStatuses.has(release.status);
+        attempt += 1
+      ) {
+        await new Promise((resolve) => setTimeout(resolve, 1_000))
+        release = await fetchRelease(release.id)
+        setReleases((items) => [release, ...items.filter((item) => item.id !== release.id)])
+      }
+      await Promise.all([
+        refreshVersionList(selectedProject.id),
+        fetchProjectReleases(selectedProject.id).then(setReleases),
+        loadProjects(),
+      ])
+    } finally {
+      setPublishing(false)
     }
   }
 
@@ -156,8 +269,7 @@ export default function App() {
     if (!selectedProject) throw new Error('请选择一个域名 Project')
     setValidating(true)
     try {
-      const result = await validateProjectRoutes(selectedProject.id, model)
-      setValidation(result)
+      setValidation(await validateProjectRoutes(selectedProject.id, model))
       setErrorMessage(null)
     } finally {
       setValidating(false)
@@ -168,22 +280,32 @@ export default function App() {
     <AppShell apiState={apiState}>
       <ProjectsPage
         apiState={apiState}
+        configurationLockVersion={configurationLockVersion}
+        currentVersionId={currentVersionId}
         errorMessage={errorMessage}
         hasUnsavedChanges={hasUnsavedChanges}
         health={health}
         model={model}
+        previewVersion={previewVersion}
         projects={projects}
+        publishing={publishing}
+        releases={releases}
         routeLoading={routeLoading}
         saving={saving}
         selectedProjectId={selectedProjectId}
         systemStatus={systemStatus}
         validating={validating}
         validation={validation}
+        versions={versions}
+        onClosePreview={() => setPreviewVersion(null)}
         onCreateProject={handleCreateProject}
         onModelChange={handleModelChange}
+        onPublishVersion={handlePublishVersion}
+        onRestoreVersion={handleRestoreVersion}
         onSaveRoutes={handleSaveRoutes}
         onSelectProject={handleSelectProject}
         onValidateRoutes={handleValidateRoutes}
+        onViewVersion={handleViewVersion}
       />
     </AppShell>
   )

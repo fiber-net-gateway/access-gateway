@@ -112,3 +112,48 @@ test('YAML route APIs accept schema v2 and reject the legacy whole-project reque
   assert.equal(rejected.statusCode, 400)
   assert.equal(rejected.json().error.code, 'VALIDATION_ERROR')
 })
+
+test('configuration version and Release APIs are registered and fail closed without storage', async (context) => {
+  const app = buildApp()
+  context.after(() => app.close())
+  const projectId = '00000000-0000-4000-8000-000000000001'
+  const versionId = '00000000-0000-4000-8000-000000000002'
+  const routeId = '00000000-0000-4000-8000-000000000003'
+
+  const versions = await app.inject({
+    method: 'GET',
+    url: `/api/projects/${projectId}/configuration-versions`,
+  })
+  assert.equal(versions.statusCode, 503)
+  assert.equal(versions.json().error.code, 'DATABASE_UNCONFIGURED')
+
+  const saved = await app.inject({
+    method: 'POST',
+    url: `/api/projects/${projectId}/configuration-versions`,
+    headers: { 'if-match': '"0"', 'idempotency-key': 'test-save-v1' },
+    payload: {
+      baseVersionId: null,
+      changeSummary: 'Create V1',
+      model: {
+        schemaVersion: 2,
+        kind: 'project_routes_yaml',
+        routes: [{ id: routeId, source: 'path: /\ntype: RESPONSE\nstatus: 200' }],
+      },
+    },
+  })
+  assert.equal(saved.statusCode, 503)
+  assert.equal(saved.json().error.code, 'DATABASE_UNCONFIGURED')
+
+  const release = await app.inject({
+    method: 'POST',
+    url: `/api/projects/${projectId}/releases`,
+    headers: { 'idempotency-key': 'test-release-v1' },
+    payload: {
+      sourceVersionId: versionId,
+      expectedCurrentVersionId: versionId,
+      title: 'Publish V1',
+    },
+  })
+  assert.equal(release.statusCode, 503)
+  assert.equal(release.json().error.code, 'DATABASE_UNCONFIGURED')
+})

@@ -16,7 +16,7 @@ interface NavigationItem {
 const navigation: NavigationItem[] = [
   { label: 'Projects', detail: '域名与路由', active: true },
   { label: 'Certificates', detail: '未接入运行时' },
-  { label: 'Releases', detail: 'Worker 未接入' },
+  { label: 'Releases', detail: '版本与 rnacos 发布' },
   { label: 'Audit', detail: '即将开放' },
   { label: 'System', detail: '部署能力' },
 ]

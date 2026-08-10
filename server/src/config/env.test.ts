@@ -14,6 +14,7 @@ test('loadServerConfig uses safe local development defaults', () => {
   assert.equal(config.documentEncryption.key, null)
   assert.equal(config.auth.mode, 'development')
   assert.equal(config.nativeValidator.path, null)
+  assert.equal(config.publication.enabled, false)
 })
 
 test('loadServerConfig parses explicit database and validator values', () => {
@@ -29,6 +30,8 @@ test('loadServerConfig parses explicit database and validator values', () => {
     DOCUMENT_ENCRYPTION_KEY_BASE64: key,
     NATIVE_VALIDATOR_PATH: '/opt/access-gateway-validator',
     CONSOLE_STATIC_ROOT: '/opt/access-gateway-console',
+    PUBLICATION_WORKER_ENABLED: 'true',
+    PUBLICATION_NACOS_ENDPOINT: 'http://rnacos:8848',
   })
   assert.equal(config.host, '0.0.0.0')
   assert.equal(config.port, 3100)
@@ -39,6 +42,8 @@ test('loadServerConfig parses explicit database and validator values', () => {
   assert.deepEqual(config.documentEncryption.key, Buffer.alloc(32, 7))
   assert.equal(config.nativeValidator.path, '/opt/access-gateway-validator')
   assert.equal(config.staticRoot, '/opt/access-gateway-console')
+  assert.equal(config.publication.enabled, true)
+  assert.equal(config.publication.endpointOverride, 'http://rnacos:8848')
 })
 
 test('loadServerConfig rejects invalid ports, log levels, and database secrets', () => {
@@ -72,6 +77,14 @@ test('loadServerConfig rejects invalid ports, log levels, and database secrets',
   assert.throws(
     () => loadServerConfig({ CONSOLE_STATIC_ROOT: './web/dist' }),
     /CONSOLE_STATIC_ROOT/u,
+  )
+  assert.throws(
+    () => loadServerConfig({ PUBLICATION_NACOS_ENDPOINT: 'ftp://rnacos/config' }),
+    /PUBLICATION_NACOS_ENDPOINT/u,
+  )
+  assert.throws(
+    () => loadServerConfig({ PUBLICATION_NACOS_ENDPOINT: 'http://user:secret@rnacos' }),
+    /PUBLICATION_NACOS_ENDPOINT/u,
   )
 })
 

@@ -26,6 +26,8 @@ const routeFields = new Set([
   'allows',
 ])
 
+export const ROUTE_COMPILER_REVISION = 'project-routes-yaml-v2'
+
 export interface RouteValidationIssue {
   routeId: string
   path: string

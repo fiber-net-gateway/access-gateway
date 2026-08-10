@@ -19,12 +19,13 @@ The repository is under active development in two first-class areas:
   script-corpus differential verification and final cutover gates are still in progress.
 - **Console** — the first MySQL-backed vertical slice is available: deterministic migrations,
   development identity and single-deployment RBAC, environment-free domain project APIs, encrypted
-  immutable route revisions, optimistic locking, audit events, and a route-first React workspace.
+  immutable configuration versions, optimistic locking, audit events, and a route-first React workspace.
   Each route has an independently mounted CodeMirror YAML editor and is deterministically compiled
   to the native JSON wire model. Release/publication tables, the release state machine, publication
-  conflict decisions, and a fail-closed Native Validator adapter are present. OIDC, Nacos
-  publication workers, certificate inventory/runtime delivery, and per-instance activation
-  collection remain to be implemented.
+  conflict decisions, a fail-closed Native Validator adapter, current/historical version Release
+  creation, and a leased rnacos publication worker with readback evidence are present. OIDC,
+  resource-level publication retry/recovery, certificate inventory/runtime delivery, and
+  per-instance activation collection remain to be implemented.
 
 The console therefore reports unavailable or unknown state where the supporting workflow does not
 exist. It does not fabricate publication or activation success.
@@ -144,12 +145,13 @@ The implemented control-plane endpoints include:
 - `/api/health`, `/api/health/live`, `/api/health/ready`, and `/api/system/status`;
 - fixed workspace retrieval and a one-time environment bootstrap endpoint;
 - environment-free `/api/projects` list/create and project detail;
-- active project draft get/create, current revision retrieval, immutable revision save with
-  `If-Match`, and revision retrieval;
-- project YAML route validation and deterministic native-wire preview.
+- immutable Configuration Version list/save/detail/restore/validation with `If-Match` and
+  idempotency;
+- project YAML route validation and deterministic native-wire preview;
+- Release creation from a current or historical version, publication queueing, and status detail.
 
-Each draft stores ordered route IDs and exact YAML source. Legacy whole-project JSON revisions are
-upgraded to stable YAML route items when read. Draft model documents are envelope-encrypted with
+Each Configuration Version stores ordered route IDs and exact YAML source. Legacy whole-project JSON
+revisions are upgraded to stable YAML route items when read. Model documents are envelope-encrypted with
 AES-256-GCM before MySQL storage. The local key configuration is intended for development only;
 production must use an external key provider.
 
@@ -174,12 +176,12 @@ npm run demo:up
 ```
 
 The first native image build downloads the pinned C++ build dependencies and can take several
-minutes. Compose applies the MySQL migrations, idempotently creates a Console demo environment,
-publishes a compatible demo route directly to R-Nacos, and starts Access Server only after that
-bootstrap succeeds.
+minutes. Compose applies the MySQL migrations, idempotently creates a Console demo project and
+Configuration Version, publishes a Release through the Console worker, and starts Access Server
+only after the R-Nacos readback succeeds.
 
 Fastify serves both the `/api/*` endpoints and the built React single-page application from one
-Console container. The complete stack therefore contains four long-running containers and three
+Console container. The complete stack therefore contains five long-running containers and three
 one-shot migration/bootstrap containers.
 
 Once all services are ready:
@@ -199,8 +201,9 @@ demo ports remain loopback-only. WSL2 NAT normally forwards TCP, but not UDP, fr
 `https://demo.local:16688/`. Set `ACCESS_SERVER_PUBLISHED_HOST=127.0.0.1` in `.env` when the gateway
 should only be reachable inside WSL. Browsers negotiate QUIC only after trusting the demo
 certificate; never trust or reuse this local self-signed certificate in production.
-The bootstrap writes directly to R-Nacos because the Console publication worker is not implemented
-yet; the UI continues to report publication and per-instance activation as unavailable or unknown.
+The bootstrap creates a Configuration Version and Release through the Console API; the publication
+worker performs the R-Nacos write and readback. Per-instance activation remains unknown because
+access-server activation evidence collection is not implemented.
 Use `npm run demo:ps`, `npm run demo:logs`, and `npm run demo:down` to operate the stack. Add
 `--volumes` to `docker compose down` only when you intentionally want to delete all demo data.
 

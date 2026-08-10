@@ -47,6 +47,14 @@ export function conflict(code: string, message: string): AppError {
   return new AppError(code, message, 409)
 }
 
+export function unprocessable(
+  code: string,
+  message: string,
+  fields: readonly ErrorField[] = [],
+): AppError {
+  return new AppError(code, message, 422, fields)
+}
+
 export function unavailable(code: string, message: string): AppError {
   return new AppError(code, message, 503)
 }
