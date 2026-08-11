@@ -12,7 +12,7 @@
     "publication-worker": "node dist/processes/publication-worker.js",
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit -p tsconfig.json --pretty false",
-    "test": "node --import tsx --test src/app.test.ts src/config/env.test.ts src/crypto/document-cipher.test.ts src/integrations/nacos/http.test.ts src/integrations/native-validator/subprocess.test.ts src/modules/drafts/compiler.test.ts src/modules/drafts/model.test.ts src/modules/environments/service.test.ts src/modules/projects/service.test.ts src/modules/releases/state.test.ts src/modules/publication/decision.test.ts src/shared/time.test.ts",
+    "test": "node --import tsx --test src/app.test.ts src/config/env.test.ts src/crypto/document-cipher.test.ts src/integrations/nacos/http.test.ts src/integrations/native-validator/subprocess.test.ts src/modules/drafts/compiler.test.ts src/modules/drafts/model.test.ts src/modules/drafts/service.test.ts src/modules/environments/service.test.ts src/modules/projects/service.test.ts src/modules/releases/state.test.ts src/modules/publication/decision.test.ts src/modules/versions/service.test.ts src/shared/time.test.ts",
     "db:migrate": "tsx src/processes/migrate.ts"
   },
   "dependencies": {

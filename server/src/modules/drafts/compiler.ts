@@ -93,6 +93,73 @@ function jsonSafe(value: unknown): boolean {
   return Object.entries(value).every(([key, item]) => typeof key === 'string' && jsonSafe(item))
 }
 
+function isScalarValue(value: unknown): boolean {
+  return (
+    value === null ||
+    typeof value === 'string' ||
+    typeof value === 'boolean' ||
+    typeof value === 'number'
+  )
+}
+
+function isScalarMap(value: unknown): boolean {
+  return (
+    value === null ||
+    (typeof value === 'object' &&
+      !Array.isArray(value) &&
+      Object.values(value).every(isScalarValue))
+  )
+}
+
+function isScalarList(value: unknown): boolean {
+  return value === null || (Array.isArray(value) && value.every(isScalarValue))
+}
+
+function validateRouteFieldShapes(
+  route: RouteItemModel,
+  lineCounter: LineCounter,
+  document: ReturnType<typeof parseDocument>,
+  value: Readonly<Record<string, unknown>>,
+  issues: RouteValidationIssue[],
+): void {
+  const addTypeIssue = (field: string, expected: string): void => {
+    issues.push(
+      issue(
+        route,
+        lineCounter,
+        'INVALID_ROUTE_FIELD_TYPE',
+        `${field} must be ${expected}`,
+        field,
+        findFieldOffset(document, field),
+      ),
+    )
+  }
+
+  for (const field of ['proxy_headers', 'response_headers', 'context']) {
+    if (field in value && !isScalarMap(value[field])) addTypeIssue(field, 'an object or null')
+  }
+  for (const field of ['addresses', 'allows']) {
+    if (field in value && !isScalarList(value[field])) addTypeIssue(field, 'an array or null')
+  }
+  for (const field of [
+    'service',
+    'cluster',
+    'condition',
+    'rewrite',
+    'status',
+    'timeout',
+    'max_client_body_size',
+    'max_proxy_body_size',
+    'websocket_timeout',
+    'flush',
+  ]) {
+    if (field in value && !isScalarValue(value[field])) {
+      addTypeIssue(field, 'a scalar value or null')
+    }
+  }
+  if ('body' in value && !isScalarMap(value.body)) addTypeIssue('body', 'an object or null')
+}
+
 function parseRoute(route: RouteItemModel): {
   value: Readonly<Record<string, unknown>> | null
   issues: RouteValidationIssue[]
@@ -220,6 +287,7 @@ function parseRoute(route: RouteItemModel): {
       ),
     )
   }
+  validateRouteFieldShapes(route, lineCounter, document, value, issues)
   return { value: issues.length === 0 ? value : null, issues }
 }
 

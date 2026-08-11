@@ -268,8 +268,9 @@ Repository 在一个 MySQL transaction 内：
 9. 写入脱敏 `configuration_version.created` audit event；
 10. commit 后返回新版本和新 ETag。
 
-保存允许 YAML 或 native 语义无效，因为“防止内容丢失”和“允许发布”是两个边界。API 仍拒绝超过
-大小限制、重复 Route ID、错误顶层 schema 或无法安全加密的输入。
+Working Copy 可以暂时保留无效 YAML 以便继续修复，但 Web 和 API 都必须在创建版本前运行确定性的
+YAML 与本地 Route 结构校验。语法错误、非 mapping 根节点、不安全 YAML 特性、未知字段、缺失
+`path`/`type` 或非 JSON-safe 标量会阻止保存；完整 Project/native 语义校验仍与保存生命周期分离。
 
 同一个 Idempotency-Key 的重试必须返回第一次创建的版本。事务失败不得留下 current pointer 指向
 不存在 revision 的状态。
@@ -379,9 +380,13 @@ Worker 使用有期限 lease 领取 job；同一固定 workspace 同时只允许
 | GET    | `/api/projects/:projectId/configuration-versions/current`                 | read     | 返回当前版本与配置 ETag    |
 | GET    | `/api/projects/:projectId/configuration-versions/:versionId`              | read     | 返回只读精确模型           |
 | POST   | `/api/projects/:projectId/configuration-versions/:versionId/validations`  | maintain | 校验不可变版本             |
-| POST   | `/api/projects/:projectId/configuration-versions/:versionId/restorations` | maintain | 复制历史内容为新当前版本   |
+| POST   | `/api/projects/:projectId/configuration-versions/:versionId/restorations` | maintain | 从历史来源保存新当前版本   |
 
 版本 comparison/diff API 为下一增量，当前 UI 只提供只读历史快照。
+
+Restoration 请求中的路径 `versionId` 是历史编辑来源，`baseVersionId` 和 `If-Match` 必须指向
+保存时观察到的当前版本与配置锁。请求可携带编辑后的完整 `model`；省略 `model` 表示原样恢复历史
+内容。两种方式都只插入一个新版本并记录 `restoredFromVersionId`，不会先创建中间恢复版本。
 
 保存请求：
 
@@ -443,6 +448,7 @@ Worker 使用有期限 lease 领取 job；同一固定 workspace 同时只允许
 
 | Code                              | HTTP | 场景                                  |
 | --------------------------------- | ---- | ------------------------------------- |
+| `INVALID_CONFIGURATION_YAML`      | 400  | YAML 或本地 Route 结构不合法          |
 | `CONFIG_VERSION_CONFLICT`         | 409  | base version 或 ETag 已过期           |
 | `CONFIG_VERSION_UNCHANGED`        | 409  | 相同内容且未确认强制保存              |
 | `CONFIG_VERSION_NOT_PUBLISHABLE`  | 422  | 所选版本校验失败                      |
@@ -482,7 +488,9 @@ Worker 使用有期限 lease 领取 job；同一固定 workspace 同时只允许
 
 ### 8.2 保存为版本
 
-- Routes 页主按钮文案为“保存为版本”，快捷键 `Ctrl/Cmd+S` 打开保存弹窗；
+- Routes 页主按钮文案为“保存为版本”；YAML 合法时快捷键 `Ctrl/Cmd+S` 打开保存弹窗；
+- 编辑时即时展示 YAML 行列错误，不重建 CodeMirror 或移动焦点；存在本地 YAML 错误时按钮禁用，
+  快捷键只提示修复错误，不打开保存弹窗；API 使用同一 YAML 子集再次阻止非法保存；
 - 弹窗展示 base version、Route 数和变更摘要，版本说明必填；
 - 保存期间编辑器不被服务端旧响应覆盖；请求绑定提交时的 local fingerprint；
 - 成功后 Working Copy base 更新到新 version ID，dirty 置为 false，历史列表插入新行；
@@ -504,6 +512,9 @@ Worker 使用有期限 lease 领取 job；同一固定 workspace 同时只允许
 
 历史 YAML 只读展示。点击“基于此版本编辑”不会立即改变当前版本：用户先在 Working Copy 中查看
 内容，再通过“恢复并保存为新版本”创建新版本。可提供直接恢复弹窗，但后端语义仍是插入新版本。
+Routes 页必须同时显示“编辑来源 Vx”和“当前保存基线 Vy”。历史模型与当前模型不同时，从进入
+编辑器起即视为未保存副本；保存请求携带编辑后的 model，并生成唯一的新版本 Vz。放弃副本只重新
+加载当前版本，不写数据库。
 
 ### 8.4 发布版本弹窗
 

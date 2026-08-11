@@ -50,6 +50,7 @@ export interface RestoreConfigurationVersionInput {
   changeSummary: string
   forceSameContent: boolean
   idempotencyKey: string
+  model?: unknown
 }
 
 export interface SavedConfigurationVersion {

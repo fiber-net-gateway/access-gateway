@@ -181,6 +181,7 @@ interface RestoreVersionBody {
   baseVersionId: string
   changeSummary: string
   forceSameContent?: boolean
+  model?: unknown
 }
 
 export function registerConfigurationVersionRoutes(
@@ -322,6 +323,7 @@ export function registerConfigurationVersionRoutes(
             baseVersionId: { type: 'string', format: 'uuid' },
             changeSummary: { type: 'string', minLength: 1, maxLength: 200 },
             forceSameContent: { type: 'boolean', default: false },
+            model: projectRoutesModelSchema,
           },
         },
         response: { 201: savedVersionSchema },
@@ -338,6 +340,7 @@ export function registerConfigurationVersionRoutes(
           changeSummary: request.body.changeSummary,
           forceSameContent: request.body.forceSameContent ?? false,
           idempotencyKey: parseIdempotencyKey(request.headers['idempotency-key']),
+          model: request.body.model,
         },
         String(request.id),
       )

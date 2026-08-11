@@ -140,6 +140,10 @@ export async function fetchProjects(signal?: AbortSignal): Promise<readonly Proj
   return response.items
 }
 
+export async function fetchProject(projectId: string, signal?: AbortSignal): Promise<ProjectView> {
+  return requestJson(`/api/projects/${encodeURIComponent(projectId)}`, { signal }, isProject)
+}
+
 export async function createProject(domain: string): Promise<{ id: string }> {
   return requestJson(
     '/api/projects',
@@ -306,10 +310,11 @@ export async function fetchCurrentConfigurationVersion(
 export async function fetchConfigurationVersion(
   projectId: string,
   versionId: string,
+  signal?: AbortSignal,
 ): Promise<ConfigurationVersionDetail> {
   return requestJson(
     `/api/projects/${encodeURIComponent(projectId)}/configuration-versions/${encodeURIComponent(versionId)}`,
-    {},
+    { signal },
     isConfigurationVersionDetail,
   )
 }
@@ -343,6 +348,7 @@ export async function restoreConfigurationVersion(
   currentVersionId: string,
   lockVersion: string,
   changeSummary: string,
+  model?: ProjectRoutesModel,
 ): Promise<SavedConfigurationVersion> {
   return requestJson(
     `/api/projects/${encodeURIComponent(projectId)}/configuration-versions/${encodeURIComponent(versionId)}/restorations`,
@@ -357,6 +363,7 @@ export async function restoreConfigurationVersion(
         baseVersionId: currentVersionId,
         changeSummary,
         forceSameContent: false,
+        ...(model ? { model } : {}),
       }),
     },
     isSavedConfigurationVersion,

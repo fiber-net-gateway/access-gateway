@@ -230,11 +230,11 @@ Project 页面固定显示域名、当前配置版本、未保存状态、rnacos
 | CON-RTE-001 | P0     | 每条 Route 渲染为独立卡片，卡片内使用代码编辑器编辑一份 YAML mapping               |
 | CON-RTE-002 | P0     | 支持新增 RESPONSE/PROXY 模板、复制、删除、折叠和拖拽/键盘排序                      |
 | CON-RTE-003 | P0     | 卡片标题从 YAML 派生 `path`、`type` 和 condition 摘要；解析失败时显示稳定 Route ID |
-| CON-RTE-004 | P0     | 编辑器支持 YAML 高亮、缩进、行号、查找、撤销、括号匹配和行列级错误                 |
+| CON-RTE-004 | P0     | 编辑器支持 YAML 高亮、缩进、行号、查找、撤销、括号匹配，以及行内和 gutter 错误提示 |
 | CON-RTE-005 | P0     | 支持字段补全、字段说明和 RESPONSE/PROXY snippet，但不强制用户切换到表单            |
 | CON-RTE-006 | P0     | Route 顺序独立持久化；同一路径条件路由的先后变化必须作为语义 diff 展示             |
-| CON-RTE-007 | P0     | 支持保存暂时无效的 YAML 原文，防止内容丢失；无效 Route 明确标红并阻止 Release      |
-| CON-RTE-008 | P0     | `Ctrl/Cmd+S` 打开“保存为版本”流程；保存成功前持续显示未保存状态                    |
+| CON-RTE-007 | P0     | 编辑中即时标出无效 YAML 且不重建编辑器或抢走焦点；有错误时阻止保存版本和 Release   |
+| CON-RTE-008 | P0     | YAML 合法时 `Ctrl/Cmd+S` 打开“保存为版本”流程；保存成功前持续显示未保存状态        |
 | CON-RTE-009 | P0     | 后端保存使用乐观锁，旧保存响应不得覆盖较新的本地内容或校验结果                     |
 | CON-RTE-010 | P1     | 大项目按可视区域挂载编辑器，折叠卡片不保留高成本编辑器实例                         |
 | CON-RTE-011 | P2     | 支持跨 Route 搜索、批量折叠、从历史 Route 复制和只读双栏语义 diff                  |
@@ -271,6 +271,8 @@ allows:
 - 使用 YAML 1.2 core schema，每个编辑器只接受单文档、根节点为 mapping 的内容。
 - 保留注释和用户格式作为配置版本原文；发布比较同时提供“源码 diff”和“编译后语义 diff”。
 - 拒绝重复 key、自定义 tag、对象构造 tag、anchor、alias、merge key 和多文档输入。
+- `proxy_headers`、`response_headers`、`context` 必须是 mapping 或 null；`addresses`、`allows`
+  必须是 sequence 或 null。可被 YAML 解析但容器类型不符合 native codec 的内容仍视为不可保存。
 - 字段名采用 native wire model 的 snake_case；未知字段在 P0 阻止新配置发布，导入的兼容未知字段
   必须单独展示且不得静默丢弃。
 - 时间和大小支持 native 已定义的毫秒/秒与 bytes/K/M/G 形式；编辑器显示归一化值。
@@ -302,10 +304,13 @@ RESPONSE Route 至少覆盖 `status` 与 `body`（TEXT、BASE64、TEMPLATE）。
   原因后可以强制保存，审计记录原因。
 - Working Copy 基于明确的 base version。保存时若服务端当前版本已经变化，返回并发冲突，用户
   必须比较、重新应用或放弃本地修改，不能静默覆盖。
-- 配置版本允许保存暂时无效的 YAML，状态标记为 `invalid` 或 `not_validated`，用于防止工作丢失；
-  这类版本可查看、比较和恢复，但不能创建可发布 Release。
+- Working Copy 允许保留暂时无效的 YAML 供用户继续修复，但 Web 和 API 都必须阻止把 YAML 语法、
+  安全子集或本地 Route 结构无效的内容保存为配置版本；Native 语义校验仍与保存生命周期分离。
 - “恢复为当前版本”不移动当前指针到旧记录，也不修改旧记录；它复制历史内容并创建下一个新
   版本，例如把 `V3` 恢复后保存为 `V9`，来源记录为 `restoredFrom=V3`。
+- “基于此版本编辑”先把历史模型加载为浏览器内 Working Copy，不立即创建中间版本；保存时以
+  服务端当前版本作为并发 base、以所选历史版本作为 `restoredFrom`，把编辑后的完整模型一次保存为
+  下一个新版本。
 
 | ID          | 优先级 | 需求                                                                               |
 | ----------- | ------ | ---------------------------------------------------------------------------------- |
@@ -316,6 +321,7 @@ RESPONSE Route 至少覆盖 `status` 与 `body`（TEXT、BASE64、TEMPLATE）。
 | CON-VER-005 | P0     | 未保存 Working Copy 不能发布；发布时提示先保存为版本或放弃未保存内容               |
 | CON-VER-006 | P0     | 历史版本发布不会改变当前配置版本，也不会删除当前 Working Copy                      |
 | CON-VER-007 | P0     | 恢复历史版本通过复制内容创建新版本，禁止倒退版本号或原地修改历史记录               |
+| CON-VER-011 | P0     | 基于历史版本编辑时只在最终保存生成一个新版本，并同时记录当前 base 与历史来源       |
 | CON-VER-008 | P0     | 配置版本号与 native wire `version` 分离，二者不得在 API、UI、日志和审计中混称      |
 | CON-VER-009 | P1     | 支持版本说明搜索、按作者/校验/发布状态筛选和稳定游标分页                           |
 | CON-VER-010 | P2     | 支持为重要配置版本添加受控标签；标签变化必须独立审计                               |
@@ -328,15 +334,15 @@ RESPONSE Route 至少覆盖 `status` 与 `body`（TEXT、BASE64、TEMPLATE）。
 4. **Native 权威校验**：把完整候选编译为精确 wire JSON，使用与 access-server 相同的 codec、
    脚本编译器和 route model 校验。
 
-| ID          | 优先级 | 需求                                                                    |
-| ----------- | ------ | ----------------------------------------------------------------------- |
-| CON-VAL-001 | P0     | 保存配置版本允许失败内容，创建 Release 前所选版本必须通过全部四层校验   |
-| CON-VAL-002 | P0     | Native Validator 不可用、超时或 contract version 不匹配时 fail closed   |
-| CON-VAL-003 | P0     | 错误至少包含 Route ID、字段路径、行、列、稳定 code 和安全 message       |
-| CON-VAL-004 | P0     | 错误定位到对应 Route 卡片和行列，提供“上一处/下一处错误”导航            |
-| CON-VAL-005 | P0     | 校验结果绑定配置版本和内容摘要；过时结果不能覆盖其他版本或 Working Copy |
-| CON-VAL-006 | P0     | 提供最终项目列表和 project route JSON 的只读预览、语义 diff 和 SHA-256  |
-| CON-VAL-007 | P1     | 使用用户显式提供的脱敏示例请求预览 Route 选择与执行计划，不发出网络请求 |
+| ID          | 优先级 | 需求                                                                          |
+| ----------- | ------ | ----------------------------------------------------------------------------- |
+| CON-VAL-001 | P0     | 保存版本前必须通过 YAML 与本地 Route 结构校验；Release 前必须通过全部四层校验 |
+| CON-VAL-002 | P0     | Native Validator 不可用、超时或 contract version 不匹配时 fail closed         |
+| CON-VAL-003 | P0     | 错误至少包含 Route ID、字段路径、行、列、稳定 code 和安全 message             |
+| CON-VAL-004 | P0     | 错误定位到对应 Route 卡片和行列，提供“上一处/下一处错误”导航                  |
+| CON-VAL-005 | P0     | 校验结果绑定配置版本和内容摘要；过时结果不能覆盖其他版本或 Working Copy       |
+| CON-VAL-006 | P0     | 提供最终项目列表和 project route JSON 的只读预览、语义 diff 和 SHA-256        |
+| CON-VAL-007 | P1     | 使用用户显式提供的脱敏示例请求预览 Route 选择与执行计划，不发出网络请求       |
 
 确定性编译结果遵守当前 wire contract：
 

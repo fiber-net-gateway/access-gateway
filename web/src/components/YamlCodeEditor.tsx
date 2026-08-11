@@ -17,6 +17,7 @@ import {
   syntaxHighlighting,
 } from '@codemirror/language'
 import { yaml } from '@codemirror/lang-yaml'
+import { lintGutter, lintKeymap, setDiagnostics, type Diagnostic } from '@codemirror/lint'
 import { highlightSelectionMatches, searchKeymap } from '@codemirror/search'
 import { Compartment, EditorState } from '@codemirror/state'
 import {
@@ -35,9 +36,18 @@ import { useEffect, useRef } from 'react'
 
 interface YamlCodeEditorProps {
   ariaLabel: string
+  diagnostics: readonly YamlCodeEditorDiagnostic[]
   value: string
   onChange(value: string): void
   onSave(): void
+}
+
+export interface YamlCodeEditorDiagnostic {
+  line: number
+  column: number
+  path: string
+  code: string
+  message: string
 }
 
 const routeCompletions: readonly Completion[] = [
@@ -100,6 +110,29 @@ function completeRouteField(context: CompletionContext): CompletionResult | null
   return { from: word.from, options: routeCompletions }
 }
 
+function codeMirrorDiagnostics(
+  view: EditorView,
+  diagnostics: readonly YamlCodeEditorDiagnostic[],
+): readonly Diagnostic[] {
+  return diagnostics.map((diagnostic) => {
+    const lineNumber = Math.min(Math.max(diagnostic.line, 1), view.state.doc.lines)
+    const line = view.state.doc.line(lineNumber)
+    const requestedOffset = Math.min(Math.max(diagnostic.column - 1, 0), line.length)
+    const field = diagnostic.path.split('.').at(-1)
+    const fieldOffset = field ? line.text.indexOf(field) : -1
+    const from = line.from + (fieldOffset >= 0 ? fieldOffset : requestedOffset)
+    const fieldEnd = fieldOffset >= 0 && field ? from + field.length : line.to
+    const to = Math.min(Math.max(fieldEnd, from), line.to)
+    return {
+      from,
+      to,
+      severity: 'error',
+      source: diagnostic.code,
+      message: diagnostic.message,
+    }
+  })
+}
+
 const editorTheme = EditorView.theme({
   '&': {
     minHeight: '210px',
@@ -127,9 +160,21 @@ const editorTheme = EditorView.theme({
   },
   '.cm-cursor, .cm-dropCursor': { borderLeftColor: '#d8f36c' },
   '.cm-foldPlaceholder': { backgroundColor: '#294238', border: 0, color: '#b8c9c0' },
+  '.cm-tooltip-lint': {
+    border: '1px solid #dfa38f',
+    backgroundColor: '#fff4ef',
+    color: '#6f2d20',
+  },
+  '.cm-diagnostic-error': { borderLeftColor: '#c14f38' },
 })
 
-export function YamlCodeEditor({ ariaLabel, value, onChange, onSave }: YamlCodeEditorProps) {
+export function YamlCodeEditor({
+  ariaLabel,
+  diagnostics,
+  value,
+  onChange,
+  onSave,
+}: YamlCodeEditorProps) {
   const hostRef = useRef<HTMLDivElement | null>(null)
   const editorRef = useRef<EditorView | null>(null)
   const ariaLabelCompartmentRef = useRef<Compartment | null>(null)
@@ -152,6 +197,7 @@ export function YamlCodeEditor({ ariaLabel, value, onChange, onSave }: YamlCodeE
           highlightSpecialChars(),
           history(),
           foldGutter(),
+          lintGutter({ hoverTime: 150 }),
           drawSelection(),
           dropCursor(),
           EditorState.allowMultipleSelections.of(true),
@@ -185,6 +231,7 @@ export function YamlCodeEditor({ ariaLabel, value, onChange, onSave }: YamlCodeE
             ...searchKeymap,
             ...historyKeymap,
             ...foldKeymap,
+            ...lintKeymap,
           ]),
         ],
       }),
@@ -211,6 +258,12 @@ export function YamlCodeEditor({ ariaLabel, value, onChange, onSave }: YamlCodeE
     if (!view || view.state.doc.toString() === value) return
     view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: value } })
   }, [value])
+
+  useEffect(() => {
+    const view = editorRef.current
+    if (!view) return
+    view.dispatch(setDiagnostics(view.state, codeMirrorDiagnostics(view, diagnostics)))
+  }, [diagnostics])
 
   return <div className="yaml-code-editor" ref={hostRef} />
 }
