@@ -2,6 +2,7 @@ import type { NativeValidator } from '../../integrations/native-validator/model.
 import { badRequest, forbidden, notFound, unavailable } from '../../shared/errors.js'
 import { bufferToPublicId } from '../../shared/ids.js'
 import type { Actor } from '../auth/model.js'
+import { compileProjectRoutes } from '../drafts/compiler.js'
 import { isProjectRoutesModel, type ProjectRoutesModel } from '../drafts/model.js'
 import { validateProjectRoutesCandidate } from '../drafts/validation.js'
 import { EnvironmentRepository } from '../environments/repository.js'
@@ -56,6 +57,24 @@ function parseModel(value: unknown): ProjectRoutesModel {
     )
   }
   return value
+}
+
+function parseSavableModel(domain: string, value: unknown): ProjectRoutesModel {
+  const model = parseModel(value)
+  const result = compileProjectRoutes(domain, model)
+  if (!result.compiled) {
+    const routeIndexes = new Map(model.routes.map((route, index) => [route.id, index]))
+    throw badRequest(
+      'INVALID_CONFIGURATION_YAML',
+      'The configuration contains invalid YAML routes',
+      result.issues.map((issue) => ({
+        path: `model.routes.${routeIndexes.get(issue.routeId) ?? 0}.source`,
+        code: issue.code,
+        message: `${issue.message} (${issue.line}:${issue.column})`,
+      })),
+    )
+  }
+  return model
 }
 
 function parseLockVersion(value: string): string {
@@ -173,7 +192,7 @@ export class DefaultConfigurationVersionService implements ConfigurationVersionS
       changeSummary: parseSummary(input.changeSummary),
       forceSameContent: input.forceSameContent,
       idempotencyKey: input.idempotencyKey,
-      model: parseModel(input.model),
+      model: parseSavableModel(project.name, input.model),
       requestId,
     })
   }
@@ -197,7 +216,10 @@ export class DefaultConfigurationVersionService implements ConfigurationVersionS
       changeSummary: parseSummary(input.changeSummary),
       forceSameContent: input.forceSameContent,
       idempotencyKey: input.idempotencyKey,
-      model: source.model,
+      model: parseSavableModel(
+        project.name,
+        input.model === undefined ? source.model : input.model,
+      ),
       restoredFromVersionId: source.id,
       requestId,
     })

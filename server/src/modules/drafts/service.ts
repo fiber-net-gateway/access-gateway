@@ -10,6 +10,7 @@ import type {
   DraftView,
   ProjectRoutesModel,
 } from './model.js'
+import { compileProjectRoutes } from './compiler.js'
 import { isProjectRoutesModel } from './model.js'
 import { DraftRepository } from './repository.js'
 import { validateProjectRoutesCandidate, type ProjectRoutesValidationView } from './validation.js'
@@ -48,6 +49,24 @@ function parseProjectRoutesModel(value: unknown): ProjectRoutesModel {
     )
   }
   return value
+}
+
+function parseSavableProjectRoutesModel(domain: string, value: unknown): ProjectRoutesModel {
+  const model = parseProjectRoutesModel(value)
+  const result = compileProjectRoutes(domain, model)
+  if (!result.compiled) {
+    const routeIndexes = new Map(model.routes.map((route, index) => [route.id, index]))
+    throw badRequest(
+      'INVALID_CONFIGURATION_YAML',
+      'The configuration contains invalid YAML routes',
+      result.issues.map((issue) => ({
+        path: `model.routes.${routeIndexes.get(issue.routeId) ?? 0}.source`,
+        code: issue.code,
+        message: `${issue.message} (${issue.line}:${issue.column})`,
+      })),
+    )
+  }
+  return model
 }
 
 function parseLockVersion(value: string): string {
@@ -119,7 +138,7 @@ export class DefaultDraftService implements DraftService {
       actor,
       draftId,
       parseLockVersion(input.lockVersion),
-      parseProjectRoutesModel(input.model),
+      parseSavableProjectRoutesModel(project.name, input.model),
       summary,
       requestId,
     )

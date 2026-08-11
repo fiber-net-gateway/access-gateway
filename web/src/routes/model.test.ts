@@ -67,3 +67,25 @@ test('reports missing and unknown route fields before server validation', () => 
   assert.ok(result.issues.some((issue) => issue.code === 'INVALID_ROUTE_TYPE'))
   assert.ok(result.issues.some((issue) => issue.code === 'UNKNOWN_ROUTE_FIELD'))
 })
+
+test('rejects a scalar response_headers block even though it is valid YAML syntax', () => {
+  const result = analyzeRouteSource({
+    id: crypto.randomUUID(),
+    source: 'path: /\nstatus: 200\ntype: RESPONSE\nresponse_headers:\n  X-Heassf',
+  })
+
+  assert.ok(
+    result.issues.some(
+      (issue) => issue.code === 'INVALID_ROUTE_FIELD_TYPE' && issue.path === 'response_headers',
+    ),
+  )
+})
+
+test('rejects YAML scalar values that cannot be represented safely in JSON', () => {
+  const result = analyzeRouteSource({
+    id: crypto.randomUUID(),
+    source: 'path: /unsafe\ntype: RESPONSE\nstatus: 9007199254740993',
+  })
+
+  assert.ok(result.issues.some((issue) => issue.code === 'ROUTE_VALUE_NOT_JSON_SAFE'))
+})

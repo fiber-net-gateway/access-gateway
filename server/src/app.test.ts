@@ -144,6 +144,36 @@ test('configuration version and Release APIs are registered and fail closed with
   assert.equal(saved.statusCode, 503)
   assert.equal(saved.json().error.code, 'DATABASE_UNCONFIGURED')
 
+  const restoredAfterEditing = await app.inject({
+    method: 'POST',
+    url: `/api/projects/${projectId}/configuration-versions/${versionId}/restorations`,
+    headers: { 'if-match': '"1"', 'idempotency-key': 'test-restore-edited-v2' },
+    payload: {
+      baseVersionId: versionId,
+      changeSummary: 'Use V1 as an editing source',
+      model: {
+        schemaVersion: 2,
+        kind: 'project_routes_yaml',
+        routes: [{ id: routeId, source: 'path: /edited\ntype: RESPONSE\nstatus: 200' }],
+      },
+    },
+  })
+  assert.equal(restoredAfterEditing.statusCode, 503)
+  assert.equal(restoredAfterEditing.json().error.code, 'DATABASE_UNCONFIGURED')
+
+  const invalidEditedRestoration = await app.inject({
+    method: 'POST',
+    url: `/api/projects/${projectId}/configuration-versions/${versionId}/restorations`,
+    headers: { 'if-match': '"1"', 'idempotency-key': 'test-restore-invalid' },
+    payload: {
+      baseVersionId: versionId,
+      changeSummary: 'Invalid derived content',
+      model: { schemaVersion: 1, kind: 'project_route', routes: [] },
+    },
+  })
+  assert.equal(invalidEditedRestoration.statusCode, 400)
+  assert.equal(invalidEditedRestoration.json().error.code, 'VALIDATION_ERROR')
+
   const release = await app.inject({
     method: 'POST',
     url: `/api/projects/${projectId}/releases`,

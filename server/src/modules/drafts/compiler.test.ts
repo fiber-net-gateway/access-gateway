@@ -74,6 +74,20 @@ test('rejects duplicate, unknown, and structurally incomplete route fields', () 
   assert.ok(incomplete.issues.some((issue) => issue.code === 'INVALID_ROUTE_TYPE'))
 })
 
+test('rejects scalar header blocks that YAML accepts but the native route codec cannot consume', () => {
+  const result = compileProjectRoutes(
+    'api.example.com',
+    model('path: /\nstatus: 200\ntype: RESPONSE\nresponse_headers:\n  X-Heassf'),
+  )
+
+  assert.equal(result.compiled, null)
+  assert.ok(
+    result.issues.some(
+      (issue) => issue.code === 'INVALID_ROUTE_FIELD_TYPE' && issue.path === 'response_headers',
+    ),
+  )
+})
+
 test('comments and formatting do not change the compiled semantic digest', () => {
   const compact = compileProjectRoutes(
     'api.example.com',

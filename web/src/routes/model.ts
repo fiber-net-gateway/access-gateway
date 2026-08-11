@@ -99,6 +99,79 @@ function fieldOffset(document: ReturnType<typeof parseDocument>, field: string):
   return isScalar(pair?.key) ? (pair.key.range?.[0] ?? 0) : 0
 }
 
+function isJsonSafe(value: unknown): boolean {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return true
+  if (typeof value === 'number') return Number.isFinite(value) && Number.isSafeInteger(value)
+  if (Array.isArray(value)) return value.every(isJsonSafe)
+  if (typeof value !== 'object') return false
+  return Object.entries(value).every(([key, item]) => typeof key === 'string' && isJsonSafe(item))
+}
+
+function isScalarValue(value: unknown): boolean {
+  return (
+    value === null ||
+    typeof value === 'string' ||
+    typeof value === 'boolean' ||
+    typeof value === 'number'
+  )
+}
+
+function isScalarMap(value: unknown): boolean {
+  return (
+    value === null ||
+    (typeof value === 'object' &&
+      !Array.isArray(value) &&
+      Object.values(value).every(isScalarValue))
+  )
+}
+
+function isScalarList(value: unknown): boolean {
+  return value === null || (Array.isArray(value) && value.every(isScalarValue))
+}
+
+function validateRouteFieldShapes(
+  route: RouteItemModel,
+  lineCounter: LineCounter,
+  document: ReturnType<typeof parseDocument>,
+  value: Readonly<Record<string, unknown>>,
+  issues: RouteValidationIssue[],
+): void {
+  const addTypeIssue = (field: string, expected: string): void => {
+    issues.push(
+      sourceIssue(
+        route.id,
+        lineCounter,
+        'INVALID_ROUTE_FIELD_TYPE',
+        `${field} 必须是${expected}`,
+        field,
+        fieldOffset(document, field),
+      ),
+    )
+  }
+
+  for (const field of ['proxy_headers', 'response_headers', 'context']) {
+    if (field in value && !isScalarMap(value[field])) addTypeIssue(field, 'mapping 或 null')
+  }
+  for (const field of ['addresses', 'allows']) {
+    if (field in value && !isScalarList(value[field])) addTypeIssue(field, 'sequence 或 null')
+  }
+  for (const field of [
+    'service',
+    'cluster',
+    'condition',
+    'rewrite',
+    'status',
+    'timeout',
+    'max_client_body_size',
+    'max_proxy_body_size',
+    'websocket_timeout',
+    'flush',
+  ]) {
+    if (field in value && !isScalarValue(value[field])) addTypeIssue(field, 'scalar 或 null')
+  }
+  if ('body' in value && !isScalarMap(value.body)) addTypeIssue('body', 'mapping 或 null')
+}
+
 function sourceIssue(
   routeId: string,
   lineCounter: LineCounter,
@@ -130,6 +203,15 @@ function analyzeRouteSourceUncached(route: RouteItemModel): RouteSourceAnalysis 
     code: error.code,
     message: error.message,
   }))
+  for (const warning of document.warnings) {
+    issues.push({
+      routeId: route.id,
+      path: '',
+      ...position(lineCounter, warning.pos[0]),
+      code: warning.code,
+      message: warning.message,
+    })
+  }
   visit(document, {
     Alias(_key, node) {
       issues.push({
@@ -174,7 +256,17 @@ function analyzeRouteSourceUncached(route: RouteItemModel): RouteSourceAnalysis 
   }
   if (issues.length > 0) return { path: null, type: null, condition: null, issues }
   const value: unknown = document.toJS({ maxAliasCount: 0 })
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+  if (typeof value !== 'object' || value === null || Array.isArray(value) || !isJsonSafe(value)) {
+    if (!isJsonSafe(value)) {
+      issues.push({
+        routeId: route.id,
+        path: '',
+        line: 1,
+        column: 1,
+        code: 'ROUTE_VALUE_NOT_JSON_SAFE',
+        message: 'Route 值只能使用 JSON 安全的字符串、布尔值、数组、对象和安全整数',
+      })
+    }
     return { path: null, type: null, condition: null, issues }
   }
   const routeValue = value as Record<string, unknown>
@@ -218,6 +310,7 @@ function analyzeRouteSourceUncached(route: RouteItemModel): RouteSourceAnalysis 
       ),
     )
   }
+  validateRouteFieldShapes(route, lineCounter, document, routeValue, issues)
   return {
     path: typeof routeValue.path === 'string' ? routeValue.path : null,
     type,
