@@ -12,9 +12,16 @@ export interface RouteItemModel {
   source: string
 }
 
+export interface ProjectNetworkPolicy {
+  source: 'route' | 'project'
+  allowedCidrs: readonly string[]
+  deniedCidrs: readonly string[]
+}
+
 export interface ProjectRoutesModel {
-  schemaVersion: 2
+  schemaVersion: 3
   kind: 'project_routes_yaml'
+  networkPolicy: ProjectNetworkPolicy
   routes: readonly RouteItemModel[]
 }
 
@@ -50,10 +57,25 @@ export function isProjectRoutesModel(value: unknown): value is ProjectRoutesMode
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
   const model = value as Record<string, unknown>
   if (
-    model.schemaVersion !== 2 ||
+    model.schemaVersion !== 3 ||
     model.kind !== 'project_routes_yaml' ||
+    typeof model.networkPolicy !== 'object' ||
+    model.networkPolicy === null ||
+    Array.isArray(model.networkPolicy) ||
     !Array.isArray(model.routes) ||
     model.routes.length > 5_000
+  ) {
+    return false
+  }
+  const networkPolicy = model.networkPolicy as Record<string, unknown>
+  if (
+    (networkPolicy.source !== 'route' && networkPolicy.source !== 'project') ||
+    !Array.isArray(networkPolicy.allowedCidrs) ||
+    !Array.isArray(networkPolicy.deniedCidrs) ||
+    networkPolicy.allowedCidrs.length + networkPolicy.deniedCidrs.length > 256 ||
+    ![...networkPolicy.allowedCidrs, ...networkPolicy.deniedCidrs].every(
+      (cidr) => typeof cidr === 'string' && cidr.length > 0 && cidr.length <= 64,
+    )
   ) {
     return false
   }
@@ -76,6 +98,37 @@ interface LegacyProjectRouteModel {
   kind: 'project_route'
   hosts: readonly unknown[]
   routes: readonly unknown[]
+}
+
+interface YamlRoutesV2Model {
+  schemaVersion: 2
+  kind: 'project_routes_yaml'
+  routes: readonly RouteItemModel[]
+}
+
+function isYamlRoutesV2Model(value: unknown): value is YamlRoutesV2Model {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const model = value as Record<string, unknown>
+  if (
+    model.schemaVersion !== 2 ||
+    model.kind !== 'project_routes_yaml' ||
+    !Array.isArray(model.routes) ||
+    model.routes.length > 5_000
+  ) {
+    return false
+  }
+  const ids = new Set<string>()
+  let totalSourceBytes = 0
+  for (const value of model.routes) {
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+    const route = value as Record<string, unknown>
+    if (!isPublicId(String(route.id)) || typeof route.source !== 'string') return false
+    if (route.source.length > 1_048_576 || ids.has(route.id as string)) return false
+    totalSourceBytes += Buffer.byteLength(route.source, 'utf8')
+    if (totalSourceBytes > 4_194_304) return false
+    ids.add(route.id as string)
+  }
+  return true
 }
 
 function isLegacyProjectRouteModel(value: unknown): value is LegacyProjectRouteModel {
@@ -102,10 +155,19 @@ function legacyRouteId(route: unknown, index: number): string {
 
 export function normalizeStoredProjectRoutesModel(value: unknown): ProjectRoutesModel | null {
   if (isProjectRoutesModel(value)) return value
+  if (isYamlRoutesV2Model(value)) {
+    return {
+      schemaVersion: 3,
+      kind: 'project_routes_yaml',
+      networkPolicy: { source: 'route', allowedCidrs: [], deniedCidrs: [] },
+      routes: value.routes,
+    }
+  }
   if (!isLegacyProjectRouteModel(value)) return null
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     kind: 'project_routes_yaml',
+    networkPolicy: { source: 'route', allowedCidrs: [], deniedCidrs: [] },
     routes: value.routes.map((route, index) => ({
       id: legacyRouteId(route, index),
       source: stringify(route, { lineWidth: 0 }).trimEnd(),

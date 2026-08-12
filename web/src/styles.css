@@ -1522,6 +1522,28 @@ button:disabled {
   max-height: min(60vh, 620px);
 }
 
+.version-preview-network {
+  display: grid;
+  gap: 5px;
+  margin-bottom: 13px;
+  padding: 12px 13px;
+  border: 1px solid #d8dfd6;
+  border-radius: 10px;
+  background: #f2f5f0;
+  color: #536159;
+}
+
+.version-preview-network strong {
+  color: #304239;
+  font-size: 0.72rem;
+}
+
+.version-preview-network span,
+.version-preview-network small {
+  font-size: 0.66rem;
+  line-height: 1.5;
+}
+
 .version-preview-routes article {
   overflow: hidden;
   border: 1px solid #d8dfd6;
@@ -1546,6 +1568,274 @@ button:disabled {
     0.69rem/1.6 'SFMono-Regular',
     Consolas,
     monospace;
+}
+
+.certificate-page-grid,
+.project-settings-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(320px, 0.85fr);
+  gap: 16px;
+}
+
+.settings-panel {
+  overflow: hidden;
+  border: 1px solid #d2d9d0;
+  border-radius: 15px;
+  background: #fbfcf9;
+}
+
+.settings-panel > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 20px;
+  border-bottom: 1px solid #e0e5de;
+  background: #f5f7f3;
+}
+
+.settings-panel h2,
+.settings-panel h3 {
+  margin: 0;
+  color: #24372e;
+  font-size: 1rem;
+}
+
+.certificate-list {
+  display: grid;
+  gap: 10px;
+  padding: 16px;
+}
+
+.certificate-card {
+  overflow: hidden;
+  border: 1px solid #d9dfd7;
+  border-radius: 11px;
+  background: #fff;
+}
+
+.certificate-card > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 14px;
+}
+
+.certificate-card > header > div {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+}
+
+.certificate-card strong {
+  color: #263b31;
+  font-size: 0.78rem;
+}
+
+.certificate-card small,
+.settings-description {
+  color: #748078;
+  font-size: 0.68rem;
+  line-height: 1.55;
+}
+
+.certificate-card dl,
+.certificate-binding-detail dl {
+  display: grid;
+  margin: 0;
+  border-top: 1px solid #e6eae4;
+}
+
+.certificate-card dl {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.certificate-card dl div,
+.certificate-binding-detail dl div {
+  min-width: 0;
+  padding: 10px 13px;
+}
+
+.certificate-card dt,
+.certificate-binding-detail dt {
+  color: #839088;
+  font-size: 0.59rem;
+}
+
+.certificate-card dd,
+.certificate-binding-detail dd {
+  overflow: hidden;
+  margin: 4px 0 0;
+  color: #405149;
+  font-family: 'SFMono-Regular', Consolas, monospace;
+  font-size: 0.63rem;
+  overflow-wrap: anywhere;
+}
+
+.certificate-upload-form,
+.network-policy-form {
+  display: grid;
+  gap: 16px;
+  padding: 20px;
+}
+
+.certificate-upload-form label,
+.network-policy-form label,
+.binding-controls label {
+  display: grid;
+  gap: 7px;
+  color: #526159;
+  font-size: 0.68rem;
+  font-weight: 720;
+}
+
+.certificate-upload-form input,
+.certificate-upload-form textarea,
+.network-policy-form input,
+.network-policy-form textarea,
+.binding-controls select {
+  width: 100%;
+  padding: 10px 11px;
+  border: 1px solid #cbd4ca;
+  border-radius: 9px;
+  background: #fff;
+  color: #1e2d26;
+  outline: none;
+}
+
+.certificate-upload-form textarea,
+.network-policy-form textarea {
+  resize: vertical;
+  font:
+    0.68rem/1.55 'SFMono-Regular',
+    Consolas,
+    monospace;
+}
+
+.certificate-upload-form input:focus,
+.certificate-upload-form textarea:focus,
+.network-policy-form input:focus,
+.network-policy-form textarea:focus,
+.binding-controls select:focus {
+  border-color: #789578;
+  box-shadow: 0 0 0 3px rgb(120 149 120 / 13%);
+}
+
+.certificate-pem-grid,
+.network-cidr-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.form-actions,
+.binding-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.form-actions > span,
+.network-policy-form label > small {
+  color: #748078;
+  font-size: 0.64rem;
+  font-weight: 500;
+  line-height: 1.5;
+}
+
+.project-settings-grid {
+  margin-top: 18px;
+}
+
+.settings-description,
+.certificate-binding-detail,
+.binding-controls {
+  margin: 0;
+  padding: 17px 20px;
+}
+
+.certificate-binding-detail > p {
+  margin: 0 0 13px;
+  color: #53635b;
+  font-size: 0.72rem;
+}
+
+.binding-controls {
+  border-top: 1px solid #e3e8e1;
+}
+
+.binding-controls label {
+  flex: 1 1 260px;
+}
+
+.network-policy-form {
+  max-width: 980px;
+  padding-right: 0;
+  padding-left: 0;
+}
+
+.network-policy-form fieldset {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  padding: 0;
+  border: 0;
+}
+
+.network-policy-form legend {
+  margin-bottom: 9px;
+  color: #536159;
+  font-size: 0.69rem;
+  font-weight: 760;
+}
+
+.policy-option {
+  display: flex !important;
+  align-items: flex-start;
+  padding: 14px;
+  border: 1px solid #d6ddd4;
+  border-radius: 11px;
+  background: #fff;
+}
+
+.policy-option input {
+  width: auto;
+  margin: 3px 4px 0 0;
+}
+
+.policy-option span {
+  display: grid;
+  gap: 4px;
+}
+
+.policy-option small {
+  color: #718078;
+  font-weight: 500;
+  line-height: 1.45;
+}
+
+.network-change-summary {
+  max-width: 600px;
+}
+
+.status-chip-valid,
+.status-chip-expiring {
+  background: #e1ebbc;
+  color: #385220;
+}
+
+.status-chip-expiring {
+  background: #fff0c9;
+  color: #725713;
+}
+
+.status-chip-expired,
+.status-chip-superseded {
+  background: #f5ddd5;
+  color: #7e3526;
 }
 
 @media (max-width: 1080px) {
@@ -1602,6 +1892,11 @@ button:disabled {
     grid-template-columns: 1fr;
   }
 
+  .certificate-page-grid,
+  .project-settings-grid {
+    grid-template-columns: 1fr;
+  }
+
   .project-workspace {
     grid-template-columns: 1fr;
   }
@@ -1653,6 +1948,13 @@ button:disabled {
   }
 
   .version-source-summary {
+    grid-template-columns: 1fr;
+  }
+
+  .certificate-pem-grid,
+  .network-cidr-grid,
+  .network-policy-form fieldset,
+  .certificate-card dl {
     grid-template-columns: 1fr;
   }
 

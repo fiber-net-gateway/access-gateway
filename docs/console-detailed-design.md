@@ -1,13 +1,14 @@
 # Access Gateway Console 详细设计
 
-- 状态：Draft v0.3
+- 状态：Draft v0.4
 - 上游需求：[Access Gateway Console 产品需求文档](console-requirements.md)
 - 核心流程：逐条 YAML Route → 保存配置版本 → 选择当前/历史版本 → 创建 Release → 发布到 rnacos
 - 适用范围：`web/`、`server/`、MySQL migration、rnacos publication worker，以及必要的
   `native/access-server/` 校验和激活证据接口
 - 实现基线：Configuration Version API 与历史 UI、按当前/历史版本创建 Release、Native Validator
   重校验、rnacos publication worker、逐资源回读证据和 Docker demo 已实现；版本 diff、资源级重试、
-  崩溃后自动重新领取 running job、证书动态交付和实例激活采集尚未实现
+  Project 网络策略、证书库存/校验/绑定已实现；崩溃后自动重新领取 running job、证书动态交付和
+  实例激活采集尚未实现
 
 ## 1. 设计目标
 
@@ -680,17 +681,18 @@ rnacos adapter 未配置时保持 unavailable，UI 不模拟发布成功。
 
 ## 14. 需求追踪
 
-| 需求范围                 | 详细设计章节             |
-| ------------------------ | ------------------------ |
-| 保存不可变配置版本       | 2、4.1、5、6.1、7.2、8.2 |
-| 当前/历史版本列表与 diff | 4.3、5.3、7.2、8.3       |
-| 选择历史版本发布         | 2.2、6.4、7.3、8.4       |
-| 恢复历史版本             | 5.2、6.2、7.2            |
-| wire version 与兼容校验  | 2.2、5.4、6.3、6.4       |
-| rnacos 多资源发布        | 4.2、6.5、6.6、10        |
-| 发布/激活状态分离        | 4.2、4.3、8.5            |
-| 权限、安全和审计         | 7.4、9                   |
-| Migration 和测试         | 11、12、13               |
+| 需求范围                 | 详细设计章节                               |
+| ------------------------ | ------------------------------------------ |
+| 保存不可变配置版本       | 2、4.1、5、6.1、7.2、8.2                   |
+| 当前/历史版本列表与 diff | 4.3、5.3、7.2、8.3                         |
+| 选择历史版本发布         | 2.2、6.4、7.3、8.4                         |
+| 恢复历史版本             | 5.2、6.2、7.2                              |
+| wire version 与兼容校验  | 2.2、5.4、6.3、6.4                         |
+| rnacos 多资源发布        | 4.2、6.5、6.6、10                          |
+| 发布/激活状态分离        | 4.2、4.3、8.5                              |
+| 权限、安全和审计         | 7.4、9                                     |
+| Migration 和测试         | 11、12、13                                 |
+| 网络策略与证书库存/绑定  | `network-policy-and-certificate-design.md` |
 
 实现时还必须遵守仓库根 `AGENTS.md` 中的 native wire contract、秘密保护、不可变 Release、失败保留
 旧快照和实例证据边界。

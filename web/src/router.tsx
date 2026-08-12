@@ -1,8 +1,11 @@
 import { Navigate, createBrowserRouter } from 'react-router'
 
 import App from './App'
+import { CertificatesPage } from './pages/CertificatesPage'
 import { NotFoundPage } from './pages/NotFoundPage'
 import { ProjectLayout } from './pages/ProjectLayout'
+import { ProjectCertificatePage } from './pages/ProjectCertificatePage'
+import { ProjectNetworkPolicyPage } from './pages/ProjectNetworkPolicyPage'
 import { ProjectReleasesPage } from './pages/ProjectReleasesPage'
 import { ProjectRoutesPage } from './pages/ProjectRoutesPage'
 import { ProjectUnavailablePage } from './pages/ProjectUnavailablePage'
@@ -15,6 +18,7 @@ export const appRoutes = [
     element: <App />,
     children: [
       { index: true, element: <Navigate replace to="/projects" /> },
+      { path: 'certificates', element: <CertificatesPage /> },
       {
         path: 'projects',
         children: [
@@ -26,7 +30,8 @@ export const appRoutes = [
               { index: true, element: <Navigate replace to="routes" /> },
               { path: 'routes', element: <ProjectRoutesPage /> },
               { path: 'versions', element: <ProjectVersionsPage /> },
-              { path: 'certificate', element: <ProjectUnavailablePage capability="certificate" /> },
+              { path: 'network-policy', element: <ProjectNetworkPolicyPage /> },
+              { path: 'certificate', element: <ProjectCertificatePage /> },
               { path: 'releases', element: <ProjectReleasesPage /> },
               { path: 'settings', element: <ProjectUnavailablePage capability="settings" /> },
             ],

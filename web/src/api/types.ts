@@ -38,6 +38,13 @@ export interface ProjectView {
   } | null
   publishedVersion: number | null
   activationStatus: 'unknown'
+  certificate: {
+    id: string
+    name: string
+    status: 'valid' | 'expiring' | 'expired' | 'superseded'
+    notAfter: string
+    runtimeDeploymentStatus: 'unsupported'
+  } | null
 }
 
 export interface RouteItemModel {
@@ -45,9 +52,16 @@ export interface RouteItemModel {
   source: string
 }
 
+export interface ProjectNetworkPolicy {
+  source: 'route' | 'project'
+  allowedCidrs: readonly string[]
+  deniedCidrs: readonly string[]
+}
+
 export interface ProjectRoutesModel {
-  schemaVersion: 2
+  schemaVersion: 3
   kind: 'project_routes_yaml'
+  networkPolicy: ProjectNetworkPolicy
   routes: readonly RouteItemModel[]
 }
 
@@ -155,4 +169,32 @@ export interface ProjectReleaseView {
   activationStatus: 'unknown'
   createdAt: string
   publishedAt: string | null
+}
+
+export type CertificateFactStatus = 'valid' | 'expiring' | 'expired' | 'superseded'
+
+export interface CertificateView {
+  id: string
+  name: string
+  status: CertificateFactStatus
+  subject: string
+  issuer: string
+  serialNumber: string
+  fingerprintSha256: string
+  dnsNames: readonly string[]
+  notBefore: string
+  notAfter: string
+  keyType: string
+  bindingCount: number
+  runtimeDeploymentStatus: 'unsupported'
+  createdAt: string
+}
+
+export interface ProjectCertificateBindingView {
+  projectId: string
+  domain: string
+  certificate: CertificateView | null
+  coverageStatus: 'covered' | 'unbound'
+  runtimeDeploymentStatus: 'unsupported'
+  boundAt: string | null
 }

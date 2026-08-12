@@ -16,6 +16,11 @@ import {
 import { HttpNacosClient, UnavailableNacosClient } from './integrations/nacos/http.js'
 import { AuthRepository } from './modules/auth/repository.js'
 import { FixedActorAuthService, UnavailableAuthService } from './modules/auth/service.js'
+import { CertificateRepository } from './modules/certificates/repository.js'
+import {
+  DefaultCertificateService,
+  UnavailableCertificateService,
+} from './modules/certificates/service.js'
 import { DraftRepository } from './modules/drafts/repository.js'
 import { DefaultDraftService, UnavailableDraftService } from './modules/drafts/service.js'
 import { EnvironmentRepository } from './modules/environments/repository.js'
@@ -86,6 +91,7 @@ function unavailableServices(
       : new UnavailableAuthService()
   return {
     auth,
+    certificates: new UnavailableCertificateService(),
     environments: new UnavailableEnvironmentService(),
     projects: new UnavailableProjectService(),
     drafts: new UnavailableDraftService(),
@@ -145,8 +151,10 @@ export async function createApplicationRuntime(config: ServerConfig): Promise<Ap
         })
       : new UnavailableNacosClient()
     const releases = new ReleaseRepository(pool, documents)
+    const certificates = new CertificateRepository(pool, documents)
     const services: ApplicationServices = {
       auth,
+      certificates: new DefaultCertificateService(certificates, projects, environments),
       environments: new DefaultEnvironmentService(environments),
       projects: new DefaultProjectService(projects, environments),
       drafts: new DefaultDraftService(drafts, projects, environments, validator),

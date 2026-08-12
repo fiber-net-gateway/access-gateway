@@ -53,8 +53,9 @@ const analysisCache = new WeakMap<RouteItemModel, RouteSourceAnalysis>()
 
 export function initialRouteModel(): ProjectRoutesModel {
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     kind: 'project_routes_yaml',
+    networkPolicy: { source: 'route', allowedCidrs: [], deniedCidrs: [] },
     routes: [],
   }
 }

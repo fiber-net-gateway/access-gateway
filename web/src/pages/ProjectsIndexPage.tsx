@@ -115,6 +115,10 @@ export function ProjectsIndexPage() {
                         : '尚未发布'}
                     </span>
                     <span>实例激活：未知</span>
+                    <span>
+                      证书：
+                      {project.certificate ? `${project.certificate.status} / 未部署` : '未绑定'}
+                    </span>
                   </span>
                 </span>
                 <span className="project-card-arrow" aria-hidden="true">

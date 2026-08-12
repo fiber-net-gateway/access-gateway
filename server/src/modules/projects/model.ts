@@ -11,6 +11,13 @@ export interface ProjectView {
   } | null
   publishedVersion: number | null
   activationStatus: 'unknown'
+  certificate: {
+    id: string
+    name: string
+    status: 'valid' | 'expiring' | 'expired' | 'superseded'
+    notAfter: string
+    runtimeDeploymentStatus: 'unsupported'
+  } | null
   createdAt: string
   updatedAt: string
 }

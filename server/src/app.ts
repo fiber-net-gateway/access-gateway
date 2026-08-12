@@ -3,6 +3,8 @@ import Fastify, { type FastifyError, type FastifyServerOptions } from 'fastify'
 
 import { UnavailableNativeValidator } from './integrations/native-validator/subprocess.js'
 import { FixedActorAuthService } from './modules/auth/service.js'
+import { registerCertificateRoutes } from './modules/certificates/routes.js'
+import { UnavailableCertificateService } from './modules/certificates/service.js'
 import { registerDraftRoutes } from './modules/drafts/routes.js'
 import { UnavailableDraftService } from './modules/drafts/service.js'
 import { registerEnvironmentRoutes } from './modules/environments/routes.js'
@@ -84,6 +86,7 @@ export function buildApp(options: BuildAppOptions = {}) {
   )
 
   registerSystemRoutes(app, services.system)
+  registerCertificateRoutes(app, services.auth, services.certificates)
   registerEnvironmentRoutes(app, services.auth, services.environments)
   registerProjectRoutes(app, services.auth, services.projects)
   registerDraftRoutes(app, services.auth, services.drafts)
@@ -159,6 +162,7 @@ function createUnavailableServices(): ApplicationServices {
   const validator = new UnavailableNativeValidator(1)
   return {
     auth,
+    certificates: new UnavailableCertificateService(),
     environments: new UnavailableEnvironmentService(),
     projects: new UnavailableProjectService(),
     drafts: new UnavailableDraftService(),
