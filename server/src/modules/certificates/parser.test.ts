@@ -3,7 +3,11 @@ import { generateKeyPairSync, sign } from 'node:crypto'
 import test from 'node:test'
 
 import { AppError } from '../../shared/errors.js'
-import { certificateCoversDomain, parseCertificateUpload } from './parser.js'
+import {
+  certificateCoversDomain,
+  missingManagedDnsNames,
+  parseCertificateUpload,
+} from './parser.js'
 
 function derLength(length: number): Buffer {
   if (length < 128) return Buffer.from([length])
@@ -128,5 +132,22 @@ test('uses one-label wildcard DNS SAN coverage and rejects expired uploads', () 
       ),
     (error: unknown) =>
       error instanceof AppError && error.fields[0]?.code === 'CERTIFICATE_EXPIRED',
+  )
+})
+
+test('requires renewed versions to preserve every managed DNS selector', () => {
+  assert.deepEqual(
+    missingManagedDnsNames(
+      ['api.example.com', '*.internal.example.com'],
+      ['api.example.com', '*.internal.example.com'],
+    ),
+    [],
+  )
+  assert.deepEqual(
+    missingManagedDnsNames(
+      ['api.example.com', 'one.internal.example.com'],
+      ['api.example.com', '*.internal.example.com'],
+    ),
+    ['*.internal.example.com'],
   )
 })

@@ -117,7 +117,11 @@ export function ProjectsIndexPage() {
                     <span>实例激活：未知</span>
                     <span>
                       证书：
-                      {project.certificate ? `${project.certificate.status} / 未部署` : '未绑定'}
+                      {project.certificate
+                        ? `V${project.certificate.version} ${project.certificate.status} / 未部署`
+                        : project.certificateResolutionStatus === 'conflict'
+                          ? '匹配冲突'
+                          : '未覆盖'}
                     </span>
                   </span>
                 </span>

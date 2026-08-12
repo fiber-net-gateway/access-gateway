@@ -1,5 +1,6 @@
 import type {
   CertificateView,
+  CertificateVersionView,
   ConfigurationVersionDetail,
   ConfigurationVersionListResult,
   DraftRevisionView,
@@ -8,7 +9,7 @@ import type {
   ProjectRoutesValidationView,
   ProjectReleaseView,
   ProjectView,
-  ProjectCertificateBindingView,
+  ProjectCertificateResolutionView,
   SavedConfigurationVersion,
   SystemStatusResponse,
 } from './types'
@@ -62,10 +63,12 @@ function isProject(value: unknown): value is ProjectView {
     typeof value.id === 'string' &&
     typeof value.domain === 'string' &&
     typeof value.status === 'string' &&
+    typeof value.certificateResolutionStatus === 'string' &&
     (value.certificate === null ||
       (isRecord(value.certificate) &&
         typeof value.certificate.id === 'string' &&
         typeof value.certificate.name === 'string' &&
+        typeof value.certificate.version === 'number' &&
         typeof value.certificate.status === 'string' &&
         typeof value.certificate.notAfter === 'string' &&
         value.certificate.runtimeDeploymentStatus === 'unsupported'))
@@ -290,11 +293,11 @@ function isProjectRelease(value: unknown): value is ProjectReleaseView {
   )
 }
 
-function isCertificate(value: unknown): value is CertificateView {
+function isCertificateVersion(value: unknown): value is CertificateVersionView {
   return (
     isRecord(value) &&
     typeof value.id === 'string' &&
-    typeof value.name === 'string' &&
+    typeof value.version === 'number' &&
     typeof value.status === 'string' &&
     typeof value.subject === 'string' &&
     typeof value.issuer === 'string' &&
@@ -305,21 +308,39 @@ function isCertificate(value: unknown): value is CertificateView {
     typeof value.notBefore === 'string' &&
     typeof value.notAfter === 'string' &&
     typeof value.keyType === 'string' &&
-    typeof value.bindingCount === 'number' &&
-    value.runtimeDeploymentStatus === 'unsupported' &&
     typeof value.createdAt === 'string'
   )
 }
 
-function isProjectCertificateBinding(value: unknown): value is ProjectCertificateBindingView {
+function isCertificate(value: unknown): value is CertificateView {
+  return (
+    isRecord(value) &&
+    typeof value.id === 'string' &&
+    typeof value.name === 'string' &&
+    typeof value.lockVersion === 'string' &&
+    Array.isArray(value.managedDnsNames) &&
+    value.managedDnsNames.every((name) => typeof name === 'string') &&
+    isCertificateVersion(value.currentVersion) &&
+    typeof value.versionCount === 'number' &&
+    typeof value.matchedProjectCount === 'number' &&
+    value.runtimeDeploymentStatus === 'unsupported' &&
+    typeof value.createdAt === 'string' &&
+    typeof value.updatedAt === 'string'
+  )
+}
+
+function isProjectCertificateResolution(value: unknown): value is ProjectCertificateResolutionView {
   return (
     isRecord(value) &&
     typeof value.projectId === 'string' &&
     typeof value.domain === 'string' &&
+    (value.resolutionStatus === 'matched' ||
+      value.resolutionStatus === 'uncovered' ||
+      value.resolutionStatus === 'conflict') &&
     (value.certificate === null || isCertificate(value.certificate)) &&
-    (value.coverageStatus === 'covered' || value.coverageStatus === 'unbound') &&
-    value.runtimeDeploymentStatus === 'unsupported' &&
-    (value.boundAt === null || typeof value.boundAt === 'string')
+    Array.isArray(value.matches) &&
+    value.matches.every(isCertificate) &&
+    value.runtimeDeploymentStatus === 'unsupported'
   )
 }
 
@@ -349,39 +370,48 @@ export async function createCertificate(input: {
   )
 }
 
+export async function createCertificateVersion(
+  certificateId: string,
+  input: { certificatePem: string; privateKeyPem: string; lockVersion: string },
+): Promise<CertificateView> {
+  return requestJson(
+    `/api/certificates/${encodeURIComponent(certificateId)}/versions`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'If-Match': `"${input.lockVersion}"`,
+      },
+      body: JSON.stringify({
+        certificatePem: input.certificatePem,
+        privateKeyPem: input.privateKeyPem,
+      }),
+    },
+    isCertificate,
+  )
+}
+
+export async function fetchCertificateVersions(
+  certificateId: string,
+  signal?: AbortSignal,
+): Promise<readonly CertificateVersionView[]> {
+  const result = await requestJson(
+    `/api/certificates/${encodeURIComponent(certificateId)}/versions`,
+    { signal },
+    (value): value is { items: CertificateVersionView[] } =>
+      isRecord(value) && Array.isArray(value.items) && value.items.every(isCertificateVersion),
+  )
+  return result.items
+}
+
 export async function fetchProjectCertificate(
   projectId: string,
   signal?: AbortSignal,
-): Promise<ProjectCertificateBindingView> {
+): Promise<ProjectCertificateResolutionView> {
   return requestJson(
     `/api/projects/${encodeURIComponent(projectId)}/certificate`,
     { signal },
-    isProjectCertificateBinding,
-  )
-}
-
-export async function bindProjectCertificate(
-  projectId: string,
-  certificateId: string,
-): Promise<ProjectCertificateBindingView> {
-  return requestJson(
-    `/api/projects/${encodeURIComponent(projectId)}/certificate`,
-    {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ certificateId }),
-    },
-    isProjectCertificateBinding,
-  )
-}
-
-export async function unbindProjectCertificate(
-  projectId: string,
-): Promise<ProjectCertificateBindingView> {
-  return requestJson(
-    `/api/projects/${encodeURIComponent(projectId)}/certificate`,
-    { method: 'DELETE' },
-    isProjectCertificateBinding,
+    isProjectCertificateResolution,
   )
 }
 

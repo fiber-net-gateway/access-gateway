@@ -38,9 +38,11 @@ export interface ProjectView {
   } | null
   publishedVersion: number | null
   activationStatus: 'unknown'
+  certificateResolutionStatus: 'matched' | 'uncovered' | 'conflict'
   certificate: {
     id: string
     name: string
+    version: number
     status: 'valid' | 'expiring' | 'expired' | 'superseded'
     notAfter: string
     runtimeDeploymentStatus: 'unsupported'
@@ -173,9 +175,9 @@ export interface ProjectReleaseView {
 
 export type CertificateFactStatus = 'valid' | 'expiring' | 'expired' | 'superseded'
 
-export interface CertificateView {
+export interface CertificateVersionView {
   id: string
-  name: string
+  version: number
   status: CertificateFactStatus
   subject: string
   issuer: string
@@ -185,16 +187,27 @@ export interface CertificateView {
   notBefore: string
   notAfter: string
   keyType: string
-  bindingCount: number
-  runtimeDeploymentStatus: 'unsupported'
   createdAt: string
 }
 
-export interface ProjectCertificateBindingView {
+export interface CertificateView {
+  id: string
+  name: string
+  lockVersion: string
+  managedDnsNames: readonly string[]
+  currentVersion: CertificateVersionView
+  versionCount: number
+  matchedProjectCount: number
+  runtimeDeploymentStatus: 'unsupported'
+  createdAt: string
+  updatedAt: string
+}
+
+export interface ProjectCertificateResolutionView {
   projectId: string
   domain: string
+  resolutionStatus: 'matched' | 'uncovered' | 'conflict'
   certificate: CertificateView | null
-  coverageStatus: 'covered' | 'unbound'
+  matches: readonly CertificateView[]
   runtimeDeploymentStatus: 'unsupported'
-  boundAt: string | null
 }

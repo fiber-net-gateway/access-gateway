@@ -1,6 +1,6 @@
 # Access Gateway Console 产品需求文档
 
-- 状态：Draft v0.4（网络策略与证书控制面 P0 已实现）
+- 状态：Draft v0.5（网络策略与可更新逻辑证书控制面 P0 已实现）
 - 适用范围：`web/`、`server/`，以及实现校验、证书生效和激活证据所需的
   `native/access-server/` 配套能力
 - 产品主线：域名 Project → 逐条 YAML Route → 保存配置版本 → 选择当前/历史版本 → 发布到 rnacos
@@ -11,7 +11,8 @@
 
 本文重新定义 Access Gateway Console 的产品范围和交互模型。Console 不再围绕“环境管理”或
 “灰度规则管理”组织功能，而是帮助网关维护者完成一个更短、更清晰的工作流：创建域名，逐条编写
-YAML 路由，绑定证书，把配置显式保存为不可变版本，并选择当前版本或历史版本发布到 rnacos。
+YAML 路由，按域名自动解析证书，把配置显式保存为不可变版本，并选择当前版本或历史版本发布到
+rnacos。
 
 本文是产品、前端、后端、原生数据面和测试共同使用的需求基线，不是数据库 DDL 或视觉稿。
 当前数据面尚未具备的能力会明确标记为配套依赖，页面不得用模拟状态掩盖能力缺失。
@@ -26,8 +27,8 @@ YAML 路由，绑定证书，把配置显式保存为不可变版本，并选择
    发布是最短操作路径。
 3. **每条 Route 使用独立 YAML 编辑器。** 页面不再要求用户编辑整份 Project JSON，也不以大量
    结构化表单拆散高级路由能力。
-4. **证书是一等对象。** Console 管理证书上传、校验、域名绑定、有效期和部署状态；私钥不进入
-   rnacos route payload。
+4. **证书是一等对象。** Console 管理稳定逻辑证书及其不可变版本、自动域名匹配、有效期和部署
+   状态；私钥不进入 rnacos route payload。
 5. **发布目标固定为一个部署配置的 rnacos。** 普通用户不创建、选择或切换环境，用户可见 API
    也不要求传递 `environmentId`。
 6. **暂不提供灰度规则配置。** Console 不展示、不编辑、不发布
@@ -58,7 +59,7 @@ YAML 路由，绑定证书，把配置显式保存为不可变版本，并选择
 
 ### 3.1 产品目标
 
-- 让用户从域名项目列表进入后，可以在同一上下文完成 Route 编写、证书绑定和发布。
+- 让用户从域名项目列表进入后，可以在同一上下文完成 Route 编写、查看证书自动解析和发布。
 - 让每条 Route 都有独立、可排序、可折叠、可定位错误的 YAML 编辑器。
 - 保留 RESPONSE、PROXY、condition、rewrite、headers、CIDR、body limit 和 WebSocket 等完整
   native route 能力。
@@ -109,7 +110,7 @@ YAML 路由，绑定证书，把配置显式保存为不可变版本，并选择
 
 ### 5.1 核心对象
 
-- **Project**：一个规范化 exact domain，以及其路由配置版本、证书绑定、Release 历史和状态摘要。
+- **Project**：一个规范化 exact domain，以及其路由配置版本、自动证书解析、Release 历史和状态摘要。
 - **Route Item**：Project 下有稳定控制面 ID 和顺序的一条路由；用户编辑内容是一份独立 YAML
   mapping，ID 和顺序不写入 wire payload。
 - **Working Copy**：浏览器中基于某个配置版本继续编辑的临时内容，可以包含未完成或无效 YAML；
@@ -119,8 +120,11 @@ YAML 路由，绑定证书，把配置显式保存为不可变版本，并选择
   或 rnacos 连接信息。每个 Project 内使用单调递增的展示号 `V1`、`V2`……；最新版本称为“当前
   配置版本”，其余为“历史配置版本”。内部可以继续由 `draft_revisions` 承载，但 UI/API 不把它
   描述成可变草稿。
-- **Certificate**：不可变证书版本，包含证书链、加密私钥、指纹、SAN、有效期和校验结果。
-- **Certificate Binding**：Certificate 与一个或多个被 SAN 覆盖的 Project 的绑定关系。
+- **Certificate**：稳定逻辑证书，包含名称、managed DNS 选择范围和当前版本指针。
+- **Certificate Version**：不可变证书链、加密私钥、指纹、SAN、有效期和校验结果；续期新增版本，
+  不覆盖历史版本。
+- **Certificate Resolution**：根据 Project domain、exact 优先和单层 wildcard 规则派生的只读关系，
+  不是需要用户逐 Project 维护的绑定。
 - **Release**：一次发布的不可变计划，保存所选 Configuration Version、来源类型（当前/历史）、
   编译器版本、新分配的数据面 `version`、精确 JSON payload、摘要和资源依赖关系。证书部署记录
   与 rnacos route resource 分开保存。
@@ -164,15 +168,15 @@ stateDiagram-v2
 ### 5.3 证书生命周期
 
 证书至少区分 `invalid`、`valid`、`expiring`、`expired`、`superseded`；运行时部署另外区分
-`unsupported`、`pending`、`deployed`、`failed` 和 `activation_unknown`。上传成功或绑定成功
-不等于证书已经被 access-server 使用。
+`unsupported`、`pending`、`deployed`、`failed` 和 `activation_unknown`。逻辑证书创建、版本更新
+或自动解析成功不等于证书已经被 access-server 使用。
 
 ## 6. 信息架构
 
 ### 6.1 顶层导航
 
 1. **Projects**：默认首页；搜索、创建和进入域名 Project。
-2. **Certificates**：证书清单、域名覆盖、到期提醒和绑定关系。
+2. **Certificates**：逻辑证书、不可变版本、自动域名范围和到期提醒。
 3. **Releases**：待发布变更、发布进度、失败重试和回滚历史。
 4. **Audit**：配置与安全操作记录。
 5. **System**：仅管理员可见；rnacos 连接、实例证据能力和部署级健康状态。
@@ -188,7 +192,7 @@ Project 页面固定显示域名、当前配置版本、未保存状态、rnacos
 
 1. **Routes**：默认页签，也是主要工作区；
 2. **Versions**：当前和历史配置版本、只读预览、版本 diff、恢复和发布入口；
-3. **Certificate**：当前绑定、覆盖检查和替换入口；
+3. **Certificate**：自动解析结果、覆盖检查和当前逻辑版本；
 4. **Releases**：该域名的发布执行、资源状态、重试和激活证据；
 5. **Settings**：HTTPS 策略、归档/下线等低频高风险操作。
 
@@ -359,17 +363,19 @@ RESPONSE Route 至少覆盖 `status` 与 `body`（TEXT、BASE64、TEMPLATE）。
 | ------------ | ------ | --------------------------------------------------------------------------------- |
 | CON-CERT-001 | P0     | 支持上传 PEM 证书链和私钥，解析后展示 subject、issuer、SAN、指纹和有效期          |
 | CON-CERT-002 | P0     | 校验证书链格式、证书与私钥匹配、有效期和域名覆盖；失败时不建立可用版本            |
-| CON-CERT-003 | P0     | 支持 exact 和 wildcard SAN 覆盖判断，一个证书可绑定多个被覆盖的 Project           |
-| CON-CERT-004 | P0     | 私钥加密存储、永不回显、不可下载，不进入日志、trace、审计 diff 或 rnacos payload  |
-| CON-CERT-005 | P0     | Project 页显示未绑定、有效、即将过期、已过期及运行时部署未知/不支持等独立状态     |
-| CON-CERT-006 | P0     | 替换证书创建不可变新版本；旧版本保留指纹和操作证据，但私钥按保留策略安全销毁      |
-| CON-CERT-007 | P1     | 到期阈值支持 30/14/7 天提醒，提醒失败不影响证书事实状态                           |
-| CON-CERT-008 | P1     | 经专用安全交付通道把证书部署到支持 SNI 的 access-server，并收集逐实例证书指纹证据 |
-| CON-CERT-009 | P2     | 支持 ACME 或企业证书服务自动签发与续期，仍使用不可变版本和显式部署记录            |
+| CON-CERT-003 | P0     | 首个版本建立稳定逻辑证书及 managed DNS 范围；版本本身保持不可变                   |
+| CON-CERT-004 | P0     | Project 按 exact 优先、单层 wildcard 规则自动解析逻辑证书，不要求逐项目绑定       |
+| CON-CERT-005 | P0     | 更新逻辑证书创建新版本，并要求继续覆盖全部 managed DNS 范围                       |
+| CON-CERT-006 | P0     | 同优先级多候选返回 conflict；不按上传时间、到期日或存储顺序任意选择               |
+| CON-CERT-007 | P0     | 私钥加密存储、永不回显、不可下载，不进入日志、trace、审计 diff 或 rnacos payload  |
+| CON-CERT-008 | P0     | Project 页分别显示 matched/uncovered/conflict、版本事实状态和 runtime unsupported |
+| CON-CERT-009 | P1     | 到期阈值支持 30/14/7 天提醒，提醒失败不影响证书事实状态                           |
+| CON-CERT-010 | P1     | 经专用安全交付通道把证书部署到支持 SNI 的 access-server，并收集逐实例证书指纹证据 |
+| CON-CERT-011 | P2     | 支持 ACME 或企业证书服务自动签发与续期，仍使用不可变版本和显式部署记录            |
 
 当前 access-server 只支持启动时从文件加载一组监听器证书，尚不支持 Console 管理的逐域名 SNI
-证书。因此 P0 可以完成证书库存、校验和绑定，但必须把运行时状态显示为“动态证书部署未接入”；
-只有 CON-CERT-008 及对应 native 能力完成后才能显示 `deployed`。
+证书。因此 P0 可以完成逻辑证书、版本更新和自动域名解析，但必须把运行时状态显示为“动态证书部署
+未接入”；只有 CON-CERT-010 及对应 native 能力完成后才能显示 `deployed`。
 
 私钥不得通过普通 rnacos 配置分发。证书交付协议必须具备双向鉴权、传输加密、最小权限、大小
 上限、原子替换、失败保留旧证书和逐实例指纹回执；具体协议在详细设计中决定。
@@ -455,7 +461,7 @@ API 统一位于 `/api`，使用显式 request/response schema、稳定错误 co
 | Projects        | `/api/projects` 列表、创建、详情、复制、归档和状态摘要              |
 | Routes/Versions | Working Copy、保存配置版本、版本列表/详情、恢复、源码 diff 和乐观锁 |
 | Validation      | YAML/schema/project/native 校验、wire 预览和语义 diff               |
-| Certificates    | 上传、元数据、绑定、替换、有效期和部署证据；绝不返回私钥            |
+| Certificates    | 逻辑证书、不可变版本、自动解析、有效期和部署证据；绝不返回私钥      |
 | Releases        | 创建、详情、发布、资源级重试、冲突处理和回滚                        |
 | Audit           | 过滤、稳定 cursor 分页和授权导出                                    |
 | System          | rnacos 连接与只读测试、validator/worker/实例证据能力状态            |
@@ -507,8 +513,10 @@ API 统一位于 `/api`，使用显式 request/response schema、稳定错误 co
 | `route_items`             | 稳定 ID、Project、顺序；当前编辑头不作为发布事实                      |
 | `draft_revisions`         | 内部承载不可变配置版本：版本号、Route 原文/顺序、作者、说明和来源版本 |
 | `validation_runs`         | 配置版本、校验层级、编译器/validator 版本、结果和结构化错误           |
-| `certificates`            | 公共证书元数据、指纹、SAN、有效期和加密文档引用                       |
-| `certificate_bindings`    | Certificate 版本与 Project 的绑定历史                                 |
+| `certificate_series`      | 稳定逻辑证书、managed DNS 范围、当前版本和乐观锁                      |
+| `certificates`            | 不可变版本、公共元数据、指纹、SAN、有效期和加密文档引用               |
+| `certificate_dns_names`   | exact/wildcard 自动选择索引                                           |
+| `certificate_bindings`    | 迁移前绑定历史；新流程不再读写                                        |
 | `certificate_deployments` | 目标实例、状态、指纹证据和脱敏错误                                    |
 | `releases`                | 不可变元数据、来源配置版本、来源类型、wire version、状态和审批信息    |
 | `release_resources`       | Data ID/group、顺序、精确 payload、base/target 摘要和发布状态         |
@@ -589,7 +597,7 @@ Route 不能破坏历史 Release 和审计引用。
 
 ### 阶段 2：证书与权威校验
 
-- 证书上传、加密存储、SAN/有效期/key match 校验、Project 绑定和到期状态；
+- 逻辑证书上传、加密存储、SAN/有效期/key match 校验、不可变版本、自动域名解析和到期状态；
 - YAML 到 wire JSON 的版本化确定性编译器；
 - native validator CLI/adapter、错误到 Route 行列的映射；
 - wire 预览与 Release 前 fail-closed gate。
@@ -631,8 +639,8 @@ Route 不能破坏历史 Release 和审计引用。
    PROXY 和一个 WebSocket Route。
 7. **证书安全**：上传证书和匹配私钥后展示 SAN、指纹和有效期；不匹配私钥被拒绝，任何 API、
    日志、审计和 rnacos payload 都无法检索到私钥原文。
-8. **证书诚实状态**：当前数据面未接入动态 SNI 时，绑定证书显示“已绑定 / 运行时部署未接入”，
-   不显示“已生效”。
+8. **证书更新与诚实状态**：更新一个逻辑证书后，所有匹配 Project 自动显示新版本；当前数据面未接入
+   动态 SNI 时仍显示“已自动匹配 / 运行时部署未接入”，不显示“已生效”。
 9. **保存版本**：用户基于 `V2` 修改 Route 并填写说明后保存为不可变 `V3`；`V2` 仍可只读查看，
    并发用户先保存 `V4` 时旧 base 保存返回冲突而不覆盖。
 10. **发布当前版本**：默认选择当前 `V4`；校验通过后，先写入并回读 project route，再按需更新
@@ -679,7 +687,8 @@ Route 不能破坏历史 Release 和审计引用。
   记录当前固定工作区、整份 JSON 编辑器和启动证书实现，仅作为现状说明；其中的 Console 产品
   交互被本文取代。
 - [`network-policy-and-certificate-design.md`](network-policy-and-certificate-design.md) 定义已实现的
-  Configuration Version v3 网络策略、证书库存/绑定、安全边界和未实现的动态 SNI 交付。
+  Configuration Version v3 网络策略、可更新逻辑证书、自动域名解析、安全边界和未实现的动态 SNI
+  交付。
 - 任何 wire/config 行为变更仍需同步更新 native codec/runtime、server schema/service、web 类型、
   兼容 fixture 和用户文档。
 
