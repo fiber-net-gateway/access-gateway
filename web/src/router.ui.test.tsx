@@ -37,6 +37,7 @@ const projectId = '00000000-0000-4000-8000-000000000001'
 const versionId = '00000000-0000-4000-8000-000000000002'
 const historicalVersionId = '00000000-0000-4000-8000-000000000003'
 const routeId = '00000000-0000-4000-8000-000000000004'
+const certificateId = '00000000-0000-4000-8000-000000000006'
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -53,8 +54,6 @@ function installApiMock() {
     draft: { id: 'draft-id', state: 'editing', revision: 8, lockVersion: '8' },
     publishedVersion: null,
     activationStatus: 'unknown',
-    certificateResolutionStatus: 'uncovered',
-    certificate: null,
   }
   const version = {
     id: versionId,
@@ -92,10 +91,9 @@ function installApiMock() {
     routes: [{ id: routeId, source: 'path: /historical\ntype: RESPONSE\nstatus: 200' }],
   }
   const certificate = {
-    id: '00000000-0000-4000-8000-000000000006',
+    id: certificateId,
     name: 'API certificate',
     lockVersion: '1',
-    managedDnsNames: ['api.example.com'],
     currentVersion: {
       id: '00000000-0000-4000-8000-000000000007',
       version: 2,
@@ -111,12 +109,19 @@ function installApiMock() {
       createdAt: '2026-08-12T00:00:00.000Z',
     },
     versionCount: 2,
-    matchedProjectCount: 1,
     runtimeDeploymentStatus: 'unsupported',
     createdAt: '2026-01-01T00:00:00.000Z',
     updatedAt: '2026-08-12T00:00:00.000Z',
   }
-
+  const sniCertificate = {
+    id: certificate.id,
+    name: certificate.name,
+    version: certificate.currentVersion.version,
+    status: certificate.currentVersion.status,
+    notAfter: certificate.currentVersion.notAfter,
+    fingerprintSha256: certificate.currentVersion.fingerprintSha256,
+    runtimeDeploymentStatus: 'unsupported',
+  }
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
     if (url === '/api/health') {
@@ -197,18 +202,48 @@ function installApiMock() {
     }
     if (url === '/api/projects') return jsonResponse({ items: [project] })
     if (url === '/api/certificates') return jsonResponse({ items: [certificate] })
-    if (url === `/api/certificates/${certificate.id}/versions`) {
-      return jsonResponse({ items: [certificate.currentVersion] })
-    }
-    if (url === `/api/projects/${projectId}/certificate`) {
+    if (url === '/api/tls/sni-resolution?serverName=api.example.com') {
       return jsonResponse({
-        projectId,
-        domain: 'api.example.com',
+        serverName: 'api.example.com',
         resolutionStatus: 'matched',
-        certificate,
-        matches: [certificate],
+        matchKind: 'exact',
+        certificate: sniCertificate,
+        matches: [sniCertificate],
         runtimeDeploymentStatus: 'unsupported',
       })
+    }
+    if (url === `/api/certificates/${certificate.id}/versions` && init?.method === 'POST') {
+      const body = JSON.parse(String(init.body)) as { confirmSniCoverageChange?: boolean }
+      if (!body.confirmSniCoverageChange) {
+        return jsonResponse(
+          {
+            error: {
+              code: 'CERTIFICATE_SNI_COVERAGE_CONFIRMATION_REQUIRED',
+              message: 'The certificate DNS SAN coverage changed',
+              fields: [
+                {
+                  path: 'confirmSniCoverageChange',
+                  code: 'SNI_NAME_ADDED',
+                  message: 'new.example.com will start selecting this certificate',
+                },
+              ],
+            },
+          },
+          409,
+        )
+      }
+      return jsonResponse(
+        {
+          ...certificate,
+          lockVersion: '2',
+          currentVersion: { ...certificate.currentVersion, version: 3 },
+          versionCount: 3,
+        },
+        201,
+      )
+    }
+    if (url === `/api/certificates/${certificate.id}/versions`) {
+      return jsonResponse({ items: [certificate.currentVersion] })
     }
     return jsonResponse({ error: { message: `Unhandled test URL: ${url}` } }, 404)
   })
@@ -351,16 +386,17 @@ describe('application routes', () => {
     })
   })
 
-  test('shows automatic certificate resolution separately from unsupported runtime deployment', async () => {
+  test('previews ClientHello SNI resolution independently from a Project', async () => {
     installApiMock()
-    const router = createMemoryRouter(appRoutes, {
-      initialEntries: [`/projects/${projectId}/certificate`],
-    })
+    const router = createMemoryRouter(appRoutes, { initialEntries: ['/certificates'] })
+    const user = userEvent.setup()
     render(<RouterProvider router={router} />)
 
-    expect(await screen.findByRole('heading', { name: 'Certificate' })).toBeTruthy()
-    expect(await screen.findByText('已自动匹配')).toBeTruthy()
-    expect(screen.getAllByText(/运行时部署未接入/u).length).toBeGreaterThan(0)
+    expect(await screen.findByRole('heading', { name: 'SNI 自动解析预览' })).toBeTruthy()
+    await user.type(screen.getByLabelText('ClientHello server name'), 'api.example.com')
+    await user.click(screen.getByRole('button', { name: '解析' }))
+    expect(await screen.findByText('已匹配')).toBeTruthy()
+    expect(screen.getByText('运行时部署状态：unsupported')).toBeTruthy()
     expect(screen.queryByText('已激活')).toBeNull()
   })
 
@@ -376,7 +412,33 @@ describe('application routes', () => {
     expect(await screen.findByRole('heading', { name: '更新 API certificate' })).toBeTruthy()
     expect(await screen.findByRole('heading', { name: '版本历史' })).toBeTruthy()
     expect(screen.getAllByText('V2').length).toBeGreaterThan(0)
-    expect(screen.getByText(/继续覆盖该逻辑证书管理的全部域名/u)).toBeTruthy()
+    expect(screen.getByText(/DNS SAN 不变时直接续期/u)).toBeTruthy()
+  })
+
+  test('requires an explicit confirmation when a renewed certificate changes SNI coverage', async () => {
+    const fetchMock = installApiMock()
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const router = createMemoryRouter(appRoutes, { initialEntries: ['/certificates'] })
+    const user = userEvent.setup()
+    render(<RouterProvider router={router} />)
+
+    await user.click(await screen.findByRole('button', { name: '更新证书版本' }))
+    await user.type(screen.getByLabelText('PEM 证书链'), 'certificate material')
+    await user.type(screen.getByLabelText('PEM 私钥'), 'private key material')
+    await user.click(screen.getByRole('button', { name: '校验并更新当前版本' }))
+
+    await waitFor(() => expect(confirm).toHaveBeenCalledTimes(1))
+    await waitFor(() => {
+      const updateCalls = fetchMock.mock.calls.filter(
+        ([url, init]) =>
+          url === `/api/certificates/${certificateId}/versions` && init?.method === 'POST',
+      )
+      expect(updateCalls).toHaveLength(2)
+      const confirmedBody = JSON.parse(String(updateCalls[1]?.[1]?.body)) as {
+        confirmSniCoverageChange?: boolean
+      }
+      expect(confirmedBody.confirmSniCoverageChange).toBe(true)
+    })
   })
 })
 

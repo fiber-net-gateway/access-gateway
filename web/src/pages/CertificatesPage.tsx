@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react'
 
-import { fetchCertificates, fetchCertificateVersions } from '../api/client'
-import type { CertificateVersionView, CertificateView } from '../api/types'
+import { fetchCertificates, fetchCertificateVersions, resolveTlsSni } from '../api/client'
+import type { CertificateVersionView, CertificateView, TlsSniResolutionView } from '../api/types'
 import { CapabilityStrip } from '../components/CapabilityStrip'
 import { CertificateUploadForm } from '../components/CertificateUploadForm'
 import { useConsoleContext } from '../App'
@@ -13,11 +13,19 @@ const statusLabel: Record<CertificateVersionView['status'], string> = {
   superseded: '历史版本',
 }
 
+const resolutionLabel: Record<TlsSniResolutionView['resolutionStatus'], string> = {
+  matched: '已匹配',
+  uncovered: '未覆盖',
+  conflict: '索引冲突',
+}
+
 export function CertificatesPage() {
   const { apiState, health, systemStatus, statusError } = useConsoleContext()
   const [certificates, setCertificates] = useState<readonly CertificateView[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [versions, setVersions] = useState<readonly CertificateVersionView[]>([])
+  const [previewName, setPreviewName] = useState('')
+  const [resolution, setResolution] = useState<TlsSniResolutionView | null>(null)
   const [loading, setLoading] = useState(true)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const selectedCertificate = useMemo(
@@ -39,7 +47,7 @@ export function CertificatesPage() {
     const controller = new AbortController()
     void load(controller.signal).catch((error: unknown) => {
       if (!controller.signal.aborted) {
-        setErrorMessage(error instanceof Error ? error.message : '加载证书库存失败')
+        setErrorMessage(error instanceof Error ? error.message : '加载 TLS 证书失败')
       }
     })
     return () => controller.abort()
@@ -61,22 +69,33 @@ export function CertificatesPage() {
     return () => controller.abort()
   }, [selectedId])
 
+  const previewResolution = async (event: FormEvent): Promise<void> => {
+    event.preventDefault()
+    setErrorMessage(null)
+    try {
+      setResolution(await resolveTlsSni(previewName))
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : '解析 SNI 失败')
+    }
+  }
+
   return (
     <div className="projects-page certificates-page">
       <header className="page-header">
         <div>
           <p className="eyebrow">TLS CERTIFICATE INVENTORY</p>
-          <h1>Certificates</h1>
+          <h1>TLS</h1>
           <p className="page-description">
-            逻辑证书按 DNS 名称自动匹配 Project；续期只新增一个不可变版本，不需要逐域名切换。 当前
-            access-server 尚未接入动态 SNI，自动匹配不代表运行时生效。
+            leaf 证书的 DNS SAN 自动形成 ClientHello SNI 选择索引，不需要维护域名绑定规则。TLS
+            握手与 HTTP Host/:authority 的 Project 选择彼此独立。当前 access-server
+            尚未接入动态证书交付，控制面匹配不代表运行时已生效。
           </p>
         </div>
       </header>
 
       {statusError || errorMessage ? (
         <div className="error-banner" role="alert">
-          <strong>部分信息加载失败</strong>
+          <strong>操作未完成</strong>
           <span>{errorMessage ?? statusError}</span>
         </div>
       ) : null}
@@ -96,7 +115,7 @@ export function CertificatesPage() {
           ) : certificates.length === 0 ? (
             <div className="route-empty-state">
               <h3>还没有证书</h3>
-              <p>上传首个版本后，DNS SAN 将成为该逻辑证书的稳定自动匹配范围。</p>
+              <p>上传首个版本后，DNS SAN 将自动成为 SNI 选择范围。</p>
             </div>
           ) : (
             <div className="certificate-list">
@@ -105,7 +124,7 @@ export function CertificatesPage() {
                   <header>
                     <div>
                       <strong>{certificate.name}</strong>
-                      <small>{certificate.managedDnsNames.join(' · ')}</small>
+                      <small>{certificate.currentVersion.dnsNames.join(' · ')}</small>
                     </div>
                     <span
                       className={`status-chip status-chip-${certificate.currentVersion.status}`}
@@ -123,11 +142,11 @@ export function CertificatesPage() {
                       <dd>{new Date(certificate.currentVersion.notAfter).toLocaleString()}</dd>
                     </div>
                     <div>
-                      <dt>自动匹配 Project</dt>
-                      <dd>{certificate.matchedProjectCount}</dd>
+                      <dt>自动 SNI 范围</dt>
+                      <dd>{certificate.currentVersion.dnsNames.length}</dd>
                     </div>
                     <div>
-                      <dt>历史版本数</dt>
+                      <dt>版本总数</dt>
                       <dd>{certificate.versionCount}</dd>
                     </div>
                   </dl>
@@ -190,6 +209,48 @@ export function CertificatesPage() {
           ) : null}
         </section>
       </div>
+
+      <section className="settings-panel tls-sni-panel" aria-labelledby="tls-sni-preview-title">
+        <header>
+          <div>
+            <p className="eyebrow">CLIENTHELLO SNI → CERTIFICATE SAN</p>
+            <h2 id="tls-sni-preview-title">SNI 自动解析预览</h2>
+          </div>
+          <span className="status-chip status-chip-unknown">控制面预览 / 未部署</span>
+        </header>
+        <div className="tls-sni-preview">
+          <form onSubmit={(event) => void previewResolution(event)}>
+            <label>
+              ClientHello server name
+              <input
+                autoComplete="off"
+                placeholder="api.example.com"
+                required
+                value={previewName}
+                onChange={(event) => setPreviewName(event.target.value)}
+              />
+            </label>
+            <button className="button-secondary" type="submit">
+              解析
+            </button>
+          </form>
+          {resolution ? (
+            <div className="tls-sni-resolution" role="status">
+              <span
+                className={`status-chip status-chip-${resolution.resolutionStatus === 'matched' ? 'ready' : 'unknown'}`}
+              >
+                {resolutionLabel[resolution.resolutionStatus]}
+              </span>
+              <strong>{resolution.certificate?.name ?? '没有唯一证书'}</strong>
+              {resolution.certificate ? <span>V{resolution.certificate.version}</span> : null}
+              {resolution.matchKind ? <span>{resolution.matchKind}</span> : null}
+              <small>运行时部署状态：unsupported</small>
+            </div>
+          ) : (
+            <p>精确 SAN 优先于通配符 SAN；通配符只覆盖一层子域名。</p>
+          )}
+        </div>
+      </section>
     </div>
   )
 }

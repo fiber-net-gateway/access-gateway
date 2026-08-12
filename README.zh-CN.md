@@ -20,8 +20,9 @@ Access Gateway 是由 C++23 数据面与 Web 管理控制台组成的高性能�
   事件，以及 route-first React 工作台。每条 Route 使用独立挂载的 CodeMirror YAML 编辑器，
   并确定性编译为 native JSON wire model。Release/发布表、Release 状态机、发布冲突判定和
   fail-closed Native Validator 适配器、当前/历史版本 Release 创建和带 lease/回读证据的 rnacos
-  发布 Worker 已经落地；Project 级版本化网络策略、加密逻辑证书、不可变证书版本与自动域名解析
-  也已实现。OIDC、资源级发布重试与恢复、证书运行时交付和实例级生效采集仍待实现。
+  发布 Worker 已经落地；Project 级版本化网络策略、独立加密 TLS 库存、不可变证书版本、基于
+  DNS SAN 的 ClientHello SNI 自动选择与解析预览也已实现。Project 仍按 HTTP Host/`:authority`
+  选择，不与 SNI 绑定。OIDC、资源级发布重试与恢复、证书运行时交付和实例级生效采集仍待实现。
 
 因此，对于尚无配套工作流的状态，控制台会明确显示“不可用”或“未知”，不会伪造发布或
 生效成功。

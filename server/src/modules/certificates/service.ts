@@ -1,16 +1,14 @@
-import { badRequest, forbidden, notFound, unavailable, unprocessable } from '../../shared/errors.js'
+import { badRequest, forbidden, notFound, unavailable } from '../../shared/errors.js'
 import type { Actor } from '../auth/model.js'
 import { EnvironmentRepository } from '../environments/repository.js'
-import { ProjectRepository } from '../projects/repository.js'
 import type {
   CertificateListResult,
   CertificateVersionListResult,
   CertificateView,
   CreateCertificateInput,
   CreateCertificateVersionInput,
-  ProjectCertificateResolutionView,
 } from './model.js'
-import { missingManagedDnsNames, parseCertificateUpload } from './parser.js'
+import { parseCertificateUpload } from './parser.js'
 import { CertificateRepository } from './repository.js'
 
 function parseLockVersion(value: string): string {
@@ -31,21 +29,14 @@ export interface CertificateService {
     requestId: string,
   ): Promise<CertificateView>
   listVersions(actor: Actor, certificateId: string): Promise<CertificateVersionListResult>
-  resolveProject(actor: Actor, projectId: string): Promise<ProjectCertificateResolutionView>
 }
 
 export class DefaultCertificateService implements CertificateService {
   readonly #certificates: CertificateRepository
-  readonly #projects: ProjectRepository
   readonly #environments: EnvironmentRepository
 
-  constructor(
-    certificates: CertificateRepository,
-    projects: ProjectRepository,
-    environments: EnvironmentRepository,
-  ) {
+  constructor(certificates: CertificateRepository, environments: EnvironmentRepository) {
     this.#certificates = certificates
-    this.#projects = projects
     this.#environments = environments
   }
 
@@ -88,19 +79,11 @@ export class DefaultCertificateService implements CertificateService {
     const environmentInternalId = await this.#environments.internalIdForActor(actor, environment.id)
     if (!environmentInternalId) throw notFound('Deployment workspace')
     const certificate = await this.requireCertificate(environmentInternalId, certificateId)
-    const parsed = parseCertificateUpload({ name: certificate.name, ...input })
-    const missingNames = missingManagedDnsNames(parsed.dnsNames, certificate.managedDnsNames)
-    if (missingNames.length > 0) {
-      throw unprocessable(
-        'CERTIFICATE_MANAGED_NAMES_NOT_COVERED',
-        'The new certificate version does not preserve every managed DNS selector',
-        missingNames.map((dnsName) => ({
-          path: 'certificatePem',
-          code: 'MANAGED_DNS_NAME_NOT_COVERED',
-          message: `${dnsName} is not covered by the new certificate version`,
-        })),
-      )
-    }
+    const parsed = parseCertificateUpload({
+      name: certificate.name,
+      certificatePem: input.certificatePem,
+      privateKeyPem: input.privateKeyPem,
+    })
     await this.#certificates.createVersion(
       actor,
       certificate.internalId,
@@ -109,6 +92,7 @@ export class DefaultCertificateService implements CertificateService {
       certificate.name,
       parseLockVersion(expectedLockVersion),
       parsed,
+      input.confirmSniCoverageChange === true,
       requestId,
     )
     return this.publicView(await this.requireCertificate(environmentInternalId, certificateId))
@@ -121,12 +105,6 @@ export class DefaultCertificateService implements CertificateService {
     if (!environmentInternalId) throw notFound('Deployment workspace')
     const certificate = await this.requireCertificate(environmentInternalId, certificateId)
     return { items: await this.#certificates.listVersions(certificate.internalId) }
-  }
-
-  async resolveProject(actor: Actor, projectId: string): Promise<ProjectCertificateResolutionView> {
-    const project = await this.#projects.findIdentity(actor, projectId)
-    if (!project) throw notFound('Project')
-    return this.#certificates.resolveProject(project)
   }
 
   private async requireCertificate(
@@ -181,10 +159,6 @@ export class UnavailableCertificateService implements CertificateService {
   }
 
   async listVersions(): Promise<never> {
-    throw unavailable('DATABASE_UNCONFIGURED', 'MySQL is not configured')
-  }
-
-  async resolveProject(): Promise<never> {
     throw unavailable('DATABASE_UNCONFIGURED', 'MySQL is not configured')
   }
 }

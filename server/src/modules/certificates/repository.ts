@@ -9,12 +9,7 @@ import { bufferToPublicId, createPublicId, publicIdToBuffer } from '../../shared
 import { mysqlDateTimeToRfc3339 } from '../../shared/time.js'
 import { AuditRepository } from '../audit/repository.js'
 import type { Actor } from '../auth/model.js'
-import type { ProjectIdentityRow } from '../projects/repository.js'
-import type {
-  CertificateVersionView,
-  CertificateView,
-  ProjectCertificateResolutionView,
-} from './model.js'
+import type { CertificateVersionView, CertificateView } from './model.js'
 import type { ParsedCertificateUpload } from './parser.js'
 
 interface CertificateSeriesRow extends RowDataPacket {
@@ -22,7 +17,6 @@ interface CertificateSeriesRow extends RowDataPacket {
   series_public_id: Buffer
   environment_id: string
   display_name: string
-  managed_dns_names_json: string | readonly string[]
   lock_version: string
   series_created_at: string
   series_updated_at: string
@@ -40,7 +34,6 @@ interface CertificateSeriesRow extends RowDataPacket {
   key_type: string
   version_created_at: string
   version_count: string
-  matched_project_count: string
 }
 
 interface CertificateVersionRow extends RowDataPacket {
@@ -58,14 +51,17 @@ interface CertificateVersionRow extends RowDataPacket {
   created_at: string
 }
 
-interface MatchedSeriesRow extends CertificateSeriesRow {
-  match_kind: 'exact' | 'wildcard'
-}
-
 interface SeriesLockRow extends RowDataPacket {
   current_version_id: string | null
   current_version_no: number | null
+  current_dns_names_json: string | readonly string[] | null
   lock_version: string
+}
+
+interface SanConflictRow extends RowDataPacket {
+  dns_name: string
+  certificate_public_id: Buffer
+  certificate_name: string
 }
 
 function parseDnsNames(value: string | readonly string[]): readonly string[] {
@@ -126,10 +122,8 @@ function toView(row: CertificateSeriesRow): CertificateView {
     id: bufferToPublicId(row.series_public_id),
     name: row.display_name,
     lockVersion: row.lock_version,
-    managedDnsNames: parseDnsNames(row.managed_dns_names_json),
     currentVersion: toVersionView(row),
     versionCount: Number(row.version_count),
-    matchedProjectCount: Number(row.matched_project_count),
     runtimeDeploymentStatus: 'unsupported',
     createdAt: mysqlDateTimeToRfc3339(row.series_created_at),
     updatedAt: mysqlDateTimeToRfc3339(row.series_updated_at),
@@ -145,27 +139,25 @@ function wildcardDotCount(name: string): number | null {
   return [...name].filter((character) => character === '.').length
 }
 
-const projectNameMatch = `
-  (
-    (certificate_name.match_kind = 'exact' AND project.name = certificate_name.match_value)
-    OR
-    (
-      certificate_name.match_kind = 'wildcard'
-      AND project.name LIKE CONCAT('%.', certificate_name.match_value)
-      AND LENGTH(project.name) - LENGTH(REPLACE(project.name, '.', '')) =
-          certificate_name.wildcard_dot_count
-    )
-  )
-`
+export function certificateSniCoverageChanges(
+  currentNames: readonly string[],
+  nextNames: readonly string[],
+): { added: readonly string[]; removed: readonly string[] } {
+  const current = new Set(currentNames)
+  const next = new Set(nextNames)
+  return {
+    added: nextNames.filter((name) => !current.has(name)),
+    removed: currentNames.filter((name) => !next.has(name)),
+  }
+}
 
-function selectSeries(additionalColumns = ''): string {
+function selectSeries(): string {
   return `
   SELECT
     series_record.id AS series_internal_id,
     series_record.public_id AS series_public_id,
     series_record.environment_id,
     series_record.display_name,
-    series_record.managed_dns_names_json,
     series_record.lock_version,
     series_record.created_at AS series_created_at,
     series_record.updated_at AS series_updated_at,
@@ -186,16 +178,7 @@ function selectSeries(additionalColumns = ''): string {
       SELECT COUNT(*)
       FROM certificates version_count
       WHERE version_count.series_id = series_record.id
-    ) AS version_count,
-    (
-      SELECT COUNT(DISTINCT project.id)
-      FROM certificate_dns_names certificate_name
-      INNER JOIN projects project
-        ON project.environment_id = series_record.environment_id
-        AND project.archived_at IS NULL
-        AND ${projectNameMatch}
-      WHERE certificate_name.certificate_series_id = series_record.id
-    ) AS matched_project_count${additionalColumns}
+    ) AS version_count
   FROM certificate_series series_record
   INNER JOIN certificates current_version ON current_version.id = series_record.current_version_id
 `
@@ -289,7 +272,7 @@ export class CertificateRepository {
         this.#pool,
         async (transaction) => {
           await this.lockEnvironment(transaction, environmentInternalId)
-          await this.rejectManagedNameConflicts(transaction, environmentInternalId, parsed.dnsNames)
+          await this.rejectSanConflicts(transaction, environmentInternalId, parsed.dnsNames)
           const [seriesResult] = await transaction.execute<ResultSetHeader>(
             `INSERT INTO certificate_series
               (public_id, environment_id, display_name, managed_dns_names_json,
@@ -304,7 +287,7 @@ export class CertificateRepository {
             ],
           )
           const seriesInternalId = seriesResult.insertId.toString()
-          await this.insertManagedNames(
+          await this.replaceSanSelectors(
             transaction,
             environmentInternalId,
             seriesInternalId,
@@ -338,7 +321,8 @@ export class CertificateRepository {
               version: 1,
               versionId: versionPublicId,
               fingerprintSha256: parsed.fingerprintSha256.toString('hex'),
-              managedDnsNames: parsed.dnsNames,
+              dnsNames: parsed.dnsNames,
+              sniNames: parsed.dnsNames,
               notAfter: parsed.notAfter.toISOString(),
             },
           })
@@ -362,6 +346,7 @@ export class CertificateRepository {
     displayName: string,
     expectedLockVersion: string,
     parsed: ParsedCertificateUpload,
+    confirmSniCoverageChange: boolean,
     requestId: string,
   ): Promise<void> {
     const versionPublicId = createPublicId()
@@ -371,10 +356,12 @@ export class CertificateRepository {
       await withTransaction(
         this.#pool,
         async (transaction) => {
+          await this.lockEnvironment(transaction, environmentInternalId)
           const [seriesRows] = await transaction.execute<SeriesLockRow[]>(
             `SELECT
                series_record.current_version_id, series_record.lock_version,
-               current_version.version_no AS current_version_no
+               current_version.version_no AS current_version_no,
+               current_version.dns_names_json AS current_dns_names_json
              FROM certificate_series series_record
              LEFT JOIN certificates current_version
                ON current_version.id = series_record.current_version_id
@@ -385,7 +372,12 @@ export class CertificateRepository {
             [seriesInternalId, environmentInternalId],
           )
           const series = seriesRows[0]
-          if (!series || series.current_version_id === null || series.current_version_no === null) {
+          if (
+            !series ||
+            series.current_version_id === null ||
+            series.current_version_no === null ||
+            series.current_dns_names_json === null
+          ) {
             throw notFound('Certificate')
           }
           if (series.lock_version !== expectedLockVersion) {
@@ -394,6 +386,37 @@ export class CertificateRepository {
               'The logical certificate changed; reload it before creating another version',
             )
           }
+          const changes = certificateSniCoverageChanges(
+            parseDnsNames(series.current_dns_names_json),
+            parsed.dnsNames,
+          )
+          if (
+            (changes.added.length > 0 || changes.removed.length > 0) &&
+            !confirmSniCoverageChange
+          ) {
+            throw conflict(
+              'CERTIFICATE_SNI_COVERAGE_CONFIRMATION_REQUIRED',
+              'The certificate DNS SAN coverage changed; confirm the SNI coverage change',
+              [
+                ...changes.added.map((dnsName) => ({
+                  path: 'confirmSniCoverageChange',
+                  code: 'SNI_NAME_ADDED',
+                  message: `${dnsName} will start selecting this certificate`,
+                })),
+                ...changes.removed.map((dnsName) => ({
+                  path: 'confirmSniCoverageChange',
+                  code: 'SNI_NAME_REMOVED',
+                  message: `${dnsName} will stop selecting this certificate`,
+                })),
+              ],
+            )
+          }
+          await this.rejectSanConflicts(
+            transaction,
+            environmentInternalId,
+            parsed.dnsNames,
+            seriesInternalId,
+          )
           const versionNo = series.current_version_no + 1
           const versionInternalId = await this.insertVersion(
             transaction,
@@ -406,6 +429,12 @@ export class CertificateRepository {
             certificateDocument,
             privateKeyDocument,
           )
+          await this.replaceSanSelectors(
+            transaction,
+            environmentInternalId,
+            seriesInternalId,
+            parsed.dnsNames,
+          )
           await transaction.execute(
             `UPDATE certificates
              SET lifecycle_state = 'superseded', superseded_at = CURRENT_TIMESTAMP(6)
@@ -414,10 +443,11 @@ export class CertificateRepository {
           )
           await transaction.execute(
             `UPDATE certificate_series
-             SET current_version_id = ?, lock_version = lock_version + 1,
+             SET current_version_id = ?, managed_dns_names_json = ?,
+                 lock_version = lock_version + 1,
                  updated_at = CURRENT_TIMESTAMP(6)
              WHERE id = ?`,
-            [versionInternalId, seriesInternalId],
+            [versionInternalId, JSON.stringify(parsed.dnsNames), seriesInternalId],
           )
           await this.#audit.append(transaction, {
             environmentInternalId,
@@ -432,6 +462,8 @@ export class CertificateRepository {
               versionId: versionPublicId,
               fingerprintSha256: parsed.fingerprintSha256.toString('hex'),
               dnsNames: parsed.dnsNames,
+              addedSniNames: changes.added,
+              removedSniNames: changes.removed,
               notAfter: parsed.notAfter.toISOString(),
             },
           })
@@ -446,49 +478,6 @@ export class CertificateRepository {
     }
   }
 
-  async resolveProject(project: ProjectIdentityRow): Promise<ProjectCertificateResolutionView> {
-    const [rows] = await this.#pool.execute<MatchedSeriesRow[]>(
-      `${selectSeries(', matched_name.match_kind AS match_kind')}
-       INNER JOIN certificate_dns_names matched_name
-         ON matched_name.certificate_series_id = series_record.id
-       WHERE series_record.environment_id = ?
-         AND series_record.archived_at IS NULL
-         AND (
-           (matched_name.match_kind = 'exact' AND matched_name.match_value = ?)
-           OR
-           (
-             matched_name.match_kind = 'wildcard'
-             AND ? LIKE CONCAT('%.', matched_name.match_value)
-             AND LENGTH(?) - LENGTH(REPLACE(?, '.', '')) = matched_name.wildcard_dot_count
-           )
-         )
-       ORDER BY
-         CASE matched_name.match_kind WHEN 'exact' THEN 0 ELSE 1 END,
-         series_record.id`,
-      [project.environment_id, project.name, project.name, project.name, project.name],
-    )
-    const preferredKind = rows.some((row) => row.match_kind === 'exact') ? 'exact' : 'wildcard'
-    const seen = new Set<string>()
-    const matches = rows
-      .filter((row) => row.match_kind === preferredKind)
-      .filter((row) => {
-        if (seen.has(row.series_internal_id)) return false
-        seen.add(row.series_internal_id)
-        return true
-      })
-      .map(toView)
-    const resolutionStatus =
-      matches.length === 0 ? 'uncovered' : matches.length === 1 ? 'matched' : 'conflict'
-    return {
-      projectId: bufferToPublicId(project.public_id),
-      domain: project.name,
-      resolutionStatus,
-      certificate: matches.length === 1 ? matches[0]! : null,
-      matches,
-      runtimeDeploymentStatus: 'unsupported',
-    }
-  }
-
   private async lockEnvironment(
     transaction: SqlExecutor,
     environmentInternalId: string,
@@ -500,46 +489,66 @@ export class CertificateRepository {
     if (!rows[0]) throw notFound('Deployment workspace')
   }
 
-  private async rejectManagedNameConflicts(
+  private async rejectSanConflicts(
     transaction: SqlExecutor,
     environmentInternalId: string,
     dnsNames: readonly string[],
+    excludedSeriesInternalId?: string,
   ): Promise<void> {
     const placeholders = dnsNames.map(() => '?').join(', ')
-    const [rows] = await transaction.execute<(RowDataPacket & { dns_name: string })[]>(
-      `SELECT dns_name
-       FROM certificate_dns_names
-       WHERE environment_id = ? AND dns_name IN (${placeholders})
-       ORDER BY dns_name`,
-      [environmentInternalId, ...dnsNames],
+    const exclusion = excludedSeriesInternalId ? 'AND selector.certificate_series_id <> ?' : ''
+    const values = excludedSeriesInternalId
+      ? [environmentInternalId, ...dnsNames, excludedSeriesInternalId]
+      : [environmentInternalId, ...dnsNames]
+    const [rows] = await transaction.execute<SanConflictRow[]>(
+      `SELECT
+         selector.dns_name,
+         series_record.public_id AS certificate_public_id,
+         series_record.display_name AS certificate_name
+       FROM certificate_san_selectors selector
+       INNER JOIN certificate_series series_record
+         ON series_record.id = selector.certificate_series_id
+       WHERE selector.environment_id = ?
+         AND selector.dns_name IN (${placeholders})
+         ${exclusion}
+       ORDER BY selector.dns_name, selector.id`,
+      values,
     )
-    if (rows.length > 0) {
-      throw conflict(
-        'CERTIFICATE_DNS_NAME_CONFLICT',
-        `DNS selector ${rows[0]!.dns_name} is already managed by another certificate`,
-      )
-    }
+    if (rows.length === 0) return
+    throw conflict(
+      'CERTIFICATE_SNI_NAME_CONFLICT',
+      'One or more DNS SAN selectors are already owned by another logical certificate',
+      rows.map((row) => ({
+        path: 'certificatePem',
+        code: 'SNI_NAME_CONFLICT',
+        message: `${row.dns_name} is already provided by ${row.certificate_name} (${bufferToPublicId(row.certificate_public_id)})`,
+      })),
+    )
   }
 
-  private async insertManagedNames(
+  private async replaceSanSelectors(
     transaction: SqlExecutor,
     environmentInternalId: string,
-    seriesInternalId: string,
+    certificateSeriesInternalId: string,
     dnsNames: readonly string[],
   ): Promise<void> {
+    await transaction.execute(
+      'DELETE FROM certificate_san_selectors WHERE certificate_series_id = ?',
+      [certificateSeriesInternalId],
+    )
     for (const dnsName of dnsNames) {
-      const isWildcard = dnsName.startsWith('*.')
+      const wildcard = dnsName.startsWith('*.')
       await transaction.execute(
-        `INSERT INTO certificate_dns_names
-          (environment_id, certificate_series_id, dns_name, match_kind, match_value,
-           wildcard_dot_count)
+        `INSERT INTO certificate_san_selectors
+          (environment_id, certificate_series_id, dns_name, match_kind,
+           match_value, wildcard_dot_count)
          VALUES (?, ?, ?, ?, ?, ?)`,
         [
           environmentInternalId,
-          seriesInternalId,
+          certificateSeriesInternalId,
           dnsName,
-          isWildcard ? 'wildcard' : 'exact',
-          isWildcard ? dnsName.slice(2) : dnsName,
+          wildcard ? 'wildcard' : 'exact',
+          wildcard ? dnsName.slice(2) : dnsName,
           wildcardDotCount(dnsName),
         ],
       )

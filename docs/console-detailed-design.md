@@ -7,7 +7,7 @@
   `native/access-server/` 校验和激活证据接口
 - 实现基线：Configuration Version API 与历史 UI、按当前/历史版本创建 Release、Native Validator
   重校验、rnacos publication worker、逐资源回读证据和 Docker demo 已实现；版本 diff、资源级重试、
-  Project 网络策略、可更新逻辑证书、不可变版本和自动域名解析已实现；崩溃后自动重新领取
+  Project 网络策略、可更新逻辑证书、不可变版本和 SAN 派生 SNI 索引已实现；崩溃后自动重新领取
   running job、证书动态交付和实例激活采集尚未实现
 
 ## 1. 设计目标
@@ -42,8 +42,8 @@
 ### 2.2 不变量
 
 - Configuration Version 的 YAML、Route ID、Route 顺序、说明、作者和创建时间一经保存不可修改。
-- Configuration Version 只覆盖 route wire payload 的创作模型；Project domain 是项目身份，证书
-  私钥、rnacos 连接和运行时激活证据不进入版本文档。
+- Configuration Version 只覆盖 route wire payload 的创作模型；Project domain 是项目身份，TLS
+  SAN 派生索引、证书私钥、rnacos 连接和运行时激活证据不进入版本文档。
 - Current Configuration Version 只能前进到新插入的版本号，不能指回历史行。
 - Release 必须引用具体且同属该 Project 的 Configuration Version 主键。
 - 创建 Release 后，来源版本 ID、编译器 revision、validator revision、wire version 和 payload bytes

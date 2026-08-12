@@ -24,8 +24,10 @@ The repository is under active development in two first-class areas:
   to the native JSON wire model. Release/publication tables, the release state machine, publication
   conflict decisions, a fail-closed Native Validator adapter, current/historical version Release
   creation, and a leased rnacos publication worker with readback evidence are present.
-  Project-level versioned network policies and encrypted logical certificate inventory, immutable
-  certificate versions, and automatic domain resolution are also available. OIDC, resource-level
+  Project-level versioned network policies and an independent encrypted TLS inventory, immutable
+  certificate versions, automatic DNS SAN-based ClientHello SNI selection, and resolution preview
+  are also available.
+  Project selection remains based on HTTP Host/`:authority` and is not coupled to SNI. OIDC, resource-level
   publication retry/recovery, certificate runtime delivery, and per-instance activation collection
   remain to be implemented.
 

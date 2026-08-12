@@ -43,8 +43,12 @@ export function notFound(resource: string): AppError {
   return new AppError('NOT_FOUND', `${resource} was not found`, 404)
 }
 
-export function conflict(code: string, message: string): AppError {
-  return new AppError(code, message, 409)
+export function conflict(
+  code: string,
+  message: string,
+  fields: readonly ErrorField[] = [],
+): AppError {
+  return new AppError(code, message, 409, fields)
 }
 
 export function unprocessable(
