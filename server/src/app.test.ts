@@ -200,4 +200,13 @@ test('configuration version and Release APIs are registered and fail closed with
   })
   assert.equal(release.statusCode, 503)
   assert.equal(release.json().error.code, 'DATABASE_UNCONFIGURED')
+
+  const tlsRelease = await app.inject({
+    method: 'POST',
+    url: '/api/tls/releases',
+    headers: { 'idempotency-key': 'test-tls-release-v1' },
+    payload: { defaultCertificateId: '00000000-0000-4000-8000-000000000004' },
+  })
+  assert.equal(tlsRelease.statusCode, 503)
+  assert.equal(tlsRelease.json().error.code, 'DATABASE_UNCONFIGURED')
 })

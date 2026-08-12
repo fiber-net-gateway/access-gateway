@@ -1,9 +1,9 @@
 # 网络策略与证书配置需求及详细设计
 
-- 状态：Implemented v4（控制面 P0）
+- 状态：Implemented v5（控制面发布 + native Nacos 热更新）
 - 日期：2026-08-12
 - 适用范围：`server/`、`web/`、配置版本编译器和既有 native `allows` 兼容能力
-- 明确未完成：逐域名 SNI 证书热更新、证书安全交付、逐实例证书/配置激活证据
+- 明确未完成：逐实例证书/配置激活证据，以及生产脚本语料差分和最终切流门槛
 
 ## 1. 目标与边界
 
@@ -15,14 +15,15 @@
    证书的 DNS SAN 自动生成 ClientHello SNI 选择索引。
 
 网络策略属于 Route 配置事实，必须随 Configuration Version 冻结，历史版本发布时使用历史策略，
-不能在 Release 创建时读取一个会漂移的 Project 当前设置。证书具有独立于 Route/rnacos 的安全
-生命周期：SAN 派生索引不属于 Project、不进入 route payload，私钥绝不通过 rnacos 分发。TLS
+不能在 Release 创建时读取一个会漂移的 Project 当前设置。证书具有独立于 Route 的安全生命周期：
+SAN 派生索引不属于 Project、不进入 route payload；Console 通过独立 TLS Release 将完整加密存储的
+证书材料编译为单一 Nacos 快照。TLS
 握手阶段使用 ClientHello SNI 选择证书；HTTP header 完整后才使用 Host 或 `:authority` 选择
 Project，两个输入允许不同且不得在控制面中隐式绑定。
 
-本次不增加 access-server 动态 SNI 能力。因此 UI 只能把解析结果标记为控制面配置，并显示
-“运行时部署未接入”，不能显示“已部署”或“已激活”。配置保存、Release Published 和实例 Active
-继续是三个不同事实。
+access-server 已监听独立 TLS 快照并原子热切换。Nacos 写入/readback 只证明 Release Published；
+逐实例证据仍未实现，所以 UI 必须把 activation 显示为 unknown。证书版本保存、TLS Release
+Published 和实例 Active 继续是三个不同事实。
 
 ## 2. 细化需求
 
@@ -47,21 +48,21 @@ Project，两个输入允许不同且不得在控制面中隐式绑定。
 
 ### 2.2 证书配置
 
-| ID           | 优先级 | 需求                                                                             |
-| ------------ | ------ | -------------------------------------------------------------------------------- |
-| CON-CERT-001 | P0     | 接收 leaf-first PEM 证书链和一把未加密 PEM 私钥，限制请求大小                    |
-| CON-CERT-002 | P0     | 校验 PEM、链顺序/签名、leaf 与私钥匹配、当前有效期和 DNS SAN                     |
-| CON-CERT-003 | P0     | exact SAN 精确匹配；`*.example.com` 只覆盖一层子域名                             |
-| CON-CERT-004 | P0     | 证书链与私钥分别 envelope-encrypted；API 永不返回 PEM、文档 ID 或密钥定位信息    |
-| CON-CERT-005 | P0     | 逻辑证书具有稳定 ID 和名称；其 PEM/私钥版本不可变，并以环境内 SHA-256 指纹去重   |
-| CON-CERT-006 | P0     | 当前 leaf DNS SAN 自动形成只读 SNI selector；不维护第二套人工绑定                |
-| CON-CERT-007 | P0     | ClientHello SNI 按 exact 优先、单层 wildcard selector 选择逻辑证书               |
-| CON-CERT-008 | P0     | 环境内相同 SAN selector 只能属于一个活动逻辑证书；冲突时整个写事务失败           |
-| CON-CERT-009 | P0     | 更新创建新版本并原子切换 current version 和 SAN 索引；范围变化必须显式确认       |
-| CON-CERT-010 | P0     | 事实状态区分 valid、30 天内 expiring、expired、superseded 和 runtime unsupported |
-| CON-CERT-011 | P0     | 创建逻辑证书和新增版本写入脱敏审计，审计不保存 PEM 或私钥                        |
-| CON-CERT-012 | P1     | 专用双向鉴权交付通道向逐域名 SNI store 原子热更新，并收集实例指纹证据            |
-| CON-CERT-013 | P0     | 证书内容校验不使用业务流量灰度；运行时部署灰度与证书是否合法是两个独立问题       |
+| ID           | 优先级 | 需求                                                                            |
+| ------------ | ------ | ------------------------------------------------------------------------------- |
+| CON-CERT-001 | P0     | 接收 leaf-first PEM 证书链和一把未加密 PEM 私钥，限制请求大小                   |
+| CON-CERT-002 | P0     | 校验 PEM、链顺序/签名、leaf 与私钥匹配、当前有效期和 DNS SAN                    |
+| CON-CERT-003 | P0     | exact SAN 精确匹配；`*.example.com` 只覆盖一层子域名                            |
+| CON-CERT-004 | P0     | 证书链与私钥分别 envelope-encrypted；API 永不返回 PEM、文档 ID 或密钥定位信息   |
+| CON-CERT-005 | P0     | 逻辑证书具有稳定 ID 和名称；其 PEM/私钥版本不可变，并以环境内 SHA-256 指纹去重  |
+| CON-CERT-006 | P0     | 当前 leaf DNS SAN 自动形成只读 SNI selector；不维护第二套人工绑定               |
+| CON-CERT-007 | P0     | ClientHello SNI 按 exact 优先、单层 wildcard selector 选择逻辑证书              |
+| CON-CERT-008 | P0     | 环境内相同 SAN selector 只能属于一个活动逻辑证书；冲突时整个写事务失败          |
+| CON-CERT-009 | P0     | 更新创建新版本并原子切换 current version 和 SAN 索引；范围变化必须显式确认      |
+| CON-CERT-010 | P0     | 事实状态区分 valid、30 天内 expiring、expired、superseded 和 activation unknown |
+| CON-CERT-011 | P0     | 创建逻辑证书和新增版本写入脱敏审计，审计不保存 PEM 或私钥                       |
+| CON-CERT-012 | P0/P1  | Nacos 完整快照原子热更新已完成；逐实例指纹证据仍为 P1                           |
+| CON-CERT-013 | P0     | 证书内容校验不使用业务流量灰度；运行时部署灰度与证书是否合法是两个独立问题      |
 
 上传不接受尚未生效或已经过期的证书；当前版本随时间可变为 `expiring`/`expired`。续期在同一
 逻辑证书下创建新版本，旧版本标记为 `superseded` 并保留指纹与审计。新版本可以包含额外 SAN，
@@ -132,6 +133,9 @@ checksum 历史不变，Migration `0009_certificate_san_selectors` 新建
 | GET    | `/api/certificates/:certificateId/versions` | read             | 返回不可变版本历史                  |
 | POST   | `/api/certificates/:certificateId/versions` | admin/maintainer | 原子更新版本和 SAN selector         |
 | GET    | `/api/tls/sni-resolution?serverName=...`    | read             | 预览 ClientHello SNI 控制面解析结果 |
+| GET    | `/api/tls/releases`                         | read             | 返回不可变 TLS Release 历史         |
+| POST   | `/api/tls/releases`                         | admin/publisher  | 冻结当前证书并选择默认证书          |
+| POST   | `/api/tls/releases/:id/publications`        | admin/publisher  | 排队写入 Nacos 并执行摘要 readback  |
 
 新增版本请求必须用 `If-Match: "<lockVersion>"` 提交逻辑证书当前锁版本。证书创建和版本更新都先
 锁定环境，再锁定目标对象，并在同一事务内检查 selector 唯一性、写入不可变版本、替换 SAN 索引和
@@ -144,8 +148,8 @@ body。跨 workspace 或无权对象继续返回 404，防止枚举。
 
 ## 5. Web 交互
 
-- 顶层 TLS 页面展示独立逻辑证书、当前版本 DNS SAN、当前/历史版本和运行时未接入状态，并提供
-  新建及版本更新入口。
+- 顶层 TLS 页面展示独立逻辑证书、当前版本 DNS SAN、当前/历史版本和 activation unknown，并提供
+  新建、版本更新、默认证书选择和 TLS 快照发布入口。
 - 同一页面提供只读 SNI 解析预览，不提供规则创建、切换或删除。SAN 范围变化时展示新增/停止覆盖
   的域名并要求确认。
 - Project 列表、详情 DTO、导航和页面不再包含证书字段或证书入口。
@@ -159,10 +163,16 @@ body。跨 workspace 或无权对象继续返回 404，防止枚举。
 - PEM、私钥和 CIDR 都是不可信输入；解析失败 fail closed，不调用 shell/OpenSSL，不发出网络请求。
 - 证书 fingerprint 是公有标识，不代替私钥保密；数据库备份必须和 KEK 分权保护。
 - 当前本地 KEK 实现仍是部署级能力；生产应接入 Secret Provider、轮换和销毁证明。
-- 逻辑证书创建或版本更新不创建 Release，不写 rnacos，也不证明任何
-  access-server 已加载证书。
-- 动态 SNI 需要 native 的不可变证书快照、原子替换、失败保留旧证书、有界安全 API、逐实例
-  fingerprint 回执和有序关闭；该工作必须单独完成 native/Console/部署测试矩阵。
+- 逻辑证书创建或版本更新不自动创建 Release、不写 Nacos，也不证明任何 access-server 已加载证书。
+- TLS Release 固定写入 `ploto.unified-access.tls-certificates` / `ACCESS-SERVER`。payload 在数据库中
+  加密，Nacos readback 和 API 只暴露摘要；Nacos 本身持有握手所需明文私钥，因此生产必须启用受控
+  网络、服务端鉴权和传输加密，并限制读取权限。
+- native 在 Nacos owner loop 上限制 4 MiB/128 证书/8192 SAN，解析链与私钥、检查当前有效期、
+  构建 TCP/QUIC context 和排序索引后一次原子发布。空值、NotFound、非法候选、低 version 与
+  same-version/different-content 都保留旧快照。
+- ClientHello 热路径只做原子读、ASCII 无分配比较与有序数组二分查找；每 worker 预分配 hazard
+  slot 延长旧快照到 Fiber 完成 `SSL_set_SSL_CTX`，不使用 mutex、shared_ptr refcount 或字符串分配。
+- 逐实例 fingerprint 回执仍未实现，因此 Release Published 后 activation 仍为 unknown。
 - 网络策略仍受当前 `X-Real-Ip` Java 兼容语义约束。可信代理边界、直接连接行为和 header
   spoofing 防护必须作为后续跨组件安全增量处理。
 
@@ -176,10 +186,9 @@ body。跨 workspace 或无权对象继续返回 404，防止枚举。
 - PEM/key 匹配、mismatch、过期拒绝、exact 优先和单层 wildcard；
 - 相同 SAN 续期直接成功；SAN 范围变化未确认时失败且旧版本、旧索引保持不变；
 - SNI exact 优先于单层 wildcard，重复 selector fail closed，不按顺序选择；
-- 私钥不出现在响应模型、审计 summary 或 rnacos payload；
-- Web 保存网络策略时创建新版本；TLS 页面把控制面 SNI 解析与 runtime unsupported 分开显示，
+- 私钥不出现在响应模型、审计 summary、日志或 readback 证据；只存在于加密文档和专用 Nacos payload；
+- Web 保存网络策略时创建新版本；TLS 页面把库存预览、Release Published 与 activation unknown 分开显示，
   Project 页面没有证书耦合。
 
-本增量的 TypeScript 变更必须执行 `npm run typecheck`、`npm test`、`npm run format:check` 和
-`npm run build`。由于未改变 native wire codec/runtime，本次不以控制面测试宣称生产兼容；生产脚本
-语料差分与最终切流门槛仍未完成。
+本增量必须执行 console 全矩阵以及 native configure/build/focused CTest，并验证 Compose 配置渲染
+和 TLS 握手。上述测试不能替代生产脚本语料差分与最终切流门槛。

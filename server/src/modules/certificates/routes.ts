@@ -78,7 +78,7 @@ const certificateResponseSchema = {
     lockVersion: { type: 'string', pattern: '^(0|[1-9][0-9]*)$' },
     currentVersion: certificateVersionResponseSchema,
     versionCount: { type: 'integer', minimum: 1 },
-    runtimeDeploymentStatus: { type: 'string', const: 'unsupported' },
+    runtimeDeploymentStatus: { type: 'string', const: 'activation_unknown' },
     createdAt: { type: 'string', format: 'date-time' },
     updatedAt: { type: 'string', format: 'date-time' },
   },

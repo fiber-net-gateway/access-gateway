@@ -41,7 +41,7 @@ test('lists immutable versions only after resolving the logical certificate in t
       name: 'API certificate',
       currentVersion: versions[0],
       versionCount: 1,
-      runtimeDeploymentStatus: 'unsupported',
+      runtimeDeploymentStatus: 'activation_unknown',
       createdAt: '2026-01-01T00:00:00.000Z',
       updatedAt: '2026-08-12T00:00:00.000Z',
     }),

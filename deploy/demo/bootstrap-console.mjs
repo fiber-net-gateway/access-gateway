@@ -1,3 +1,6 @@
+import { readFile } from 'node:fs/promises'
+import { X509Certificate } from 'node:crypto'
+
 const apiUrl = process.env.CONSOLE_API_URL ?? 'http://console-api:3000'
 const nacosEndpoint = process.env.DEMO_NACOS_ENDPOINT ?? 'http://rnacos:8848'
 
@@ -49,6 +52,72 @@ if (environmentList.items.length === 0) {
       zone: 'local-demo',
     }),
   })
+}
+
+const [demoCertificatePem, demoPrivateKeyPem] = await Promise.all([
+  readFile('/demo/certs/demo.crt', 'utf8'),
+  readFile('/demo/certs/demo.key', 'utf8'),
+])
+let certificateList = await request('/api/certificates')
+let demoCertificate =
+  certificateList.items.find((item) => item.currentVersion.dnsNames.includes('demo.local')) ??
+  certificateList.items.find((item) => item.name === 'Docker demo certificate')
+if (!demoCertificate) {
+  demoCertificate = await request('/api/certificates', {
+    method: 'POST',
+    body: JSON.stringify({
+      name: 'Docker demo certificate',
+      certificatePem: demoCertificatePem,
+      privateKeyPem: demoPrivateKeyPem,
+    }),
+  })
+}
+const demoCertificateFingerprint = new X509Certificate(demoCertificatePem).fingerprint256
+  .replaceAll(':', '')
+  .toLowerCase()
+if (demoCertificate.currentVersion.fingerprintSha256 !== demoCertificateFingerprint) {
+  demoCertificate = await request(`/api/certificates/${demoCertificate.id}/versions`, {
+    method: 'POST',
+    headers: { 'If-Match': `"${demoCertificate.lockVersion}"` },
+    body: JSON.stringify({
+      certificatePem: demoCertificatePem,
+      privateKeyPem: demoPrivateKeyPem,
+      confirmSniCoverageChange: true,
+    }),
+  })
+}
+
+let tlsReleaseList = await request('/api/tls/releases')
+let tlsRelease = tlsReleaseList.items.find(
+  (item) =>
+    ['ready', 'queued', 'publishing', 'published'].includes(item.status) &&
+    Date.parse(item.createdAt) >= Date.parse(demoCertificate.updatedAt),
+)
+if (!tlsRelease) {
+  tlsRelease = await request('/api/tls/releases', {
+    method: 'POST',
+    headers: { 'Idempotency-Key': `docker-demo-tls-v${demoCertificate.currentVersion.version}` },
+    body: JSON.stringify({ defaultCertificateId: demoCertificate.id }),
+  })
+}
+if (tlsRelease.status === 'ready') {
+  const queued = await request(`/api/tls/releases/${tlsRelease.id}/publications`, {
+    method: 'POST',
+    headers: { 'Idempotency-Key': `docker-demo-tls-publish-${tlsRelease.id}` },
+  })
+  tlsRelease = queued.release
+}
+for (let attempt = 0; attempt < 120 && tlsRelease.status !== 'published'; attempt += 1) {
+  if (['partially_published', 'publish_failed', 'abandoned'].includes(tlsRelease.status)) {
+    throw new Error(`Demo TLS Release stopped in ${tlsRelease.status}`)
+  }
+  await sleep(1_000)
+  tlsReleaseList = await request('/api/tls/releases')
+  tlsRelease = tlsReleaseList.items.find((item) => item.id === tlsRelease.id)
+  if (!tlsRelease) throw new Error('Demo TLS Release disappeared')
+}
+if (tlsRelease.status !== 'published') {
+  throw new Error('Demo TLS Release did not publish within 120 seconds')
 }
 
 const projectList = await request('/api/projects')
@@ -150,5 +219,5 @@ if (release.status !== 'published')
   throw new Error('Demo Release did not publish within 120 seconds')
 
 console.log(
-  `Console demo data is ready (project=${project.id}, version=V${currentVersion.number}, release=R${release.sequence})`,
+  `Console demo data is ready (project=${project.id}, version=V${currentVersion.number}, release=R${release.sequence}, tls=R${tlsRelease.sequence})`,
 )

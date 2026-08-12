@@ -13,7 +13,7 @@ TypeScript across a React frontend and a Node.js backend.
 The repository is under active development in two first-class areas:
 
 - **Access Server** — the native runtime supports HTTPS, HTTP/2, and HTTP/3 enabled by default,
-  PEM certificate configuration, Nacos-driven project and route configuration,
+  Nacos-driven atomic TLS certificate snapshots plus project and route configuration,
   Host/Path/condition matching, RESPONSE and PROXY execution, WebSocket tunneling, service
   discovery, gray routing, CAT tracing, Prometheus metrics, and structured access logs. Production
   script-corpus differential verification and final cutover gates are still in progress.
@@ -27,9 +27,9 @@ The repository is under active development in two first-class areas:
   Project-level versioned network policies and an independent encrypted TLS inventory, immutable
   certificate versions, automatic DNS SAN-based ClientHello SNI selection, and resolution preview
   are also available.
-  Project selection remains based on HTTP Host/`:authority` and is not coupled to SNI. OIDC, resource-level
-  publication retry/recovery, certificate runtime delivery, and per-instance activation collection
-  remain to be implemented.
+  TLS snapshot Releases, publication, and readback evidence are available. Project selection remains based
+  on HTTP Host/`:authority` and is not coupled to SNI. OIDC, resource-level publication retry/recovery,
+  and per-instance activation collection remain to be implemented.
 
 The console therefore reports unavailable or unknown state where the supporting workflow does not
 exist. It does not fabricate publication or activation success.
@@ -242,8 +242,8 @@ does not connect to Nacos or external services.
 
 ## Run Access Server
 
-Copy the native example configuration, mount a PEM certificate/private key, and set at least the
-Nacos address for your environment:
+Copy the native example configuration and set at least the Nacos address for your environment.
+When TLS is enabled, publish a complete TLS certificate snapshot before starting Access Server:
 
 ```bash
 cp native/access-server/access-server.env.example access-server.env
@@ -257,9 +257,12 @@ listeners are:
 - gateway HTTP/3: `0.0.0.0:16688/udp`;
 - Prometheus metrics: `0.0.0.0:16689`.
 
-TLS and HTTP/3 are enabled by default. A missing certificate, mismatched private key, or failed
-TCP/UDP bind fails startup. Legacy plaintext HTTP requires both `ACCESS_SERVER_TLS_ENABLED=false`
-and `ACCESS_SERVER_HTTP3_ENABLED=false`. The configuration format is strict `KEY=VALUE`; unknown or
+TLS and HTTP/3 are enabled by default. Access Server waits for
+`ploto.unified-access.tls-certificates` in group `ACCESS-SERVER`, derives SNI selectors from leaf DNS
+SANs, and hot-swaps only a fully validated snapshot. A missing snapshot, expired certificate,
+mismatched key, or failed TCP/UDP bind fails startup. File-based certificate settings have been
+removed. Legacy plaintext HTTP requires both `ACCESS_SERVER_TLS_ENABLED=false` and
+`ACCESS_SERVER_HTTP3_ENABLED=false`. The configuration format is strict `KEY=VALUE`; unknown or
 duplicate keys fail startup. Do not commit local environment files, private keys, or credentials. See
 [`native/access-server/access-server.env.example`](native/access-server/access-server.env.example)
 for the full configuration surface.

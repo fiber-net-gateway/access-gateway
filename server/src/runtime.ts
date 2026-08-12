@@ -34,6 +34,11 @@ import { ReleaseRepository } from './modules/releases/repository.js'
 import { DefaultReleaseService, UnavailableReleaseService } from './modules/releases/service.js'
 import { DefaultSystemStatusService } from './modules/system/service.js'
 import { TlsSniRepository } from './modules/tls/repository.js'
+import { TlsCertificateReleaseRepository } from './modules/tls/release-repository.js'
+import {
+  DefaultTlsCertificateReleaseService,
+  UnavailableTlsCertificateReleaseService,
+} from './modules/tls/release-service.js'
 import { DefaultTlsSniService, UnavailableTlsSniService } from './modules/tls/service.js'
 import { ConfigurationVersionRepository } from './modules/versions/repository.js'
 import {
@@ -108,6 +113,7 @@ function unavailableServices(
       config.publication.enabled,
     ),
     tlsSni: new UnavailableTlsSniService(),
+    tlsReleases: new UnavailableTlsCertificateReleaseService(),
   }
 }
 
@@ -156,6 +162,7 @@ export async function createApplicationRuntime(config: ServerConfig): Promise<Ap
     const releases = new ReleaseRepository(pool, documents)
     const certificates = new CertificateRepository(pool, documents)
     const tlsSni = new TlsSniRepository(pool)
+    const tlsReleases = new TlsCertificateReleaseRepository(pool, documents)
     const services: ApplicationServices = {
       auth,
       certificates: new DefaultCertificateService(certificates, environments),
@@ -180,6 +187,7 @@ export async function createApplicationRuntime(config: ServerConfig): Promise<Ap
         config.publication.enabled,
       ),
       tlsSni: new DefaultTlsSniService(tlsSni, environments),
+      tlsReleases: new DefaultTlsCertificateReleaseService(tlsReleases, environments, nacos),
     }
     return {
       services,

@@ -162,8 +162,6 @@ services:
       - '${ACCESS_SERVER_PUBLISHED_HOST:-0.0.0.0}:${ACCESS_SERVER_HTTPS_PORT:-16688}:16688/tcp'
       - '${ACCESS_SERVER_PUBLISHED_HOST:-0.0.0.0}:${ACCESS_SERVER_HTTPS_PORT:-16688}:16688/udp'
       - '127.0.0.1:${ACCESS_SERVER_METRICS_PORT:-16689}:16689'
-    volumes:
-      - ./deploy/demo/certs:/run/access-gateway/tls:ro
     depends_on:
       console-bootstrap:
         condition: service_completed_successfully

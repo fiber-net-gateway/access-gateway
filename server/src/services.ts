@@ -6,6 +6,7 @@ import type { ProjectService } from './modules/projects/service.js'
 import type { ReleaseService } from './modules/releases/service.js'
 import type { SystemStatusService } from './modules/system/service.js'
 import type { TlsSniService } from './modules/tls/service.js'
+import type { TlsCertificateReleaseService } from './modules/tls/release-service.js'
 import type { ConfigurationVersionService } from './modules/versions/service.js'
 
 export interface ApplicationServices {
@@ -18,6 +19,7 @@ export interface ApplicationServices {
   releases: ReleaseService
   system: SystemStatusService
   tlsSni: TlsSniService
+  tlsReleases: TlsCertificateReleaseService
 }
 
 export interface ApplicationRuntime {

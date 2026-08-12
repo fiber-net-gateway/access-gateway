@@ -369,15 +369,15 @@ RESPONSE Route 至少覆盖 `status` 与 `body`（TEXT、BASE64、TEMPLATE）。
 | CON-CERT-005 | P0     | 更新创建新版本并原子替换 SAN selector；覆盖变化必须明确确认                       |
 | CON-CERT-006 | P0     | 同优先级多候选返回 conflict；不按上传时间、到期日或存储顺序任意选择               |
 | CON-CERT-007 | P0     | 私钥加密存储、永不回显、不可下载，不进入日志、trace、审计 diff 或 rnacos payload  |
-| CON-CERT-008 | P0     | TLS 页分别显示 matched/uncovered/conflict、版本事实状态和 runtime unsupported     |
+| CON-CERT-008 | P0     | TLS 页分别显示 matched/uncovered/conflict、版本事实状态和 activation unknown      |
 | CON-CERT-009 | P1     | 到期阈值支持 30/14/7 天提醒，提醒失败不影响证书事实状态                           |
 | CON-CERT-010 | P1     | 经专用安全交付通道把证书部署到支持 SNI 的 access-server，并收集逐实例证书指纹证据 |
 | CON-CERT-011 | P2     | 支持 ACME 或企业证书服务自动签发与续期，仍使用不可变版本和显式部署记录            |
 | CON-CERT-012 | P0     | 证书内容校验不做业务流量灰度；未来实例批次部署单独记录 rollout 与逐实例证据       |
 
 当前 access-server 只支持启动时从文件加载一组监听器证书，尚不支持 Console 管理的逐域名 SNI
-证书。因此 P0 可以完成逻辑证书、版本更新和 SNI 控制面解析，但必须把运行时状态显示为“动态证书部署
-未接入”；只有 CON-CERT-010 及对应 native 能力完成后才能显示 `deployed`。
+证书。逻辑证书、版本更新、SNI 控制面解析和 TLS 快照发布已经完成；由于逐实例证据尚未实现，
+运行时状态必须显示 `activation_unknown`，不能从 Nacos readback 推断 `deployed`。
 
 上传时的本地校验可以确定 PEM 结构、所提供链条的相邻签名关系、leaf/key 匹配、当前有效期和 DNS
 SAN，不需要业务流量验证。到期状态必须随时间持续计算；公共 CA 信任、吊销状态和企业私有信任策略
@@ -648,7 +648,7 @@ Route 不能破坏历史 Release 和审计引用。
 7. **证书安全**：上传证书和匹配私钥后展示 SAN、指纹和有效期；不匹配私钥被拒绝，任何 API、
    日志、审计和 rnacos payload 都无法检索到私钥原文。
 8. **证书更新与诚实状态**：更新一个逻辑证书时原子切换版本及 SAN selector；范围变化需要确认。
-   当前数据面未接入动态 SNI 时仍显示“控制面已匹配 / 运行时部署未接入”，不显示“已生效”。
+   数据面支持动态 SNI，但实例证据未接入时仍显示“Release 已发布 / 实例激活未知”，不显示“已生效”。
 9. **保存版本**：用户基于 `V2` 修改 Route 并填写说明后保存为不可变 `V3`；`V2` 仍可只读查看，
    并发用户先保存 `V4` 时旧 base 保存返回冲突而不覆盖。
 10. **发布当前版本**：默认选择当前 `V4`；校验通过后，先写入并回读 project route，再按需更新
@@ -673,7 +673,7 @@ Route 不能破坏历史 Release 和审计引用。
 - 基于 `access_server_core` 的离线 Native Validator contract；
 - rnacos publication worker、只读回读 adapter 和最小权限服务身份；
 - 证书 envelope encryption 与 KEK/Secret Provider；
-- 阶段 4 所需的 access-server SNI 证书热更新和有界鉴权状态接口；
+- access-server 实例级 TLS 快照版本、加载结果和有界鉴权状态接口；
 - access-server 完成生产差分与切流门槛后的正式生产声明。
 
 ### 13.2 待详细设计决定
@@ -695,8 +695,8 @@ Route 不能破坏历史 Release 和审计引用。
   记录当前固定工作区、整份 JSON 编辑器和启动证书实现，仅作为现状说明；其中的 Console 产品
   交互被本文取代。
 - [`network-policy-and-certificate-design.md`](network-policy-and-certificate-design.md) 定义已实现的
-  Configuration Version v3 网络策略、可更新逻辑证书、SAN 自动 SNI 解析、安全边界和未实现的动态 SNI
-  交付。
+  Configuration Version v3 网络策略、可更新逻辑证书、SAN 自动 SNI 解析、安全边界和动态 SNI
+  交付；实例激活证据仍未实现。
 - 任何 wire/config 行为变更仍需同步更新 native codec/runtime、server schema/service、web 类型、
   兼容 fixture 和用户文档。
 

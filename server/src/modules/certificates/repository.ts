@@ -124,7 +124,7 @@ function toView(row: CertificateSeriesRow): CertificateView {
     lockVersion: row.lock_version,
     currentVersion: toVersionView(row),
     versionCount: Number(row.version_count),
-    runtimeDeploymentStatus: 'unsupported',
+    runtimeDeploymentStatus: 'activation_unknown',
     createdAt: mysqlDateTimeToRfc3339(row.series_created_at),
     updatedAt: mysqlDateTimeToRfc3339(row.series_updated_at),
   }

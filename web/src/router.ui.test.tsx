@@ -109,7 +109,7 @@ function installApiMock() {
       createdAt: '2026-08-12T00:00:00.000Z',
     },
     versionCount: 2,
-    runtimeDeploymentStatus: 'unsupported',
+    runtimeDeploymentStatus: 'activation_unknown',
     createdAt: '2026-01-01T00:00:00.000Z',
     updatedAt: '2026-08-12T00:00:00.000Z',
   }
@@ -120,7 +120,7 @@ function installApiMock() {
     status: certificate.currentVersion.status,
     notAfter: certificate.currentVersion.notAfter,
     fingerprintSha256: certificate.currentVersion.fingerprintSha256,
-    runtimeDeploymentStatus: 'unsupported',
+    runtimeDeploymentStatus: 'activation_unknown',
   }
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
@@ -209,7 +209,7 @@ function installApiMock() {
         matchKind: 'exact',
         certificate: sniCertificate,
         matches: [sniCertificate],
-        runtimeDeploymentStatus: 'unsupported',
+        runtimeDeploymentStatus: 'activation_unknown',
       })
     }
     if (url === `/api/certificates/${certificate.id}/versions` && init?.method === 'POST') {
@@ -396,7 +396,7 @@ describe('application routes', () => {
     await user.type(screen.getByLabelText('ClientHello server name'), 'api.example.com')
     await user.click(screen.getByRole('button', { name: '解析' }))
     expect(await screen.findByText('已匹配')).toBeTruthy()
-    expect(screen.getByText('运行时部署状态：unsupported')).toBeTruthy()
+    expect(screen.getByText('该预览基于当前库存；实际运行版本以最近发布快照为准。')).toBeTruthy()
     expect(screen.queryByText('已激活')).toBeNull()
   })
 

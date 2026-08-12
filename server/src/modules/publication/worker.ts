@@ -36,7 +36,7 @@ interface PublicationResourceRow extends RowDataPacket {
   id: string
   public_id: Buffer
   project_id: string | null
-  kind: 'project_route' | 'project_list'
+  kind: 'project_route' | 'project_list' | 'tls_certificates'
   data_id: string
   group_name: string
   operation: 'upsert' | 'remove'
@@ -290,7 +290,7 @@ export class PublicationWorker {
           resource.data_id,
           resource.group_name,
           payload.toString('utf8'),
-          resource.kind === 'project_route' ? 'json' : 'text',
+          resource.kind === 'project_list' ? 'text' : 'json',
         )
         wrote = true
       } else if (decision === 'remove') {
@@ -480,6 +480,16 @@ export class PublicationWorker {
            SET previous.status = 'superseded', previous.lock_version = previous.lock_version + 1
            WHERE previous.id <> ? AND previous.status = 'published'
              AND previous_item.project_id = current_item.project_id`,
+          [claim.releaseInternalId, claim.releaseInternalId],
+        )
+        await transaction.execute(
+          `UPDATE releases previous
+           INNER JOIN releases current ON current.id = ?
+           SET previous.status = 'superseded', previous.lock_version = previous.lock_version + 1
+           WHERE previous.id <> ? AND previous.status = 'published'
+             AND previous.kind = 'tls_certificates'
+             AND current.kind = 'tls_certificates'
+             AND previous.environment_id = current.environment_id`,
           [claim.releaseInternalId, claim.releaseInternalId],
         )
       }

@@ -35,7 +35,7 @@ function toCertificateSummary(row: TlsSniMatchRow): TlsSniCertificateSummary {
     status: certificateStatus(row.lifecycle_state, row.not_after),
     notAfter: mysqlDateTimeToRfc3339(row.not_after),
     fingerprintSha256: row.fingerprint_sha256.toString('hex'),
-    runtimeDeploymentStatus: 'unsupported',
+    runtimeDeploymentStatus: 'activation_unknown',
   }
 }
 
@@ -94,7 +94,7 @@ export class TlsSniRepository {
       matchKind: matches.length > 0 ? preferredKind : null,
       certificate: matches.length === 1 ? matches[0]! : null,
       matches,
-      runtimeDeploymentStatus: 'unsupported',
+      runtimeDeploymentStatus: 'activation_unknown',
     }
   }
 }

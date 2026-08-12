@@ -7,7 +7,7 @@ export interface TlsSniCertificateSummary {
   status: CertificateFactStatus
   notAfter: string
   fingerprintSha256: string
-  runtimeDeploymentStatus: 'unsupported'
+  runtimeDeploymentStatus: 'activation_unknown'
 }
 
 export interface TlsSniResolutionView {
@@ -16,5 +16,5 @@ export interface TlsSniResolutionView {
   matchKind: 'exact' | 'wildcard' | null
   certificate: TlsSniCertificateSummary | null
   matches: readonly TlsSniCertificateSummary[]
-  runtimeDeploymentStatus: 'unsupported'
+  runtimeDeploymentStatus: 'activation_unknown'
 }
