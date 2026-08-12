@@ -45,14 +45,17 @@ export interface RouteItemModel {
   source: string
 }
 
+export type HttpsRedirect = 'off' | '301' | '302' | '307' | '308'
+
 export interface ProjectNetworkPolicy {
   source: 'route' | 'project'
+  httpsRedirect: HttpsRedirect
   allowedCidrs: readonly string[]
   deniedCidrs: readonly string[]
 }
 
 export interface ProjectRoutesModel {
-  schemaVersion: 3
+  schemaVersion: 4
   kind: 'project_routes_yaml'
   networkPolicy: ProjectNetworkPolicy
   routes: readonly RouteItemModel[]

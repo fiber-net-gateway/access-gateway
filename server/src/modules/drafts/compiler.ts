@@ -4,7 +4,7 @@ import { isIP } from 'node:net'
 import { isAlias, isMap, isScalar, LineCounter, parseDocument, visit } from 'yaml'
 
 import { canonicalJson } from '../../shared/json.js'
-import type { ProjectRoutesModel, RouteItemModel } from './model.js'
+import type { HttpsRedirect, ProjectRoutesModel, RouteItemModel } from './model.js'
 
 const routeFields = new Set([
   'path',
@@ -27,9 +27,17 @@ const routeFields = new Set([
   'allows',
 ])
 
-export const ROUTE_COMPILER_REVISION = 'project-routes-yaml-v3-network-policy'
+export const ROUTE_COMPILER_REVISION = 'project-routes-yaml-v4-https-redirect'
 
 const networkPolicyRouteId = '00000000-0000-4000-8000-000000000099'
+
+const httpsStrategies: Readonly<Record<HttpsRedirect, string>> = {
+  off: 'S_NOT_MUST',
+  '301': 'S_301',
+  '302': 'S_302',
+  '307': 'S_307',
+  '308': 'S_308',
+}
 
 export interface RouteValidationIssue {
   routeId: string
@@ -384,7 +392,7 @@ export function compileProjectRoutes(
     version,
     host: {
       [domain]: {
-        https: 'S_NOT_MUST',
+        https: httpsStrategies[model.networkPolicy.httpsRedirect],
       },
     },
     routes,

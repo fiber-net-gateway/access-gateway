@@ -674,20 +674,48 @@ TEST(AccessRequestHandlerTest, ReturnsJavaHostEntryPathAndCidrErrors) {
     EXPECT_EQ(response_body(cidr_error), R"({"name":"NOT_ALLOW_IP","message":"source ip is not allowed","meta":null})");
 }
 
-TEST(AccessRequestHandlerTest, RedirectsBeforePathMatching) {
-    HostStrategyConfig strategy;
-    strategy.https = HttpsStrategy::Redirect307;
-    RouteConfigStore store;
-    publish(store, project(strategy, {response_route("/never", "never")}));
+TEST(AccessRequestHandlerTest, RedirectsWithConfiguredStatusBeforePathMatching) {
+    const std::array<std::pair<HttpsStrategy, std::string_view>, 4> cases = {
+            std::pair{HttpsStrategy::Redirect301, std::string_view{"301"}},
+            std::pair{HttpsStrategy::Redirect302, std::string_view{"302"}},
+            std::pair{HttpsStrategy::Redirect307, std::string_view{"307"}},
+            std::pair{HttpsStrategy::Redirect308, std::string_view{"308"}},
+    };
 
-    const std::string response = run_request(store, "GET /missing?q=1 HTTP/1.1\r\n"
-                                                    "Host: api.example.com:8080\r\n"
+    for (const auto &[https_strategy, status]: cases) {
+        SCOPED_TRACE(status);
+        HostStrategyConfig strategy;
+        strategy.https = https_strategy;
+        RouteConfigStore store;
+        publish(store, project(strategy, {response_route("/never", "never")}));
+
+        const std::string response = run_request(store, "POST /missing?q=1 HTTP/1.1\r\n"
+                                                        "Host: api.example.com:8080\r\n"
+                                                        "Content-Length: 0\r\n"
+                                                        "Connection: close\r\n\r\n");
+
+        EXPECT_TRUE(response.starts_with("HTTP/1.1 " + std::string(status) + " "));
+        EXPECT_NE(response.find("Strict-Transport-Security: max-age=31536000\r\n"), std::string::npos);
+        EXPECT_NE(response.find("Location: https://api.example.com:8080/missing?q=1\r\n"),
+                  std::string::npos);
+        EXPECT_EQ(response_body(response), "");
+    }
+}
+
+TEST(AccessRequestHandlerTest, DoesNotRedirectTrustedForwardedHttps) {
+    HostStrategyConfig strategy;
+    strategy.https = HttpsStrategy::Redirect308;
+    RouteConfigStore store;
+    publish(store, project(strategy, {response_route("/ready", "ready")}));
+
+    const std::string response = run_request(store, "GET /ready HTTP/1.1\r\n"
+                                                    "Host: api.example.com\r\n"
+                                                    "X-Forwarded-Proto: https\r\n"
                                                     "Connection: close\r\n\r\n");
 
-    EXPECT_TRUE(response.starts_with("HTTP/1.1 307 "));
-    EXPECT_NE(response.find("Strict-Transport-Security: max-age=31536000\r\n"), std::string::npos);
-    EXPECT_NE(response.find("Location: https://api.example.com:8080/missing?q=1\r\n"), std::string::npos);
-    EXPECT_EQ(response_body(response), "");
+    EXPECT_TRUE(response.starts_with("HTTP/1.1 200 "));
+    EXPECT_EQ(response.find("Location:"), std::string::npos);
+    EXPECT_EQ(response_body(response), "ready");
 }
 
 TEST(AccessRequestHandlerTest, DiscardsRouteHeadersOnLivePreparationErrors) {

@@ -369,6 +369,12 @@ export function ProjectVersionsPage() {
                   ? 'Project 统一策略'
                   : '由各 Route 配置'}
               </span>
+              <small>
+                HTTPS：
+                {previewVersion.model.networkPolicy.httpsRedirect === 'off'
+                  ? '不强制'
+                  : `${previewVersion.model.networkPolicy.httpsRedirect} 重定向`}
+              </small>
               {previewVersion.model.networkPolicy.source === 'project' ? (
                 <small>
                   允许：{previewVersion.model.networkPolicy.allowedCidrs.join(', ') || '全部'} ·

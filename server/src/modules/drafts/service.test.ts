@@ -51,9 +51,14 @@ test('legacy draft revision API rejects invalid YAML before persistence', async 
         lockVersion: '1',
         changeSummary: 'Broken YAML',
         model: {
-          schemaVersion: 3,
+          schemaVersion: 4,
           kind: 'project_routes_yaml',
-          networkPolicy: { source: 'route', allowedCidrs: [], deniedCidrs: [] },
+          networkPolicy: {
+            source: 'route',
+            httpsRedirect: 'off',
+            allowedCidrs: [],
+            deniedCidrs: [],
+          },
           routes: [{ id: '00000000-0000-4000-8000-000000000004', source: 'path: [' }],
         },
       },

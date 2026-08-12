@@ -1691,6 +1691,7 @@ button:disabled {
 .certificate-upload-form input,
 .certificate-upload-form textarea,
 .network-policy-form input,
+.network-policy-form select,
 .network-policy-form textarea {
   width: 100%;
   padding: 10px 11px;
@@ -1713,6 +1714,7 @@ button:disabled {
 .certificate-upload-form input:focus,
 .certificate-upload-form textarea:focus,
 .network-policy-form input:focus,
+.network-policy-form select:focus,
 .network-policy-form textarea:focus {
   border-color: #789578;
   box-shadow: 0 0 0 3px rgb(120 149 120 / 13%);

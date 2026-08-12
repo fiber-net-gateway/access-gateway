@@ -93,7 +93,7 @@ test('readiness and persistent APIs fail closed when MySQL is unconfigured', asy
   assert.equal(sniResolution.json().error.code, 'DATABASE_UNCONFIGURED')
 })
 
-test('YAML route APIs accept schema v3 and reject the legacy whole-project request shape', async (context) => {
+test('YAML route APIs accept schema v4 and reject the legacy whole-project request shape', async (context) => {
   const app = buildApp()
   context.after(() => app.close())
   const projectId = '00000000-0000-4000-8000-000000000001'
@@ -104,9 +104,14 @@ test('YAML route APIs accept schema v3 and reject the legacy whole-project reque
     url: `/api/projects/${projectId}/routes/validate`,
     payload: {
       model: {
-        schemaVersion: 3,
+        schemaVersion: 4,
         kind: 'project_routes_yaml',
-        networkPolicy: { source: 'route', allowedCidrs: [], deniedCidrs: [] },
+        networkPolicy: {
+          source: 'route',
+          httpsRedirect: 'off',
+          allowedCidrs: [],
+          deniedCidrs: [],
+        },
         routes: [{ id: routeId, source: 'path: /health\ntype: RESPONSE\nstatus: 200' }],
       },
     },
@@ -147,9 +152,14 @@ test('configuration version and Release APIs are registered and fail closed with
       baseVersionId: null,
       changeSummary: 'Create V1',
       model: {
-        schemaVersion: 3,
+        schemaVersion: 4,
         kind: 'project_routes_yaml',
-        networkPolicy: { source: 'route', allowedCidrs: [], deniedCidrs: [] },
+        networkPolicy: {
+          source: 'route',
+          httpsRedirect: 'off',
+          allowedCidrs: [],
+          deniedCidrs: [],
+        },
         routes: [{ id: routeId, source: 'path: /\ntype: RESPONSE\nstatus: 200' }],
       },
     },
@@ -165,9 +175,14 @@ test('configuration version and Release APIs are registered and fail closed with
       baseVersionId: versionId,
       changeSummary: 'Use V1 as an editing source',
       model: {
-        schemaVersion: 3,
+        schemaVersion: 4,
         kind: 'project_routes_yaml',
-        networkPolicy: { source: 'route', allowedCidrs: [], deniedCidrs: [] },
+        networkPolicy: {
+          source: 'route',
+          httpsRedirect: 'off',
+          allowedCidrs: [],
+          deniedCidrs: [],
+        },
         routes: [{ id: routeId, source: 'path: /edited\ntype: RESPONSE\nstatus: 200' }],
       },
     },

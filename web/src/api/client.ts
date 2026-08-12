@@ -84,10 +84,15 @@ function isProject(value: unknown): value is ProjectView {
 function isProjectRoutesModel(value: unknown): value is ProjectRoutesModel {
   return (
     isRecord(value) &&
-    value.schemaVersion === 3 &&
+    value.schemaVersion === 4 &&
     value.kind === 'project_routes_yaml' &&
     isRecord(value.networkPolicy) &&
     (value.networkPolicy.source === 'route' || value.networkPolicy.source === 'project') &&
+    (value.networkPolicy.httpsRedirect === 'off' ||
+      value.networkPolicy.httpsRedirect === '301' ||
+      value.networkPolicy.httpsRedirect === '302' ||
+      value.networkPolicy.httpsRedirect === '307' ||
+      value.networkPolicy.httpsRedirect === '308') &&
     Array.isArray(value.networkPolicy.allowedCidrs) &&
     value.networkPolicy.allowedCidrs.every((cidr) => typeof cidr === 'string') &&
     Array.isArray(value.networkPolicy.deniedCidrs) &&

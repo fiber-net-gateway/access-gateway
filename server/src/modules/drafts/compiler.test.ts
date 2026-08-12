@@ -6,9 +6,14 @@ import { compileProjectRoutes } from './compiler.js'
 
 function model(...sources: string[]): ProjectRoutesModel {
   return {
-    schemaVersion: 3,
+    schemaVersion: 4,
     kind: 'project_routes_yaml',
-    networkPolicy: { source: 'route', allowedCidrs: [], deniedCidrs: [] },
+    networkPolicy: {
+      source: 'route',
+      httpsRedirect: 'off',
+      allowedCidrs: [],
+      deniedCidrs: [],
+    },
     routes: sources.map((source, index) => ({
       id: `00000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`,
       source,
@@ -42,9 +47,14 @@ test('compiles independent YAML routes into ordered Java-compatible project JSON
 test('rejects unsafe YAML features and reports the owning route', () => {
   const routeId = '00000000-0000-4000-8000-000000000001'
   const result = compileProjectRoutes('api.example.com', {
-    schemaVersion: 3,
+    schemaVersion: 4,
     kind: 'project_routes_yaml',
-    networkPolicy: { source: 'route', allowedCidrs: [], deniedCidrs: [] },
+    networkPolicy: {
+      source: 'route',
+      httpsRedirect: 'off',
+      allowedCidrs: [],
+      deniedCidrs: [],
+    },
     routes: [
       {
         id: routeId,
@@ -111,6 +121,7 @@ test('injects an authoritative Project network policy into every route', () => {
     ...candidate,
     networkPolicy: {
       source: 'project',
+      httpsRedirect: 'off',
       allowedCidrs: ['10.0.0.0/8', '2001:db8::/32'],
       deniedCidrs: ['10.1.0.0/16'],
     },
@@ -130,6 +141,7 @@ test('rejects malformed Project CIDRs and Route overrides under authoritative po
     ...candidate,
     networkPolicy: {
       source: 'project',
+      httpsRedirect: 'off',
       allowedCidrs: ['10.0.0.0/99'],
       deniedCidrs: [],
     },
@@ -138,4 +150,30 @@ test('rejects malformed Project CIDRs and Route overrides under authoritative po
   assert.equal(result.compiled, null)
   assert.ok(result.issues.some((issue) => issue.code === 'INVALID_NETWORK_POLICY_CIDR'))
   assert.ok(result.issues.some((issue) => issue.code === 'ROUTE_NETWORK_POLICY_CONFLICT'))
+})
+
+test('compiles every HTTPS redirect setting to the native HostStrategy wire value', () => {
+  const expected = {
+    off: 'S_NOT_MUST',
+    '301': 'S_301',
+    '302': 'S_302',
+    '307': 'S_307',
+    '308': 'S_308',
+  } as const
+
+  for (const [httpsRedirect, strategy] of Object.entries(expected)) {
+    const candidate = model('path: /\ntype: RESPONSE\nstatus: 200')
+    const result = compileProjectRoutes('api.example.com', {
+      ...candidate,
+      networkPolicy: {
+        ...candidate.networkPolicy,
+        httpsRedirect: httpsRedirect as keyof typeof expected,
+      },
+    })
+    assert.deepEqual(result.issues, [])
+    const payload = JSON.parse(result.compiled!.payloadText) as {
+      host: Record<string, { https: string }>
+    }
+    assert.equal(payload.host['api.example.com']?.https, strategy)
+  }
 })

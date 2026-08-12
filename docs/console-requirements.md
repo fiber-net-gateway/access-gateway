@@ -194,7 +194,8 @@ Project 页面固定显示域名、当前配置版本、未保存状态、rnacos
 1. **Routes**：默认页签，也是主要工作区；
 2. **Versions**：当前和历史配置版本、只读预览、版本 diff、恢复和发布入口；
 3. **Releases**：该域名的发布执行、资源状态、重试和激活证据；
-4. **Settings**：HTTPS 策略、归档/下线等低频高风险操作。
+4. **Network Policy**：HTTPS redirect 和 CIDR 访问策略；
+5. **Settings**：归档/下线等低频高风险操作。
 
 离开存在未保存修改的 Route、切换 Project、删除 Route、归档 Project 和发布时都必须提供明确的
 防误操作保护。
@@ -389,17 +390,24 @@ SAN，不需要业务流量验证。到期状态必须随时间持续计算；�
 
 如果 Project 开启 HTTPS redirect，发布前必须确认以下条件之一：已有覆盖该域名的运行时证书证据，
 或部署明确声明 TLS 由受信任的外部终止器负责。缺少两者时阻止发布，避免重定向到不可用 HTTPS。
+当前逐实例证书证据和外部终止器声明尚未实现，因此这一发布前置校验仍是明确缺口；Console 只能
+展示入口约束和 `activation_unknown`，不能从配置保存、rnacos readback 或 TLS 库存推断 HTTPS
+已经可达。
 
 ### 7.4.1 网络策略配置
 
-网络策略作为 Configuration Version schema v3 的一部分保存，而不是可漂移的 Project 当前属性。
-它支持“Route 自主管理”和“Project 统一策略”两种互斥模式；统一模式把允许 CIDR 和优先拒绝 CIDR
+网络策略作为 Configuration Version schema v4 的一部分保存，而不是可漂移的 Project 当前属性。
+其中 HTTPS redirect 独立配置为关闭/301/302/307/308，并编译到 exact HostStrategy；CIDR 支持
+“Route 自主管理”和“Project 统一策略”两种互斥模式。统一模式把允许 CIDR 和优先拒绝 CIDR
 确定性编译进每条 route `allows`，并禁止 Route YAML 同时声明 `allows`。详细需求、迁移、API、
 安全前提和验收见
 [`network-policy-and-certificate-design.md`](network-policy-and-certificate-design.md)。
 
 当前 native 按 Java 兼容语义从 `X-Real-Ip` 执行 CIDR 判断，缺失或不可解析时跳过检查。因此生产
 部署必须由受信任入口清洗并设置该头；可信代理边界完成前不得把该配置宣传为独立网络防火墙。
+HTTPS redirect 同样只信任已清洗的 `X-Forwarded-Proto`。当前单一业务监听器启用 TLS 时不接收
+明文 HTTP，因此直连 access-server 不会触发 HTTP 到 HTTPS 重定向；该策略面向同时接收 HTTP/HTTPS
+的受信任 Ingress/LB 链路。
 
 ### 7.5 Release 与发布到 rnacos
 

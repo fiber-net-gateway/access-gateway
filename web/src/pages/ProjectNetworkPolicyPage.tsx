@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react'
 
 import { fetchCurrentConfigurationVersion, saveConfigurationVersion } from '../api/client'
-import type { ProjectNetworkPolicy, ProjectRoutesModel } from '../api/types'
+import type { HttpsRedirect, ProjectNetworkPolicy, ProjectRoutesModel } from '../api/types'
 import { initialRouteModel } from '../routes/model'
 import { useUnsavedChangesGuard } from '../routes/useUnsavedChangesGuard'
 import { useProjectContext } from './ProjectLayout'
@@ -36,10 +36,11 @@ export function ProjectNetworkPolicyPage() {
   const policy = useMemo<ProjectNetworkPolicy>(
     () => ({
       source: model.networkPolicy.source,
+      httpsRedirect: model.networkPolicy.httpsRedirect,
       allowedCidrs: parseLines(allowedCidrs),
       deniedCidrs: parseLines(deniedCidrs),
     }),
-    [allowedCidrs, deniedCidrs, model.networkPolicy.source],
+    [allowedCidrs, deniedCidrs, model.networkPolicy.httpsRedirect, model.networkPolicy.source],
   )
   const dirty = !loading && JSON.stringify(policy) !== JSON.stringify(savedPolicy)
   useUnsavedChangesGuard(dirty)
@@ -128,6 +129,58 @@ export function ProjectNetworkPolicyPage() {
           兼容约束：access-server 当前读取 X-Real-Ip，头缺失或不可解析时会跳过 CIDR
           检查。生产入口必须清洗并规范设置该头。
         </div>
+        <div className="capability-notice" role="note">
+          HTTPS 入口约束：强制 HTTPS 仅在可信 Ingress/LB 同时接收 HTTP，并清洗、设置
+          X-Forwarded-Proto 时生效。当前 access-server 直连 TLS 监听器不接收明文 HTTP。
+        </div>
+        <fieldset disabled={loading || saving}>
+          <legend>HTTPS 强制策略</legend>
+          <label className="policy-option">
+            <input
+              checked={model.networkPolicy.httpsRedirect !== 'off'}
+              type="checkbox"
+              onChange={(event) =>
+                setModel((current) => ({
+                  ...current,
+                  networkPolicy: {
+                    ...current.networkPolicy,
+                    httpsRedirect: event.target.checked ? '308' : 'off',
+                  },
+                }))
+              }
+            />
+            <span>
+              <strong>强制 HTTPS</strong>
+              <small>Host 匹配后、Route 匹配前，将 HTTP 请求重定向到同 Host 和 URI。</small>
+            </span>
+          </label>
+          <label className="https-redirect-status">
+            重定向状态码
+            <select
+              disabled={model.networkPolicy.httpsRedirect === 'off' || loading || saving}
+              value={
+                model.networkPolicy.httpsRedirect === 'off'
+                  ? '308'
+                  : model.networkPolicy.httpsRedirect
+              }
+              onChange={(event) =>
+                setModel((current) => ({
+                  ...current,
+                  networkPolicy: {
+                    ...current.networkPolicy,
+                    httpsRedirect: event.target.value as Exclude<HttpsRedirect, 'off'>,
+                  },
+                }))
+              }
+            >
+              <option value="301">301 · 永久，可能改为 GET</option>
+              <option value="302">302 · 临时，可能改为 GET</option>
+              <option value="307">307 · 临时，保留方法和请求体</option>
+              <option value="308">308 · 永久，保留方法和请求体</option>
+            </select>
+            <small>301/308 可能被客户端缓存；首次灰度建议 307，稳定后可切换 308。</small>
+          </label>
+        </fieldset>
         <fieldset disabled={loading || saving}>
           <legend>策略所有权</legend>
           <label className="policy-option">

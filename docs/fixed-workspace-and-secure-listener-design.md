@@ -112,6 +112,9 @@ Access Server 使用 Fiber 的 `HttpServer` 替换仅支持明文的 `Http1Serve
 
 直连 TLS 请求以 `exchange.scheme() == "https"` 判断 HTTPS，同时保留受信任反向代理传入的
 `X-Forwarded-Proto: https` 兼容路径，防止安全监听器上的 HTTPS redirect 循环。
+当前业务端口没有并行的明文 HTTP 监听器：Project 的 HTTPS redirect 仅用于受信任 Ingress/LB
+同时接收 HTTP/HTTPS、清洗并设置 `X-Forwarded-Proto` 的部署路径。直连 access-server 的明文
+请求不会在 TLS 端口上完成 HTTP 解析；若未来需要直连重定向，应另行设计独立明文监听器。
 
 ### 4.3 证书安全
 
