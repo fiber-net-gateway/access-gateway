@@ -11,8 +11,8 @@ Access Gateway 是由 C++23 数据面与 Web 管理控制台组成的高性能�
 
 本仓库同时持续开发两个一等组件：
 
-- **Access Server**：原生运行时已支持默认开启的 HTTPS、HTTP/2 与 HTTP/3、PEM 证书配置、
-  Nacos 驱动的项目与路由配置、Host/Path/条件
+- **Access Server**：原生运行时已支持默认开启的 HTTPS、HTTP/2 与 HTTP/3、Nacos 驱动的原子
+  TLS 证书快照、项目与路由配置、Host/Path/条件
   匹配、RESPONSE 与 PROXY 执行、WebSocket 隧道、服务发现、灰度路由、CAT 链路追踪、
   Prometheus 指标和结构化访问日志。生产脚本语料差分验证与最终切流门槛仍在推进中。
 - **Console**：首个基于 MySQL 的纵向链路已经可用，包括确定性 migration、开发身份与固定
@@ -21,8 +21,9 @@ Access Gateway 是由 C++23 数据面与 Web 管理控制台组成的高性能�
   并确定性编译为 native JSON wire model。Release/发布表、Release 状态机、发布冲突判定和
   fail-closed Native Validator 适配器、当前/历史版本 Release 创建和带 lease/回读证据的 rnacos
   发布 Worker 已经落地；Project 级版本化网络策略、独立加密 TLS 库存、不可变证书版本、基于
-  DNS SAN 的 ClientHello SNI 自动选择与解析预览也已实现。Project 仍按 HTTP Host/`:authority`
-  选择，不与 SNI 绑定。OIDC、资源级发布重试与恢复、证书运行时交付和实例级生效采集仍待实现。
+  DNS SAN 的 ClientHello SNI 自动选择与解析预览也已实现，并支持 TLS 快照 Release、发布与回读
+  证据。Project 仍按 HTTP Host/`:authority` 选择，不与 SNI 绑定。OIDC、资源级发布重试与恢复和
+  实例级生效采集仍待实现。
 
 因此，对于尚无配套工作流的状态，控制台会明确显示“不可用”或“未知”，不会伪造发布或
 生效成功。
@@ -236,9 +237,11 @@ cp native/access-server/access-server.env.example access-server.env
 - 网关 HTTP/3：`0.0.0.0:16688/udp`；
 - Prometheus 指标：`0.0.0.0:16689`。
 
-TLS 和 HTTP/3 默认开启；证书缺失、私钥不匹配或 TCP/UDP 任一绑定失败都会使启动失败。旧的
-明文 HTTP 部署必须同时显式设置 `ACCESS_SERVER_TLS_ENABLED=false` 和
-`ACCESS_SERVER_HTTP3_ENABLED=false`。配置文件采用严格的 `KEY=VALUE` 格式，未知键和重复键
+TLS 和 HTTP/3 默认开启；Access Server 从 Nacos 的
+`ploto.unified-access.tls-certificates` / `ACCESS-SERVER` 等待首个有效完整快照，并在更新后按
+leaf DNS SAN 无锁选择证书。快照缺失、证书过期、私钥不匹配或 TCP/UDP 任一绑定失败都会使启动
+失败。文件证书配置已移除；明文 HTTP 部署必须同时显式设置
+`ACCESS_SERVER_TLS_ENABLED=false` 和 `ACCESS_SERVER_HTTP3_ENABLED=false`。配置文件采用严格的 `KEY=VALUE` 格式，未知键和重复键
 都会导致启动失败。不要提交本地环境文件、证书私钥或凭据。全部配置项参见
 [`native/access-server/access-server.env.example`](native/access-server/access-server.env.example)。
 

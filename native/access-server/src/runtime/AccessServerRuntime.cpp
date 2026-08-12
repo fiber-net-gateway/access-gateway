@@ -35,12 +35,18 @@ std::string_view access_server_runtime_stage_name(AccessServerRuntimeErrorCode c
             return "start CAT client";
         case AccessServerRuntimeErrorCode::StartGrayWatcher:
             return "subscribe gray configuration";
+        case AccessServerRuntimeErrorCode::StartTlsCertificateWatcher:
+            return "subscribe TLS certificate configuration";
         case AccessServerRuntimeErrorCode::StartAccessWatcher:
             return "subscribe access configuration";
         case AccessServerRuntimeErrorCode::InitialConfigUnavailable:
             return "receive initial project list";
         case AccessServerRuntimeErrorCode::InitialConfigTimeout:
             return "wait for initial project list";
+        case AccessServerRuntimeErrorCode::InitialTlsCertificateUnavailable:
+            return "receive initial TLS certificate snapshot";
+        case AccessServerRuntimeErrorCode::InitialTlsCertificateTimeout:
+            return "wait for initial TLS certificate snapshot";
         case AccessServerRuntimeErrorCode::Bind:
             return "bind gateway listener";
         case AccessServerRuntimeErrorCode::BindMetrics:
@@ -101,8 +107,8 @@ AccessServerRuntime::create(event::EventLoop &accept_loop, event::EventLoop &nac
             accept_loop, nacos_loop, cat_loop, http_workers, config.listen_address(), config.http_server_options(),
             config.metrics_listen_address(), listen_options, config.initial_config_timeout(),
             config.default_max_request_body_size(), config.test_mode(), config.watcher_options(),
-            config.gray_watcher_options(), config.service_discovery_options(), std::move(cat_client),
-            std::move(*client), std::move(*config_service), std::move(*naming_service)));
+            config.gray_watcher_options(), config.tls_certificate_watcher_options(), config.service_discovery_options(),
+            std::move(cat_client), std::move(*client), std::move(*config_service), std::move(*naming_service)));
     if (!runtime) {
         return std::unexpected(AccessServerRuntimeError{
                 .code = AccessServerRuntimeErrorCode::AllocateRuntime,
@@ -118,32 +124,25 @@ AccessServerRuntime::AccessServerRuntime(
         http::HttpServerOptions http_server_options, net::SocketAddress metrics_listen_address,
         net::ListenOptions listen_options, std::chrono::milliseconds initial_config_timeout,
         std::size_t default_max_request_body_size, bool test_mode, AccessConfigWatcherOptions watcher_options,
-        GrayConfigWatcherOptions gray_options, AccessServiceDiscoveryOptions service_discovery_options,
-        std::unique_ptr<cat::CatClient> cat_client, std::unique_ptr<nacos::NacosClient> nacos_client,
-        std::unique_ptr<nacos::ConfigService> config_service,
+        GrayConfigWatcherOptions gray_options, TlsCertificateWatcherOptions tls_certificate_options,
+        AccessServiceDiscoveryOptions service_discovery_options, std::unique_ptr<cat::CatClient> cat_client,
+        std::unique_ptr<nacos::NacosClient> nacos_client, std::unique_ptr<nacos::ConfigService> config_service,
         std::unique_ptr<nacos::NamingService> naming_service) noexcept :
-    accept_loop_(&accept_loop), nacos_loop_(&nacos_loop), cat_loop_(&cat_loop),
+    accept_loop_(&accept_loop), nacos_loop_(&nacos_loop), cat_loop_(&cat_loop), http_workers_(&http_workers),
     listen_address_(std::move(listen_address)), metrics_listen_address_(std::move(metrics_listen_address)),
     listen_options_(std::move(listen_options)), initial_config_timeout_(initial_config_timeout),
-    cat_client_(std::move(cat_client)), nacos_client_(std::move(nacos_client)),
-    config_service_(std::move(config_service)), naming_service_(std::move(naming_service)),
+    default_max_request_body_size_(default_max_request_body_size), test_mode_(test_mode),
+    http_server_options_(std::move(http_server_options)), cat_client_(std::move(cat_client)),
+    nacos_client_(std::move(nacos_client)), config_service_(std::move(config_service)),
+    naming_service_(std::move(naming_service)),
     service_discovery_(nacos_loop, *naming_service_,
                        AccessServiceOps{.swrr_options = service_discovery_options.swrr_options,
                                         .zone = service_discovery_options.zone}),
     route_store_(script_runtime_.compiler_adapter(), service_discovery_, std::move(service_discovery_options)),
     config_watcher_(nacos_loop, *config_service_, route_store_, std::move(watcher_options)),
     gray_watcher_(nacos_loop, *config_service_, gray_store_, std::move(gray_options)),
-    server_(accept_loop, http_workers, route_store_, gray_store_.adapter(),
-            AccessServerOptions{
-                    .default_max_request_body_size = default_max_request_body_size,
-                    .script_adapter = script_runtime_.request_adapter(),
-                    .cat_client = cat_client_.get(),
-                    .test_mode = test_mode,
-                    .http_server = http_server_options,
-                    .http3_alt_svc = http_server_options.http3.enabled
-                                             ? "h3=\":" + std::to_string(listen_address_.port()) + "\"; ma=86400"
-                                             : std::string{},
-            }) {
+    tls_certificate_store_(nacos_loop, http_workers, http_server_options_.http3.enabled),
+    tls_certificate_watcher_(nacos_loop, *config_service_, tls_certificate_store_, std::move(tls_certificate_options)) {
     FIBER_ASSERT(accept_loop_ != nacos_loop_);
     FIBER_ASSERT(accept_loop_ != cat_loop_);
     FIBER_ASSERT(nacos_loop_ != cat_loop_);
@@ -217,6 +216,17 @@ async::DetachedTask AccessServerRuntime::start_nacos() noexcept {
         nacos_start_tasks_.done();
         co_return;
     }
+    if (http_server_options_.tls.enabled) {
+        auto tls_started = tls_certificate_watcher_.start();
+        if (!tls_started) {
+            nacos_start_publisher_->publish(NacosStartStatus{
+                    .error = make_io_error(AccessServerRuntimeErrorCode::StartTlsCertificateWatcher,
+                                           tls_started.error().io_error, std::move(tls_started.error().message)),
+            });
+            nacos_start_tasks_.done();
+            co_return;
+        }
+    }
     auto watcher_started = config_watcher_.start();
     if (!watcher_started) {
         nacos_start_publisher_->publish(NacosStartStatus{
@@ -235,6 +245,8 @@ async::DetachedTask AccessServerRuntime::shutdown_nacos() noexcept {
     co_await nacos_start_tasks_.join();
     co_await config_watcher_.shutdown();
     co_await gray_watcher_.shutdown();
+    co_await tls_certificate_watcher_.shutdown();
+    co_await tls_certificate_store_.shutdown();
     route_store_.clear();
     co_await service_discovery_.shutdown();
     co_await naming_service_->shutdown();
@@ -282,7 +294,9 @@ async::Task<void> AccessServerRuntime::stop_cat() noexcept {
 async::Task<void> AccessServerRuntime::fail_start() noexcept {
     FIBER_ASSERT(accept_loop_->in_loop());
     state_ = AccessServerRuntimeState::Stopping;
-    co_await server_.shutdown_and_wait();
+    if (server_) {
+        co_await server_->shutdown_and_wait();
+    }
     co_await stop_cat();
     co_await stop_nacos();
     state_ = AccessServerRuntimeState::Stopped;
@@ -292,14 +306,6 @@ async::Task<std::expected<void, AccessServerRuntimeError>> AccessServerRuntime::
     FIBER_ASSERT(accept_loop_->in_loop());
     FIBER_ASSERT(state_ == AccessServerRuntimeState::Created);
     state_ = AccessServerRuntimeState::Starting;
-
-    auto initialized = server_.initialize();
-    if (!initialized) {
-        AccessServerRuntimeError error =
-                make_io_error(AccessServerRuntimeErrorCode::InitializeWorkers, initialized.error());
-        co_await fail_start();
-        co_return std::unexpected(std::move(error));
-    }
 
     if (cat_client_) {
         auto cat_status = cat_start_status_.subscribe();
@@ -356,21 +362,84 @@ async::Task<std::expected<void, AccessServerRuntimeError>> AccessServerRuntime::
                                                 "access project-list subscription closed before synchronization"));
     }
 
-    auto bound = server_.bind(listen_address_, listen_options_);
+    std::shared_ptr<TlsBootstrapIdentity> bootstrap;
+    if (http_server_options_.tls.enabled) {
+        auto tls_ready = tls_certificate_watcher_.subscribe_ready();
+        auto tls_snapshot = tls_ready.current();
+        if ((!tls_snapshot.value || !*tls_snapshot.value) &&
+            initial_config_timeout_ > std::chrono::milliseconds::zero()) {
+            auto result = co_await async::when_any(
+                    [&tls_ready, version = tls_snapshot.version]() { return tls_ready.next(version); },
+                    [timeout = initial_config_timeout_]() { return async::sleep(timeout); });
+            if (result.is<1>()) {
+                std::move(result).get<1>();
+                co_await fail_start();
+                co_return std::unexpected(make_io_error(AccessServerRuntimeErrorCode::InitialTlsCertificateTimeout,
+                                                        common::IoErr::TimedOut,
+                                                        "initial TLS certificate synchronization timed out"));
+            }
+            tls_snapshot = std::move(result).get<0>();
+        } else if (!tls_snapshot.value || !*tls_snapshot.value) {
+            while (!tls_snapshot.value || !*tls_snapshot.value) {
+                tls_snapshot = co_await tls_ready.next(tls_snapshot.version);
+            }
+        }
+        if (!tls_snapshot.value || !*tls_snapshot.value) {
+            co_await fail_start();
+            co_return std::unexpected(make_io_error(AccessServerRuntimeErrorCode::InitialTlsCertificateUnavailable,
+                                                    common::IoErr::Canceled,
+                                                    "TLS certificate subscription closed before synchronization"));
+        }
+        bootstrap = tls_certificate_store_.bootstrap_identity();
+        FIBER_ASSERT(bootstrap);
+        http_server_options_.tls.cert_file = bootstrap->certificate_path();
+        http_server_options_.tls.key_file = bootstrap->private_key_path();
+        http_server_options_.tls.identity_selector_ops = tls_certificate_store_.selector_ops();
+    }
+
+    server_.reset(new (std::nothrow) AccessServer(
+            *accept_loop_, *http_workers_, route_store_, gray_store_.adapter(),
+            AccessServerOptions{
+                    .default_max_request_body_size = default_max_request_body_size_,
+                    .script_adapter = script_runtime_.request_adapter(),
+                    .cat_client = cat_client_.get(),
+                    .test_mode = test_mode_,
+                    .http_server = http_server_options_,
+                    .http3_alt_svc = http_server_options_.http3.enabled
+                                             ? "h3=\":" + std::to_string(listen_address_.port()) + "\"; ma=86400"
+                                             : std::string{},
+            }));
+    if (!server_) {
+        co_await fail_start();
+        co_return std::unexpected(make_io_error(AccessServerRuntimeErrorCode::InitializeWorkers, common::IoErr::NoMem,
+                                                "failed to allocate access server"));
+    }
+    auto initialized = server_->initialize();
+    if (!initialized) {
+        AccessServerRuntimeError error =
+                make_io_error(AccessServerRuntimeErrorCode::InitializeWorkers, initialized.error());
+        co_await fail_start();
+        co_return std::unexpected(std::move(error));
+    }
+
+    auto bound = server_->bind(listen_address_, listen_options_);
+    if (bootstrap) {
+        bootstrap->close();
+    }
     if (!bound) {
         const common::IoErr error = bound.error();
         co_await fail_start();
         co_return std::unexpected(make_io_error(AccessServerRuntimeErrorCode::Bind, error));
     }
-    auto metrics_bound = server_.bind_metrics(metrics_listen_address_, listen_options_);
+    auto metrics_bound = server_->bind_metrics(metrics_listen_address_, listen_options_);
     if (!metrics_bound) {
         const common::IoErr error = metrics_bound.error();
         co_await fail_start();
         co_return std::unexpected(make_io_error(AccessServerRuntimeErrorCode::BindMetrics, error));
     }
     state_ = AccessServerRuntimeState::Running;
-    async::spawn([this]() { return server_.serve(); });
-    async::spawn([this]() { return server_.serve_metrics(); });
+    async::spawn([this]() { return server_->serve(); });
+    async::spawn([this]() { return server_->serve_metrics(); });
     co_return std::expected<void, AccessServerRuntimeError>{};
 }
 
@@ -380,7 +449,9 @@ async::Task<void> AccessServerRuntime::shutdown() noexcept {
         co_return;
     }
     state_ = AccessServerRuntimeState::Stopping;
-    co_await server_.shutdown_and_wait();
+    if (server_) {
+        co_await server_->shutdown_and_wait();
+    }
     co_await stop_cat();
     co_await stop_nacos();
     state_ = AccessServerRuntimeState::Stopped;

@@ -4,6 +4,7 @@
 #include "AccessConfigWatcher.h"
 #include "AccessServiceDiscovery.h"
 #include "GrayConfigWatcher.h"
+#include "TlsCertificateWatcher.h"
 
 #include <chrono>
 #include <cstddef>
@@ -57,6 +58,9 @@ public:
     [[nodiscard]] const GrayConfigWatcherOptions &gray_watcher_options() const noexcept {
         return gray_watcher_options_;
     }
+    [[nodiscard]] const TlsCertificateWatcherOptions &tls_certificate_watcher_options() const noexcept {
+        return tls_certificate_watcher_options_;
+    }
     [[nodiscard]] const AccessServiceDiscoveryOptions &service_discovery_options() const noexcept {
         return service_discovery_options_;
     }
@@ -67,6 +71,7 @@ private:
                        std::size_t default_max_request_body_size, bool test_mode,
                        std::optional<cat::CatClientConfig> cat_config, nacos::NacosClientConfig nacos_config,
                        AccessConfigWatcherOptions watcher_options, GrayConfigWatcherOptions gray_watcher_options,
+                       TlsCertificateWatcherOptions tls_certificate_watcher_options,
                        AccessServiceDiscoveryOptions service_discovery_options) noexcept;
 
     net::SocketAddress listen_address_;
@@ -79,6 +84,7 @@ private:
     nacos::NacosClientConfig nacos_config_;
     AccessConfigWatcherOptions watcher_options_;
     GrayConfigWatcherOptions gray_watcher_options_;
+    TlsCertificateWatcherOptions tls_certificate_watcher_options_;
     AccessServiceDiscoveryOptions service_discovery_options_;
 };
 

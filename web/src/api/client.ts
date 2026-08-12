@@ -13,6 +13,7 @@ import type {
   SystemStatusResponse,
   TlsSniCertificateSummary,
   TlsSniResolutionView,
+  TlsCertificateReleaseView,
 } from './types'
 
 export interface ApiClientErrorField {
@@ -337,7 +338,7 @@ function isCertificate(value: unknown): value is CertificateView {
     typeof value.lockVersion === 'string' &&
     isCertificateVersion(value.currentVersion) &&
     typeof value.versionCount === 'number' &&
-    value.runtimeDeploymentStatus === 'unsupported' &&
+    value.runtimeDeploymentStatus === 'activation_unknown' &&
     typeof value.createdAt === 'string' &&
     typeof value.updatedAt === 'string'
   )
@@ -352,7 +353,7 @@ function isTlsSniCertificateSummary(value: unknown): value is TlsSniCertificateS
     typeof value.status === 'string' &&
     typeof value.notAfter === 'string' &&
     typeof value.fingerprintSha256 === 'string' &&
-    value.runtimeDeploymentStatus === 'unsupported'
+    value.runtimeDeploymentStatus === 'activation_unknown'
   )
 }
 
@@ -367,7 +368,25 @@ function isTlsSniResolution(value: unknown): value is TlsSniResolutionView {
     (value.certificate === null || isTlsSniCertificateSummary(value.certificate)) &&
     Array.isArray(value.matches) &&
     value.matches.every(isTlsSniCertificateSummary) &&
-    value.runtimeDeploymentStatus === 'unsupported'
+    value.runtimeDeploymentStatus === 'activation_unknown'
+  )
+}
+
+function isTlsCertificateRelease(value: unknown): value is TlsCertificateReleaseView {
+  return (
+    isRecord(value) &&
+    typeof value.id === 'string' &&
+    typeof value.sequence === 'string' &&
+    typeof value.status === 'string' &&
+    typeof value.defaultCertificateId === 'string' &&
+    typeof value.certificateCount === 'number' &&
+    typeof value.wireSha256 === 'string' &&
+    isRecord(value.resource) &&
+    typeof value.resource.id === 'string' &&
+    typeof value.resource.status === 'string' &&
+    isRecord(value.publication) &&
+    value.activationStatus === 'unknown' &&
+    typeof value.createdAt === 'string'
   )
 }
 
@@ -446,6 +465,44 @@ export async function resolveTlsSni(
     { signal },
     isTlsSniResolution,
   )
+}
+
+export async function fetchTlsCertificateReleases(
+  signal?: AbortSignal,
+): Promise<readonly TlsCertificateReleaseView[]> {
+  const result = await requestJson(
+    '/api/tls/releases',
+    { signal },
+    (value): value is { items: TlsCertificateReleaseView[] } =>
+      isRecord(value) && Array.isArray(value.items) && value.items.every(isTlsCertificateRelease),
+  )
+  return result.items
+}
+
+export async function createTlsCertificateRelease(
+  defaultCertificateId: string,
+): Promise<TlsCertificateReleaseView> {
+  return requestJson(
+    '/api/tls/releases',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Idempotency-Key': crypto.randomUUID() },
+      body: JSON.stringify({ defaultCertificateId }),
+    },
+    isTlsCertificateRelease,
+  )
+}
+
+export async function publishTlsCertificateRelease(
+  releaseId: string,
+): Promise<TlsCertificateReleaseView> {
+  const result = await requestJson(
+    `/api/tls/releases/${encodeURIComponent(releaseId)}/publications`,
+    { method: 'POST', headers: { 'Idempotency-Key': crypto.randomUUID() } },
+    (value): value is { release: TlsCertificateReleaseView } =>
+      isRecord(value) && isTlsCertificateRelease(value.release),
+  )
+  return result.release
 }
 
 export async function fetchConfigurationVersions(

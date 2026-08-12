@@ -54,6 +54,8 @@ connection pool，以及 Nacos、CAT、Prometheus 组件。迁移不要求这些
 - Java golden fixtures 已覆盖未知字段、重复字段、null、标量转型和主要配置字段；
 - 已实现 owner-loop Nacos 配置图：项目列表驱动逐项目订阅增删，空/同 version/非法
   更新保留当前路由，列表移除卸载项目，shutdown 等待全部 listener 关闭；
+- 已实现独立 TLS 证书快照 watcher：从 leaf DNS SAN 编译 exact/单层 wildcard 索引，
+  完整校验候选后原子切换，非法或空候选保留旧快照；ClientHello 热路径不分配、不加锁；
 - 已实现 production gray 配置 codec、失败保旧的原子规则快照，以及 CIDR/ratio 对
   NamingService cluster 的覆盖；`context.cluster` 同样会覆盖 route 默认 cluster；
 - 已实现 NamingService route 依赖协调、健康/权重/zone/cluster 过滤、不可变服务目录、
@@ -158,8 +160,10 @@ cp native/access-server/access-server.env.example access-server.env
 
 完整键和值示例见 [`access-server.env.example`](access-server.env.example)。配置文件采用
 严格的 `KEY=VALUE` 行格式，空行和以 `#` 开头的注释会忽略；重复键和未知键会使进程
-启动失败。TLS 与 HTTP/3 默认开启，必须提供 PEM 证书和私钥；证书加载、密钥匹配或 TCP/UDP
-绑定失败时进程 fail closed。兼容明文 HTTP 时必须同时显式关闭 TLS 与 HTTP/3。
+启动失败。TLS 与 HTTP/3 默认开启，进程从
+`ploto.unified-access.tls-certificates` / `ACCESS-SERVER` 等待首个完整证书快照；缺失、过期、
+私钥不匹配或 TCP/UDP 绑定失败时 fail closed。文件证书配置已移除。兼容明文 HTTP 时必须同时
+显式关闭 TLS 与 HTTP/3。
 `NACOS_SERVER_ADDRESSES` 当前要求逗号分隔的 IP literal。
 CAT 默认关闭；任一 `CAT_*` 设置非空后必须给出完整 app key、hostname、IP，以及
 至少一个 router 或 bootstrap collector。CAT 不可用会在启动阶段 fail closed，不会
@@ -186,8 +190,8 @@ python3 native/access-server/scripts/sync_test_nacos.py \
 字节数和 SHA-256，但不记录 token 或密码。若项目列表引用了不存在的 route，该 dataId
 保持 rnacos `NotFound` 状态，并记录在 `missingRoutes` 中。
 
-listener 只在 Nacos client/config/naming、两类 watcher 和项目列表首值就绪后开放；
-若项目列表不存在，服务会等待到
+listener 只在 Nacos client/config/naming、project/gray watcher、项目列表首值，以及 TLS 开启时
+首个有效证书快照全部就绪后开放；若项目列表或 TLS 快照不存在，服务会等待到
 `ACCESS_SERVER_INITIAL_CONFIG_TIMEOUT_MILLIS` 后失败退出。某个项目的 route 配置尚未
 到达或不可用时不会开放对应 Host/Path，请求仍按现有稳定错误结果 fail closed。
 

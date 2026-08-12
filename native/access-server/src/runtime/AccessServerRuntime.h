@@ -9,6 +9,8 @@
 #include "GrayConfigWatcher.h"
 #include "GrayMatchStore.h"
 #include "RouteConfigStore.h"
+#include "TlsCertificateStore.h"
+#include "TlsCertificateWatcher.h"
 
 #include <cstdint>
 #include <expected>
@@ -46,9 +48,12 @@ enum class AccessServerRuntimeErrorCode : std::uint8_t {
     StartNamingService,
     StartCatClient,
     StartGrayWatcher,
+    StartTlsCertificateWatcher,
     StartAccessWatcher,
     InitialConfigUnavailable,
     InitialConfigTimeout,
+    InitialTlsCertificateUnavailable,
+    InitialTlsCertificateTimeout,
     Bind,
     BindMetrics,
 };
@@ -81,8 +86,8 @@ public:
     [[nodiscard]] async::Task<void> shutdown() noexcept;
 
     [[nodiscard]] AccessServerRuntimeState state() const noexcept { return state_; }
-    [[nodiscard]] int fd() const noexcept { return server_.fd(); }
-    [[nodiscard]] int metrics_fd() const noexcept { return server_.metrics_fd(); }
+    [[nodiscard]] int fd() const noexcept { return server_ ? server_->fd() : -1; }
+    [[nodiscard]] int metrics_fd() const noexcept { return server_ ? server_->metrics_fd() : -1; }
 
 private:
     struct NacosStartStatus {
@@ -101,6 +106,7 @@ private:
                         net::ListenOptions listen_options, std::chrono::milliseconds initial_config_timeout,
                         std::size_t default_max_request_body_size, bool test_mode,
                         AccessConfigWatcherOptions watcher_options, GrayConfigWatcherOptions gray_options,
+                        TlsCertificateWatcherOptions tls_certificate_options,
                         AccessServiceDiscoveryOptions service_discovery_options,
                         std::unique_ptr<cat::CatClient> cat_client, std::unique_ptr<nacos::NacosClient> nacos_client,
                         std::unique_ptr<nacos::ConfigService> config_service,
@@ -122,10 +128,14 @@ private:
     event::EventLoop *accept_loop_ = nullptr;
     event::EventLoop *nacos_loop_ = nullptr;
     event::EventLoop *cat_loop_ = nullptr;
+    event::EventLoopGroup *http_workers_ = nullptr;
     net::SocketAddress listen_address_;
     net::SocketAddress metrics_listen_address_;
     net::ListenOptions listen_options_;
     std::chrono::milliseconds initial_config_timeout_{0};
+    std::size_t default_max_request_body_size_ = 0;
+    bool test_mode_ = false;
+    http::HttpServerOptions http_server_options_;
     std::unique_ptr<cat::CatClient> cat_client_;
     std::unique_ptr<nacos::NacosClient> nacos_client_;
     std::unique_ptr<nacos::ConfigService> config_service_;
@@ -136,7 +146,9 @@ private:
     RouteConfigStore route_store_;
     AccessConfigWatcher config_watcher_;
     GrayConfigWatcher gray_watcher_;
-    AccessServer server_;
+    TlsCertificateStore tls_certificate_store_;
+    TlsCertificateWatcher tls_certificate_watcher_;
+    std::unique_ptr<AccessServer> server_;
     async::WaitGroup nacos_start_tasks_;
     async::WaitGroup cat_start_tasks_;
     async::Watch<NacosStartStatus> nacos_start_status_;

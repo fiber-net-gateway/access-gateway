@@ -21,7 +21,7 @@ export interface CertificateView {
   lockVersion: string
   currentVersion: CertificateVersionView
   versionCount: number
-  runtimeDeploymentStatus: 'unsupported'
+  runtimeDeploymentStatus: 'activation_unknown'
   createdAt: string
   updatedAt: string
 }

@@ -43,7 +43,7 @@ test('resolves ClientHello SNI through the certificate SAN selector repository',
     matchKind: null,
     certificate: null,
     matches: [],
-    runtimeDeploymentStatus: 'unsupported' as const,
+    runtimeDeploymentStatus: 'activation_unknown' as const,
   }
   const selectors = {
     resolve: async (_environmentInternalId: string, serverName: string) => {

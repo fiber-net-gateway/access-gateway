@@ -187,7 +187,7 @@ export interface CertificateView {
   lockVersion: string
   currentVersion: CertificateVersionView
   versionCount: number
-  runtimeDeploymentStatus: 'unsupported'
+  runtimeDeploymentStatus: 'activation_unknown'
   createdAt: string
   updatedAt: string
 }
@@ -199,7 +199,7 @@ export interface TlsSniCertificateSummary {
   status: CertificateFactStatus
   notAfter: string
   fingerprintSha256: string
-  runtimeDeploymentStatus: 'unsupported'
+  runtimeDeploymentStatus: 'activation_unknown'
 }
 
 export interface TlsSniResolutionView {
@@ -208,5 +208,26 @@ export interface TlsSniResolutionView {
   matchKind: 'exact' | 'wildcard' | null
   certificate: TlsSniCertificateSummary | null
   matches: readonly TlsSniCertificateSummary[]
-  runtimeDeploymentStatus: 'unsupported'
+  runtimeDeploymentStatus: 'activation_unknown'
+}
+
+export interface TlsCertificateReleaseView {
+  id: string
+  sequence: string
+  status: ReleaseStatus
+  defaultCertificateId: string
+  certificateCount: number
+  wireSha256: string
+  resource: {
+    id: string
+    dataId: string
+    group: string
+    status: string
+    verifiedSha256: string | null
+    verifiedAt: string | null
+  }
+  publication: { jobId: string | null; state: string | null }
+  activationStatus: 'unknown'
+  createdAt: string
+  publishedAt: string | null
 }

@@ -84,19 +84,20 @@ rewrite、headers、CIDR、body limit 或 WebSocket 等高级字段；前端进�
 
 新增严格配置项：
 
-| 配置                                 | 默认值 | 说明                           |
-| ------------------------------------ | ------ | ------------------------------ |
-| `ACCESS_SERVER_TLS_ENABLED`          | `true` | 安全监听器开关                 |
-| `ACCESS_SERVER_TLS_CERTIFICATE_FILE` | 无     | PEM 证书链文件；TLS 开启时必填 |
-| `ACCESS_SERVER_TLS_PRIVATE_KEY_FILE` | 无     | PEM 私钥文件；TLS 开启时必填   |
-| `ACCESS_SERVER_HTTP3_ENABLED`        | `true` | 在相同地址和端口绑定 QUIC UDP  |
+| 配置                                     | 默认值                                  | 说明                          |
+| ---------------------------------------- | --------------------------------------- | ----------------------------- |
+| `ACCESS_SERVER_TLS_ENABLED`              | `true`                                  | 安全监听器开关                |
+| `ACCESS_SERVER_TLS_CERTIFICATES_DATA_ID` | `ploto.unified-access.tls-certificates` | 完整 TLS 快照 Data ID         |
+| `ACCESS_SERVER_TLS_CERTIFICATES_GROUP`   | `ACCESS-SERVER`                         | 完整 TLS 快照 Group           |
+| `ACCESS_SERVER_HTTP3_ENABLED`            | `true`                                  | 在相同地址和端口绑定 QUIC UDP |
 
 HTTP/2 不设置独立开关：Fiber `HttpServer` 在 TLS 模式固定通过 ALPN 提供 `h2` 和
 `http/1.1`，避免出现“配置显示开启但协议未通”的状态。HTTP/3 开启但 TLS 关闭属于非法配置。
 
 TLS 默认开启，因此旧的纯 HTTP 部署必须显式设置 `ACCESS_SERVER_TLS_ENABLED=false` 和
-`ACCESS_SERVER_HTTP3_ENABLED=false`。证书或私钥缺失、无法读取、证书与私钥不匹配、TCP 或 UDP
-任一绑定失败时启动失败，不静默降级到 HTTP。
+`ACCESS_SERVER_HTTP3_ENABLED=false`。TLS 模式会先订阅并完整校验 Nacos 证书快照；首值缺失、
+证书/私钥不匹配、证书不在有效期、TCP 或 UDP 任一绑定失败时启动失败，不静默降级到 HTTP。
+原文件证书配置项已经移除，避免形成两套证书来源。
 
 ### 4.2 监听与发现
 
@@ -114,9 +115,10 @@ Access Server 使用 Fiber 的 `HttpServer` 替换仅支持明文的 `Http1Serve
 
 ### 4.3 证书安全
 
-- Access Server 只接收文件路径，不在配置日志中输出 PEM 内容；
-- 私钥不进入 MySQL、R-Nacos、镜像层或 Git；
-- Compose 把本机生成的证书目录只读挂载到容器；
+- Console 将证书链、私钥和 Release payload 分别 envelope-encrypted 保存，API、日志和审计均不回显；
+- TLS Release 的完整 JSON payload 通过 Nacos 交付；必须对 Nacos 使用受控网络、鉴权和加密传输；
+- Access Server 在更新线程内解析 PEM，运行快照只保留编译后的 TLS context 和 SAN 索引；
+- 启动桥接使用只读 sealed memfd，监听器初始化后立即关闭，不把私钥写入磁盘或镜像层；
 - `deploy/demo/init-env.sh` 使用 `umask 077` 生成自签名 ECDSA P-256 证书，SAN 覆盖
   `demo.local`、`localhost`、`127.0.0.1` 和 `::1`；
 - `.env` 和 `deploy/demo/certs/` 均被忽略。自签名证书仅用于演示，生产环境应挂载由受信 CA

@@ -1,7 +1,19 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react'
 
-import { fetchCertificates, fetchCertificateVersions, resolveTlsSni } from '../api/client'
-import type { CertificateVersionView, CertificateView, TlsSniResolutionView } from '../api/types'
+import {
+  createTlsCertificateRelease,
+  fetchCertificates,
+  fetchCertificateVersions,
+  fetchTlsCertificateReleases,
+  publishTlsCertificateRelease,
+  resolveTlsSni,
+} from '../api/client'
+import type {
+  CertificateVersionView,
+  CertificateView,
+  TlsCertificateReleaseView,
+  TlsSniResolutionView,
+} from '../api/types'
 import { CapabilityStrip } from '../components/CapabilityStrip'
 import { CertificateUploadForm } from '../components/CertificateUploadForm'
 import { useConsoleContext } from '../App'
@@ -26,6 +38,9 @@ export function CertificatesPage() {
   const [versions, setVersions] = useState<readonly CertificateVersionView[]>([])
   const [previewName, setPreviewName] = useState('')
   const [resolution, setResolution] = useState<TlsSniResolutionView | null>(null)
+  const [tlsReleases, setTlsReleases] = useState<readonly TlsCertificateReleaseView[]>([])
+  const [defaultCertificateId, setDefaultCertificateId] = useState('')
+  const [publishing, setPublishing] = useState(false)
   const [loading, setLoading] = useState(true)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const selectedCertificate = useMemo(
@@ -36,7 +51,17 @@ export function CertificatesPage() {
   const load = useCallback(async (signal?: AbortSignal): Promise<void> => {
     setLoading(true)
     try {
-      setCertificates(await fetchCertificates(signal))
+      const loadedCertificates = await fetchCertificates(signal)
+      setCertificates(loadedCertificates)
+      setDefaultCertificateId((current) => current || loadedCertificates[0]?.id || '')
+      try {
+        setTlsReleases(await fetchTlsCertificateReleases(signal))
+      } catch (error) {
+        if (!signal?.aborted) {
+          setErrorMessage(error instanceof Error ? error.message : '加载 TLS 发布记录失败')
+        }
+        return
+      }
       setErrorMessage(null)
     } finally {
       setLoading(false)
@@ -79,6 +104,21 @@ export function CertificatesPage() {
     }
   }
 
+  const publishSnapshot = async (): Promise<void> => {
+    if (!defaultCertificateId) return
+    setPublishing(true)
+    setErrorMessage(null)
+    try {
+      const release = await createTlsCertificateRelease(defaultCertificateId)
+      await publishTlsCertificateRelease(release.id)
+      setTlsReleases(await fetchTlsCertificateReleases())
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : '发布 TLS 证书快照失败')
+    } finally {
+      setPublishing(false)
+    }
+  }
+
   return (
     <div className="projects-page certificates-page">
       <header className="page-header">
@@ -87,8 +127,8 @@ export function CertificatesPage() {
           <h1>TLS</h1>
           <p className="page-description">
             leaf 证书的 DNS SAN 自动形成 ClientHello SNI 选择索引，不需要维护域名绑定规则。TLS
-            握手与 HTTP Host/:authority 的 Project 选择彼此独立。当前 access-server
-            尚未接入动态证书交付，控制面匹配不代表运行时已生效。
+            握手与 HTTP Host/:authority 的 Project 选择彼此独立。发布会生成不可变证书快照并写入
+            Nacos；实例激活证据尚未接入，因此运行时状态保持 unknown。
           </p>
         </div>
       </header>
@@ -108,7 +148,7 @@ export function CertificatesPage() {
               <p className="eyebrow">LOGICAL CERTIFICATES</p>
               <h2 id="certificate-inventory-title">证书库存</h2>
             </div>
-            <span className="status-chip status-chip-unknown">运行时交付未接入</span>
+            <span className="status-chip status-chip-ready">支持 Nacos 热更新</span>
           </header>
           {loading ? (
             <div className="route-empty-state">正在加载证书…</div>
@@ -210,13 +250,57 @@ export function CertificatesPage() {
         </section>
       </div>
 
+      <section className="settings-panel tls-sni-panel" aria-labelledby="tls-release-title">
+        <header>
+          <div>
+            <p className="eyebrow">IMMUTABLE TLS SNAPSHOT</p>
+            <h2 id="tls-release-title">发布证书快照</h2>
+          </div>
+          <span className="status-chip status-chip-unknown">实例激活 unknown</span>
+        </header>
+        <div className="tls-sni-preview">
+          <label>
+            无 SNI 或未匹配时的默认证书
+            <select
+              disabled={certificates.length === 0 || publishing}
+              value={defaultCertificateId}
+              onChange={(event) => setDefaultCertificateId(event.target.value)}
+            >
+              {certificates.map((certificate) => (
+                <option key={certificate.id} value={certificate.id}>
+                  {certificate.name} · V{certificate.currentVersion.version}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button
+            className="button-primary"
+            disabled={!defaultCertificateId || publishing}
+            onClick={() => void publishSnapshot()}
+            type="button"
+          >
+            {publishing ? '正在创建并排队…' : '创建并发布快照'}
+          </button>
+          {tlsReleases[0] ? (
+            <div className="tls-sni-resolution" role="status">
+              <strong>#{tlsReleases[0].sequence}</strong>
+              <span>{tlsReleases[0].status}</span>
+              <span>{tlsReleases[0].certificateCount} 张证书</span>
+              <small>激活状态：{tlsReleases[0].activationStatus}</small>
+            </div>
+          ) : (
+            <p>快照包含当前所有逻辑证书的当前版本；更新证书不会自动发布。</p>
+          )}
+        </div>
+      </section>
+
       <section className="settings-panel tls-sni-panel" aria-labelledby="tls-sni-preview-title">
         <header>
           <div>
             <p className="eyebrow">CLIENTHELLO SNI → CERTIFICATE SAN</p>
             <h2 id="tls-sni-preview-title">SNI 自动解析预览</h2>
           </div>
-          <span className="status-chip status-chip-unknown">控制面预览 / 未部署</span>
+          <span className="status-chip status-chip-ready">与快照选择规则一致</span>
         </header>
         <div className="tls-sni-preview">
           <form onSubmit={(event) => void previewResolution(event)}>
@@ -244,7 +328,7 @@ export function CertificatesPage() {
               <strong>{resolution.certificate?.name ?? '没有唯一证书'}</strong>
               {resolution.certificate ? <span>V{resolution.certificate.version}</span> : null}
               {resolution.matchKind ? <span>{resolution.matchKind}</span> : null}
-              <small>运行时部署状态：unsupported</small>
+              <small>该预览基于当前库存；实际运行版本以最近发布快照为准。</small>
             </div>
           ) : (
             <p>精确 SAN 优先于通配符 SAN；通配符只覆盖一层子域名。</p>
