@@ -142,8 +142,14 @@ if (versionList.items.length === 0) {
       baseVersionId: null,
       changeSummary: 'Initialize the Docker demo routes',
       model: {
-        schemaVersion: 2,
+        schemaVersion: 4,
         kind: 'project_routes_yaml',
+        networkPolicy: {
+          source: 'route',
+          httpsRedirect: 'off',
+          allowedCidrs: [],
+          deniedCidrs: [],
+        },
         routes: [
           {
             id: '00000000-0000-4000-8000-000000000001',

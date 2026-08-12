@@ -19,17 +19,16 @@ The repository is under active development in two first-class areas:
   script-corpus differential verification and final cutover gates are still in progress.
 - **Console** — the first MySQL-backed vertical slice is available: deterministic migrations,
   development identity and single-deployment RBAC, environment-free domain project APIs, encrypted
-  immutable configuration versions, optimistic locking, audit events, and a route-first React workspace.
-  Each route has an independently mounted CodeMirror YAML editor and is deterministically compiled
-  to the native JSON wire model. Release/publication tables, the release state machine, publication
-  conflict decisions, a fail-closed Native Validator adapter, current/historical version Release
-  creation, and a leased rnacos publication worker with readback evidence are present.
-  Project-level versioned network policies and an independent encrypted TLS inventory, immutable
-  certificate versions, automatic DNS SAN-based ClientHello SNI selection, and resolution preview
-  are also available.
-  TLS snapshot Releases, publication, and readback evidence are available. Project selection remains based
-  on HTTP Host/`:authority` and is not coupled to SNI. OIDC, resource-level publication retry/recovery,
-  and per-instance activation collection remain to be implemented.
+  immutable configuration versions, optimistic locking, audit events, and a route-first React
+  workspace. Each route has an independently mounted CodeMirror YAML editor and is deterministically
+  compiled to the native JSON wire model. Release/publication tables, the release state machine,
+  publication conflict decisions, a fail-closed Native Validator adapter, current/historical version
+  Release creation, and a leased rnacos publication worker with readback evidence are present.
+  Project-level versioned HTTPS redirect and CIDR policies are available, together with an independent
+  encrypted TLS inventory, immutable certificate versions, automatic DNS SAN-based ClientHello SNI
+  selection, resolution preview, and TLS snapshot Releases with publication/readback evidence. Project
+  selection remains based on HTTP Host/`:authority` and is not coupled to SNI. OIDC, resource-level
+  publication retry/recovery, and per-instance activation collection remain to be implemented.
 
 The console therefore reports unavailable or unknown state where the supporting workflow does not
 exist. It does not fabricate publication or activation success.
@@ -41,7 +40,8 @@ flowchart LR
     User[Operator] --> Web[React Console]
     Web --> API[Node.js / Fastify API]
     API --> DB[(Control-plane database)]
-    API --> Nacos[(Nacos / rnacos)]
+    Worker[Publication worker] <--> DB
+    Worker --> Nacos[(Nacos / rnacos)]
     Nacos --> Access[Native Access Server]
     Discovery[Nacos NamingService] --> Access
     Client[Gateway client] --> Access
@@ -152,12 +152,16 @@ The implemented control-plane endpoints include:
 - immutable Configuration Version list/save/detail/restore/validation with `If-Match` and
   idempotency;
 - project YAML route validation and deterministic native-wire preview;
-- Release creation from a current or historical version, publication queueing, and status detail.
+- versioned Project HTTPS redirect and CIDR network-policy authoring;
+- Release creation from a current or historical version, publication queueing, and status detail;
+- certificate inventory/version updates, DNS SAN-based SNI resolution preview, and TLS snapshot
+  Release/publication APIs.
 
-Each Configuration Version stores ordered route IDs and exact YAML source. Legacy whole-project JSON
-revisions are upgraded to stable YAML route items when read. Model documents are envelope-encrypted with
-AES-256-GCM before MySQL storage. The local key configuration is intended for development only;
-production must use an external key provider.
+Each Configuration Version uses schema v4 and stores the HTTPS redirect setting, CIDR policy,
+ordered route IDs, and exact YAML source. Stored schema v1/v2/v3 documents are normalized to v4 when
+read without rewriting historical ciphertext; HTTPS redirect defaults to `off` for those older
+models. Model documents are envelope-encrypted with AES-256-GCM before MySQL storage. The local key
+configuration is intended for development only; production must use an external key provider.
 
 Validate all console workspaces with:
 
@@ -181,9 +185,10 @@ npm run demo:up
 ```
 
 The first native image build downloads the pinned C++ build dependencies and can take several
-minutes. Compose applies the MySQL migrations, idempotently creates a Console demo project and
-Configuration Version, publishes a Release through the Console worker, and starts Access Server
-only after the R-Nacos readback succeeds.
+minutes. Compose applies the MySQL migrations, uploads the local certificate through the Console,
+publishes a TLS snapshot, idempotently creates a demo Project and Configuration Version, publishes
+its Release through the Console worker, and starts Access Server only after both R-Nacos readbacks
+succeed.
 
 Fastify serves both the `/api/*` endpoints and the built React single-page application from one
 Console container. The complete stack therefore contains five long-running containers and three
@@ -272,16 +277,31 @@ duplicate keys fail startup. Do not commit local environment files, private keys
 [`native/access-server/access-server.env.example`](native/access-server/access-server.env.example)
 for the full configuration surface.
 
+Project HTTPS redirect is evaluated after HTTP Host/`:authority` selection and before route matching.
+With TLS enabled, the business listener does not accept plaintext HTTP, so a direct client cannot
+reach the redirect rule. To execute this rule behind an ingress, the trusted ingress must terminate
+TLS, accept both HTTP and HTTPS, remove any client-supplied `X-Forwarded-Proto`, set the canonical
+original scheme, and forward both protocols to an explicitly plaintext Access Server backend
+(`ACCESS_SERVER_TLS_ENABLED=false` and `ACCESS_SERVER_HTTP3_ENABLED=false`) on a protected network.
+If the ingress uses TLS backhaul, Access Server sees the connection itself as HTTPS and does not let
+`X-Forwarded-Proto: http` override that fact; perform the redirect at the ingress instead. A separate
+plaintext redirect listener is not currently implemented.
+
+CIDR policy retains the Java-compatible `X-Real-Ip` behavior: a missing or unparsable header skips
+the CIDR check. A trusted ingress must therefore remove any client-supplied value and set a canonical
+client address; the current policy must not be treated as a standalone network firewall.
+
 ## Nacos configuration contract
 
 The native codec is the source of truth for accepted values, defaults, and update behavior. The
 default compatibility contract is:
 
-| Purpose               | Data ID                                | Group           |
-| --------------------- | -------------------------------------- | --------------- |
-| Project list          | `ploto.unified-access.projects`        | `ACCESS-SERVER` |
-| Project route         | `ploto.unified-access.route.<project>` | `ACCESS-SERVER` |
-| Production gray rules | `ploto.unified-access.gray-match`      | `DEFAULT_GROUP` |
+| Purpose                  | Data ID                                 | Group           |
+| ------------------------ | --------------------------------------- | --------------- |
+| Project list             | `ploto.unified-access.projects`         | `ACCESS-SERVER` |
+| Project route            | `ploto.unified-access.route.<project>`  | `ACCESS-SERVER` |
+| TLS certificate snapshot | `ploto.unified-access.tls-certificates` | `ACCESS-SERVER` |
+| Production gray rules    | `ploto.unified-access.gray-match`       | `DEFAULT_GROUP` |
 
 The project list is a semicolon-separated string rather than JSON. Route and gray-rule payloads
 retain the Java compatibility wire behavior. A candidate configuration is fully parsed and
@@ -291,6 +311,7 @@ compiled before immutable publication; invalid candidates retain the previous ac
 
 - [Console product requirements](docs/console-requirements.md)
 - [Console detailed design](docs/console-detailed-design.md)
+- [Network policy and certificate design](docs/network-policy-and-certificate-design.md)
 - [Fixed workspace and secure listener design](docs/fixed-workspace-and-secure-listener-design.md)
 - [Access Server guide](native/access-server/README.md)
 - [Compatibility contract](native/access-server/docs/compatibility-contract.md)
