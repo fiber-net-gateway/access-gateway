@@ -1,15 +1,17 @@
-import { useState, type FormEvent } from 'react'
+import { useEffect, useState, type FormEvent } from 'react'
 
-import { createCertificate } from '../api/client'
+import { createCertificate, createCertificateVersion } from '../api/client'
 import type { CertificateView } from '../api/types'
 
 interface CertificateUploadFormProps {
-  onCreated(certificate: CertificateView): Promise<void> | void
+  certificate?: CertificateView | null
+  onSaved(certificate: CertificateView): Promise<void> | void
   submitLabel?: string
 }
 
 export function CertificateUploadForm({
-  onCreated,
+  certificate = null,
+  onSaved,
   submitLabel = '上传到证书库存',
 }: CertificateUploadFormProps) {
   const [name, setName] = useState('')
@@ -18,16 +20,29 @@ export function CertificateUploadForm({
   const [submitting, setSubmitting] = useState(false)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
 
+  useEffect(() => {
+    setName(certificate?.name ?? '')
+    setCertificatePem('')
+    setPrivateKeyPem('')
+    setErrorMessage(null)
+  }, [certificate])
+
   const submit = async (event: FormEvent): Promise<void> => {
     event.preventDefault()
     setSubmitting(true)
     setErrorMessage(null)
     try {
-      const created = await createCertificate({ name, certificatePem, privateKeyPem })
-      setName('')
+      const saved = certificate
+        ? await createCertificateVersion(certificate.id, {
+            certificatePem,
+            privateKeyPem,
+            lockVersion: certificate.lockVersion,
+          })
+        : await createCertificate({ name, certificatePem, privateKeyPem })
+      if (!certificate) setName('')
       setCertificatePem('')
       setPrivateKeyPem('')
-      await onCreated(created)
+      await onSaved(saved)
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : '证书上传失败')
     } finally {
@@ -43,6 +58,7 @@ export function CertificateUploadForm({
           autoComplete="off"
           maxLength={255}
           placeholder="api.example.com / 2026"
+          readOnly={certificate !== null}
           required
           value={name}
           onChange={(event) => setName(event.target.value)}
@@ -82,7 +98,11 @@ export function CertificateUploadForm({
         </div>
       ) : null}
       <div className="form-actions">
-        <span>服务端会校验证书链、有效期、DNS SAN 和私钥匹配。</span>
+        <span>
+          {certificate
+            ? '新版本必须继续覆盖该逻辑证书管理的全部域名。'
+            : '首个版本的 DNS SAN 将成为稳定的自动匹配范围。'}
+        </span>
         <button className="button-primary" disabled={submitting} type="submit">
           {submitting ? '校验并上传中…' : submitLabel}
         </button>

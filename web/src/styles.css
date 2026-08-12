@@ -1641,30 +1641,34 @@ button:disabled {
 }
 
 .certificate-card dl,
-.certificate-binding-detail dl {
+.certificate-resolution-detail dl {
   display: grid;
   margin: 0;
   border-top: 1px solid #e6eae4;
 }
 
 .certificate-card dl {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.certificate-card > .button-secondary {
+  margin: 0 13px 13px;
 }
 
 .certificate-card dl div,
-.certificate-binding-detail dl div {
+.certificate-resolution-detail dl div {
   min-width: 0;
   padding: 10px 13px;
 }
 
 .certificate-card dt,
-.certificate-binding-detail dt {
+.certificate-resolution-detail dt {
   color: #839088;
   font-size: 0.59rem;
 }
 
 .certificate-card dd,
-.certificate-binding-detail dd {
+.certificate-resolution-detail dd {
   overflow: hidden;
   margin: 4px 0 0;
   color: #405149;
@@ -1681,8 +1685,7 @@ button:disabled {
 }
 
 .certificate-upload-form label,
-.network-policy-form label,
-.binding-controls label {
+.network-policy-form label {
   display: grid;
   gap: 7px;
   color: #526159;
@@ -1693,8 +1696,7 @@ button:disabled {
 .certificate-upload-form input,
 .certificate-upload-form textarea,
 .network-policy-form input,
-.network-policy-form textarea,
-.binding-controls select {
+.network-policy-form textarea {
   width: 100%;
   padding: 10px 11px;
   border: 1px solid #cbd4ca;
@@ -1716,10 +1718,14 @@ button:disabled {
 .certificate-upload-form input:focus,
 .certificate-upload-form textarea:focus,
 .network-policy-form input:focus,
-.network-policy-form textarea:focus,
-.binding-controls select:focus {
+.network-policy-form textarea:focus {
   border-color: #789578;
   box-shadow: 0 0 0 3px rgb(120 149 120 / 13%);
+}
+
+.certificate-upload-form input[readonly] {
+  background: #eef1ec;
+  color: #66736c;
 }
 
 .certificate-pem-grid,
@@ -1729,8 +1735,7 @@ button:disabled {
   gap: 12px;
 }
 
-.form-actions,
-.binding-controls {
+.form-actions {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1746,29 +1751,74 @@ button:disabled {
   line-height: 1.5;
 }
 
+.settings-panel > .form-actions {
+  padding: 16px 20px;
+  border-top: 1px solid #e3e8e1;
+}
+
 .project-settings-grid {
   margin-top: 18px;
 }
 
 .settings-description,
-.certificate-binding-detail,
-.binding-controls {
+.certificate-resolution-detail {
   margin: 0;
   padding: 17px 20px;
 }
 
-.certificate-binding-detail > p {
+.certificate-resolution-detail > p {
   margin: 0 0 13px;
   color: #53635b;
   font-size: 0.72rem;
 }
 
-.binding-controls {
+.certificate-version-history {
+  display: grid;
+  gap: 8px;
+  padding: 0 20px 20px;
+}
+
+.certificate-version-history h3 {
+  padding-top: 16px;
   border-top: 1px solid #e3e8e1;
 }
 
-.binding-controls label {
-  flex: 1 1 260px;
+.certificate-version-row {
+  display: grid;
+  grid-template-columns: 42px 76px minmax(100px, 1fr) minmax(90px, auto);
+  gap: 8px;
+  padding: 9px 10px;
+  border: 1px solid #dce2da;
+  border-radius: 8px;
+  color: #526159;
+  font-size: 0.65rem;
+}
+
+.certificate-version-row code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.certificate-match-conflict,
+.certificate-selection-rules {
+  margin: 0;
+  padding: 17px 20px 19px 40px;
+  color: #5b6861;
+  font-size: 0.7rem;
+  line-height: 1.65;
+}
+
+.certificate-match-conflict {
+  margin: 18px 20px;
+  padding: 14px 16px;
+  border: 1px solid #dfa38f;
+  border-radius: 9px;
+  background: #fff1ec;
+  color: #7c3426;
+}
+
+.certificate-match-conflict p {
+  margin-top: 0;
 }
 
 .network-policy-form {

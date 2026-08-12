@@ -23,6 +23,7 @@ const projectResponseSchema = {
     'draft',
     'publishedVersion',
     'activationStatus',
+    'certificateResolutionStatus',
     'certificate',
     'createdAt',
     'updatedAt',
@@ -50,16 +51,21 @@ const projectResponseSchema = {
     },
     publishedVersion: { anyOf: [{ type: 'integer' }, { type: 'null' }] },
     activationStatus: { type: 'string', const: 'unknown' },
+    certificateResolutionStatus: {
+      type: 'string',
+      enum: ['matched', 'uncovered', 'conflict'],
+    },
     certificate: {
       anyOf: [
         { type: 'null' },
         {
           type: 'object',
           additionalProperties: false,
-          required: ['id', 'name', 'status', 'notAfter', 'runtimeDeploymentStatus'],
+          required: ['id', 'name', 'version', 'status', 'notAfter', 'runtimeDeploymentStatus'],
           properties: {
             id: { type: 'string', format: 'uuid' },
             name: { type: 'string' },
+            version: { type: 'integer', minimum: 1 },
             status: { type: 'string', enum: ['valid', 'expiring', 'expired', 'superseded'] },
             notAfter: { type: 'string', format: 'date-time' },
             runtimeDeploymentStatus: { type: 'string', const: 'unsupported' },

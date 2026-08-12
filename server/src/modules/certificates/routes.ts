@@ -1,8 +1,9 @@
 import type { FastifyInstance } from 'fastify'
 
+import { badRequest } from '../../shared/errors.js'
 import { requireActor } from '../auth/http.js'
 import type { AuthService } from '../auth/model.js'
-import type { BindProjectCertificateInput, CreateCertificateInput } from './model.js'
+import type { CreateCertificateInput, CreateCertificateVersionInput } from './model.js'
 import type { CertificateService } from './service.js'
 
 const projectParameters = {
@@ -12,12 +13,32 @@ const projectParameters = {
   properties: { projectId: { type: 'string', format: 'uuid' } },
 } as const
 
-const certificateResponseSchema = {
+const certificateParameters = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['certificateId'],
+  properties: { certificateId: { type: 'string', format: 'uuid' } },
+} as const
+
+function parseIfMatch(value: string | undefined): string {
+  if (!value)
+    throw badRequest('IF_MATCH_REQUIRED', 'If-Match is required when updating a certificate')
+  const match = /^"(0|[1-9][0-9]*)"$/u.exec(value)
+  if (!match) {
+    throw badRequest(
+      'INVALID_IF_MATCH',
+      'If-Match must contain the logical certificate lock version ETag',
+    )
+  }
+  return match[1]!
+}
+
+const certificateVersionResponseSchema = {
   type: 'object',
   additionalProperties: false,
   required: [
     'id',
-    'name',
+    'version',
     'status',
     'subject',
     'issuer',
@@ -27,13 +48,11 @@ const certificateResponseSchema = {
     'notBefore',
     'notAfter',
     'keyType',
-    'bindingCount',
-    'runtimeDeploymentStatus',
     'createdAt',
   ],
   properties: {
     id: { type: 'string', format: 'uuid' },
-    name: { type: 'string' },
+    version: { type: 'integer', minimum: 1 },
     status: { type: 'string', enum: ['valid', 'expiring', 'expired', 'superseded'] },
     subject: { type: 'string' },
     issuer: { type: 'string' },
@@ -43,30 +62,67 @@ const certificateResponseSchema = {
     notBefore: { type: 'string', format: 'date-time' },
     notAfter: { type: 'string', format: 'date-time' },
     keyType: { type: 'string' },
-    bindingCount: { type: 'integer', minimum: 0 },
-    runtimeDeploymentStatus: { type: 'string', const: 'unsupported' },
     createdAt: { type: 'string', format: 'date-time' },
   },
 } as const
 
-const bindingResponseSchema = {
+const certificateResponseSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: [
+    'id',
+    'name',
+    'lockVersion',
+    'managedDnsNames',
+    'currentVersion',
+    'versionCount',
+    'matchedProjectCount',
+    'runtimeDeploymentStatus',
+    'createdAt',
+    'updatedAt',
+  ],
+  properties: {
+    id: { type: 'string', format: 'uuid' },
+    name: { type: 'string' },
+    lockVersion: { type: 'string', pattern: '^(0|[1-9][0-9]*)$' },
+    managedDnsNames: { type: 'array', items: { type: 'string' } },
+    currentVersion: certificateVersionResponseSchema,
+    versionCount: { type: 'integer', minimum: 1 },
+    matchedProjectCount: { type: 'integer', minimum: 0 },
+    runtimeDeploymentStatus: { type: 'string', const: 'unsupported' },
+    createdAt: { type: 'string', format: 'date-time' },
+    updatedAt: { type: 'string', format: 'date-time' },
+  },
+} as const
+
+const resolutionResponseSchema = {
   type: 'object',
   additionalProperties: false,
   required: [
     'projectId',
     'domain',
+    'resolutionStatus',
     'certificate',
-    'coverageStatus',
+    'matches',
     'runtimeDeploymentStatus',
-    'boundAt',
   ],
   properties: {
     projectId: { type: 'string', format: 'uuid' },
     domain: { type: 'string' },
+    resolutionStatus: { type: 'string', enum: ['matched', 'uncovered', 'conflict'] },
     certificate: { anyOf: [{ type: 'null' }, certificateResponseSchema] },
-    coverageStatus: { type: 'string', enum: ['covered', 'unbound'] },
+    matches: { type: 'array', items: certificateResponseSchema },
     runtimeDeploymentStatus: { type: 'string', const: 'unsupported' },
-    boundAt: { anyOf: [{ type: 'null' }, { type: 'string', format: 'date-time' }] },
+  },
+} as const
+
+const certificateMaterialSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['certificatePem', 'privateKeyPem'],
+  properties: {
+    certificatePem: { type: 'string', minLength: 1, maxLength: 1048576 },
+    privateKeyPem: { type: 'string', minLength: 1, maxLength: 262144 },
   },
 } as const
 
@@ -97,13 +153,11 @@ export function registerCertificateRoutes(
     {
       schema: {
         body: {
-          type: 'object',
-          additionalProperties: false,
+          ...certificateMaterialSchema,
           required: ['name', 'certificatePem', 'privateKeyPem'],
           properties: {
             name: { type: 'string', minLength: 1, maxLength: 255 },
-            certificatePem: { type: 'string', minLength: 1, maxLength: 1048576 },
-            privateKeyPem: { type: 'string', minLength: 1, maxLength: 262144 },
+            ...certificateMaterialSchema.properties,
           },
         },
         response: { 201: certificateResponseSchema },
@@ -117,44 +171,61 @@ export function registerCertificateRoutes(
         ),
   )
 
-  app.get<{ Params: { projectId: string } }>(
-    '/api/projects/:projectId/certificate',
-    { schema: { params: projectParameters, response: { 200: bindingResponseSchema } } },
-    async (request) =>
-      certificates.getProjectBinding(await requireActor(auth), request.params.projectId),
-  )
-
-  app.put<{ Params: { projectId: string }; Body: BindProjectCertificateInput }>(
-    '/api/projects/:projectId/certificate',
+  app.get<{ Params: { certificateId: string } }>(
+    '/api/certificates/:certificateId/versions',
     {
       schema: {
-        params: projectParameters,
-        body: {
-          type: 'object',
-          additionalProperties: false,
-          required: ['certificateId'],
-          properties: { certificateId: { type: 'string', format: 'uuid' } },
+        params: certificateParameters,
+        response: {
+          200: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['items'],
+            properties: { items: { type: 'array', items: certificateVersionResponseSchema } },
+          },
         },
-        response: { 200: bindingResponseSchema },
       },
     },
     async (request) =>
-      certificates.bindProject(
-        await requireActor(auth),
-        request.params.projectId,
-        request.body,
-        String(request.id),
-      ),
+      certificates.listVersions(await requireActor(auth), request.params.certificateId),
   )
 
-  app.delete<{ Params: { projectId: string } }>(
+  app.post<{
+    Params: { certificateId: string }
+    Body: CreateCertificateVersionInput
+    Headers: { 'if-match'?: string }
+  }>(
+    '/api/certificates/:certificateId/versions',
+    {
+      schema: {
+        params: certificateParameters,
+        headers: {
+          type: 'object',
+          required: ['if-match'],
+          properties: { 'if-match': { type: 'string' } },
+        },
+        body: certificateMaterialSchema,
+        response: { 201: certificateResponseSchema },
+      },
+    },
+    async (request, reply) =>
+      reply
+        .code(201)
+        .send(
+          await certificates.createVersion(
+            await requireActor(auth),
+            request.params.certificateId,
+            request.body,
+            parseIfMatch(request.headers['if-match']),
+            String(request.id),
+          ),
+        ),
+  )
+
+  app.get<{ Params: { projectId: string } }>(
     '/api/projects/:projectId/certificate',
-    { schema: { params: projectParameters, response: { 200: bindingResponseSchema } } },
+    { schema: { params: projectParameters, response: { 200: resolutionResponseSchema } } },
     async (request) =>
-      certificates.unbindProject(
-        await requireActor(auth),
-        request.params.projectId,
-        String(request.id),
-      ),
+      certificates.resolveProject(await requireActor(auth), request.params.projectId),
   )
 }

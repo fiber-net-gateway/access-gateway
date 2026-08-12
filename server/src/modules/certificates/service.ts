@@ -1,33 +1,37 @@
-import { forbidden, notFound, unavailable, unprocessable } from '../../shared/errors.js'
-import { bufferToPublicId } from '../../shared/ids.js'
+import { badRequest, forbidden, notFound, unavailable, unprocessable } from '../../shared/errors.js'
 import type { Actor } from '../auth/model.js'
 import { EnvironmentRepository } from '../environments/repository.js'
 import { ProjectRepository } from '../projects/repository.js'
 import type {
-  BindProjectCertificateInput,
   CertificateListResult,
+  CertificateVersionListResult,
   CertificateView,
   CreateCertificateInput,
-  ProjectCertificateBindingView,
+  CreateCertificateVersionInput,
+  ProjectCertificateResolutionView,
 } from './model.js'
-import { certificateCoversDomain, parseCertificateUpload } from './parser.js'
+import { missingManagedDnsNames, parseCertificateUpload } from './parser.js'
 import { CertificateRepository } from './repository.js'
+
+function parseLockVersion(value: string): string {
+  if (!/^(0|[1-9][0-9]*)$/u.test(value)) {
+    throw badRequest('INVALID_LOCK_VERSION', 'lockVersion must be an unsigned integer string')
+  }
+  return value
+}
 
 export interface CertificateService {
   list(actor: Actor): Promise<CertificateListResult>
   create(actor: Actor, input: CreateCertificateInput, requestId: string): Promise<CertificateView>
-  getProjectBinding(actor: Actor, projectId: string): Promise<ProjectCertificateBindingView>
-  bindProject(
+  createVersion(
     actor: Actor,
-    projectId: string,
-    input: BindProjectCertificateInput,
+    certificateId: string,
+    input: CreateCertificateVersionInput,
+    expectedLockVersion: string,
     requestId: string,
-  ): Promise<ProjectCertificateBindingView>
-  unbindProject(
-    actor: Actor,
-    projectId: string,
-    requestId: string,
-  ): Promise<ProjectCertificateBindingView>
+  ): Promise<CertificateView>
+  listVersions(actor: Actor, certificateId: string): Promise<CertificateVersionListResult>
+  resolveProject(actor: Actor, projectId: string): Promise<ProjectCertificateResolutionView>
 }
 
 export class DefaultCertificateService implements CertificateService {
@@ -68,69 +72,92 @@ export class DefaultCertificateService implements CertificateService {
       parsed,
       requestId,
     )
-    const created = await this.#certificates.findInEnvironment(environmentInternalId, publicId)
-    if (!created) throw new Error('Created certificate could not be reloaded')
+    return this.publicView(await this.requireCertificate(environmentInternalId, publicId))
+  }
+
+  async createVersion(
+    actor: Actor,
+    certificateId: string,
+    input: CreateCertificateVersionInput,
+    expectedLockVersion: string,
+    requestId: string,
+  ): Promise<CertificateView> {
+    const environment = await this.#environments.findWorkspace(actor)
+    if (!environment) throw notFound('Deployment workspace')
+    await this.requireMaintainer(actor, environment.id)
+    const environmentInternalId = await this.#environments.internalIdForActor(actor, environment.id)
+    if (!environmentInternalId) throw notFound('Deployment workspace')
+    const certificate = await this.requireCertificate(environmentInternalId, certificateId)
+    const parsed = parseCertificateUpload({ name: certificate.name, ...input })
+    const missingNames = missingManagedDnsNames(parsed.dnsNames, certificate.managedDnsNames)
+    if (missingNames.length > 0) {
+      throw unprocessable(
+        'CERTIFICATE_MANAGED_NAMES_NOT_COVERED',
+        'The new certificate version does not preserve every managed DNS selector',
+        missingNames.map((dnsName) => ({
+          path: 'certificatePem',
+          code: 'MANAGED_DNS_NAME_NOT_COVERED',
+          message: `${dnsName} is not covered by the new certificate version`,
+        })),
+      )
+    }
+    await this.#certificates.createVersion(
+      actor,
+      certificate.internalId,
+      environmentInternalId,
+      certificate.id,
+      certificate.name,
+      parseLockVersion(expectedLockVersion),
+      parsed,
+      requestId,
+    )
+    return this.publicView(await this.requireCertificate(environmentInternalId, certificateId))
+  }
+
+  async listVersions(actor: Actor, certificateId: string): Promise<CertificateVersionListResult> {
+    const environment = await this.#environments.findWorkspace(actor)
+    if (!environment) throw notFound('Deployment workspace')
+    const environmentInternalId = await this.#environments.internalIdForActor(actor, environment.id)
+    if (!environmentInternalId) throw notFound('Deployment workspace')
+    const certificate = await this.requireCertificate(environmentInternalId, certificateId)
+    return { items: await this.#certificates.listVersions(certificate.internalId) }
+  }
+
+  async resolveProject(actor: Actor, projectId: string): Promise<ProjectCertificateResolutionView> {
+    const project = await this.#projects.findIdentity(actor, projectId)
+    if (!project) throw notFound('Project')
+    return this.#certificates.resolveProject(project)
+  }
+
+  private async requireCertificate(
+    environmentInternalId: string,
+    certificateId: string,
+  ): Promise<
+    CertificateView & {
+      internalId: string
+      environmentInternalId: string
+    }
+  > {
+    const certificate = await this.#certificates.findInEnvironment(
+      environmentInternalId,
+      certificateId,
+    )
+    if (!certificate) throw notFound('Certificate')
+    return certificate
+  }
+
+  private publicView(
+    certificate: CertificateView & {
+      internalId: string
+      environmentInternalId: string
+    },
+  ): CertificateView {
     const {
       internalId: _internalId,
       environmentInternalId: _environmentInternalId,
       ...view
-    } = created
+    } = certificate
     return view
-  }
-
-  async getProjectBinding(actor: Actor, projectId: string): Promise<ProjectCertificateBindingView> {
-    const project = await this.#projects.findIdentity(actor, projectId)
-    if (!project) throw notFound('Project')
-    return this.#certificates.getBinding(project)
-  }
-
-  async bindProject(
-    actor: Actor,
-    projectId: string,
-    input: BindProjectCertificateInput,
-    requestId: string,
-  ): Promise<ProjectCertificateBindingView> {
-    const project = await this.#projects.findIdentity(actor, projectId)
-    if (!project) throw notFound('Project')
-    await this.requireMaintainer(actor, bufferToPublicId(project.environment_public_id))
-    const certificate = await this.#certificates.findInEnvironment(
-      project.environment_id,
-      input.certificateId,
-    )
-    if (!certificate) throw notFound('Certificate')
-    if (certificate.status !== 'valid' && certificate.status !== 'expiring') {
-      throw unprocessable(
-        'CERTIFICATE_NOT_BINDABLE',
-        'Only a currently valid certificate can be bound',
-      )
-    }
-    if (!certificateCoversDomain(certificate.dnsNames, project.name)) {
-      throw unprocessable(
-        'CERTIFICATE_DOMAIN_NOT_COVERED',
-        'The certificate DNS SANs do not cover the Project domain',
-        [
-          {
-            path: 'certificateId',
-            code: 'DOMAIN_NOT_COVERED',
-            message: `${project.name} is not covered by this certificate`,
-          },
-        ],
-      )
-    }
-    await this.#certificates.bind(actor, project, certificate.internalId, certificate.id, requestId)
-    return this.#certificates.getBinding(project)
-  }
-
-  async unbindProject(
-    actor: Actor,
-    projectId: string,
-    requestId: string,
-  ): Promise<ProjectCertificateBindingView> {
-    const project = await this.#projects.findIdentity(actor, projectId)
-    if (!project) throw notFound('Project')
-    await this.requireMaintainer(actor, bufferToPublicId(project.environment_public_id))
-    await this.#certificates.unbind(actor, project, requestId)
-    return this.#certificates.getBinding(project)
   }
 
   private async requireMaintainer(actor: Actor, environmentId: string): Promise<void> {
@@ -149,15 +176,15 @@ export class UnavailableCertificateService implements CertificateService {
     throw unavailable('DATABASE_UNCONFIGURED', 'MySQL is not configured')
   }
 
-  async getProjectBinding(): Promise<never> {
+  async createVersion(): Promise<never> {
     throw unavailable('DATABASE_UNCONFIGURED', 'MySQL is not configured')
   }
 
-  async bindProject(): Promise<never> {
+  async listVersions(): Promise<never> {
     throw unavailable('DATABASE_UNCONFIGURED', 'MySQL is not configured')
   }
 
-  async unbindProject(): Promise<never> {
+  async resolveProject(): Promise<never> {
     throw unavailable('DATABASE_UNCONFIGURED', 'MySQL is not configured')
   }
 }

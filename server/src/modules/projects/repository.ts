@@ -21,12 +21,18 @@ interface ProjectRow extends RowDataPacket {
   current_revision_no: number | null
   draft_lock_version: string | null
   published_revision_no: number | null
-  certificate_public_id: Buffer | null
-  certificate_name: string | null
-  certificate_lifecycle_state: 'active' | 'superseded' | null
-  certificate_not_after: string | null
   created_at: string
   updated_at: string
+}
+
+interface ProjectCertificateMatchRow extends RowDataPacket {
+  project_public_id: Buffer
+  certificate_public_id: Buffer
+  certificate_name: string
+  certificate_version_no: number
+  certificate_lifecycle_state: 'active' | 'superseded'
+  certificate_not_after: string
+  match_kind: 'exact' | 'wildcard'
 }
 
 export interface ProjectIdentityRow extends RowDataPacket {
@@ -37,13 +43,32 @@ export interface ProjectIdentityRow extends RowDataPacket {
   name: string
 }
 
-function toView(row: ProjectRow): ProjectView {
-  const certificateStatus = (): 'valid' | 'expiring' | 'expired' | 'superseded' => {
-    if (row.certificate_lifecycle_state === 'superseded') return 'superseded'
-    const notAfter = Date.parse(mysqlDateTimeToRfc3339(row.certificate_not_after!))
-    if (notAfter <= Date.now()) return 'expired'
-    return notAfter - Date.now() <= 30 * 24 * 60 * 60 * 1_000 ? 'expiring' : 'valid'
-  }
+function certificateStatus(
+  match: ProjectCertificateMatchRow,
+): 'valid' | 'expiring' | 'expired' | 'superseded' {
+  if (match.certificate_lifecycle_state === 'superseded') return 'superseded'
+  const notAfter = Date.parse(mysqlDateTimeToRfc3339(match.certificate_not_after))
+  if (notAfter <= Date.now()) return 'expired'
+  return notAfter - Date.now() <= 30 * 24 * 60 * 60 * 1_000 ? 'expiring' : 'valid'
+}
+
+function selectCertificateMatches(
+  matches: readonly ProjectCertificateMatchRow[],
+): readonly ProjectCertificateMatchRow[] {
+  const preferredKind = matches.some((match) => match.match_kind === 'exact') ? 'exact' : 'wildcard'
+  const seen = new Set<string>()
+  return matches.filter((match) => {
+    if (match.match_kind !== preferredKind) return false
+    const id = match.certificate_public_id.toString('hex')
+    if (seen.has(id)) return false
+    seen.add(id)
+    return true
+  })
+}
+
+function toView(row: ProjectRow, allMatches: readonly ProjectCertificateMatchRow[]): ProjectView {
+  const matches = selectCertificateMatches(allMatches)
+  const certificate = matches.length === 1 ? matches[0]! : null
   return {
     id: bufferToPublicId(row.public_id),
     domain: row.name,
@@ -59,12 +84,15 @@ function toView(row: ProjectRow): ProjectView {
       : null,
     publishedVersion: row.published_revision_no,
     activationStatus: 'unknown',
-    certificate: row.certificate_public_id
+    certificateResolutionStatus:
+      matches.length === 0 ? 'uncovered' : matches.length === 1 ? 'matched' : 'conflict',
+    certificate: certificate
       ? {
-          id: bufferToPublicId(row.certificate_public_id),
-          name: row.certificate_name!,
-          status: certificateStatus(),
-          notAfter: mysqlDateTimeToRfc3339(row.certificate_not_after!),
+          id: bufferToPublicId(certificate.certificate_public_id),
+          name: certificate.certificate_name,
+          version: certificate.certificate_version_no,
+          status: certificateStatus(certificate),
+          notAfter: mysqlDateTimeToRfc3339(certificate.certificate_not_after),
           runtimeDeploymentStatus: 'unsupported',
         }
       : null,
@@ -89,16 +117,10 @@ const selectProjects = `
       ORDER BY release_record.published_at DESC, release_record.id DESC
       LIMIT 1
     ) AS published_revision_no,
-    cert.public_id AS certificate_public_id,
-    cert.display_name AS certificate_name,
-    cert.lifecycle_state AS certificate_lifecycle_state,
-    cert.not_after AS certificate_not_after,
     p.created_at, p.updated_at
   FROM projects p
   INNER JOIN environments e ON e.id = p.environment_id
   LEFT JOIN drafts d ON d.project_id = p.id AND d.archived_at IS NULL
-  LEFT JOIN certificate_bindings cb ON cb.project_id = p.id AND cb.unbound_at IS NULL
-  LEFT JOIN certificates cert ON cert.id = cb.certificate_id
 `
 
 export class ProjectRepository {
@@ -124,7 +146,8 @@ export class ProjectRepository {
        ORDER BY p.name, p.public_id`,
       values,
     )
-    return rows.map(toView)
+    const matches = await this.loadCertificateMatches(rows)
+    return rows.map((row) => toView(row, matches.get(row.public_id.toString('hex')) ?? []))
   }
 
   async findView(actor: Actor, projectPublicId: string): Promise<ProjectView | null> {
@@ -140,7 +163,10 @@ export class ProjectRepository {
        WHERE p.public_id = ? AND p.archived_at IS NULL`,
       values,
     )
-    return rows[0] ? toView(rows[0]) : null
+    const row = rows[0]
+    if (!row) return null
+    const matches = await this.loadCertificateMatches(rows)
+    return toView(row, matches.get(row.public_id.toString('hex')) ?? [])
   }
 
   async findIdentity(actor: Actor, projectPublicId: string): Promise<ProjectIdentityRow | null> {
@@ -229,5 +255,52 @@ export class ProjectRepository {
       }
       throw error
     }
+  }
+
+  private async loadCertificateMatches(
+    projects: readonly ProjectRow[],
+  ): Promise<Map<string, readonly ProjectCertificateMatchRow[]>> {
+    const result = new Map<string, ProjectCertificateMatchRow[]>()
+    if (projects.length === 0) return result
+    const placeholders = projects.map(() => '?').join(', ')
+    const [rows] = await this.#pool.execute<ProjectCertificateMatchRow[]>(
+      `SELECT
+         project.public_id AS project_public_id,
+         series_record.public_id AS certificate_public_id,
+         series_record.display_name AS certificate_name,
+         current_version.version_no AS certificate_version_no,
+         current_version.lifecycle_state AS certificate_lifecycle_state,
+         current_version.not_after AS certificate_not_after,
+         certificate_name.match_kind
+       FROM projects project
+       INNER JOIN certificate_dns_names certificate_name
+         ON certificate_name.environment_id = project.environment_id
+        AND (
+          (certificate_name.match_kind = 'exact'
+           AND project.name = certificate_name.match_value)
+          OR
+          (
+            certificate_name.match_kind = 'wildcard'
+            AND project.name LIKE CONCAT('%.', certificate_name.match_value)
+            AND LENGTH(project.name) - LENGTH(REPLACE(project.name, '.', '')) =
+                certificate_name.wildcard_dot_count
+          )
+        )
+       INNER JOIN certificate_series series_record
+         ON series_record.id = certificate_name.certificate_series_id
+        AND series_record.archived_at IS NULL
+       INNER JOIN certificates current_version
+         ON current_version.id = series_record.current_version_id
+       WHERE project.public_id IN (${placeholders})
+       ORDER BY project.public_id, certificate_name.match_kind, series_record.id`,
+      projects.map((project) => project.public_id),
+    )
+    for (const row of rows) {
+      const key = row.project_public_id.toString('hex')
+      const matches = result.get(key) ?? []
+      matches.push(row)
+      result.set(key, matches)
+    }
+    return result
   }
 }

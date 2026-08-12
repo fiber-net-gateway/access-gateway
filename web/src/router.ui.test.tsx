@@ -53,6 +53,7 @@ function installApiMock() {
     draft: { id: 'draft-id', state: 'editing', revision: 8, lockVersion: '8' },
     publishedVersion: null,
     activationStatus: 'unknown',
+    certificateResolutionStatus: 'uncovered',
     certificate: null,
   }
   const version = {
@@ -93,18 +94,27 @@ function installApiMock() {
   const certificate = {
     id: '00000000-0000-4000-8000-000000000006',
     name: 'API certificate',
-    status: 'valid',
-    subject: 'CN=api.example.com',
-    issuer: 'CN=Test CA',
-    serialNumber: '01',
-    fingerprintSha256: 'a'.repeat(64),
-    dnsNames: ['api.example.com'],
-    notBefore: '2026-01-01T00:00:00.000Z',
-    notAfter: '2027-01-01T00:00:00.000Z',
-    keyType: 'ec',
-    bindingCount: 1,
+    lockVersion: '1',
+    managedDnsNames: ['api.example.com'],
+    currentVersion: {
+      id: '00000000-0000-4000-8000-000000000007',
+      version: 2,
+      status: 'valid',
+      subject: 'CN=api.example.com',
+      issuer: 'CN=Test CA',
+      serialNumber: '01',
+      fingerprintSha256: 'a'.repeat(64),
+      dnsNames: ['api.example.com'],
+      notBefore: '2026-01-01T00:00:00.000Z',
+      notAfter: '2027-01-01T00:00:00.000Z',
+      keyType: 'ec',
+      createdAt: '2026-08-12T00:00:00.000Z',
+    },
+    versionCount: 2,
+    matchedProjectCount: 1,
     runtimeDeploymentStatus: 'unsupported',
     createdAt: '2026-01-01T00:00:00.000Z',
+    updatedAt: '2026-08-12T00:00:00.000Z',
   }
 
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -187,14 +197,17 @@ function installApiMock() {
     }
     if (url === '/api/projects') return jsonResponse({ items: [project] })
     if (url === '/api/certificates') return jsonResponse({ items: [certificate] })
+    if (url === `/api/certificates/${certificate.id}/versions`) {
+      return jsonResponse({ items: [certificate.currentVersion] })
+    }
     if (url === `/api/projects/${projectId}/certificate`) {
       return jsonResponse({
         projectId,
         domain: 'api.example.com',
+        resolutionStatus: 'matched',
         certificate,
-        coverageStatus: 'covered',
+        matches: [certificate],
         runtimeDeploymentStatus: 'unsupported',
-        boundAt: '2026-08-12T00:00:00.000Z',
       })
     }
     return jsonResponse({ error: { message: `Unhandled test URL: ${url}` } }, 404)
@@ -338,7 +351,7 @@ describe('application routes', () => {
     })
   })
 
-  test('shows certificate SAN coverage separately from unsupported runtime deployment', async () => {
+  test('shows automatic certificate resolution separately from unsupported runtime deployment', async () => {
     installApiMock()
     const router = createMemoryRouter(appRoutes, {
       initialEntries: [`/projects/${projectId}/certificate`],
@@ -346,9 +359,24 @@ describe('application routes', () => {
     render(<RouterProvider router={router} />)
 
     expect(await screen.findByRole('heading', { name: 'Certificate' })).toBeTruthy()
-    expect(await screen.findByText('SAN 已覆盖')).toBeTruthy()
+    expect(await screen.findByText('已自动匹配')).toBeTruthy()
     expect(screen.getAllByText(/运行时部署未接入/u).length).toBeGreaterThan(0)
     expect(screen.queryByText('已激活')).toBeNull()
+  })
+
+  test('updates one logical certificate through an immutable version workflow', async () => {
+    installApiMock()
+    const router = createMemoryRouter(appRoutes, { initialEntries: ['/certificates'] })
+    const user = userEvent.setup()
+    render(<RouterProvider router={router} />)
+
+    expect(await screen.findByText('API certificate')).toBeTruthy()
+    await user.click(screen.getByRole('button', { name: '更新证书版本' }))
+
+    expect(await screen.findByRole('heading', { name: '更新 API certificate' })).toBeTruthy()
+    expect(await screen.findByRole('heading', { name: '版本历史' })).toBeTruthy()
+    expect(screen.getAllByText('V2').length).toBeGreaterThan(0)
+    expect(screen.getByText(/继续覆盖该逻辑证书管理的全部域名/u)).toBeTruthy()
   })
 })
 
