@@ -1,6 +1,6 @@
 # Access Gateway Console 产品需求文档
 
-- 状态：Draft v0.3
+- 状态：Draft v0.4（网络策略与证书控制面 P0 已实现）
 - 适用范围：`web/`、`server/`，以及实现校验、证书生效和激活证据所需的
   `native/access-server/` 配套能力
 - 产品主线：域名 Project → 逐条 YAML Route → 保存配置版本 → 选择当前/历史版本 → 发布到 rnacos
@@ -377,6 +377,17 @@ RESPONSE Route 至少覆盖 `status` 与 `body`（TEXT、BASE64、TEMPLATE）。
 如果 Project 开启 HTTPS redirect，发布前必须确认以下条件之一：已有覆盖该域名的运行时证书证据，
 或部署明确声明 TLS 由受信任的外部终止器负责。缺少两者时阻止发布，避免重定向到不可用 HTTPS。
 
+### 7.4.1 网络策略配置
+
+网络策略作为 Configuration Version schema v3 的一部分保存，而不是可漂移的 Project 当前属性。
+它支持“Route 自主管理”和“Project 统一策略”两种互斥模式；统一模式把允许 CIDR 和优先拒绝 CIDR
+确定性编译进每条 route `allows`，并禁止 Route YAML 同时声明 `allows`。详细需求、迁移、API、
+安全前提和验收见
+[`network-policy-and-certificate-design.md`](network-policy-and-certificate-design.md)。
+
+当前 native 按 Java 兼容语义从 `X-Real-Ip` 执行 CIDR 判断，缺失或不可解析时跳过检查。因此生产
+部署必须由受信任入口清洗并设置该头；可信代理边界完成前不得把该配置宣传为独立网络防火墙。
+
 ### 7.5 Release 与发布到 rnacos
 
 | ID          | 优先级 | 需求                                                                                      |
@@ -667,6 +678,8 @@ Route 不能破坏历史 Release 和审计引用。
 - [`fixed-workspace-and-secure-listener-design.md`](fixed-workspace-and-secure-listener-design.md)
   记录当前固定工作区、整份 JSON 编辑器和启动证书实现，仅作为现状说明；其中的 Console 产品
   交互被本文取代。
+- [`network-policy-and-certificate-design.md`](network-policy-and-certificate-design.md) 定义已实现的
+  Configuration Version v3 网络策略、证书库存/绑定、安全边界和未实现的动态 SNI 交付。
 - 任何 wire/config 行为变更仍需同步更新 native codec/runtime、server schema/service、web 类型、
   兼容 fixture 和用户文档。
 

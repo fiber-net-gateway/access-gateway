@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { isIP } from 'node:net'
 
 import { isAlias, isMap, isScalar, LineCounter, parseDocument, visit } from 'yaml'
 
@@ -26,7 +27,9 @@ const routeFields = new Set([
   'allows',
 ])
 
-export const ROUTE_COMPILER_REVISION = 'project-routes-yaml-v2'
+export const ROUTE_COMPILER_REVISION = 'project-routes-yaml-v3-network-policy'
+
+const networkPolicyRouteId = '00000000-0000-4000-8000-000000000099'
 
 export interface RouteValidationIssue {
   routeId: string
@@ -291,17 +294,89 @@ function parseRoute(route: RouteItemModel): {
   return { value: issues.length === 0 ? value : null, issues }
 }
 
+function validateNetworkPolicy(model: ProjectRoutesModel): RouteValidationIssue[] {
+  const issues: RouteValidationIssue[] = []
+  const all = [
+    ...model.networkPolicy.allowedCidrs.map((value, index) => ({
+      value,
+      path: `networkPolicy.allowedCidrs.${index}`,
+    })),
+    ...model.networkPolicy.deniedCidrs.map((value, index) => ({
+      value,
+      path: `networkPolicy.deniedCidrs.${index}`,
+    })),
+  ]
+  const seen = new Set<string>()
+  for (const { value, path } of all) {
+    const slash = value.indexOf('/')
+    const address = slash === -1 ? value : value.slice(0, slash)
+    const prefixText = slash === -1 ? null : value.slice(slash + 1)
+    const family = isIP(address)
+    const maximumPrefix = family === 4 ? 32 : family === 6 ? 128 : 0
+    const prefix = prefixText !== null && /^\d+$/u.test(prefixText) ? Number(prefixText) : null
+    if (
+      value !== value.trim() ||
+      value.startsWith('!') ||
+      family === 0 ||
+      (prefixText !== null &&
+        (prefix === null || !Number.isSafeInteger(prefix) || prefix < 0 || prefix > maximumPrefix))
+    ) {
+      issues.push({
+        routeId: networkPolicyRouteId,
+        path,
+        line: 1,
+        column: 1,
+        code: 'INVALID_NETWORK_POLICY_CIDR',
+        message: `${value} is not a valid IPv4 or IPv6 CIDR`,
+      })
+      continue
+    }
+    const key = value.toLowerCase()
+    if (seen.has(key)) {
+      issues.push({
+        routeId: networkPolicyRouteId,
+        path,
+        line: 1,
+        column: 1,
+        code: 'DUPLICATE_NETWORK_POLICY_CIDR',
+        message: `${value} is duplicated in the network policy`,
+      })
+    }
+    seen.add(key)
+  }
+  return issues
+}
+
 export function compileProjectRoutes(
   domain: string,
   model: ProjectRoutesModel,
   version = 1,
 ): ProjectRoutesCompileResult {
   const routes: Readonly<Record<string, unknown>>[] = []
-  const issues: RouteValidationIssue[] = []
+  const issues: RouteValidationIssue[] = validateNetworkPolicy(model)
   for (const route of model.routes) {
     const parsed = parseRoute(route)
     issues.push(...parsed.issues)
-    if (parsed.value) routes.push(parsed.value)
+    if (parsed.value) {
+      if (model.networkPolicy.source === 'project' && 'allows' in parsed.value) {
+        issues.push({
+          routeId: route.id,
+          path: 'allows',
+          line: 1,
+          column: 1,
+          code: 'ROUTE_NETWORK_POLICY_CONFLICT',
+          message: 'Route allows must be removed while the project network policy is authoritative',
+        })
+      } else if (model.networkPolicy.source === 'project') {
+        const allows = [
+          ...model.networkPolicy.allowedCidrs,
+          ...model.networkPolicy.deniedCidrs.map((cidr) => `!${cidr}`),
+        ]
+        routes.push(allows.length > 0 ? { ...parsed.value, allows } : parsed.value)
+      } else {
+        routes.push(parsed.value)
+      }
+    }
   }
   if (issues.length > 0) return { compiled: null, issues }
 

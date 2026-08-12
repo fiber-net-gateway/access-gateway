@@ -23,6 +23,7 @@ const projectResponseSchema = {
     'draft',
     'publishedVersion',
     'activationStatus',
+    'certificate',
     'createdAt',
     'updatedAt',
   ],
@@ -49,6 +50,23 @@ const projectResponseSchema = {
     },
     publishedVersion: { anyOf: [{ type: 'integer' }, { type: 'null' }] },
     activationStatus: { type: 'string', const: 'unknown' },
+    certificate: {
+      anyOf: [
+        { type: 'null' },
+        {
+          type: 'object',
+          additionalProperties: false,
+          required: ['id', 'name', 'status', 'notAfter', 'runtimeDeploymentStatus'],
+          properties: {
+            id: { type: 'string', format: 'uuid' },
+            name: { type: 'string' },
+            status: { type: 'string', enum: ['valid', 'expiring', 'expired', 'superseded'] },
+            notAfter: { type: 'string', format: 'date-time' },
+            runtimeDeploymentStatus: { type: 'string', const: 'unsupported' },
+          },
+        },
+      ],
+    },
     createdAt: { type: 'string', format: 'date-time' },
     updatedAt: { type: 'string', format: 'date-time' },
   },

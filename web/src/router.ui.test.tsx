@@ -53,6 +53,7 @@ function installApiMock() {
     draft: { id: 'draft-id', state: 'editing', revision: 8, lockVersion: '8' },
     publishedVersion: null,
     activationStatus: 'unknown',
+    certificate: null,
   }
   const version = {
     id: versionId,
@@ -77,11 +78,33 @@ function installApiMock() {
     changeSummary: 'Historical routes',
     routeCount: 1,
   }
-  const model = { schemaVersion: 2, kind: 'project_routes_yaml', routes: [] }
-  const historicalModel = {
-    schemaVersion: 2,
+  const model = {
+    schemaVersion: 3,
     kind: 'project_routes_yaml',
+    networkPolicy: { source: 'route', allowedCidrs: [], deniedCidrs: [] },
+    routes: [],
+  }
+  const historicalModel = {
+    schemaVersion: 3,
+    kind: 'project_routes_yaml',
+    networkPolicy: { source: 'route', allowedCidrs: [], deniedCidrs: [] },
     routes: [{ id: routeId, source: 'path: /historical\ntype: RESPONSE\nstatus: 200' }],
+  }
+  const certificate = {
+    id: '00000000-0000-4000-8000-000000000006',
+    name: 'API certificate',
+    status: 'valid',
+    subject: 'CN=api.example.com',
+    issuer: 'CN=Test CA',
+    serialNumber: '01',
+    fingerprintSha256: 'a'.repeat(64),
+    dnsNames: ['api.example.com'],
+    notBefore: '2026-01-01T00:00:00.000Z',
+    notAfter: '2027-01-01T00:00:00.000Z',
+    keyType: 'ec',
+    bindingCount: 1,
+    runtimeDeploymentStatus: 'unsupported',
+    createdAt: '2026-01-01T00:00:00.000Z',
   }
 
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -116,13 +139,26 @@ function installApiMock() {
     if (url === `/api/projects/${projectId}/configuration-versions/current`) {
       return jsonResponse({ version: { ...version, model }, lockVersion: '8' })
     }
-    if (url === `/api/projects/${projectId}/configuration-versions`) {
+    if (
+      url === `/api/projects/${projectId}/configuration-versions` &&
+      (!init?.method || init.method === 'GET')
+    ) {
       return jsonResponse({
         items: [version, historicalVersion],
         nextCursor: null,
         currentVersionId: versionId,
         lockVersion: '8',
       })
+    }
+    if (url === `/api/projects/${projectId}/configuration-versions` && init?.method === 'POST') {
+      const body = JSON.parse(String(init.body)) as { model: typeof model }
+      return jsonResponse(
+        {
+          version: { ...version, number: 9, model: body.model },
+          lockVersion: '9',
+        },
+        201,
+      )
     }
     if (url === `/api/projects/${projectId}/configuration-versions/${historicalVersionId}`) {
       return jsonResponse({ ...historicalVersion, model: historicalModel })
@@ -150,6 +186,17 @@ function installApiMock() {
       )
     }
     if (url === '/api/projects') return jsonResponse({ items: [project] })
+    if (url === '/api/certificates') return jsonResponse({ items: [certificate] })
+    if (url === `/api/projects/${projectId}/certificate`) {
+      return jsonResponse({
+        projectId,
+        domain: 'api.example.com',
+        certificate,
+        coverageStatus: 'covered',
+        runtimeDeploymentStatus: 'unsupported',
+        boundAt: '2026-08-12T00:00:00.000Z',
+      })
+    }
     return jsonResponse({ error: { message: `Unhandled test URL: ${url}` } }, 404)
   })
   vi.stubGlobal('fetch', fetchMock)
@@ -252,6 +299,56 @@ describe('application routes', () => {
     expect(document.activeElement).toBe(editor)
     expect(await screen.findByText(/请修复后再保存为版本/u)).toBeTruthy()
     expect(screen.queryByRole('dialog', { name: '保存为配置版本' })).toBeNull()
+  })
+
+  test('saves a Project-owned CIDR policy as a new immutable configuration version', async () => {
+    const fetchMock = installApiMock()
+    const router = createMemoryRouter(appRoutes, {
+      initialEntries: [`/projects/${projectId}/network-policy`],
+    })
+    const user = userEvent.setup()
+    render(<RouterProvider router={router} />)
+
+    await screen.findByRole('heading', { name: 'Network Policy' })
+    await user.click(screen.getByRole('radio', { name: /Project 统一强制/u }))
+    await user.type(screen.getByLabelText(/允许 CIDR/u), '10.0.0.0/8')
+    await user.type(screen.getByLabelText(/拒绝 CIDR/u), '10.1.0.0/16')
+    await user.click(screen.getByRole('button', { name: '保存为 V9' }))
+
+    await waitFor(() => {
+      const saveCall = fetchMock.mock.calls.find(
+        ([url, init]) =>
+          url === `/api/projects/${projectId}/configuration-versions` && init?.method === 'POST',
+      )
+      expect(saveCall).toBeTruthy()
+      const body = JSON.parse(String(saveCall?.[1]?.body)) as {
+        model: {
+          networkPolicy: {
+            source: string
+            allowedCidrs: string[]
+            deniedCidrs: string[]
+          }
+        }
+      }
+      expect(body.model.networkPolicy).toEqual({
+        source: 'project',
+        allowedCidrs: ['10.0.0.0/8'],
+        deniedCidrs: ['10.1.0.0/16'],
+      })
+    })
+  })
+
+  test('shows certificate SAN coverage separately from unsupported runtime deployment', async () => {
+    installApiMock()
+    const router = createMemoryRouter(appRoutes, {
+      initialEntries: [`/projects/${projectId}/certificate`],
+    })
+    render(<RouterProvider router={router} />)
+
+    expect(await screen.findByRole('heading', { name: 'Certificate' })).toBeTruthy()
+    expect(await screen.findByText('SAN 已覆盖')).toBeTruthy()
+    expect(screen.getAllByText(/运行时部署未接入/u).length).toBeGreaterThan(0)
+    expect(screen.queryByText('已激活')).toBeNull()
   })
 })
 

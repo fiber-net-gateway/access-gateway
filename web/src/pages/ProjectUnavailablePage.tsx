@@ -1,14 +1,8 @@
 interface ProjectUnavailablePageProps {
-  capability: 'certificate' | 'settings'
+  capability: 'settings'
 }
 
 const content = {
-  certificate: {
-    eyebrow: 'CERTIFICATE DELIVERY',
-    title: 'Certificate 暂不可用',
-    description:
-      '证书绑定和动态 SNI 部署尚未接入 access-server。当前不会模拟“已部署”或“已激活”状态。',
-  },
   settings: {
     eyebrow: 'PROJECT OPERATIONS',
     title: 'Settings 暂不可用',

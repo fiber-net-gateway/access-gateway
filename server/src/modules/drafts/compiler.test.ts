@@ -6,8 +6,9 @@ import { compileProjectRoutes } from './compiler.js'
 
 function model(...sources: string[]): ProjectRoutesModel {
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     kind: 'project_routes_yaml',
+    networkPolicy: { source: 'route', allowedCidrs: [], deniedCidrs: [] },
     routes: sources.map((source, index) => ({
       id: `00000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`,
       source,
@@ -41,8 +42,9 @@ test('compiles independent YAML routes into ordered Java-compatible project JSON
 test('rejects unsafe YAML features and reports the owning route', () => {
   const routeId = '00000000-0000-4000-8000-000000000001'
   const result = compileProjectRoutes('api.example.com', {
-    schemaVersion: 2,
+    schemaVersion: 3,
     kind: 'project_routes_yaml',
+    networkPolicy: { source: 'route', allowedCidrs: [], deniedCidrs: [] },
     routes: [
       {
         id: routeId,
@@ -98,4 +100,42 @@ test('comments and formatting do not change the compiled semantic digest', () =>
     model('# health endpoint\npath: /health\ntype: RESPONSE\nstatus: 200\n'),
   )
   assert.equal(compact.compiled?.sha256, commented.compiled?.sha256)
+})
+
+test('injects an authoritative Project network policy into every route', () => {
+  const candidate = model(
+    'path: /health\ntype: RESPONSE\nstatus: 200',
+    'path: /api/*\ntype: PROXY\nservice: users',
+  )
+  const result = compileProjectRoutes('api.example.com', {
+    ...candidate,
+    networkPolicy: {
+      source: 'project',
+      allowedCidrs: ['10.0.0.0/8', '2001:db8::/32'],
+      deniedCidrs: ['10.1.0.0/16'],
+    },
+  })
+
+  assert.deepEqual(result.issues, [])
+  const payload = JSON.parse(result.compiled!.payloadText) as {
+    routes: Array<{ allows: string[] }>
+  }
+  assert.deepEqual(payload.routes[0]?.allows, ['10.0.0.0/8', '2001:db8::/32', '!10.1.0.0/16'])
+  assert.deepEqual(payload.routes[1]?.allows, payload.routes[0]?.allows)
+})
+
+test('rejects malformed Project CIDRs and Route overrides under authoritative policy', () => {
+  const candidate = model('path: /\ntype: RESPONSE\nstatus: 200\nallows: []')
+  const result = compileProjectRoutes('api.example.com', {
+    ...candidate,
+    networkPolicy: {
+      source: 'project',
+      allowedCidrs: ['10.0.0.0/99'],
+      deniedCidrs: [],
+    },
+  })
+
+  assert.equal(result.compiled, null)
+  assert.ok(result.issues.some((issue) => issue.code === 'INVALID_NETWORK_POLICY_CIDR'))
+  assert.ok(result.issues.some((issue) => issue.code === 'ROUTE_NETWORK_POLICY_CONFLICT'))
 })

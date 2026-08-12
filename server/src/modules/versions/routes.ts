@@ -46,10 +46,28 @@ const versionParameters = {
 const projectRoutesModelSchema = {
   type: 'object',
   additionalProperties: false,
-  required: ['schemaVersion', 'kind', 'routes'],
+  required: ['schemaVersion', 'kind', 'networkPolicy', 'routes'],
   properties: {
-    schemaVersion: { type: 'integer', const: 2 },
+    schemaVersion: { type: 'integer', const: 3 },
     kind: { type: 'string', const: 'project_routes_yaml' },
+    networkPolicy: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['source', 'allowedCidrs', 'deniedCidrs'],
+      properties: {
+        source: { type: 'string', enum: ['route', 'project'] },
+        allowedCidrs: {
+          type: 'array',
+          maxItems: 256,
+          items: { type: 'string', minLength: 1, maxLength: 64 },
+        },
+        deniedCidrs: {
+          type: 'array',
+          maxItems: 256,
+          items: { type: 'string', minLength: 1, maxLength: 64 },
+        },
+      },
+    },
     routes: {
       type: 'array',
       maxItems: 5000,

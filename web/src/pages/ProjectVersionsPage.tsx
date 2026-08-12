@@ -362,6 +362,20 @@ export function ProjectVersionsPage() {
             <p className="eyebrow">READ-ONLY SNAPSHOT</p>
             <h2 id="preview-version-title">V{previewVersion.number} · 配置快照</h2>
             <p>{previewVersion.changeSummary}</p>
+            <section className="version-preview-network" aria-label="网络策略快照">
+              <strong>Network Policy</strong>
+              <span>
+                {previewVersion.model.networkPolicy.source === 'project'
+                  ? 'Project 统一策略'
+                  : '由各 Route 配置'}
+              </span>
+              {previewVersion.model.networkPolicy.source === 'project' ? (
+                <small>
+                  允许：{previewVersion.model.networkPolicy.allowedCidrs.join(', ') || '全部'} ·
+                  拒绝：{previewVersion.model.networkPolicy.deniedCidrs.join(', ') || '无'}
+                </small>
+              ) : null}
+            </section>
             <div className="version-preview-routes">
               {previewVersion.model.routes.map((route, index) => (
                 <article key={route.id}>

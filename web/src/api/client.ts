@@ -1,4 +1,5 @@
 import type {
+  CertificateView,
   ConfigurationVersionDetail,
   ConfigurationVersionListResult,
   DraftRevisionView,
@@ -7,6 +8,7 @@ import type {
   ProjectRoutesValidationView,
   ProjectReleaseView,
   ProjectView,
+  ProjectCertificateBindingView,
   SavedConfigurationVersion,
   SystemStatusResponse,
 } from './types'
@@ -59,15 +61,28 @@ function isProject(value: unknown): value is ProjectView {
     isRecord(value) &&
     typeof value.id === 'string' &&
     typeof value.domain === 'string' &&
-    typeof value.status === 'string'
+    typeof value.status === 'string' &&
+    (value.certificate === null ||
+      (isRecord(value.certificate) &&
+        typeof value.certificate.id === 'string' &&
+        typeof value.certificate.name === 'string' &&
+        typeof value.certificate.status === 'string' &&
+        typeof value.certificate.notAfter === 'string' &&
+        value.certificate.runtimeDeploymentStatus === 'unsupported'))
   )
 }
 
 function isProjectRoutesModel(value: unknown): value is ProjectRoutesModel {
   return (
     isRecord(value) &&
-    value.schemaVersion === 2 &&
+    value.schemaVersion === 3 &&
     value.kind === 'project_routes_yaml' &&
+    isRecord(value.networkPolicy) &&
+    (value.networkPolicy.source === 'route' || value.networkPolicy.source === 'project') &&
+    Array.isArray(value.networkPolicy.allowedCidrs) &&
+    value.networkPolicy.allowedCidrs.every((cidr) => typeof cidr === 'string') &&
+    Array.isArray(value.networkPolicy.deniedCidrs) &&
+    value.networkPolicy.deniedCidrs.every((cidr) => typeof cidr === 'string') &&
     Array.isArray(value.routes) &&
     value.routes.every(
       (route) =>
@@ -272,6 +287,101 @@ function isProjectRelease(value: unknown): value is ProjectReleaseView {
     Array.isArray(value.resources) &&
     isRecord(value.publication) &&
     value.activationStatus === 'unknown'
+  )
+}
+
+function isCertificate(value: unknown): value is CertificateView {
+  return (
+    isRecord(value) &&
+    typeof value.id === 'string' &&
+    typeof value.name === 'string' &&
+    typeof value.status === 'string' &&
+    typeof value.subject === 'string' &&
+    typeof value.issuer === 'string' &&
+    typeof value.serialNumber === 'string' &&
+    typeof value.fingerprintSha256 === 'string' &&
+    Array.isArray(value.dnsNames) &&
+    value.dnsNames.every((name) => typeof name === 'string') &&
+    typeof value.notBefore === 'string' &&
+    typeof value.notAfter === 'string' &&
+    typeof value.keyType === 'string' &&
+    typeof value.bindingCount === 'number' &&
+    value.runtimeDeploymentStatus === 'unsupported' &&
+    typeof value.createdAt === 'string'
+  )
+}
+
+function isProjectCertificateBinding(value: unknown): value is ProjectCertificateBindingView {
+  return (
+    isRecord(value) &&
+    typeof value.projectId === 'string' &&
+    typeof value.domain === 'string' &&
+    (value.certificate === null || isCertificate(value.certificate)) &&
+    (value.coverageStatus === 'covered' || value.coverageStatus === 'unbound') &&
+    value.runtimeDeploymentStatus === 'unsupported' &&
+    (value.boundAt === null || typeof value.boundAt === 'string')
+  )
+}
+
+export async function fetchCertificates(signal?: AbortSignal): Promise<readonly CertificateView[]> {
+  const result = await requestJson(
+    '/api/certificates',
+    { signal },
+    (value): value is { items: CertificateView[] } =>
+      isRecord(value) && Array.isArray(value.items) && value.items.every(isCertificate),
+  )
+  return result.items
+}
+
+export async function createCertificate(input: {
+  name: string
+  certificatePem: string
+  privateKeyPem: string
+}): Promise<CertificateView> {
+  return requestJson(
+    '/api/certificates',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    },
+    isCertificate,
+  )
+}
+
+export async function fetchProjectCertificate(
+  projectId: string,
+  signal?: AbortSignal,
+): Promise<ProjectCertificateBindingView> {
+  return requestJson(
+    `/api/projects/${encodeURIComponent(projectId)}/certificate`,
+    { signal },
+    isProjectCertificateBinding,
+  )
+}
+
+export async function bindProjectCertificate(
+  projectId: string,
+  certificateId: string,
+): Promise<ProjectCertificateBindingView> {
+  return requestJson(
+    `/api/projects/${encodeURIComponent(projectId)}/certificate`,
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ certificateId }),
+    },
+    isProjectCertificateBinding,
+  )
+}
+
+export async function unbindProjectCertificate(
+  projectId: string,
+): Promise<ProjectCertificateBindingView> {
+  return requestJson(
+    `/api/projects/${encodeURIComponent(projectId)}/certificate`,
+    { method: 'DELETE' },
+    isProjectCertificateBinding,
   )
 }
 

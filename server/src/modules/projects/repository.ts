@@ -21,6 +21,10 @@ interface ProjectRow extends RowDataPacket {
   current_revision_no: number | null
   draft_lock_version: string | null
   published_revision_no: number | null
+  certificate_public_id: Buffer | null
+  certificate_name: string | null
+  certificate_lifecycle_state: 'active' | 'superseded' | null
+  certificate_not_after: string | null
   created_at: string
   updated_at: string
 }
@@ -34,6 +38,12 @@ export interface ProjectIdentityRow extends RowDataPacket {
 }
 
 function toView(row: ProjectRow): ProjectView {
+  const certificateStatus = (): 'valid' | 'expiring' | 'expired' | 'superseded' => {
+    if (row.certificate_lifecycle_state === 'superseded') return 'superseded'
+    const notAfter = Date.parse(mysqlDateTimeToRfc3339(row.certificate_not_after!))
+    if (notAfter <= Date.now()) return 'expired'
+    return notAfter - Date.now() <= 30 * 24 * 60 * 60 * 1_000 ? 'expiring' : 'valid'
+  }
   return {
     id: bufferToPublicId(row.public_id),
     domain: row.name,
@@ -49,6 +59,15 @@ function toView(row: ProjectRow): ProjectView {
       : null,
     publishedVersion: row.published_revision_no,
     activationStatus: 'unknown',
+    certificate: row.certificate_public_id
+      ? {
+          id: bufferToPublicId(row.certificate_public_id),
+          name: row.certificate_name!,
+          status: certificateStatus(),
+          notAfter: mysqlDateTimeToRfc3339(row.certificate_not_after!),
+          runtimeDeploymentStatus: 'unsupported',
+        }
+      : null,
     createdAt: mysqlDateTimeToRfc3339(row.created_at),
     updatedAt: mysqlDateTimeToRfc3339(row.updated_at),
   }
@@ -70,10 +89,16 @@ const selectProjects = `
       ORDER BY release_record.published_at DESC, release_record.id DESC
       LIMIT 1
     ) AS published_revision_no,
+    cert.public_id AS certificate_public_id,
+    cert.display_name AS certificate_name,
+    cert.lifecycle_state AS certificate_lifecycle_state,
+    cert.not_after AS certificate_not_after,
     p.created_at, p.updated_at
   FROM projects p
   INNER JOIN environments e ON e.id = p.environment_id
   LEFT JOIN drafts d ON d.project_id = p.id AND d.archived_at IS NULL
+  LEFT JOIN certificate_bindings cb ON cb.project_id = p.id AND cb.unbound_at IS NULL
+  LEFT JOIN certificates cert ON cert.id = cb.certificate_id
 `
 
 export class ProjectRepository {

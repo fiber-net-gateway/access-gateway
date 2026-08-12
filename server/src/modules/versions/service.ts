@@ -52,7 +52,7 @@ function parseModel(value: unknown): ProjectRoutesModel {
   if (!isProjectRoutesModel(value)) {
     throw badRequest(
       'INVALID_CONFIGURATION_MODEL',
-      'The configuration does not match project_routes_yaml schema version 2',
+      'The configuration does not match project_routes_yaml schema version 3',
       [{ path: 'model', code: 'INVALID_SCHEMA', message: 'Invalid YAML route model' }],
     )
   }
@@ -66,12 +66,18 @@ function parseSavableModel(domain: string, value: unknown): ProjectRoutesModel {
     const routeIndexes = new Map(model.routes.map((route, index) => [route.id, index]))
     throw badRequest(
       'INVALID_CONFIGURATION_YAML',
-      'The configuration contains invalid YAML routes',
-      result.issues.map((issue) => ({
-        path: `model.routes.${routeIndexes.get(issue.routeId) ?? 0}.source`,
-        code: issue.code,
-        message: `${issue.message} (${issue.line}:${issue.column})`,
-      })),
+      'The configuration contains invalid routes or network policy',
+      result.issues.map((issue) => {
+        const routeIndex = routeIndexes.get(issue.routeId)
+        return {
+          path:
+            routeIndex === undefined
+              ? `model.${issue.path || 'networkPolicy'}`
+              : `model.routes.${routeIndex}.source`,
+          code: issue.code,
+          message: `${issue.message} (${issue.line}:${issue.column})`,
+        }
+      }),
     )
   }
   return model
