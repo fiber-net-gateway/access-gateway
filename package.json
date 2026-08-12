@@ -20,6 +20,8 @@
     "build": "npm run build --workspaces --if-present",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
+    "format:native": "./format_code.sh",
+    "format:native:all": "./format_code.sh -a",
     "demo:init": "./deploy/demo/init-env.sh",
     "demo:up": "docker compose up --build --detach",
     "demo:down": "docker compose down",
@@ -31,6 +33,7 @@
     "test:native": "cmake --build native/build --target fiber_access_server_tests --parallel && ctest --test-dir native/build --output-on-failure -L access-server"
   },
   "devDependencies": {
+    "@polycam/clang-tools": "22.1.8",
     "concurrently": "^10.0.4",
     "prettier": "^3.9.6"
   }

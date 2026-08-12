@@ -133,10 +133,8 @@ TEST(AccessConfigCodecTest, ParsesFullJavaProjectConfiguration) {
 
 TEST(AccessConfigCodecTest, ParsesEveryHttpsHostStrategyPublishedByConsole) {
     const std::vector<std::pair<std::string_view, HttpsStrategy>> cases = {
-            {"S_NOT_MUST", HttpsStrategy::NotRequired},
-            {"S_301", HttpsStrategy::Redirect301},
-            {"S_302", HttpsStrategy::Redirect302},
-            {"S_307", HttpsStrategy::Redirect307},
+            {"S_NOT_MUST", HttpsStrategy::NotRequired}, {"S_301", HttpsStrategy::Redirect301},
+            {"S_302", HttpsStrategy::Redirect302},      {"S_307", HttpsStrategy::Redirect307},
             {"S_308", HttpsStrategy::Redirect308},
     };
 

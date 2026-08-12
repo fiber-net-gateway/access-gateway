@@ -165,6 +165,7 @@ Validate all console workspaces with:
 npm run typecheck
 npm test
 npm run format:check
+npm run format:native
 npm run build
 ```
 
@@ -221,6 +222,10 @@ npm run build:native
 npm run build:native-validator
 npm run test:native
 ```
+
+`npm run format:native` formats changed repository-owned C/C++ files with the pinned Fiber style;
+`npm run format:native:all` formats all repository-owned C/C++ files. Both commands use the
+repository-pinned clang-format 22 development dependency and never modify `third_party/`.
 
 The equivalent CMake commands are:
 

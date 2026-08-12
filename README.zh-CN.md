@@ -152,6 +152,7 @@ Migration 使用 checksum 防篡改，并通过 MySQL advisory lock 串行执行
 npm run typecheck
 npm test
 npm run format:check
+npm run format:native
 npm run build
 ```
 
@@ -204,6 +205,10 @@ npm run build:native
 npm run build:native-validator
 npm run test:native
 ```
+
+`npm run format:native` 使用固定的 Fiber 风格格式化有改动的仓库自有 C/C++ 文件；
+`npm run format:native:all` 格式化全部仓库自有 C/C++ 文件。两者使用仓库锁定的 clang-format 22
+开发依赖，且不会修改 `third_party/`。
 
 等价的 CMake 命令是：
 
