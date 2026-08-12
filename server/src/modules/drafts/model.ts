@@ -12,14 +12,17 @@ export interface RouteItemModel {
   source: string
 }
 
+export type HttpsRedirect = 'off' | '301' | '302' | '307' | '308'
+
 export interface ProjectNetworkPolicy {
   source: 'route' | 'project'
+  httpsRedirect: HttpsRedirect
   allowedCidrs: readonly string[]
   deniedCidrs: readonly string[]
 }
 
 export interface ProjectRoutesModel {
-  schemaVersion: 3
+  schemaVersion: 4
   kind: 'project_routes_yaml'
   networkPolicy: ProjectNetworkPolicy
   routes: readonly RouteItemModel[]
@@ -57,7 +60,7 @@ export function isProjectRoutesModel(value: unknown): value is ProjectRoutesMode
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
   const model = value as Record<string, unknown>
   if (
-    model.schemaVersion !== 3 ||
+    model.schemaVersion !== 4 ||
     model.kind !== 'project_routes_yaml' ||
     typeof model.networkPolicy !== 'object' ||
     model.networkPolicy === null ||
@@ -70,6 +73,7 @@ export function isProjectRoutesModel(value: unknown): value is ProjectRoutesMode
   const networkPolicy = model.networkPolicy as Record<string, unknown>
   if (
     (networkPolicy.source !== 'route' && networkPolicy.source !== 'project') ||
+    !['off', '301', '302', '307', '308'].includes(String(networkPolicy.httpsRedirect)) ||
     !Array.isArray(networkPolicy.allowedCidrs) ||
     !Array.isArray(networkPolicy.deniedCidrs) ||
     networkPolicy.allowedCidrs.length + networkPolicy.deniedCidrs.length > 256 ||
@@ -91,6 +95,33 @@ export function isProjectRoutesModel(value: unknown): value is ProjectRoutesMode
     ids.add(route.id as string)
   }
   return true
+}
+
+interface YamlRoutesV3Model {
+  schemaVersion: 3
+  kind: 'project_routes_yaml'
+  networkPolicy: Omit<ProjectNetworkPolicy, 'httpsRedirect'>
+  routes: readonly RouteItemModel[]
+}
+
+function isYamlRoutesV3Model(value: unknown): value is YamlRoutesV3Model {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const model = value as Record<string, unknown>
+  if (
+    model.schemaVersion !== 3 ||
+    model.kind !== 'project_routes_yaml' ||
+    typeof model.networkPolicy !== 'object' ||
+    model.networkPolicy === null ||
+    Array.isArray(model.networkPolicy)
+  ) {
+    return false
+  }
+  const networkPolicy = model.networkPolicy as Record<string, unknown>
+  return isProjectRoutesModel({
+    ...model,
+    schemaVersion: 4,
+    networkPolicy: { ...networkPolicy, httpsRedirect: 'off' },
+  })
 }
 
 interface LegacyProjectRouteModel {
@@ -155,19 +186,36 @@ function legacyRouteId(route: unknown, index: number): string {
 
 export function normalizeStoredProjectRoutesModel(value: unknown): ProjectRoutesModel | null {
   if (isProjectRoutesModel(value)) return value
+  if (isYamlRoutesV3Model(value)) {
+    return {
+      ...value,
+      schemaVersion: 4,
+      networkPolicy: { ...value.networkPolicy, httpsRedirect: 'off' },
+    }
+  }
   if (isYamlRoutesV2Model(value)) {
     return {
-      schemaVersion: 3,
+      schemaVersion: 4,
       kind: 'project_routes_yaml',
-      networkPolicy: { source: 'route', allowedCidrs: [], deniedCidrs: [] },
+      networkPolicy: {
+        source: 'route',
+        httpsRedirect: 'off',
+        allowedCidrs: [],
+        deniedCidrs: [],
+      },
       routes: value.routes,
     }
   }
   if (!isLegacyProjectRouteModel(value)) return null
   return {
-    schemaVersion: 3,
+    schemaVersion: 4,
     kind: 'project_routes_yaml',
-    networkPolicy: { source: 'route', allowedCidrs: [], deniedCidrs: [] },
+    networkPolicy: {
+      source: 'route',
+      httpsRedirect: 'off',
+      allowedCidrs: [],
+      deniedCidrs: [],
+    },
     routes: value.routes.map((route, index) => ({
       id: legacyRouteId(route, index),
       source: stringify(route, { lineWidth: 0 }).trimEnd(),

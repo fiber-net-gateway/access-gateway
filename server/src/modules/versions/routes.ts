@@ -48,14 +48,15 @@ const projectRoutesModelSchema = {
   additionalProperties: false,
   required: ['schemaVersion', 'kind', 'networkPolicy', 'routes'],
   properties: {
-    schemaVersion: { type: 'integer', const: 3 },
+    schemaVersion: { type: 'integer', const: 4 },
     kind: { type: 'string', const: 'project_routes_yaml' },
     networkPolicy: {
       type: 'object',
       additionalProperties: false,
-      required: ['source', 'allowedCidrs', 'deniedCidrs'],
+      required: ['source', 'httpsRedirect', 'allowedCidrs', 'deniedCidrs'],
       properties: {
         source: { type: 'string', enum: ['route', 'project'] },
+        httpsRedirect: { type: 'string', enum: ['off', '301', '302', '307', '308'] },
         allowedCidrs: {
           type: 'array',
           maxItems: 256,

@@ -79,15 +79,25 @@ function installApiMock() {
     routeCount: 1,
   }
   const model = {
-    schemaVersion: 3,
+    schemaVersion: 4,
     kind: 'project_routes_yaml',
-    networkPolicy: { source: 'route', allowedCidrs: [], deniedCidrs: [] },
+    networkPolicy: {
+      source: 'route',
+      httpsRedirect: 'off',
+      allowedCidrs: [],
+      deniedCidrs: [],
+    },
     routes: [],
   }
   const historicalModel = {
-    schemaVersion: 3,
+    schemaVersion: 4,
     kind: 'project_routes_yaml',
-    networkPolicy: { source: 'route', allowedCidrs: [], deniedCidrs: [] },
+    networkPolicy: {
+      source: 'route',
+      httpsRedirect: 'off',
+      allowedCidrs: [],
+      deniedCidrs: [],
+    },
     routes: [{ id: routeId, source: 'path: /historical\ntype: RESPONSE\nstatus: 200' }],
   }
   const certificate = {
@@ -349,7 +359,7 @@ describe('application routes', () => {
     expect(screen.queryByRole('dialog', { name: '保存为配置版本' })).toBeNull()
   })
 
-  test('saves a Project-owned CIDR policy as a new immutable configuration version', async () => {
+  test('saves HTTPS redirect and Project-owned CIDRs as one immutable version', async () => {
     const fetchMock = installApiMock()
     const router = createMemoryRouter(appRoutes, {
       initialEntries: [`/projects/${projectId}/network-policy`],
@@ -358,6 +368,8 @@ describe('application routes', () => {
     render(<RouterProvider router={router} />)
 
     await screen.findByRole('heading', { name: 'Network Policy' })
+    await user.click(screen.getByRole('checkbox', { name: /强制 HTTPS/u }))
+    await user.selectOptions(screen.getByRole('combobox', { name: /重定向状态码/u }), '307')
     await user.click(screen.getByRole('radio', { name: /Project 统一强制/u }))
     await user.type(screen.getByLabelText(/允许 CIDR/u), '10.0.0.0/8')
     await user.type(screen.getByLabelText(/拒绝 CIDR/u), '10.1.0.0/16')
@@ -373,6 +385,7 @@ describe('application routes', () => {
         model: {
           networkPolicy: {
             source: string
+            httpsRedirect: string
             allowedCidrs: string[]
             deniedCidrs: string[]
           }
@@ -380,6 +393,7 @@ describe('application routes', () => {
       }
       expect(body.model.networkPolicy).toEqual({
         source: 'project',
+        httpsRedirect: '307',
         allowedCidrs: ['10.0.0.0/8'],
         deniedCidrs: ['10.1.0.0/16'],
       })

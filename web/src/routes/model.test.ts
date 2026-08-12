@@ -10,9 +10,14 @@ import {
 
 test('creates an empty ordered YAML route model', () => {
   assert.deepEqual(initialRouteModel(), {
-    schemaVersion: 3,
+    schemaVersion: 4,
     kind: 'project_routes_yaml',
-    networkPolicy: { source: 'route', allowedCidrs: [], deniedCidrs: [] },
+    networkPolicy: {
+      source: 'route',
+      httpsRedirect: 'off',
+      allowedCidrs: [],
+      deniedCidrs: [],
+    },
     routes: [],
   })
 })

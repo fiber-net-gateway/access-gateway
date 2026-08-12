@@ -7,6 +7,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "config/AccessConfigCodec.h"
@@ -128,6 +129,33 @@ TEST(AccessConfigCodecTest, ParsesFullJavaProjectConfiguration) {
     EXPECT_EQ(*response.body->type, BodyType::Text);
     ASSERT_TRUE(response.body->content);
     EXPECT_EQ(*response.body->content, "ok");
+}
+
+TEST(AccessConfigCodecTest, ParsesEveryHttpsHostStrategyPublishedByConsole) {
+    const std::vector<std::pair<std::string_view, HttpsStrategy>> cases = {
+            {"S_NOT_MUST", HttpsStrategy::NotRequired},
+            {"S_301", HttpsStrategy::Redirect301},
+            {"S_302", HttpsStrategy::Redirect302},
+            {"S_307", HttpsStrategy::Redirect307},
+            {"S_308", HttpsStrategy::Redirect308},
+    };
+
+    for (const auto &[wire_value, expected]: cases) {
+        SCOPED_TRACE(wire_value);
+        std::string input = R"({"host":{"api.example.com":{"https":")";
+        input.append(wire_value);
+        input.append(R"("}},"routes":[]})");
+
+        auto result = parse_project_config(input);
+
+        ASSERT_TRUE(result) << result.error().message;
+        ASSERT_TRUE(*result);
+        const HostConfigEntry *host = find_host(**result, "api.example.com");
+        ASSERT_NE(host, nullptr);
+        ASSERT_TRUE(host->strategy);
+        ASSERT_TRUE(host->strategy->https);
+        EXPECT_EQ(*host->strategy->https, expected);
+    }
 }
 
 TEST(AccessConfigCodecTest, PreservesObservedJacksonCoercionsAndLastWinsFields) {

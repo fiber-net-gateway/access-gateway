@@ -17,7 +17,7 @@ export function useProjectContext(): ProjectContextValue {
 
 const projectNavigation = [
   { path: 'routes', label: 'Routes', detail: '编辑与校验' },
-  { path: 'network-policy', label: 'Network Policy', detail: 'CIDR 访问控制' },
+  { path: 'network-policy', label: 'Network Policy', detail: 'HTTPS 与 CIDR 策略' },
   { path: 'versions', label: 'Versions', detail: '不可变配置' },
   { path: 'releases', label: 'Releases', detail: 'rnacos 发布' },
   { path: 'settings', label: 'Settings', detail: '暂不可用' },
