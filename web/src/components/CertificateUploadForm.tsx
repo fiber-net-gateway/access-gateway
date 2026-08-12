@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react'
 
-import { createCertificate, createCertificateVersion } from '../api/client'
+import { ApiClientError, createCertificate, createCertificateVersion } from '../api/client'
 import type { CertificateView } from '../api/types'
 
 interface CertificateUploadFormProps {
@@ -32,13 +32,36 @@ export function CertificateUploadForm({
     setSubmitting(true)
     setErrorMessage(null)
     try {
-      const saved = certificate
-        ? await createCertificateVersion(certificate.id, {
+      let saved: CertificateView
+      if (certificate) {
+        try {
+          saved = await createCertificateVersion(certificate.id, {
             certificatePem,
             privateKeyPem,
             lockVersion: certificate.lockVersion,
           })
-        : await createCertificate({ name, certificatePem, privateKeyPem })
+        } catch (error) {
+          if (
+            !(error instanceof ApiClientError) ||
+            error.code !== 'CERTIFICATE_SNI_COVERAGE_CONFIRMATION_REQUIRED'
+          ) {
+            throw error
+          }
+          const changes = error.fields.map((field) => field.message).join('\n')
+          const confirmed = window.confirm(
+            `新证书会改变自动 SNI 覆盖范围：\n\n${changes}\n\n确认继续更新？`,
+          )
+          if (!confirmed) return
+          saved = await createCertificateVersion(certificate.id, {
+            certificatePem,
+            privateKeyPem,
+            lockVersion: certificate.lockVersion,
+            confirmSniCoverageChange: true,
+          })
+        }
+      } else {
+        saved = await createCertificate({ name, certificatePem, privateKeyPem })
+      }
       if (!certificate) setName('')
       setCertificatePem('')
       setPrivateKeyPem('')
@@ -100,8 +123,8 @@ export function CertificateUploadForm({
       <div className="form-actions">
         <span>
           {certificate
-            ? '新版本必须继续覆盖该逻辑证书管理的全部域名。'
-            : '首个版本的 DNS SAN 将成为稳定的自动匹配范围。'}
+            ? 'DNS SAN 不变时直接续期；范围变化时需要确认影响后原子更新。'
+            : 'leaf 证书的 DNS SAN 会自动成为 ClientHello SNI 选择范围。'}
         </span>
         <button className="button-primary" disabled={submitting} type="submit">
           {submitting ? '校验并上传中…' : submitLabel}

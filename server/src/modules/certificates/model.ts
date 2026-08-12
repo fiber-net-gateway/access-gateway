@@ -19,22 +19,11 @@ export interface CertificateView {
   id: string
   name: string
   lockVersion: string
-  managedDnsNames: readonly string[]
   currentVersion: CertificateVersionView
   versionCount: number
-  matchedProjectCount: number
   runtimeDeploymentStatus: 'unsupported'
   createdAt: string
   updatedAt: string
-}
-
-export interface ProjectCertificateResolutionView {
-  projectId: string
-  domain: string
-  resolutionStatus: 'matched' | 'uncovered' | 'conflict'
-  certificate: CertificateView | null
-  matches: readonly CertificateView[]
-  runtimeDeploymentStatus: 'unsupported'
 }
 
 export interface CreateCertificateInput {
@@ -46,6 +35,7 @@ export interface CreateCertificateInput {
 export interface CreateCertificateVersionInput {
   certificatePem: string
   privateKeyPem: string
+  confirmSniCoverageChange?: boolean
 }
 
 export interface CertificateListResult {

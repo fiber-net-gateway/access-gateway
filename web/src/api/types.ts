@@ -38,15 +38,6 @@ export interface ProjectView {
   } | null
   publishedVersion: number | null
   activationStatus: 'unknown'
-  certificateResolutionStatus: 'matched' | 'uncovered' | 'conflict'
-  certificate: {
-    id: string
-    name: string
-    version: number
-    status: 'valid' | 'expiring' | 'expired' | 'superseded'
-    notAfter: string
-    runtimeDeploymentStatus: 'unsupported'
-  } | null
 }
 
 export interface RouteItemModel {
@@ -194,20 +185,28 @@ export interface CertificateView {
   id: string
   name: string
   lockVersion: string
-  managedDnsNames: readonly string[]
   currentVersion: CertificateVersionView
   versionCount: number
-  matchedProjectCount: number
   runtimeDeploymentStatus: 'unsupported'
   createdAt: string
   updatedAt: string
 }
 
-export interface ProjectCertificateResolutionView {
-  projectId: string
-  domain: string
+export interface TlsSniCertificateSummary {
+  id: string
+  name: string
+  version: number
+  status: CertificateFactStatus
+  notAfter: string
+  fingerprintSha256: string
+  runtimeDeploymentStatus: 'unsupported'
+}
+
+export interface TlsSniResolutionView {
+  serverName: string
   resolutionStatus: 'matched' | 'uncovered' | 'conflict'
-  certificate: CertificateView | null
-  matches: readonly CertificateView[]
+  matchKind: 'exact' | 'wildcard' | null
+  certificate: TlsSniCertificateSummary | null
+  matches: readonly TlsSniCertificateSummary[]
   runtimeDeploymentStatus: 'unsupported'
 }

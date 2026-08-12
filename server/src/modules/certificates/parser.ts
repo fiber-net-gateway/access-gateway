@@ -193,22 +193,3 @@ export function certificateCoversDomain(dnsNames: readonly string[], domain: str
     )
   })
 }
-
-export function certificateCoversManagedName(
-  dnsNames: readonly string[],
-  managedDnsName: string,
-): boolean {
-  if (managedDnsName.startsWith('*.')) {
-    return dnsNames.includes(managedDnsName)
-  }
-  return certificateCoversDomain(dnsNames, managedDnsName)
-}
-
-export function missingManagedDnsNames(
-  dnsNames: readonly string[],
-  managedDnsNames: readonly string[],
-): readonly string[] {
-  return managedDnsNames.filter(
-    (managedDnsName) => !certificateCoversManagedName(dnsNames, managedDnsName),
-  )
-}

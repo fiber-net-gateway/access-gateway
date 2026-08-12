@@ -33,6 +33,8 @@ import { DefaultProjectService, UnavailableProjectService } from './modules/proj
 import { ReleaseRepository } from './modules/releases/repository.js'
 import { DefaultReleaseService, UnavailableReleaseService } from './modules/releases/service.js'
 import { DefaultSystemStatusService } from './modules/system/service.js'
+import { TlsSniRepository } from './modules/tls/repository.js'
+import { DefaultTlsSniService, UnavailableTlsSniService } from './modules/tls/service.js'
 import { ConfigurationVersionRepository } from './modules/versions/repository.js'
 import {
   DefaultConfigurationVersionService,
@@ -105,6 +107,7 @@ function unavailableServices(
       config.nativeValidator.path !== null,
       config.publication.enabled,
     ),
+    tlsSni: new UnavailableTlsSniService(),
   }
 }
 
@@ -152,9 +155,10 @@ export async function createApplicationRuntime(config: ServerConfig): Promise<Ap
       : new UnavailableNacosClient()
     const releases = new ReleaseRepository(pool, documents)
     const certificates = new CertificateRepository(pool, documents)
+    const tlsSni = new TlsSniRepository(pool)
     const services: ApplicationServices = {
       auth,
-      certificates: new DefaultCertificateService(certificates, projects, environments),
+      certificates: new DefaultCertificateService(certificates, environments),
       environments: new DefaultEnvironmentService(environments),
       projects: new DefaultProjectService(projects, environments),
       drafts: new DefaultDraftService(drafts, projects, environments, validator),
@@ -175,6 +179,7 @@ export async function createApplicationRuntime(config: ServerConfig): Promise<Ap
         config.nativeValidator.path !== null,
         config.publication.enabled,
       ),
+      tlsSni: new DefaultTlsSniService(tlsSni, environments),
     }
     return {
       services,

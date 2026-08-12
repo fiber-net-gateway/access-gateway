@@ -15,6 +15,8 @@ import { registerReleaseRoutes } from './modules/releases/routes.js'
 import { UnavailableReleaseService } from './modules/releases/service.js'
 import { registerSystemRoutes } from './modules/system/routes.js'
 import { DefaultSystemStatusService } from './modules/system/service.js'
+import { registerTlsSniRoutes } from './modules/tls/routes.js'
+import { UnavailableTlsSniService } from './modules/tls/service.js'
 import { registerConfigurationVersionRoutes } from './modules/versions/routes.js'
 import { UnavailableConfigurationVersionService } from './modules/versions/service.js'
 import type { ApplicationServices } from './services.js'
@@ -87,6 +89,7 @@ export function buildApp(options: BuildAppOptions = {}) {
 
   registerSystemRoutes(app, services.system)
   registerCertificateRoutes(app, services.auth, services.certificates)
+  registerTlsSniRoutes(app, services.auth, services.tlsSni)
   registerEnvironmentRoutes(app, services.auth, services.environments)
   registerProjectRoutes(app, services.auth, services.projects)
   registerDraftRoutes(app, services.auth, services.drafts)
@@ -169,5 +172,6 @@ function createUnavailableServices(): ApplicationServices {
     versions: new UnavailableConfigurationVersionService(),
     releases: new UnavailableReleaseService(),
     system: new DefaultSystemStatusService(null, auth, validator),
+    tlsSni: new UnavailableTlsSniService(),
   }
 }

@@ -84,6 +84,13 @@ test('readiness and persistent APIs fail closed when MySQL is unconfigured', asy
   const certificates = await app.inject({ method: 'GET', url: '/api/certificates' })
   assert.equal(certificates.statusCode, 503)
   assert.equal(certificates.json().error.code, 'DATABASE_UNCONFIGURED')
+
+  const sniResolution = await app.inject({
+    method: 'GET',
+    url: '/api/tls/sni-resolution?serverName=api.example.com',
+  })
+  assert.equal(sniResolution.statusCode, 503)
+  assert.equal(sniResolution.json().error.code, 'DATABASE_UNCONFIGURED')
 })
 
 test('YAML route APIs accept schema v3 and reject the legacy whole-project request shape', async (context) => {

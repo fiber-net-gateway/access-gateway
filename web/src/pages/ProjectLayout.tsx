@@ -19,7 +19,6 @@ const projectNavigation = [
   { path: 'routes', label: 'Routes', detail: '编辑与校验' },
   { path: 'network-policy', label: 'Network Policy', detail: 'CIDR 访问控制' },
   { path: 'versions', label: 'Versions', detail: '不可变配置' },
-  { path: 'certificate', label: 'Certificate', detail: '自动域名匹配' },
   { path: 'releases', label: 'Releases', detail: 'rnacos 发布' },
   { path: 'settings', label: 'Settings', detail: '暂不可用' },
 ]
@@ -96,14 +95,6 @@ export function ProjectLayout() {
               {project.publishedVersion ? `V${project.publishedVersion}` : '尚未发布'}
             </span>
             <span>实例激活：未知</span>
-            <span>
-              证书：
-              {project.certificate
-                ? `${project.certificate.name} V${project.certificate.version} / 运行时未接入`
-                : project.certificateResolutionStatus === 'conflict'
-                  ? '匹配冲突'
-                  : '未覆盖'}
-            </span>
           </div>
         </div>
         <Link className="button-secondary inline-button-link" to="/projects">

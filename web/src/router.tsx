@@ -4,7 +4,6 @@ import App from './App'
 import { CertificatesPage } from './pages/CertificatesPage'
 import { NotFoundPage } from './pages/NotFoundPage'
 import { ProjectLayout } from './pages/ProjectLayout'
-import { ProjectCertificatePage } from './pages/ProjectCertificatePage'
 import { ProjectNetworkPolicyPage } from './pages/ProjectNetworkPolicyPage'
 import { ProjectReleasesPage } from './pages/ProjectReleasesPage'
 import { ProjectRoutesPage } from './pages/ProjectRoutesPage'
@@ -31,7 +30,6 @@ export const appRoutes = [
               { path: 'routes', element: <ProjectRoutesPage /> },
               { path: 'versions', element: <ProjectVersionsPage /> },
               { path: 'network-policy', element: <ProjectNetworkPolicyPage /> },
-              { path: 'certificate', element: <ProjectCertificatePage /> },
               { path: 'releases', element: <ProjectReleasesPage /> },
               { path: 'settings', element: <ProjectUnavailablePage capability="settings" /> },
             ],

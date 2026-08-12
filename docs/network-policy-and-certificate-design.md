@@ -1,6 +1,6 @@
 # 网络策略与证书配置需求及详细设计
 
-- 状态：Implemented v2（控制面 P0）
+- 状态：Implemented v4（控制面 P0）
 - 日期：2026-08-12
 - 适用范围：`server/`、`web/`、配置版本编译器和既有 native `allows` 兼容能力
 - 明确未完成：逐域名 SNI 证书热更新、证书安全交付、逐实例证书/配置激活证据
@@ -11,14 +11,16 @@
 
 1. 在 Project 中配置可版本化的 CIDR 网络访问策略，并确定性编译到现有 route wire
    `allows` 字段；
-2. 上传、校验和加密保存 TLS 证书链/私钥，以稳定逻辑证书管理不可变版本，并根据 Project
-   domain 和逻辑证书的 DNS 选择范围自动解析证书。
+2. 上传、校验和加密保存 TLS 证书链/私钥，以稳定逻辑证书管理不可变版本，并根据当前 leaf
+   证书的 DNS SAN 自动生成 ClientHello SNI 选择索引。
 
 网络策略属于 Route 配置事实，必须随 Configuration Version 冻结，历史版本发布时使用历史策略，
 不能在 Release 创建时读取一个会漂移的 Project 当前设置。证书具有独立于 Route/rnacos 的安全
-生命周期：自动解析关系不进入 route payload，私钥绝不通过 rnacos 分发。
+生命周期：SAN 派生索引不属于 Project、不进入 route payload，私钥绝不通过 rnacos 分发。TLS
+握手阶段使用 ClientHello SNI 选择证书；HTTP header 完整后才使用 Host 或 `:authority` 选择
+Project，两个输入允许不同且不得在控制面中隐式绑定。
 
-本次不增加 access-server 动态 SNI 能力。因此 UI 必须分别显示“域名已自动匹配”和
+本次不增加 access-server 动态 SNI 能力。因此 UI 只能把解析结果标记为控制面配置，并显示
 “运行时部署未接入”，不能显示“已部署”或“已激活”。配置保存、Release Published 和实例 Active
 继续是三个不同事实。
 
@@ -52,18 +54,26 @@
 | CON-CERT-003 | P0     | exact SAN 精确匹配；`*.example.com` 只覆盖一层子域名                             |
 | CON-CERT-004 | P0     | 证书链与私钥分别 envelope-encrypted；API 永不返回 PEM、文档 ID 或密钥定位信息    |
 | CON-CERT-005 | P0     | 逻辑证书具有稳定 ID 和名称；其 PEM/私钥版本不可变，并以环境内 SHA-256 指纹去重   |
-| CON-CERT-006 | P0     | 首个版本的 DNS SAN 冻结为逻辑证书的 managed DNS 范围，普通续期不得删除该范围     |
-| CON-CERT-007 | P0     | Project 按 domain 自动选择：exact 优先，wildcard 仅覆盖一层子域名                |
-| CON-CERT-008 | P0     | 同优先级出现多个候选时返回 conflict，不按上传时间、有效期或数据库顺序任意选择    |
-| CON-CERT-009 | P0     | 更新逻辑证书创建新版本并原子切换 current version，所有匹配 Project 自动跟随      |
+| CON-CERT-006 | P0     | 当前 leaf DNS SAN 自动形成只读 SNI selector；不维护第二套人工绑定                |
+| CON-CERT-007 | P0     | ClientHello SNI 按 exact 优先、单层 wildcard selector 选择逻辑证书               |
+| CON-CERT-008 | P0     | 环境内相同 SAN selector 只能属于一个活动逻辑证书；冲突时整个写事务失败           |
+| CON-CERT-009 | P0     | 更新创建新版本并原子切换 current version 和 SAN 索引；范围变化必须显式确认       |
 | CON-CERT-010 | P0     | 事实状态区分 valid、30 天内 expiring、expired、superseded 和 runtime unsupported |
 | CON-CERT-011 | P0     | 创建逻辑证书和新增版本写入脱敏审计，审计不保存 PEM 或私钥                        |
 | CON-CERT-012 | P1     | 专用双向鉴权交付通道向逐域名 SNI store 原子热更新，并收集实例指纹证据            |
+| CON-CERT-013 | P0     | 证书内容校验不使用业务流量灰度；运行时部署灰度与证书是否合法是两个独立问题       |
 
 上传不接受尚未生效或已经过期的证书；当前版本随时间可变为 `expiring`/`expired`。续期在同一
 逻辑证书下创建新版本，旧版本标记为 `superseded` 并保留指纹与审计。新版本可以包含额外 SAN，
-但额外 SAN 不会静默扩大 managed DNS 范围；修改选择范围应作为独立、带影响预览的后续操作。
-私钥销毁期限仍需在运行时交付设计中确定。
+当前版本 DNS SAN 是控制面的权威 SNI 范围。普通续期 SAN 不变时直接切换；如果增加或删除 SAN，
+API 返回影响明细并要求 `confirmSniCoverageChange=true` 后才能原子更新。私钥销毁期限仍需在运行时
+交付设计中确定。
+
+上述上传校验能在接收证书时确定 PEM 可解析、所提供链条的相邻签名关系、leaf/key 匹配、当时的
+有效期和 DNS SAN，不依赖真实业务流量。到期状态仍随时间推进，必须持续计算和提醒；公共 CA 信任、
+吊销状态或企业私有信任策略也不能仅由这组本地检查证明，后续交付设计应定义独立的 trust policy。
+证书内容不做按请求灰度；未来若为降低运行时发布风险进行实例批次部署，应作为 deployment rollout
+记录和验证，不能反向改变证书版本或 SAN selector 的事实状态。
 
 ## 3. 配置模型与编译
 
@@ -95,47 +105,50 @@ Configuration Version 模型升级为 schema v3：
 切换到 Project 策略不自动删除 YAML 中的 `allows`，而是 fail closed 并要求用户确认修改对应
 Route。这样不会因 UI 切换静默放宽或覆盖已有策略。
 
-## 4. 证书存储、自动解析与 API
+## 4. 证书存储、SNI 解析与 API
 
 Migration `0006_network_policies_and_certificates` 最初新增不可变证书和 Project 绑定。
-Migration `0007_certificate_series_and_automatic_resolution` 在不改写既有密文和审计的前提下升级为：
+Migration `0007_certificate_series_and_automatic_resolution` 在不改写既有密文和审计的前提下引入：
 
-- `certificate_series`：稳定逻辑证书、名称、managed DNS 范围和当前版本；
+- `certificate_series`：稳定逻辑证书、名称、当前版本和乐观锁；
 - `certificates`：不可变版本、公有元数据、证书链/私钥加密文档外键、版本号和事实生命周期；
-- `certificate_dns_names`：预编译 exact/wildcard 选择器，供列表和 Project 解析使用；
+- `certificate_dns_names`：最初由证书 SAN 自动产生的 exact/wildcard 选择器；
 - `certificate_bindings`：只保留迁移前的历史证据；新代码不再读取或写入。
 
-升级时每个既有证书成为一个逻辑证书的 V1，并复用原证书 public ID 作为逻辑证书 ID。若历史数据
-中多个证书声明同一选择器，迁移不猜测所有权；Project 返回 `conflict`，由管理员处理后才能形成
-唯一选择。
+Migration `0008_tls_sni_rules` 曾为 `certificate_dns_names` 增加显式规则元数据。为保持已经执行的
+checksum 历史不变，Migration `0009_certificate_san_selectors` 新建
+`certificate_san_selectors`，从每个逻辑证书当前版本的 DNS SAN 重建只读 selector，并以
+`(environment_id, dns_name)` 唯一约束拒绝歧义。`certificate_dns_names` 自此只作为兼容历史保留，
+新代码不再读取或写入。
 
 证书链与私钥分别写入 `config_documents`，purpose 为 `certificate_chain` 和
 `certificate_private_key`。上传事务、元数据和审计要么全部提交，要么全部回滚。服务端只在解析
 与加密所需的短生命周期内持有 PEM；没有私钥读取或下载 API。
 
-| Method | Path                                        | 权限             | 行为                                   |
-| ------ | ------------------------------------------- | ---------------- | -------------------------------------- |
-| GET    | `/api/certificates`                         | read             | 返回逻辑证书及当前版本                 |
-| POST   | `/api/certificates`                         | admin/maintainer | 以首个不可变版本创建逻辑证书           |
-| GET    | `/api/certificates/:certificateId/versions` | read             | 返回不可变版本历史                     |
-| POST   | `/api/certificates/:certificateId/versions` | admin/maintainer | 校验覆盖范围并更新当前版本             |
-| GET    | `/api/projects/:projectId/certificate`      | read             | 返回自动解析结果和 runtime unsupported |
+| Method | Path                                        | 权限             | 行为                                |
+| ------ | ------------------------------------------- | ---------------- | ----------------------------------- |
+| GET    | `/api/certificates`                         | read             | 返回独立逻辑证书及当前版本          |
+| POST   | `/api/certificates`                         | admin/maintainer | 创建 V1 并自动生成 SAN selector     |
+| GET    | `/api/certificates/:certificateId/versions` | read             | 返回不可变版本历史                  |
+| POST   | `/api/certificates/:certificateId/versions` | admin/maintainer | 原子更新版本和 SAN selector         |
+| GET    | `/api/tls/sni-resolution?serverName=...`    | read             | 预览 ClientHello SNI 控制面解析结果 |
 
-新增版本请求必须用 `If-Match: "<lockVersion>"` 提交逻辑证书当前锁版本。服务端在事务内锁定
-逻辑证书并比较版本，成功后原子递增锁；并发更新返回 `409 CERTIFICATE_VERSION_CONFLICT`，客户端
-必须重新读取当前版本后再决定是否续期。
+新增版本请求必须用 `If-Match: "<lockVersion>"` 提交逻辑证书当前锁版本。证书创建和版本更新都先
+锁定环境，再锁定目标对象，并在同一事务内检查 selector 唯一性、写入不可变版本、替换 SAN 索引和
+切换 current version。锁冲突返回 409，客户端必须重新读取后再决定。
 
 稳定业务错误包括 `INVALID_CERTIFICATE`、`CERTIFICATE_ALREADY_EXISTS`、
-`CERTIFICATE_DNS_NAME_CONFLICT`、`CERTIFICATE_MANAGED_NAMES_NOT_COVERED` 和
-`CERTIFICATE_VERSION_CONFLICT`。请求 schema、Fastify 错误与日志不得回显 body。跨 workspace
-或无权对象继续返回 404，防止枚举。
+`CERTIFICATE_VERSION_CONFLICT`、`CERTIFICATE_SNI_NAME_CONFLICT` 和
+`CERTIFICATE_SNI_COVERAGE_CONFIRMATION_REQUIRED`。请求 schema、Fastify 错误与日志不得回显
+body。跨 workspace 或无权对象继续返回 404，防止枚举。
 
 ## 5. Web 交互
 
-- 顶层 Certificates 页面展示逻辑证书、managed DNS 范围、当前版本、历史版本数、自动匹配的
-  Project 数和运行时未接入状态，并提供新建及版本更新入口。
-- Project / Certificate 页面只读展示 exact/wildcard 自动解析结果、当前版本、有效期、指纹以及
-  uncovered/conflict；不再提供绑定和解绑操作。
+- 顶层 TLS 页面展示独立逻辑证书、当前版本 DNS SAN、当前/历史版本和运行时未接入状态，并提供
+  新建及版本更新入口。
+- 同一页面提供只读 SNI 解析预览，不提供规则创建、切换或删除。SAN 范围变化时展示新增/停止覆盖
+  的域名并要求确认。
+- Project 列表、详情 DTO、导航和页面不再包含证书字段或证书入口。
 - Project / Network Policy 页面编辑策略所有权、允许/拒绝 CIDR 和版本说明；保存复用
   Configuration Version 乐观锁与幂等写入，并阻止有未保存修改时离开。
 - 私钥输入成功后立即从 React state 清空；页面、响应、列表和错误中都不显示私钥。
@@ -146,7 +159,8 @@ Migration `0007_certificate_series_and_automatic_resolution` 在不改写既有�
 - PEM、私钥和 CIDR 都是不可信输入；解析失败 fail closed，不调用 shell/OpenSSL，不发出网络请求。
 - 证书 fingerprint 是公有标识，不代替私钥保密；数据库备份必须和 KEK 分权保护。
 - 当前本地 KEK 实现仍是部署级能力；生产应接入 Secret Provider、轮换和销毁证明。
-- 逻辑证书创建或版本更新不创建 Release，不写 rnacos，也不证明任何 access-server 已加载证书。
+- 逻辑证书创建或版本更新不创建 Release，不写 rnacos，也不证明任何
+  access-server 已加载证书。
 - 动态 SNI 需要 native 的不可变证书快照、原子替换、失败保留旧证书、有界安全 API、逐实例
   fingerprint 回执和有序关闭；该工作必须单独完成 native/Console/部署测试矩阵。
 - 网络策略仍受当前 `X-Real-Ip` Java 兼容语义约束。可信代理边界、直接连接行为和 header
@@ -160,10 +174,11 @@ Migration `0007_certificate_series_and_automatic_resolution` 在不改写既有�
 - Project 策略注入每条 Route、deny 编译、无效/重复 CIDR、Route 冲突；
 - Native Validator 对最终 wire payload 的既有 CIDR 校验；
 - PEM/key 匹配、mismatch、过期拒绝、exact 优先和单层 wildcard；
-- 新版本保留全部 managed DNS 范围，更新一次后所有 Project 解析到同一新版本；
-- 同优先级历史选择器冲突 fail closed，不按顺序选择；
+- 相同 SAN 续期直接成功；SAN 范围变化未确认时失败且旧版本、旧索引保持不变；
+- SNI exact 优先于单层 wildcard，重复 selector fail closed，不按顺序选择；
 - 私钥不出现在响应模型、审计 summary 或 rnacos payload；
-- Web 保存网络策略时创建新版本；证书页面把自动解析与 runtime unsupported 分开显示。
+- Web 保存网络策略时创建新版本；TLS 页面把控制面 SNI 解析与 runtime unsupported 分开显示，
+  Project 页面没有证书耦合。
 
 本增量的 TypeScript 变更必须执行 `npm run typecheck`、`npm test`、`npm run format:check` 和
 `npm run build`。由于未改变 native wire codec/runtime，本次不以控制面测试宣称生产兼容；生产脚本

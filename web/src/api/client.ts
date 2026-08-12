@@ -9,20 +9,34 @@ import type {
   ProjectRoutesValidationView,
   ProjectReleaseView,
   ProjectView,
-  ProjectCertificateResolutionView,
   SavedConfigurationVersion,
   SystemStatusResponse,
+  TlsSniCertificateSummary,
+  TlsSniResolutionView,
 } from './types'
+
+export interface ApiClientErrorField {
+  path: string
+  code: string
+  message: string
+}
 
 export class ApiClientError extends Error {
   readonly status: number
   readonly code: string
+  readonly fields: readonly ApiClientErrorField[]
 
-  constructor(message: string, status: number, code: string) {
+  constructor(
+    message: string,
+    status: number,
+    code: string,
+    fields: readonly ApiClientErrorField[] = [],
+  ) {
     super(message)
     this.name = 'ApiClientError'
     this.status = status
     this.code = code
+    this.fields = fields
   }
 }
 
@@ -62,16 +76,7 @@ function isProject(value: unknown): value is ProjectView {
     isRecord(value) &&
     typeof value.id === 'string' &&
     typeof value.domain === 'string' &&
-    typeof value.status === 'string' &&
-    typeof value.certificateResolutionStatus === 'string' &&
-    (value.certificate === null ||
-      (isRecord(value.certificate) &&
-        typeof value.certificate.id === 'string' &&
-        typeof value.certificate.name === 'string' &&
-        typeof value.certificate.version === 'number' &&
-        typeof value.certificate.status === 'string' &&
-        typeof value.certificate.notAfter === 'string' &&
-        value.certificate.runtimeDeploymentStatus === 'unsupported'))
+    typeof value.status === 'string'
   )
 }
 
@@ -119,6 +124,17 @@ function apiErrorCode(value: unknown): string {
     : 'API_ERROR'
 }
 
+function apiErrorFields(value: unknown): readonly ApiClientErrorField[] {
+  if (!isRecord(value) || !isRecord(value.error) || !Array.isArray(value.error.fields)) return []
+  return value.error.fields.filter(
+    (field): field is ApiClientErrorField =>
+      isRecord(field) &&
+      typeof field.path === 'string' &&
+      typeof field.code === 'string' &&
+      typeof field.message === 'string',
+  )
+}
+
 async function requestJson<T>(
   path: string,
   init: RequestInit,
@@ -136,6 +152,7 @@ async function requestJson<T>(
       apiErrorMessage(body, response.status),
       response.status,
       apiErrorCode(body),
+      apiErrorFields(body),
     )
   }
   if (!validate(body)) {
@@ -318,28 +335,38 @@ function isCertificate(value: unknown): value is CertificateView {
     typeof value.id === 'string' &&
     typeof value.name === 'string' &&
     typeof value.lockVersion === 'string' &&
-    Array.isArray(value.managedDnsNames) &&
-    value.managedDnsNames.every((name) => typeof name === 'string') &&
     isCertificateVersion(value.currentVersion) &&
     typeof value.versionCount === 'number' &&
-    typeof value.matchedProjectCount === 'number' &&
     value.runtimeDeploymentStatus === 'unsupported' &&
     typeof value.createdAt === 'string' &&
     typeof value.updatedAt === 'string'
   )
 }
 
-function isProjectCertificateResolution(value: unknown): value is ProjectCertificateResolutionView {
+function isTlsSniCertificateSummary(value: unknown): value is TlsSniCertificateSummary {
   return (
     isRecord(value) &&
-    typeof value.projectId === 'string' &&
-    typeof value.domain === 'string' &&
+    typeof value.id === 'string' &&
+    typeof value.name === 'string' &&
+    typeof value.version === 'number' &&
+    typeof value.status === 'string' &&
+    typeof value.notAfter === 'string' &&
+    typeof value.fingerprintSha256 === 'string' &&
+    value.runtimeDeploymentStatus === 'unsupported'
+  )
+}
+
+function isTlsSniResolution(value: unknown): value is TlsSniResolutionView {
+  return (
+    isRecord(value) &&
+    typeof value.serverName === 'string' &&
     (value.resolutionStatus === 'matched' ||
       value.resolutionStatus === 'uncovered' ||
       value.resolutionStatus === 'conflict') &&
-    (value.certificate === null || isCertificate(value.certificate)) &&
+    (value.matchKind === null || value.matchKind === 'exact' || value.matchKind === 'wildcard') &&
+    (value.certificate === null || isTlsSniCertificateSummary(value.certificate)) &&
     Array.isArray(value.matches) &&
-    value.matches.every(isCertificate) &&
+    value.matches.every(isTlsSniCertificateSummary) &&
     value.runtimeDeploymentStatus === 'unsupported'
   )
 }
@@ -372,7 +399,12 @@ export async function createCertificate(input: {
 
 export async function createCertificateVersion(
   certificateId: string,
-  input: { certificatePem: string; privateKeyPem: string; lockVersion: string },
+  input: {
+    certificatePem: string
+    privateKeyPem: string
+    lockVersion: string
+    confirmSniCoverageChange?: boolean
+  },
 ): Promise<CertificateView> {
   return requestJson(
     `/api/certificates/${encodeURIComponent(certificateId)}/versions`,
@@ -385,6 +417,7 @@ export async function createCertificateVersion(
       body: JSON.stringify({
         certificatePem: input.certificatePem,
         privateKeyPem: input.privateKeyPem,
+        ...(input.confirmSniCoverageChange ? { confirmSniCoverageChange: true } : {}),
       }),
     },
     isCertificate,
@@ -404,14 +437,14 @@ export async function fetchCertificateVersions(
   return result.items
 }
 
-export async function fetchProjectCertificate(
-  projectId: string,
+export async function resolveTlsSni(
+  serverName: string,
   signal?: AbortSignal,
-): Promise<ProjectCertificateResolutionView> {
+): Promise<TlsSniResolutionView> {
   return requestJson(
-    `/api/projects/${encodeURIComponent(projectId)}/certificate`,
+    `/api/tls/sni-resolution?serverName=${encodeURIComponent(serverName)}`,
     { signal },
-    isProjectCertificateResolution,
+    isTlsSniResolution,
   )
 }
 

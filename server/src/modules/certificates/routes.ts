@@ -6,13 +6,6 @@ import type { AuthService } from '../auth/model.js'
 import type { CreateCertificateInput, CreateCertificateVersionInput } from './model.js'
 import type { CertificateService } from './service.js'
 
-const projectParameters = {
-  type: 'object',
-  additionalProperties: false,
-  required: ['projectId'],
-  properties: { projectId: { type: 'string', format: 'uuid' } },
-} as const
-
 const certificateParameters = {
   type: 'object',
   additionalProperties: false,
@@ -73,10 +66,8 @@ const certificateResponseSchema = {
     'id',
     'name',
     'lockVersion',
-    'managedDnsNames',
     'currentVersion',
     'versionCount',
-    'matchedProjectCount',
     'runtimeDeploymentStatus',
     'createdAt',
     'updatedAt',
@@ -85,34 +76,11 @@ const certificateResponseSchema = {
     id: { type: 'string', format: 'uuid' },
     name: { type: 'string' },
     lockVersion: { type: 'string', pattern: '^(0|[1-9][0-9]*)$' },
-    managedDnsNames: { type: 'array', items: { type: 'string' } },
     currentVersion: certificateVersionResponseSchema,
     versionCount: { type: 'integer', minimum: 1 },
-    matchedProjectCount: { type: 'integer', minimum: 0 },
     runtimeDeploymentStatus: { type: 'string', const: 'unsupported' },
     createdAt: { type: 'string', format: 'date-time' },
     updatedAt: { type: 'string', format: 'date-time' },
-  },
-} as const
-
-const resolutionResponseSchema = {
-  type: 'object',
-  additionalProperties: false,
-  required: [
-    'projectId',
-    'domain',
-    'resolutionStatus',
-    'certificate',
-    'matches',
-    'runtimeDeploymentStatus',
-  ],
-  properties: {
-    projectId: { type: 'string', format: 'uuid' },
-    domain: { type: 'string' },
-    resolutionStatus: { type: 'string', enum: ['matched', 'uncovered', 'conflict'] },
-    certificate: { anyOf: [{ type: 'null' }, certificateResponseSchema] },
-    matches: { type: 'array', items: certificateResponseSchema },
-    runtimeDeploymentStatus: { type: 'string', const: 'unsupported' },
   },
 } as const
 
@@ -123,6 +91,14 @@ const certificateMaterialSchema = {
   properties: {
     certificatePem: { type: 'string', minLength: 1, maxLength: 1048576 },
     privateKeyPem: { type: 'string', minLength: 1, maxLength: 262144 },
+  },
+} as const
+
+const certificateVersionMaterialSchema = {
+  ...certificateMaterialSchema,
+  properties: {
+    ...certificateMaterialSchema.properties,
+    confirmSniCoverageChange: { type: 'boolean' },
   },
 } as const
 
@@ -204,7 +180,7 @@ export function registerCertificateRoutes(
           required: ['if-match'],
           properties: { 'if-match': { type: 'string' } },
         },
-        body: certificateMaterialSchema,
+        body: certificateVersionMaterialSchema,
         response: { 201: certificateResponseSchema },
       },
     },
@@ -220,12 +196,5 @@ export function registerCertificateRoutes(
             String(request.id),
           ),
         ),
-  )
-
-  app.get<{ Params: { projectId: string } }>(
-    '/api/projects/:projectId/certificate',
-    { schema: { params: projectParameters, response: { 200: resolutionResponseSchema } } },
-    async (request) =>
-      certificates.resolveProject(await requireActor(auth), request.params.projectId),
   )
 }
