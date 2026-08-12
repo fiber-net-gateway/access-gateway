@@ -696,8 +696,7 @@ TEST(AccessRequestHandlerTest, RedirectsWithConfiguredStatusBeforePathMatching) 
 
         EXPECT_TRUE(response.starts_with("HTTP/1.1 " + std::string(status) + " "));
         EXPECT_NE(response.find("Strict-Transport-Security: max-age=31536000\r\n"), std::string::npos);
-        EXPECT_NE(response.find("Location: https://api.example.com:8080/missing?q=1\r\n"),
-                  std::string::npos);
+        EXPECT_NE(response.find("Location: https://api.example.com:8080/missing?q=1\r\n"), std::string::npos);
         EXPECT_EQ(response_body(response), "");
     }
 }
