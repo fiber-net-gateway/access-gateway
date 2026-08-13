@@ -1178,6 +1178,11 @@ button:disabled {
   color: #405620;
 }
 
+.route-type-script {
+  background: #eadff4;
+  color: #65417b;
+}
+
 .route-type-unknown {
   background: #f4ddd5;
   color: #813828;
@@ -1203,6 +1208,33 @@ button:disabled {
 .yaml-code-editor {
   overflow: hidden;
   background: #12201a;
+}
+
+.script-route-match-fields {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(180px, 1fr);
+  gap: 12px;
+  padding: 14px 16px;
+  border-bottom: 1px solid #d5ddd4;
+  background: #f5f7f3;
+}
+
+.script-route-match-fields label {
+  display: grid;
+  gap: 6px;
+  color: #5d6d65;
+  font-size: 0.68rem;
+  font-weight: 700;
+}
+
+.script-route-match-fields input {
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid #cbd5cc;
+  border-radius: 7px;
+  background: #fff;
+  color: #203229;
+  font-family: 'SFMono-Regular', Consolas, monospace;
 }
 
 .editor-loading {
@@ -2260,6 +2292,10 @@ button:disabled {
 
   .route-card-header {
     grid-template-columns: 27px 25px minmax(0, 1fr);
+  }
+
+  .script-route-match-fields {
+    grid-template-columns: 1fr;
   }
 
   .route-issues li {

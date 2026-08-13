@@ -8,6 +8,7 @@ import type { HttpsRedirect, ProjectRoutesModel, RouteItemModel } from './model.
 
 const routeFields = new Set([
   'path',
+  'method',
   'type',
   'service',
   'cluster',
@@ -27,7 +28,7 @@ const routeFields = new Set([
   'allows',
 ])
 
-export const ROUTE_COMPILER_REVISION = 'project-routes-yaml-v4-https-redirect'
+export const ROUTE_COMPILER_REVISION = 'project-routes-mixed-v5-method-script'
 
 const networkPolicyRouteId = '00000000-0000-4000-8000-000000000099'
 
@@ -153,6 +154,7 @@ function validateRouteFieldShapes(
     if (field in value && !isScalarList(value[field])) addTypeIssue(field, 'an array or null')
   }
   for (const field of [
+    'method',
     'service',
     'cluster',
     'condition',
@@ -169,6 +171,28 @@ function validateRouteFieldShapes(
     }
   }
   if ('body' in value && !isScalarMap(value.body)) addTypeIssue('body', 'an object or null')
+}
+
+const httpMethodPattern = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/u
+
+function validateMethod(
+  route: RouteItemModel,
+  value: unknown,
+  lineCounter: LineCounter,
+  offset = 0,
+): RouteValidationIssue | null {
+  if (value === undefined || value === null) return null
+  if (typeof value !== 'string' || value.length > 64 || !httpMethodPattern.test(value)) {
+    return issue(
+      route,
+      lineCounter,
+      'INVALID_ROUTE_METHOD',
+      'Route method must be a 1-64 byte HTTP token',
+      'method',
+      offset,
+    )
+  }
+  return null
 }
 
 function parseRoute(route: RouteItemModel): {
@@ -298,6 +322,13 @@ function parseRoute(route: RouteItemModel): {
       ),
     )
   }
+  const methodIssue = validateMethod(
+    route,
+    value.method,
+    lineCounter,
+    findFieldOffset(document, 'method'),
+  )
+  if (methodIssue) issues.push(methodIssue)
   validateRouteFieldShapes(route, lineCounter, document, value, issues)
   return { value: issues.length === 0 ? value : null, issues }
 }
@@ -363,7 +394,49 @@ export function compileProjectRoutes(
   const routes: Readonly<Record<string, unknown>>[] = []
   const issues: RouteValidationIssue[] = validateNetworkPolicy(model)
   for (const route of model.routes) {
-    const parsed = parseRoute(route)
+    const parsed =
+      route.format === 'yaml'
+        ? parseRoute(route)
+        : (() => {
+            const lineCounter = new LineCounter()
+            const routeIssues: RouteValidationIssue[] = []
+            if (route.path.length === 0 || route.path.length > 2048) {
+              routeIssues.push(
+                issue(
+                  route,
+                  lineCounter,
+                  'INVALID_ROUTE_PATH',
+                  'JavaScript Route path must contain 1-2048 characters',
+                  'path',
+                ),
+              )
+            }
+            const methodIssue = validateMethod(route, route.method, lineCounter)
+            if (methodIssue) routeIssues.push(methodIssue)
+            if (route.source.trim().length === 0) {
+              routeIssues.push(
+                issue(
+                  route,
+                  lineCounter,
+                  'EMPTY_ROUTE_SCRIPT',
+                  'JavaScript Route source must not be empty',
+                  'source',
+                ),
+              )
+            }
+            return {
+              value:
+                routeIssues.length === 0
+                  ? {
+                      path: route.path,
+                      ...(route.method ? { method: route.method } : {}),
+                      type: 'SCRIPT',
+                      script: route.source,
+                    }
+                  : null,
+              issues: routeIssues,
+            }
+          })()
     issues.push(...parsed.issues)
     if (parsed.value) {
       if (model.networkPolicy.source === 'project' && 'allows' in parsed.value) {

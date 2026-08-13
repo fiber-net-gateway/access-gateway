@@ -539,6 +539,96 @@ TEST(ProjectRouteSnapshotTest, RejectsRouteAfterUnconditionalAtTheSameNode) {
     EXPECT_EQ(result.error().field, "routes[1].path");
 }
 
+TEST(ProjectRouteSnapshotTest, CompilesSamePathMethodsAndAllMethodFallbackInOrder) {
+    RouteConfig get = proxy_route("/same/:id");
+    get.method = "GET";
+    RouteConfig post = proxy_route("/same/:id");
+    post.method = "POST";
+    RouteConfig fallback = proxy_route("/same/:id");
+
+    auto result =
+            compile_project_config("demo", project_with_routes({std::move(get), std::move(post), std::move(fallback)}));
+    const ProjectRouteSnapshot &snapshot = require_snapshot(result);
+
+    ASSERT_EQ(snapshot.routes().size(), 3U);
+    ASSERT_TRUE(snapshot.routes()[0].method);
+    EXPECT_EQ(*snapshot.routes()[0].method, "GET");
+    ASSERT_TRUE(snapshot.routes()[1].method);
+    EXPECT_EQ(*snapshot.routes()[1].method, "POST");
+    EXPECT_FALSE(snapshot.routes()[2].method);
+    EXPECT_NE(snapshot.routes()[0].key, snapshot.routes()[1].key);
+    EXPECT_EQ(snapshot.routes()[2].key, "/same/:id");
+}
+
+TEST(ProjectRouteSnapshotTest, RejectsDuplicateMethodPredicateAtTheSamePath) {
+    RouteConfig first = proxy_route("/same/:id");
+    first.method = "GET";
+    RouteConfig duplicate = proxy_route("/same/:id");
+    duplicate.method = "GET";
+
+    auto result = compile_project_config("demo", project_with_routes({std::move(first), std::move(duplicate)}));
+
+    ASSERT_FALSE(result);
+    EXPECT_EQ(result.error().code, AccessConfigErrorCode::Conflict);
+    EXPECT_EQ(result.error().field, "routes[1].path");
+    EXPECT_EQ(result.error().message, "route predicate is duplicate");
+}
+
+TEST(ProjectRouteSnapshotTest, RejectsInvalidMethodAndScriptRouteCombinations) {
+    {
+        RouteConfig route = proxy_route("/bad");
+        route.method = "GET POST";
+        auto result = compile_project_config("demo", project_with_routes({std::move(route)}));
+        ASSERT_FALSE(result);
+        EXPECT_EQ(result.error().field, "routes[0].method");
+    }
+    {
+        RouteConfig route;
+        route.path = "/script";
+        route.type = RouteType::Script;
+        auto result = compile_project_config("demo", project_with_routes({std::move(route)}));
+        ASSERT_FALSE(result);
+        EXPECT_EQ(result.error().field, "routes[0].script");
+    }
+    {
+        RouteConfig route;
+        route.path = "/script";
+        route.type = RouteType::Script;
+        route.script = " \t\r\n";
+        auto result = compile_project_config("demo", project_with_routes({std::move(route)}));
+        ASSERT_FALSE(result);
+        EXPECT_EQ(result.error().field, "routes[0].script");
+    }
+    {
+        RouteConfig route;
+        route.path = "/script";
+        route.type = RouteType::Script;
+        route.script = "return 1;";
+        route.service = "orders";
+        auto result = compile_project_config("demo", project_with_routes({std::move(route)}));
+        ASSERT_FALSE(result);
+        EXPECT_EQ(result.error().code, AccessConfigErrorCode::InvalidCombination);
+    }
+}
+
+TEST(ProjectRouteSnapshotTest, CompilesJavaScriptRouteAgainstPathConstants) {
+    fiber::access_server::AccessScriptRuntime scripts;
+    RouteConfig route;
+    route.path = "/script/:id";
+    route.method = "POST";
+    route.type = RouteType::Script;
+    route.script = "return {id: $path.id, method: $req.method};";
+
+    auto result = compile_project_config("demo", project_with_routes({std::move(route)}), scripts.compiler_adapter());
+    const ProjectRouteSnapshot &snapshot = require_snapshot(result);
+
+    ASSERT_EQ(snapshot.routes().size(), 1U);
+    ASSERT_TRUE(snapshot.routes()[0].script_program);
+    EXPECT_TRUE(snapshot.routes()[0].script_program->valid());
+    ASSERT_EQ(snapshot.routes()[0].path_constant_indices.size(), 1U);
+    EXPECT_NE(snapshot.routes()[0].path_constant_indices[0], fiber::http_script::kInvalidConstIndex);
+}
+
 TEST(ProjectRouteSnapshotTest, RejectsDuplicatePathVariableAndMiddleWildcard) {
     auto duplicate = compile_project_config("demo", project_with_routes({proxy_route("/items/:id/:id")}));
     ASSERT_FALSE(duplicate);

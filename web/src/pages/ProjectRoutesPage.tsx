@@ -157,7 +157,7 @@ export function ProjectRoutesPage() {
 
   const openSaveDialog = (): void => {
     if (hasLocalIssues) {
-      setErrorMessage(`当前有 ${localIssueCount} 个 YAML 问题，请修复后再保存为版本。`)
+      setErrorMessage(`当前有 ${localIssueCount} 个 Route 问题，请修复后再保存为版本。`)
       return
     }
     if (sourceVersion && !changeSummary) {
@@ -171,7 +171,7 @@ export function ProjectRoutesPage() {
     await runAction(async () => {
       if (!hasUnsavedChanges) throw new Error('当前工作区没有需要保存的修改')
       if (hasLocalIssues) {
-        throw new Error(`当前有 ${localIssueCount} 个 YAML 问题，请修复后再保存为版本。`)
+        throw new Error(`当前有 ${localIssueCount} 个 Route 问题，请修复后再保存为版本。`)
       }
       const saveBaseVersionId = currentVersionId
       if (sourceVersion && !saveBaseVersionId) {
@@ -336,11 +336,14 @@ export function ProjectRoutesPage() {
           <button className="button-secondary" onClick={() => addRoute('PROXY')} type="button">
             + PROXY
           </button>
+          <button className="button-secondary" onClick={() => addRoute('JS')} type="button">
+            + JS
+          </button>
         </div>
         <div className="route-toolbar-status" role="status">
           {hasLocalIssues ? (
             <span className="status-chip status-chip-pending" id="route-save-state">
-              {localIssueCount} 个 YAML 问题 · 修复后才能保存
+              {localIssueCount} 个 Route 问题 · 修复后才能保存
             </span>
           ) : validation?.valid ? (
             <span className="status-chip status-chip-ready">Native 校验通过</span>
@@ -371,16 +374,19 @@ export function ProjectRoutesPage() {
       ) : model.routes.length === 0 ? (
         <div className="route-empty-state">
           <span className="empty-route-mark" aria-hidden="true">
-            YAML
+            ROUTE
           </span>
           <h3>从第一条 Route 开始</h3>
-          <p>选择 RESPONSE 或 PROXY 模板，每条路由都会拥有独立的 YAML 编辑器。</p>
+          <p>选择 YAML RESPONSE/PROXY 或 JavaScript，每条路由都有独立编辑器。</p>
           <div>
             <button className="button-secondary" onClick={() => addRoute('RESPONSE')} type="button">
               新建 RESPONSE
             </button>
             <button className="button-primary" onClick={() => addRoute('PROXY')} type="button">
               新建 PROXY
+            </button>
+            <button className="button-secondary" onClick={() => addRoute('JS')} type="button">
+              新建 JS
             </button>
           </div>
         </div>
@@ -410,14 +416,16 @@ export function ProjectRoutesPage() {
                       <span
                         className={`route-type route-type-${(analysis.type ?? 'unknown').toLowerCase()}`}
                       >
-                        {analysis.type ?? 'YAML'}
+                        {analysis.type ?? route.format.toUpperCase()}
                       </span>
                       <strong>{analysis.path ?? '无法解析 path'}</strong>
                     </div>
                     <small>
-                      {analysis.condition
-                        ? `condition · ${analysis.condition}`
-                        : `route · ${route.id.slice(0, 8)}`}
+                      {analysis.method
+                        ? `${analysis.method} · ${route.format.toUpperCase()}`
+                        : analysis.condition
+                          ? `condition · ${analysis.condition}`
+                          : `ALL METHODS · ${route.id.slice(0, 8)}`}
                     </small>
                   </div>
                   <div className="route-card-actions">
@@ -456,12 +464,57 @@ export function ProjectRoutesPage() {
                 </header>
                 {!isCollapsed ? (
                   <>
+                    {route.format === 'js' ? (
+                      <div className="script-route-match-fields">
+                        <label>
+                          Path pattern
+                          <input
+                            aria-label={`路由 ${index + 1} Path pattern`}
+                            required
+                            value={route.path}
+                            onChange={(event) =>
+                              updateRoutes(
+                                model.routes.map((item) =>
+                                  item.id === route.id && item.format === 'js'
+                                    ? { ...item, path: event.target.value }
+                                    : item,
+                                ),
+                              )
+                            }
+                          />
+                        </label>
+                        <label>
+                          Method（可选）
+                          <input
+                            aria-label={`路由 ${index + 1} Method`}
+                            placeholder="留空匹配所有 method"
+                            value={route.method ?? ''}
+                            onChange={(event) =>
+                              updateRoutes(
+                                model.routes.map((item) => {
+                                  if (item.id !== route.id || item.format !== 'js') return item
+                                  const method = event.target.value
+                                  if (method) return { ...item, method }
+                                  return {
+                                    id: item.id,
+                                    format: 'js',
+                                    path: item.path,
+                                    source: item.source,
+                                  }
+                                }),
+                              )
+                            }
+                          />
+                        </label>
+                      </div>
+                    ) : null}
                     <Suspense
-                      fallback={<div className="editor-loading">正在加载 YAML 编辑器…</div>}
+                      fallback={<div className="editor-loading">正在加载 Route 编辑器…</div>}
                     >
                       <YamlCodeEditor
-                        ariaLabel={`路由 ${index + 1}：${analysis.type ?? 'YAML'} ${analysis.path ?? route.id}`}
+                        ariaLabel={`路由 ${index + 1}：${analysis.type ?? route.format.toUpperCase()} ${analysis.path ?? route.id}`}
                         diagnostics={issues}
+                        language={route.format === 'js' ? 'javascript' : 'yaml'}
                         value={route.source}
                         onChange={(source) =>
                           updateRoutes(
@@ -486,7 +539,10 @@ export function ProjectRoutesPage() {
                         ))}
                       </ul>
                     ) : (
-                      <div className="route-valid-hint">YAML 语法有效 · 等待完整 Native 校验</div>
+                      <div className="route-valid-hint">
+                        {route.format === 'yaml' ? 'YAML 语法有效' : '外置匹配字段有效'} · 等待完整
+                        Native 校验
+                      </div>
                     )}
                   </>
                 ) : null}

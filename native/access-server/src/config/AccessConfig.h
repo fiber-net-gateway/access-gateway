@@ -19,6 +19,7 @@ inline constexpr std::string_view kDefaultNacosGroup = "DEFAULT_GROUP";
 enum class RouteType : std::uint8_t {
     Proxy,
     Response,
+    Script,
 };
 
 enum class BodyType : std::uint8_t {
@@ -75,6 +76,9 @@ struct RouteBodyConfig {
 
 struct RouteConfig {
     std::optional<std::string> path;
+    // Missing/null matches every request method. A configured value is matched
+    // byte-for-byte because HTTP method names are case-sensitive tokens.
+    std::optional<std::string> method;
     // Java initializes this field to PROXY. Explicit null and unknown enum
     // values replace it with null and are rejected later by route compilation.
     std::optional<RouteType> type = RouteType::Proxy;
@@ -94,6 +98,7 @@ struct RouteConfig {
     std::optional<std::int64_t> websocket_timeout_millis;
     std::optional<bool> flush;
     NullableStringSet allows;
+    std::optional<std::string> script;
 
     bool operator==(const RouteConfig &) const = default;
 };

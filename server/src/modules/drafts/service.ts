@@ -44,8 +44,8 @@ function parseProjectRoutesModel(value: unknown): ProjectRoutesModel {
   if (!isProjectRoutesModel(value)) {
     throw badRequest(
       'INVALID_DRAFT_MODEL',
-      'Draft model does not match project_routes_yaml schema version 3',
-      [{ path: 'model', code: 'INVALID_SCHEMA', message: 'Invalid YAML route model' }],
+      'Draft model does not match project_routes_yaml schema version 5',
+      [{ path: 'model', code: 'INVALID_SCHEMA', message: 'Invalid mixed route model' }],
     )
   }
   return value
@@ -57,6 +57,8 @@ function parseSavableProjectRoutesModel(domain: string, value: unknown): Project
   if (!result.compiled) {
     const routeIndexes = new Map(model.routes.map((route, index) => [route.id, index]))
     throw badRequest(
+      // Preserve the established machine-readable code for existing API clients. The
+      // message and field paths now cover both YAML and JavaScript Route items.
       'INVALID_CONFIGURATION_YAML',
       'The configuration contains invalid routes or network policy',
       result.issues.map((issue) => {
@@ -65,7 +67,12 @@ function parseSavableProjectRoutesModel(domain: string, value: unknown): Project
           path:
             routeIndex === undefined
               ? `model.${issue.path || 'networkPolicy'}`
-              : `model.routes.${routeIndex}.source`,
+              : `model.routes.${routeIndex}.${
+                  model.routes[routeIndex]?.format === 'js' &&
+                  (issue.path === 'path' || issue.path === 'method')
+                    ? issue.path
+                    : 'source'
+                }`,
           code: issue.code,
           message: `${issue.message} (${issue.line}:${issue.column})`,
         }

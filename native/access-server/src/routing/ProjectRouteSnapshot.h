@@ -56,8 +56,10 @@ struct CompiledProxyRoute {
 struct CompiledRoute {
     std::string path;
     std::string key;
+    std::optional<std::string> method;
     RouteType type = RouteType::Proxy;
     std::optional<script::Script> condition_program;
+    std::shared_ptr<script::Script> script_program;
     std::vector<std::string> path_variable_names;
     // Aligned with path_variable_names. Entries not referenced by any script use
     // kInvalidConstIndex and are skipped when a candidate route binds captures.
@@ -83,9 +85,12 @@ struct ScriptCompilerAdapter {
     using Result = std::expected<script::Script, std::string>;
     using Function = Result (*)(void *context, http_script::ConstPackage::Builder &constants,
                                 std::string_view expression, std::span<const std::string> path_variable_names);
+    using RouteFunction = Result (*)(void *context, http_script::ConstPackage::Builder &constants,
+                                     std::string_view source, std::span<const std::string> path_variable_names);
 
     void *context = nullptr;
     Function compile_expression = nullptr;
+    RouteFunction compile_route_script = nullptr;
 };
 
 class ProjectRouteSnapshot {

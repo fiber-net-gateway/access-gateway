@@ -14,7 +14,8 @@ test('upgrades legacy whole-project JSON revisions to stable YAML route items', 
   const second = normalizeStoredProjectRoutesModel(legacy)
   assert.deepEqual(first, second)
   assert.equal(first?.kind, 'project_routes_yaml')
-  assert.equal(first?.schemaVersion, 4)
+  assert.equal(first?.schemaVersion, 5)
+  assert.equal(first?.routes[0]?.format, 'yaml')
   assert.deepEqual(first?.networkPolicy, {
     source: 'route',
     httpsRedirect: 'off',
@@ -48,7 +49,7 @@ test('upgrades schema v2 YAML models with safe network policy defaults', () => {
   })
 
   assert.deepEqual(upgraded, {
-    schemaVersion: 4,
+    schemaVersion: 5,
     kind: 'project_routes_yaml',
     networkPolicy: {
       source: 'route',
@@ -73,7 +74,7 @@ test('upgrades schema v3 network policies with HTTPS redirect disabled', () => {
   })
 
   assert.deepEqual(upgraded, {
-    schemaVersion: 4,
+    schemaVersion: 5,
     kind: 'project_routes_yaml',
     networkPolicy: {
       source: 'project',
@@ -82,5 +83,26 @@ test('upgrades schema v3 network policies with HTTPS redirect disabled', () => {
       deniedCidrs: ['10.1.0.0/16'],
     },
     routes: [],
+  })
+})
+
+test('upgrades schema v4 YAML items with an explicit format discriminator', () => {
+  const upgraded = normalizeStoredProjectRoutesModel({
+    schemaVersion: 4,
+    kind: 'project_routes_yaml',
+    networkPolicy: {
+      source: 'route',
+      httpsRedirect: 'off',
+      allowedCidrs: [],
+      deniedCidrs: [],
+    },
+    routes: [{ id: '00000000-0000-4000-8000-000000000001', source: 'path: /' }],
+  })
+
+  assert.equal(upgraded?.schemaVersion, 5)
+  assert.deepEqual(upgraded?.routes[0], {
+    id: '00000000-0000-4000-8000-000000000001',
+    format: 'yaml',
+    source: 'path: /',
   })
 })

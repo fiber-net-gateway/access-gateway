@@ -7,10 +7,21 @@ import { canonicalJson } from '../../shared/json.js'
 
 export type DraftState = 'editing' | 'validating' | 'ready'
 
-export interface RouteItemModel {
+export interface YamlRouteItemModel {
   id: string
+  format: 'yaml'
   source: string
 }
+
+export interface JavaScriptRouteItemModel {
+  id: string
+  format: 'js'
+  source: string
+  path: string
+  method?: string
+}
+
+export type RouteItemModel = YamlRouteItemModel | JavaScriptRouteItemModel
 
 export type HttpsRedirect = 'off' | '301' | '302' | '307' | '308'
 
@@ -22,7 +33,7 @@ export interface ProjectNetworkPolicy {
 }
 
 export interface ProjectRoutesModel {
-  schemaVersion: 4
+  schemaVersion: 5
   kind: 'project_routes_yaml'
   networkPolicy: ProjectNetworkPolicy
   routes: readonly RouteItemModel[]
@@ -60,7 +71,7 @@ export function isProjectRoutesModel(value: unknown): value is ProjectRoutesMode
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
   const model = value as Record<string, unknown>
   if (
-    model.schemaVersion !== 4 ||
+    model.schemaVersion !== 5 ||
     model.kind !== 'project_routes_yaml' ||
     typeof model.networkPolicy !== 'object' ||
     model.networkPolicy === null ||
@@ -88,7 +99,25 @@ export function isProjectRoutesModel(value: unknown): value is ProjectRoutesMode
   for (const value of model.routes) {
     if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
     const route = value as Record<string, unknown>
-    if (!isPublicId(String(route.id)) || typeof route.source !== 'string') return false
+    if (
+      !isPublicId(String(route.id)) ||
+      typeof route.source !== 'string' ||
+      (route.format !== 'yaml' && route.format !== 'js')
+    ) {
+      return false
+    }
+    if (
+      route.format === 'js' &&
+      (typeof route.path !== 'string' ||
+        route.path.length < 1 ||
+        route.path.length > 2048 ||
+        (route.method !== undefined &&
+          (typeof route.method !== 'string' ||
+            route.method.length < 1 ||
+            route.method.length > 64)))
+    ) {
+      return false
+    }
     if (route.source.length > 1_048_576 || ids.has(route.id as string)) return false
     totalSourceBytes += Buffer.byteLength(route.source, 'utf8')
     if (totalSourceBytes > 4_194_304) return false
@@ -97,11 +126,44 @@ export function isProjectRoutesModel(value: unknown): value is ProjectRoutesMode
   return true
 }
 
+interface LegacyYamlRouteItemModel {
+  id: string
+  source: string
+}
+
+interface YamlRoutesV4Model {
+  schemaVersion: 4
+  kind: 'project_routes_yaml'
+  networkPolicy: ProjectNetworkPolicy
+  routes: readonly LegacyYamlRouteItemModel[]
+}
+
+function isYamlRoutesV4Model(value: unknown): value is YamlRoutesV4Model {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const model = value as Record<string, unknown>
+  if (
+    model.schemaVersion !== 4 ||
+    model.kind !== 'project_routes_yaml' ||
+    !Array.isArray(model.routes)
+  ) {
+    return false
+  }
+  return isProjectRoutesModel({
+    ...model,
+    schemaVersion: 5,
+    routes: model.routes.map((route) =>
+      typeof route === 'object' && route !== null && !Array.isArray(route)
+        ? { ...route, format: 'yaml' }
+        : route,
+    ),
+  })
+}
+
 interface YamlRoutesV3Model {
   schemaVersion: 3
   kind: 'project_routes_yaml'
   networkPolicy: Omit<ProjectNetworkPolicy, 'httpsRedirect'>
-  routes: readonly RouteItemModel[]
+  routes: readonly LegacyYamlRouteItemModel[]
 }
 
 function isYamlRoutesV3Model(value: unknown): value is YamlRoutesV3Model {
@@ -112,15 +174,21 @@ function isYamlRoutesV3Model(value: unknown): value is YamlRoutesV3Model {
     model.kind !== 'project_routes_yaml' ||
     typeof model.networkPolicy !== 'object' ||
     model.networkPolicy === null ||
-    Array.isArray(model.networkPolicy)
+    Array.isArray(model.networkPolicy) ||
+    !Array.isArray(model.routes)
   ) {
     return false
   }
   const networkPolicy = model.networkPolicy as Record<string, unknown>
   return isProjectRoutesModel({
     ...model,
-    schemaVersion: 4,
+    schemaVersion: 5,
     networkPolicy: { ...networkPolicy, httpsRedirect: 'off' },
+    routes: model.routes.map((route) =>
+      typeof route === 'object' && route !== null && !Array.isArray(route)
+        ? { ...route, format: 'yaml' }
+        : route,
+    ),
   })
 }
 
@@ -134,7 +202,7 @@ interface LegacyProjectRouteModel {
 interface YamlRoutesV2Model {
   schemaVersion: 2
   kind: 'project_routes_yaml'
-  routes: readonly RouteItemModel[]
+  routes: readonly LegacyYamlRouteItemModel[]
 }
 
 function isYamlRoutesV2Model(value: unknown): value is YamlRoutesV2Model {
@@ -186,16 +254,24 @@ function legacyRouteId(route: unknown, index: number): string {
 
 export function normalizeStoredProjectRoutesModel(value: unknown): ProjectRoutesModel | null {
   if (isProjectRoutesModel(value)) return value
+  if (isYamlRoutesV4Model(value)) {
+    return {
+      ...value,
+      schemaVersion: 5,
+      routes: value.routes.map((route) => ({ ...route, format: 'yaml' })),
+    }
+  }
   if (isYamlRoutesV3Model(value)) {
     return {
       ...value,
-      schemaVersion: 4,
+      schemaVersion: 5,
       networkPolicy: { ...value.networkPolicy, httpsRedirect: 'off' },
+      routes: value.routes.map((route) => ({ ...route, format: 'yaml' })),
     }
   }
   if (isYamlRoutesV2Model(value)) {
     return {
-      schemaVersion: 4,
+      schemaVersion: 5,
       kind: 'project_routes_yaml',
       networkPolicy: {
         source: 'route',
@@ -203,12 +279,12 @@ export function normalizeStoredProjectRoutesModel(value: unknown): ProjectRoutes
         allowedCidrs: [],
         deniedCidrs: [],
       },
-      routes: value.routes,
+      routes: value.routes.map((route) => ({ ...route, format: 'yaml' })),
     }
   }
   if (!isLegacyProjectRouteModel(value)) return null
   return {
-    schemaVersion: 4,
+    schemaVersion: 5,
     kind: 'project_routes_yaml',
     networkPolicy: {
       source: 'route',
@@ -218,6 +294,7 @@ export function normalizeStoredProjectRoutesModel(value: unknown): ProjectRoutes
     },
     routes: value.routes.map((route, index) => ({
       id: legacyRouteId(route, index),
+      format: 'yaml',
       source: stringify(route, { lineWidth: 0 }).trimEnd(),
     })),
   }

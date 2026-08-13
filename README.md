@@ -151,16 +151,17 @@ The implemented control-plane endpoints include:
 - environment-free `/api/projects` list/create and project detail;
 - immutable Configuration Version list/save/detail/restore/validation with `If-Match` and
   idempotency;
-- project YAML route validation and deterministic native-wire preview;
+- mixed YAML/JavaScript route validation and deterministic native-wire preview;
 - versioned Project HTTPS redirect and CIDR network-policy authoring;
 - Release creation from a current or historical version, publication queueing, and status detail;
 - certificate inventory/version updates, DNS SAN-based SNI resolution preview, and TLS snapshot
   Release/publication APIs.
 
-Each Configuration Version uses schema v4 and stores the HTTPS redirect setting, CIDR policy,
-ordered route IDs, and exact YAML source. Stored schema v1/v2/v3 documents are normalized to v4 when
-read without rewriting historical ciphertext; HTTPS redirect defaults to `off` for those older
-models. Model documents are envelope-encrypted with AES-256-GCM before MySQL storage. The local key
+Each Configuration Version uses schema v5 and stores the HTTPS redirect setting, CIDR policy,
+ordered route IDs, an explicit YAML/JavaScript format, exact source, and JavaScript Route external
+path/optional method metadata. Stored schema v1-v4 documents are normalized to v5 as YAML entries
+when read without rewriting historical ciphertext; HTTPS redirect defaults to `off` where absent.
+Model documents are envelope-encrypted with AES-256-GCM before MySQL storage. The local key
 configuration is intended for development only; production must use an external key provider.
 
 Validate all console workspaces with:

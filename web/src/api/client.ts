@@ -87,7 +87,7 @@ function isProject(value: unknown): value is ProjectView {
 function isProjectRoutesModel(value: unknown): value is ProjectRoutesModel {
   return (
     isRecord(value) &&
-    value.schemaVersion === 4 &&
+    value.schemaVersion === 5 &&
     value.kind === 'project_routes_yaml' &&
     isRecord(value.networkPolicy) &&
     (value.networkPolicy.source === 'route' || value.networkPolicy.source === 'project') &&
@@ -103,7 +103,13 @@ function isProjectRoutesModel(value: unknown): value is ProjectRoutesModel {
     Array.isArray(value.routes) &&
     value.routes.every(
       (route) =>
-        isRecord(route) && typeof route.id === 'string' && typeof route.source === 'string',
+        isRecord(route) &&
+        typeof route.id === 'string' &&
+        typeof route.source === 'string' &&
+        (route.format === 'yaml' ||
+          (route.format === 'js' &&
+            typeof route.path === 'string' &&
+            (route.method === undefined || typeof route.method === 'string'))),
     )
   )
 }
