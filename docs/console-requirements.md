@@ -705,6 +705,9 @@ Route 不能破坏历史 Release 和审计引用。
 - [`network-policy-and-certificate-design.md`](network-policy-and-certificate-design.md) 定义已实现的
   Configuration Version v3 网络策略、可更新逻辑证书、SAN 自动 SNI 解析、安全边界和动态 SNI
   交付；实例激活证据仍未实现。
+- [`project-settings-requirements.md`](project-settings-requirements.md) 和
+  [`project-settings-detailed-design.md`](project-settings-detailed-design.md) 定义已实现的 Project
+  Settings 下线 Release、Project List 回读证据和归档边界；route Data ID 清理仍是后续可选动作。
 - 任何 wire/config 行为变更仍需同步更新 native codec/runtime、server schema/service、web 类型、
   兼容 fixture 和用户文档。
 

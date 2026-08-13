@@ -51,9 +51,12 @@ function installApiMock() {
     id: projectId,
     domain: 'api.example.com',
     status: 'active',
+    lockVersion: '4',
     draft: { id: 'draft-id', state: 'editing', revision: 8, lockVersion: '8' },
     publishedVersion: null,
     activationStatus: 'unknown',
+    createdAt: '2026-08-01T00:00:00.000Z',
+    updatedAt: '2026-08-12T00:00:00.000Z',
   }
   const version = {
     id: versionId,
@@ -132,6 +135,32 @@ function installApiMock() {
     fingerprintSha256: certificate.currentVersion.fingerprintSha256,
     runtimeDeploymentStatus: 'activation_unknown',
   }
+  const decommissionRelease = {
+    id: '00000000-0000-4000-8000-000000000009',
+    sequence: '9',
+    projectId,
+    kind: 'project_decommission',
+    title: '下线 api.example.com',
+    description: '域名已迁移',
+    status: 'ready',
+    sourceConfigurationVersion: null,
+    currentConfigurationVersionAtCreation: { id: versionId, number: 8 },
+    allocatedWireVersion: null,
+    resources: [
+      {
+        id: '00000000-0000-4000-8000-000000000010',
+        kind: 'project_list',
+        dataId: 'ploto.unified-access.projects',
+        group: 'ACCESS-SERVER',
+        operation: 'upsert',
+        status: 'pending',
+      },
+    ],
+    publication: { jobId: null, state: null },
+    activationStatus: 'unknown',
+    createdAt: '2026-08-13T00:00:00.000Z',
+    publishedAt: null,
+  }
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
     if (url === '/api/health') {
@@ -161,6 +190,29 @@ function installApiMock() {
       })
     }
     if (url === `/api/projects/${projectId}`) return jsonResponse(project)
+    if (url === `/api/projects/${projectId}/releases`) {
+      return jsonResponse({ items: [] })
+    }
+    if (url === `/api/projects/${projectId}/decommission-releases` && init?.method === 'POST') {
+      return jsonResponse(decommissionRelease, 201)
+    }
+    if (url === `/api/releases/${decommissionRelease.id}/publications` && init?.method === 'POST') {
+      return jsonResponse(
+        {
+          jobId: '00000000-0000-4000-8000-000000000011',
+          state: 'queued',
+          release: {
+            ...decommissionRelease,
+            status: 'queued',
+            publication: {
+              jobId: '00000000-0000-4000-8000-000000000011',
+              state: 'queued',
+            },
+          },
+        },
+        202,
+      )
+    }
     if (url === `/api/projects/${projectId}/configuration-versions/current`) {
       return jsonResponse({ version: { ...version, model }, lockVersion: '8' })
     }
@@ -398,6 +450,39 @@ describe('application routes', () => {
         deniedCidrs: ['10.1.0.0/16'],
       })
     })
+  })
+
+  test('creates and queues a Project decommission Release from Settings', async () => {
+    const fetchMock = installApiMock()
+    const router = createMemoryRouter(appRoutes, {
+      initialEntries: [`/projects/${projectId}/settings`],
+    })
+    const user = userEvent.setup()
+    render(<RouterProvider router={router} />)
+
+    expect(await screen.findByRole('heading', { name: 'Settings' })).toBeTruthy()
+    expect(screen.getAllByText('未知').length).toBeGreaterThan(0)
+    await user.click(screen.getByRole('button', { name: '下线并归档 Project' }))
+    expect(await screen.findByRole('heading', { name: '确认下线 api.example.com' })).toBeTruthy()
+
+    await user.type(screen.getByLabelText('下线原因'), '域名已迁移')
+    await user.type(screen.getByLabelText('输入完整域名以确认'), 'api.example.com')
+    await user.click(screen.getByRole('button', { name: '创建并发布下线 Release' }))
+
+    await waitFor(() => {
+      const createCall = fetchMock.mock.calls.find(
+        ([url, init]) =>
+          url === `/api/projects/${projectId}/decommission-releases` && init?.method === 'POST',
+      )
+      expect(new Headers(createCall?.[1]?.headers).get('If-Match')).toBe('"4"')
+      expect(JSON.parse(String(createCall?.[1]?.body))).toEqual({
+        confirmationDomain: 'api.example.com',
+        reason: '域名已迁移',
+      })
+    })
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe(`/projects/${projectId}/releases`),
+    )
   })
 
   test('previews ClientHello SNI resolution independently from a Project', async () => {

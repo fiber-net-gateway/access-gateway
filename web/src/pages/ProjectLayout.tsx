@@ -20,7 +20,7 @@ const projectNavigation = [
   { path: 'network-policy', label: 'Network Policy', detail: 'HTTPS 与 CIDR 策略' },
   { path: 'versions', label: 'Versions', detail: '不可变配置' },
   { path: 'releases', label: 'Releases', detail: 'rnacos 发布' },
-  { path: 'settings', label: 'Settings', detail: '暂不可用' },
+  { path: 'settings', label: 'Settings', detail: '生命周期与归档' },
 ]
 
 export function ProjectLayout() {
@@ -87,6 +87,7 @@ export function ProjectLayout() {
           <p className="eyebrow">DOMAIN PROJECT</p>
           <h1>{project.domain}</h1>
           <div className="project-status-row">
+            <span>生命周期：{project.status === 'active' ? 'Active' : '下线处理中'}</span>
             <span>
               当前配置：{project.draft?.revision ? `V${project.draft.revision}` : '尚无版本'}
             </span>

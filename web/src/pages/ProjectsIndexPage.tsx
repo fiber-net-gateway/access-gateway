@@ -99,7 +99,11 @@ export function ProjectsIndexPage() {
         ) : filteredProjects.length > 0 ? (
           <div className="project-index-grid">
             {filteredProjects.map((project) => (
-              <Link className="project-index-card" key={project.id} to={`${project.id}/routes`}>
+              <Link
+                className="project-index-card"
+                key={project.id}
+                to={`${project.id}/${project.status === 'decommissioning' ? 'settings' : 'routes'}`}
+              >
                 <span className="project-domain-mark" aria-hidden="true">
                   {project.domain.charAt(0).toUpperCase()}
                 </span>
@@ -109,6 +113,7 @@ export function ProjectsIndexPage() {
                     当前配置：{project.draft?.revision ? `V${project.draft.revision}` : '尚无版本'}
                   </small>
                   <span className="project-card-statuses">
+                    <span>{project.status === 'active' ? 'Active' : '下线处理中'}</span>
                     <span>
                       {project.publishedVersion
                         ? `已发布 V${project.publishedVersion}`

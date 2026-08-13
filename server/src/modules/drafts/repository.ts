@@ -172,6 +172,23 @@ export class DraftRepository {
     await withTransaction(
       this.#pool,
       async (transaction) => {
+        const [identityRows] = await transaction.execute<
+          (RowDataPacket & { project_id: string })[]
+        >(
+          `SELECT project_id
+           FROM drafts
+           WHERE public_id = ? AND archived_at IS NULL`,
+          [publicIdToBuffer(draftPublicId)],
+        )
+        const identity = identityRows[0]
+        if (!identity) throw notFound('Draft')
+        const [projectRows] = await transaction.execute<(RowDataPacket & { status: string })[]>(
+          'SELECT status FROM projects WHERE id = ? FOR UPDATE',
+          [identity.project_id],
+        )
+        if (projectRows[0]?.status !== 'active') {
+          throw conflict('PROJECT_NOT_ACTIVE', 'Drafts can only be saved for an active Project')
+        }
         const [rows] = await transaction.execute<LockedDraftRow[]>(
           `SELECT id, public_id, environment_id, project_id, current_revision_no, lock_version
            FROM drafts

@@ -56,6 +56,13 @@ interface AttemptCountRow extends RowDataPacket {
   attempt_count: number
 }
 
+interface ProjectLifecycleRow extends RowDataPacket {
+  kind: string
+  project_id: string | null
+  project_public_id: Buffer | null
+  domain: string | null
+}
+
 export interface PublicationWorkerOptions {
   leaseMillis: number
   owner?: string
@@ -492,6 +499,59 @@ export class PublicationWorker {
              AND previous.environment_id = current.environment_id`,
           [claim.releaseInternalId, claim.releaseInternalId],
         )
+        const [lifecycleRows] = await transaction.execute<ProjectLifecycleRow[]>(
+          `SELECT rel.kind, project_record.id AS project_id,
+                  project_record.public_id AS project_public_id, project_record.name AS domain
+           FROM releases rel
+           LEFT JOIN release_items item
+             ON item.release_id = rel.id AND item.kind = 'project_decommission'
+           LEFT JOIN projects project_record ON project_record.id = item.project_id
+           WHERE rel.id = ?
+           LIMIT 1`,
+          [claim.releaseInternalId],
+        )
+        const lifecycle = lifecycleRows[0]
+        if (
+          lifecycle?.kind === 'project_decommission' &&
+          lifecycle.project_id &&
+          lifecycle.project_public_id &&
+          lifecycle.domain
+        ) {
+          await transaction.execute(
+            `UPDATE releases previous
+             INNER JOIN release_items previous_item
+               ON previous_item.release_id = previous.id
+              AND previous_item.kind IN ('project_route', 'project_decommission')
+             SET previous.status = 'superseded',
+                 previous.lock_version = previous.lock_version + 1
+             WHERE previous.id <> ? AND previous.status = 'published'
+               AND previous_item.project_id = ?`,
+            [claim.releaseInternalId, lifecycle.project_id],
+          )
+          const [archived] = await transaction.execute<ResultSetHeader>(
+            `UPDATE projects
+             SET status = 'archived', archived_at = CURRENT_TIMESTAMP(6),
+                 updated_at = CURRENT_TIMESTAMP(6), lock_version = lock_version + 1
+             WHERE id = ? AND status = 'decommissioning' AND archived_at IS NULL`,
+            [lifecycle.project_id],
+          )
+          if (archived.affectedRows === 1) {
+            await this.#audit.append(transaction, {
+              environmentInternalId: claim.environmentInternalId,
+              actorInternalId: claim.requestedByInternalId,
+              eventType: 'project.archived',
+              targetType: 'project',
+              targetPublicId: bufferToPublicId(lifecycle.project_public_id),
+              requestId: claim.jobId,
+              result: 'success',
+              summary: {
+                releaseId: claim.releaseId,
+                domain: lifecycle.domain,
+                activationStatus: 'unknown',
+              },
+            })
+          }
+        }
       }
       await this.#audit.append(transaction, {
         environmentInternalId: claim.environmentInternalId,

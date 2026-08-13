@@ -14,7 +14,7 @@ interface ProjectRow extends RowDataPacket {
   internal_id: string
   public_id: Buffer
   name: string
-  status: 'active' | 'archived'
+  status: 'active' | 'decommissioning' | 'archived'
   lock_version: string
   draft_public_id: Buffer | null
   draft_state: string | null
@@ -31,6 +31,7 @@ export interface ProjectIdentityRow extends RowDataPacket {
   environment_id: string
   environment_public_id: Buffer
   name: string
+  status: 'active' | 'decommissioning' | 'archived'
 }
 
 function toView(row: ProjectRow): ProjectView {
@@ -128,11 +129,34 @@ export class ProjectRepository {
       ? [publicIdToBuffer(projectPublicId)]
       : [actor.internalId, publicIdToBuffer(projectPublicId)]
     const [rows] = await this.#pool.execute<ProjectIdentityRow[]>(
-      `SELECT p.id, p.public_id, p.environment_id, e.public_id AS environment_public_id, p.name
+      `SELECT p.id, p.public_id, p.environment_id, e.public_id AS environment_public_id,
+              p.name, p.status
        FROM projects p
        INNER JOIN environments e ON e.id = p.environment_id
        ${permissionJoin}
-       WHERE p.public_id = ? AND p.archived_at IS NULL`,
+       WHERE p.public_id = ? AND p.status = 'active' AND p.archived_at IS NULL`,
+      values,
+    )
+    return rows[0] ?? null
+  }
+
+  async findIdentityForHistory(
+    actor: Actor,
+    projectPublicId: string,
+  ): Promise<ProjectIdentityRow | null> {
+    const permissionJoin = actor.platformAdmin
+      ? ''
+      : 'INNER JOIN environment_memberships m ON m.environment_id = e.id AND m.user_id = ?'
+    const values = actor.platformAdmin
+      ? [publicIdToBuffer(projectPublicId)]
+      : [actor.internalId, publicIdToBuffer(projectPublicId)]
+    const [rows] = await this.#pool.execute<ProjectIdentityRow[]>(
+      `SELECT p.id, p.public_id, p.environment_id, e.public_id AS environment_public_id,
+              p.name, p.status
+       FROM projects p
+       INNER JOIN environments e ON e.id = p.environment_id
+       ${permissionJoin}
+       WHERE p.public_id = ?`,
       values,
     )
     return rows[0] ?? null

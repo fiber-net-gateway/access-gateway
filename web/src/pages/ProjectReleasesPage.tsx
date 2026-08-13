@@ -113,9 +113,12 @@ export function ProjectReleasesPage() {
                   <div>
                     <strong>{release.title}</strong>
                     <small>
-                      来源 V{release.sourceConfigurationVersion.number} · wire v
-                      {release.allocatedWireVersion} ·{' '}
-                      {new Date(release.createdAt).toLocaleString('zh-CN')}
+                      {release.kind === 'project_decommission'
+                        ? 'Project 下线'
+                        : `来源 V${release.sourceConfigurationVersion?.number ?? '未知'} · wire v${
+                            release.allocatedWireVersion ?? '未知'
+                          }`}{' '}
+                      · {new Date(release.createdAt).toLocaleString('zh-CN')}
                     </small>
                   </div>
                 </div>
@@ -133,7 +136,8 @@ export function ProjectReleasesPage() {
                         {resource.kind === 'project_route' ? 'Project route' : 'Project list'}
                       </strong>
                       <small>
-                        {resource.dataId} · {resource.group}
+                        {resource.dataId} · {resource.group} ·{' '}
+                        {resource.operation === 'upsert' ? '写入' : '删除'}
                       </small>
                     </span>
                     <span className="status-chip status-chip-unknown">{resource.status}</span>
