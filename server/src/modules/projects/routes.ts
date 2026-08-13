@@ -29,7 +29,7 @@ const projectResponseSchema = {
   properties: {
     id: { type: 'string', format: 'uuid' },
     domain: { type: 'string' },
-    status: { type: 'string', enum: ['active', 'archived'] },
+    status: { type: 'string', enum: ['active', 'decommissioning', 'archived'] },
     lockVersion: { type: 'string', pattern: '^(0|[1-9][0-9]*)$' },
     draft: {
       anyOf: [

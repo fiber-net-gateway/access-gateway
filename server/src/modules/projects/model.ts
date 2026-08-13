@@ -1,7 +1,7 @@
 export interface ProjectView {
   id: string
   domain: string
-  status: 'active' | 'archived'
+  status: 'active' | 'decommissioning' | 'archived'
   lockVersion: string
   draft: {
     id: string

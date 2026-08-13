@@ -238,6 +238,16 @@ export class ConfigurationVersionRepository {
     await withTransaction(
       this.#pool,
       async (transaction) => {
+        const [projectRows] = await transaction.execute<(RowDataPacket & { status: string })[]>(
+          'SELECT status FROM projects WHERE id = ? FOR UPDATE',
+          [input.project.id],
+        )
+        if (projectRows[0]?.status !== 'active') {
+          throw conflict(
+            'PROJECT_NOT_ACTIVE',
+            'Configuration versions can only be saved for an active Project',
+          )
+        }
         const [draftRows] = await transaction.execute<LockedDraftRow[]>(
           `SELECT id, environment_id, current_revision_no, lock_version
            FROM drafts

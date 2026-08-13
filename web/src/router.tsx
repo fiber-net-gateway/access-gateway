@@ -7,7 +7,7 @@ import { ProjectLayout } from './pages/ProjectLayout'
 import { ProjectNetworkPolicyPage } from './pages/ProjectNetworkPolicyPage'
 import { ProjectReleasesPage } from './pages/ProjectReleasesPage'
 import { ProjectRoutesPage } from './pages/ProjectRoutesPage'
-import { ProjectUnavailablePage } from './pages/ProjectUnavailablePage'
+import { ProjectSettingsPage } from './pages/ProjectSettingsPage'
 import { ProjectVersionsPage } from './pages/ProjectVersionsPage'
 import { ProjectsIndexPage } from './pages/ProjectsIndexPage'
 
@@ -31,7 +31,7 @@ export const appRoutes = [
               { path: 'versions', element: <ProjectVersionsPage /> },
               { path: 'network-policy', element: <ProjectNetworkPolicyPage /> },
               { path: 'releases', element: <ProjectReleasesPage /> },
-              { path: 'settings', element: <ProjectUnavailablePage capability="settings" /> },
+              { path: 'settings', element: <ProjectSettingsPage /> },
             ],
           },
         ],

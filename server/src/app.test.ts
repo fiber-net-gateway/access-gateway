@@ -216,6 +216,21 @@ test('configuration version and Release APIs are registered and fail closed with
   assert.equal(release.statusCode, 503)
   assert.equal(release.json().error.code, 'DATABASE_UNCONFIGURED')
 
+  const decommission = await app.inject({
+    method: 'POST',
+    url: `/api/projects/${projectId}/decommission-releases`,
+    headers: {
+      'if-match': '"0"',
+      'idempotency-key': 'test-decommission-project',
+    },
+    payload: {
+      confirmationDomain: 'api.example.com',
+      reason: 'Retired by test',
+    },
+  })
+  assert.equal(decommission.statusCode, 503)
+  assert.equal(decommission.json().error.code, 'DATABASE_UNCONFIGURED')
+
   const tlsRelease = await app.inject({
     method: 'POST',
     url: '/api/tls/releases',

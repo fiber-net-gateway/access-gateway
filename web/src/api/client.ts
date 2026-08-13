@@ -77,7 +77,10 @@ function isProject(value: unknown): value is ProjectView {
     isRecord(value) &&
     typeof value.id === 'string' &&
     typeof value.domain === 'string' &&
-    typeof value.status === 'string'
+    typeof value.status === 'string' &&
+    typeof value.lockVersion === 'string' &&
+    typeof value.createdAt === 'string' &&
+    typeof value.updatedAt === 'string'
   )
 }
 
@@ -305,11 +308,13 @@ function isProjectRelease(value: unknown): value is ProjectReleaseView {
     typeof value.id === 'string' &&
     typeof value.sequence === 'string' &&
     typeof value.projectId === 'string' &&
+    (value.kind === 'project_route' || value.kind === 'project_decommission') &&
     typeof value.title === 'string' &&
     typeof value.status === 'string' &&
-    isRecord(value.sourceConfigurationVersion) &&
-    typeof value.sourceConfigurationVersion.id === 'string' &&
-    typeof value.sourceConfigurationVersion.number === 'number' &&
+    (value.sourceConfigurationVersion === null ||
+      (isRecord(value.sourceConfigurationVersion) &&
+        typeof value.sourceConfigurationVersion.id === 'string' &&
+        typeof value.sourceConfigurationVersion.number === 'number')) &&
     Array.isArray(value.resources) &&
     isRecord(value.publication) &&
     value.activationStatus === 'unknown'
@@ -638,6 +643,27 @@ export async function createRelease(
         'Idempotency-Key': crypto.randomUUID(),
       },
       body: JSON.stringify({ sourceVersionId, expectedCurrentVersionId, title, description }),
+    },
+    isProjectRelease,
+  )
+}
+
+export async function createProjectDecommissionRelease(
+  projectId: string,
+  lockVersion: string,
+  confirmationDomain: string,
+  reason: string,
+): Promise<ProjectReleaseView> {
+  return requestJson(
+    `/api/projects/${encodeURIComponent(projectId)}/decommission-releases`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'If-Match': `"${lockVersion}"`,
+        'Idempotency-Key': crypto.randomUUID(),
+      },
+      body: JSON.stringify({ confirmationDomain, reason }),
     },
     isProjectRelease,
   )

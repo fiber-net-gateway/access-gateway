@@ -29,7 +29,8 @@ export interface SystemStatusResponse {
 export interface ProjectView {
   id: string
   domain: string
-  status: 'active' | 'archived'
+  status: 'active' | 'decommissioning' | 'archived'
+  lockVersion: string
   draft: {
     id: string
     state: string
@@ -38,6 +39,8 @@ export interface ProjectView {
   } | null
   publishedVersion: number | null
   activationStatus: 'unknown'
+  createdAt: string
+  updatedAt: string
 }
 
 export interface RouteItemModel {
@@ -144,6 +147,7 @@ export interface ProjectReleaseView {
   id: string
   sequence: string
   projectId: string
+  kind: 'project_route' | 'project_decommission'
   title: string
   description: string
   status: ReleaseStatus
@@ -151,14 +155,15 @@ export interface ProjectReleaseView {
     id: string
     number: number
     relationAtCreation: 'current' | 'historical' | 'unknown'
-  }
-  currentConfigurationVersionAtCreation: { id: string; number: number }
-  allocatedWireVersion: number
+  } | null
+  currentConfigurationVersionAtCreation: { id: string; number: number } | null
+  allocatedWireVersion: number | null
   resources: readonly {
     id: string
     kind: 'project_route' | 'project_list'
     dataId: string
     group: string
+    operation: 'upsert' | 'remove'
     status: string
   }[]
   publication: { jobId: string | null; state: string | null }

@@ -19,19 +19,20 @@ interface ReleaseRow extends RowDataPacket {
   public_id: Buffer
   sequence_no: string
   project_public_id: Buffer
+  kind: 'project_route' | 'project_decommission'
   title: string
   description: string
   status: ReleaseStatus
-  source_version_public_id: Buffer
-  source_version_no: number
+  source_version_public_id: Buffer | null
+  source_version_no: number | null
   source_relation: 'current' | 'historical' | null
-  current_version_public_id: Buffer
-  current_version_no: number
-  allocated_project_version: number
+  current_version_public_id: Buffer | null
+  current_version_no: number | null
+  allocated_project_version: number | null
   source_model_sha256: Buffer
   wire_sha256: Buffer | null
-  native_validator_contract: number
-  native_validator_revision: string
+  native_validator_contract: number | null
+  native_validator_revision: string | null
   compiler_revision: string | null
   validation_errors_json: unknown
   publication_job_public_id: Buffer | null
@@ -88,6 +89,21 @@ export interface BeginReleaseResult {
   replay: boolean
 }
 
+export interface BeginDecommissionReleaseInput {
+  actor: Actor
+  project: ProjectIdentityRow
+  expectedLockVersion: string
+  reason: string
+  idempotencyKey: string
+  requestSha256: Buffer
+  requestId: string
+  planText: string
+  dataId: string
+  group: string
+  base: NacosResourceValue
+  targetContent: string
+}
+
 export interface PreparedReleaseResource {
   kind: 'project_route' | 'project_list'
   dataId: string
@@ -108,7 +124,7 @@ const selectRelease = `
   SELECT
     rel.id AS internal_id, rel.public_id, rel.sequence_no,
     p.public_id AS project_public_id,
-    rel.title, rel.description, rel.status,
+    rel.kind, rel.title, rel.description, rel.status,
     source.public_id AS source_version_public_id, source.revision_no AS source_version_no,
     ri.source_relation,
     current_at_creation.public_id AS current_version_public_id,
@@ -126,11 +142,13 @@ const selectRelease = `
     job.public_id AS publication_job_public_id, job.state AS publication_job_state,
     rel.created_at, rel.published_at
   FROM releases rel
-  INNER JOIN release_items ri ON ri.release_id = rel.id AND ri.kind = 'project_route'
+  INNER JOIN release_items ri
+    ON ri.release_id = rel.id AND ri.kind IN ('project_route', 'project_decommission')
   INNER JOIN projects p ON p.id = ri.project_id
-  INNER JOIN draft_revisions source ON source.id = ri.draft_revision_id
-  INNER JOIN config_documents source_doc ON source_doc.id = source.model_document_id
-  INNER JOIN draft_revisions current_at_creation ON current_at_creation.id = rel.current_revision_id_at_creation
+  LEFT JOIN draft_revisions source ON source.id = ri.draft_revision_id
+  INNER JOIN config_documents source_doc ON source_doc.id = ri.model_document_id
+  LEFT JOIN draft_revisions current_at_creation
+    ON current_at_creation.id = rel.current_revision_id_at_creation
   LEFT JOIN publication_jobs job ON job.release_id = rel.id
 `
 
@@ -182,6 +200,32 @@ export class ReleaseRepository {
             )
           }
           releasePublicId = bufferToPublicId(existing.public_id)
+          replay = true
+          return
+        }
+
+        const [projectRows] = await transaction.execute<
+          (RowDataPacket & { status: ProjectIdentityRow['status'] })[]
+        >('SELECT status FROM projects WHERE id = ? FOR UPDATE', [input.project.id])
+        if (projectRows[0]?.status !== 'active') {
+          throw conflict('PROJECT_NOT_ACTIVE', 'Only an active Project can create a route Release')
+        }
+        const [lockedExistingRows] = await transaction.execute<ExistingReleaseRow[]>(
+          `SELECT public_id, request_sha256
+           FROM releases
+           WHERE environment_id = ? AND created_by = ? AND idempotency_key = ?
+           LIMIT 1`,
+          [input.project.environment_id, input.actor.internalId, input.idempotencyKey],
+        )
+        const lockedExisting = lockedExistingRows[0]
+        if (lockedExisting) {
+          if (!lockedExisting.request_sha256.equals(input.requestSha256)) {
+            throw conflict(
+              'IDEMPOTENCY_KEY_REUSED',
+              'The idempotency key was already used with a different release request',
+            )
+          }
+          releasePublicId = bufferToPublicId(lockedExisting.public_id)
           replay = true
           return
         }
@@ -312,6 +356,247 @@ export class ReleaseRepository {
 
     const release = await this.findByPublicId(releasePublicId)
     if (!release) throw new Error('Release could not be reloaded after creation')
+    return { release, replay }
+  }
+
+  async beginDecommission(input: BeginDecommissionReleaseInput): Promise<BeginReleaseResult> {
+    let releasePublicId = createPublicId()
+    let replay = false
+    const planEncrypted = this.#documents.encrypt(Buffer.from(input.planText, 'utf8'))
+    const targetEncrypted = this.#documents.encrypt(Buffer.from(input.targetContent, 'utf8'))
+    const baseEncrypted =
+      input.base.exists && input.base.content !== null
+        ? this.#documents.encrypt(Buffer.from(input.base.content, 'utf8'))
+        : null
+
+    await withTransaction(
+      this.#pool,
+      async (transaction) => {
+        const [existingRows] = await transaction.execute<ExistingReleaseRow[]>(
+          `SELECT public_id, request_sha256
+           FROM releases
+           WHERE environment_id = ? AND created_by = ? AND idempotency_key = ?
+           LIMIT 1`,
+          [input.project.environment_id, input.actor.internalId, input.idempotencyKey],
+        )
+        const existing = existingRows[0]
+        if (existing) {
+          if (!existing.request_sha256.equals(input.requestSha256)) {
+            throw conflict(
+              'IDEMPOTENCY_KEY_REUSED',
+              'The idempotency key was already used with a different release request',
+            )
+          }
+          releasePublicId = bufferToPublicId(existing.public_id)
+          replay = true
+          return
+        }
+
+        const [projectRows] = await transaction.execute<
+          (RowDataPacket & {
+            status: ProjectIdentityRow['status']
+            lock_version: string
+            archived_at: string | null
+          })[]
+        >(
+          `SELECT status, lock_version, archived_at
+           FROM projects
+           WHERE id = ?
+           FOR UPDATE`,
+          [input.project.id],
+        )
+        const project = projectRows[0]
+        if (!project || project.status === 'archived' || project.archived_at !== null) {
+          throw conflict('PROJECT_ARCHIVED', 'An archived Project cannot be decommissioned again')
+        }
+        const [lockedExistingRows] = await transaction.execute<ExistingReleaseRow[]>(
+          `SELECT public_id, request_sha256
+           FROM releases
+           WHERE environment_id = ? AND created_by = ? AND idempotency_key = ?
+           LIMIT 1`,
+          [input.project.environment_id, input.actor.internalId, input.idempotencyKey],
+        )
+        const lockedExisting = lockedExistingRows[0]
+        if (lockedExisting) {
+          if (!lockedExisting.request_sha256.equals(input.requestSha256)) {
+            throw conflict(
+              'IDEMPOTENCY_KEY_REUSED',
+              'The idempotency key was already used with a different release request',
+            )
+          }
+          releasePublicId = bufferToPublicId(lockedExisting.public_id)
+          replay = true
+          return
+        }
+        if (project.lock_version !== input.expectedLockVersion) {
+          throw conflict(
+            'PROJECT_VERSION_CONFLICT',
+            'The Project changed; refresh Settings and confirm decommissioning again',
+          )
+        }
+
+        const [activeReleaseRows] = await transaction.execute<(RowDataPacket & { id: string })[]>(
+          `SELECT rel.id
+           FROM releases rel
+           INNER JOIN release_items item ON item.release_id = rel.id
+           WHERE item.project_id = ?
+             AND rel.status IN ('creating', 'validating', 'ready', 'queued', 'publishing')
+           LIMIT 1`,
+          [input.project.id],
+        )
+        if (activeReleaseRows[0]) {
+          throw conflict(
+            'PROJECT_DECOMMISSION_IN_PROGRESS',
+            'The Project already has a non-terminal Release',
+          )
+        }
+
+        const [environmentRows] = await transaction.execute<
+          (RowDataPacket & { last_release_sequence: string })[]
+        >('SELECT last_release_sequence FROM environments WHERE id = ? FOR UPDATE', [
+          input.project.environment_id,
+        ])
+        const environment = environmentRows[0]
+        if (!environment) throw notFound('Workspace')
+        const nextSequence = BigInt(environment.last_release_sequence) + 1n
+
+        const [currentRows] = await transaction.execute<CurrentRevisionRow[]>(
+          `SELECT revision.id, revision.public_id, revision.revision_no
+           FROM drafts draft
+           INNER JOIN draft_revisions revision
+             ON revision.draft_id = draft.id
+            AND revision.revision_no = draft.current_revision_no
+           WHERE draft.project_id = ? AND draft.archived_at IS NULL
+           LIMIT 1`,
+          [input.project.id],
+        )
+        const current = currentRows[0] ?? null
+
+        const planDocument = await this.#documents.insert(transaction, {
+          environmentInternalId: input.project.environment_id,
+          purpose: 'release_model',
+          contentType: 'application/json',
+          schemaVersion: 1,
+          encrypted: planEncrypted,
+        })
+        let baseDocumentId: string | null = null
+        if (baseEncrypted) {
+          const baseDocument = await this.#documents.insert(transaction, {
+            environmentInternalId: input.project.environment_id,
+            purpose: 'nacos_observation',
+            contentType: 'text/plain',
+            schemaVersion: null,
+            encrypted: baseEncrypted,
+          })
+          baseDocumentId = baseDocument.internalId
+        }
+        const [observation] = await transaction.execute<ResultSetHeader>(
+          `INSERT INTO nacos_resource_observations
+            (public_id, environment_id, data_id, group_name, resource_exists,
+             payload_document_id, nacos_md5, sha256, source, client_result, fetched_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'release_preflight', 'success', CURRENT_TIMESTAMP(6))`,
+          [
+            publicIdToBuffer(createPublicId()),
+            input.project.environment_id,
+            input.dataId,
+            input.group,
+            input.base.exists,
+            baseDocumentId,
+            input.base.md5 ? Buffer.from(input.base.md5, 'hex') : null,
+            input.base.sha256 ? Buffer.from(input.base.sha256, 'hex') : null,
+          ],
+        )
+        const targetDocument = await this.#documents.insert(transaction, {
+          environmentInternalId: input.project.environment_id,
+          purpose: 'release_payload',
+          contentType: 'text/plain',
+          schemaVersion: null,
+          encrypted: targetEncrypted,
+        })
+
+        await transaction.execute(
+          'UPDATE environments SET last_release_sequence = ? WHERE id = ?',
+          [nextSequence.toString(), input.project.environment_id],
+        )
+        const [releaseResult] = await transaction.execute<ResultSetHeader>(
+          `INSERT INTO releases
+            (public_id, environment_id, sequence_no, kind, status, title, description,
+             compiler_revision, current_revision_id_at_creation, idempotency_key,
+             request_sha256, validation_errors_json, native_validator_contract,
+             native_validator_revision, created_by, ready_at)
+           VALUES (?, ?, ?, 'project_decommission', 'ready', ?, ?, 'project-decommission-v1',
+                   ?, ?, ?, JSON_ARRAY(), NULL, NULL, ?, CURRENT_TIMESTAMP(6))`,
+          [
+            publicIdToBuffer(releasePublicId),
+            input.project.environment_id,
+            nextSequence.toString(),
+            `下线 ${input.project.name}`,
+            input.reason,
+            current?.id ?? null,
+            input.idempotencyKey,
+            input.requestSha256,
+            input.actor.internalId,
+          ],
+        )
+        const releaseInternalId = releaseResult.insertId.toString()
+        await transaction.execute(
+          `INSERT INTO release_items
+            (public_id, release_id, project_id, kind, draft_revision_id, source_relation,
+             model_document_id, allocated_project_version, change_kind, diff_summary_json)
+           VALUES (?, ?, ?, 'project_decommission', NULL, NULL, ?, NULL, 'remove', ?)`,
+          [
+            publicIdToBuffer(createPublicId()),
+            releaseInternalId,
+            input.project.id,
+            planDocument.internalId,
+            JSON.stringify({ domain: input.project.name, removesProjectFromList: true }),
+          ],
+        )
+        await transaction.execute(
+          `INSERT INTO release_resources
+            (public_id, release_id, project_id, kind, data_id, group_name, operation,
+             publish_order, required_resource, payload_document_id, base_observation_id,
+             target_sha256, allocated_project_version, status)
+           VALUES (?, ?, ?, 'project_list', ?, ?, 'upsert', 10, TRUE, ?, ?, ?, NULL, 'pending')`,
+          [
+            publicIdToBuffer(createPublicId()),
+            releaseInternalId,
+            input.project.id,
+            input.dataId,
+            input.group,
+            targetDocument.internalId,
+            observation.insertId.toString(),
+            targetDocument.sha256,
+          ],
+        )
+        await transaction.execute(
+          `UPDATE projects
+           SET status = 'decommissioning', lock_version = lock_version + 1,
+               updated_at = CURRENT_TIMESTAMP(6)
+           WHERE id = ?`,
+          [input.project.id],
+        )
+        await this.#audit.append(transaction, {
+          environmentInternalId: input.project.environment_id,
+          actorInternalId: input.actor.internalId,
+          eventType: 'project.decommission_requested',
+          targetType: 'project',
+          targetPublicId: bufferToPublicId(input.project.public_id),
+          requestId: input.requestId,
+          result: 'success',
+          summary: {
+            releaseId: releasePublicId,
+            domain: input.project.name,
+            reason: input.reason,
+            expectedLockVersion: input.expectedLockVersion,
+          },
+        })
+      },
+      { retryOnDeadlock: true },
+    )
+
+    const release = await this.findByPublicId(releasePublicId)
+    if (!release) throw new Error('Decommission Release could not be reloaded after creation')
     return { release, replay }
   }
 
@@ -528,25 +813,35 @@ export class ReleaseRepository {
       id: bufferToPublicId(row.public_id),
       sequence: row.sequence_no,
       projectId: bufferToPublicId(row.project_public_id),
+      kind: row.kind,
       title: row.title,
       description: row.description,
       status: row.status,
-      sourceConfigurationVersion: {
-        id: bufferToPublicId(row.source_version_public_id),
-        number: row.source_version_no,
-        relationAtCreation: row.source_relation ?? 'unknown',
-      },
-      currentConfigurationVersionAtCreation: {
-        id: bufferToPublicId(row.current_version_public_id),
-        number: row.current_version_no,
-      },
+      sourceConfigurationVersion:
+        row.source_version_public_id && row.source_version_no !== null
+          ? {
+              id: bufferToPublicId(row.source_version_public_id),
+              number: row.source_version_no,
+              relationAtCreation: row.source_relation ?? 'unknown',
+            }
+          : null,
+      currentConfigurationVersionAtCreation:
+        row.current_version_public_id && row.current_version_no !== null
+          ? {
+              id: bufferToPublicId(row.current_version_public_id),
+              number: row.current_version_no,
+            }
+          : null,
       allocatedWireVersion: row.allocated_project_version,
       sourceModelSha256: row.source_model_sha256.toString('hex'),
       wireSha256: row.wire_sha256?.toString('hex') ?? null,
-      nativeValidator: {
-        contractVersion: row.native_validator_contract,
-        revision: row.native_validator_revision,
-      },
+      nativeValidator:
+        row.native_validator_contract !== null && row.native_validator_revision !== null
+          ? {
+              contractVersion: row.native_validator_contract,
+              revision: row.native_validator_revision,
+            }
+          : null,
       compilerRevision: row.compiler_revision,
       validationErrors: parseJsonArray(row.validation_errors_json),
       resources: resourceRows.map(resourceView),

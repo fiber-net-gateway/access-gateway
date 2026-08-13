@@ -4,7 +4,7 @@ import type {
   NacosTarget,
 } from '../../integrations/nacos/model.js'
 import type { NativeValidator } from '../../integrations/native-validator/model.js'
-import { forbidden, notFound, unavailable, unprocessable } from '../../shared/errors.js'
+import { conflict, forbidden, notFound, unavailable, unprocessable } from '../../shared/errors.js'
 import { canonicalJson, sha256 } from '../../shared/json.js'
 import { bufferToPublicId } from '../../shared/ids.js'
 import type { Actor } from '../auth/model.js'
@@ -15,6 +15,7 @@ import { ProjectRepository } from '../projects/repository.js'
 import { ConfigurationVersionRepository } from '../versions/repository.js'
 import type {
   CreateProjectReleaseInput,
+  CreateProjectDecommissionReleaseInput,
   ProjectReleaseListResult,
   ProjectReleaseView,
   QueuePublicationResult,
@@ -26,6 +27,12 @@ export interface ReleaseService {
     actor: Actor,
     projectId: string,
     input: CreateProjectReleaseInput,
+    requestId: string,
+  ): Promise<ProjectReleaseView>
+  createDecommission(
+    actor: Actor,
+    projectId: string,
+    input: CreateProjectDecommissionReleaseInput,
     requestId: string,
   ): Promise<ProjectReleaseView>
   list(actor: Actor, projectId: string): Promise<ProjectReleaseListResult>
@@ -67,6 +74,33 @@ function projectNames(content: string | null): string[] {
         .filter(Boolean),
     ),
   ]
+}
+
+export function compileDecommissionProjectList(content: string | null, domain: string): string {
+  const names = projectNames(content)
+  if (!names.includes(domain)) return content ?? ''
+  return names
+    .filter((name) => name !== domain)
+    .sort()
+    .join(';')
+}
+
+function validateDecommissionReason(value: string): string {
+  const reason = value.trim()
+  if (reason.length < 1 || reason.length > 1_000) {
+    throw unprocessable(
+      'INVALID_DECOMMISSION_REASON',
+      'Decommission reason must contain 1-1000 characters',
+      [
+        {
+          path: 'reason',
+          code: 'INVALID_LENGTH',
+          message: 'Reason must contain 1-1000 characters',
+        },
+      ],
+    )
+  }
+  return reason
 }
 
 export class DefaultReleaseService implements ReleaseService {
@@ -141,6 +175,9 @@ export class DefaultReleaseService implements ReleaseService {
     if (begun.replay) return begun.release
 
     const wireVersion = begun.release.allocatedWireVersion
+    if (begun.release.kind !== 'project_route' || wireVersion === null) {
+      throw new Error('Prepared route Release is missing its allocated wire version')
+    }
     const validation = await validateProjectRoutesCandidate(
       this.#validator,
       project.name,
@@ -240,8 +277,91 @@ export class DefaultReleaseService implements ReleaseService {
     return release
   }
 
+  async createDecommission(
+    actor: Actor,
+    projectId: string,
+    input: CreateProjectDecommissionReleaseInput,
+    requestId: string,
+  ): Promise<ProjectReleaseView> {
+    const project = await this.#projects.findIdentityForHistory(actor, projectId)
+    if (!project) throw notFound('Project')
+    if (project.status === 'archived') {
+      throw conflict('PROJECT_ARCHIVED', 'An archived Project cannot be decommissioned again')
+    }
+    await this.requireAdmin(actor, project.environment_public_id)
+    if (input.confirmationDomain.trim() !== project.name) {
+      throw unprocessable(
+        'PROJECT_CONFIRMATION_MISMATCH',
+        'The confirmation domain must exactly match the Project domain',
+        [
+          {
+            path: 'confirmationDomain',
+            code: 'MISMATCH',
+            message: `Enter ${project.name} to confirm`,
+          },
+        ],
+      )
+    }
+    const reason = validateDecommissionReason(input.reason)
+    if (!this.#nacos.available) {
+      throw unavailable('PUBLICATION_UNCONFIGURED', 'Nacos publication is not configured')
+    }
+    const environment = await this.#environments.findAccessibleByPublicId(
+      actor,
+      bufferToPublicId(project.environment_public_id),
+    )
+    if (!environment) throw notFound('Workspace')
+    const target: NacosTarget = {
+      endpoint: environment.nacos.endpoint,
+      namespace: environment.nacos.namespace,
+      tenant: environment.nacos.tenant,
+      credentialConfigured: environment.nacos.credentialConfigured,
+    }
+    let base: NacosResourceValue
+    try {
+      base = await this.#nacos.read(
+        target,
+        environment.dataIds.projects,
+        environment.dataIds.routeGroup,
+      )
+    } catch {
+      throw unavailable(
+        'NACOS_PREFLIGHT_FAILED',
+        'The Project List could not be read before creating the decommission Release',
+      )
+    }
+    const plan = {
+      schemaVersion: 1,
+      kind: 'project_decommission',
+      projectId,
+      domain: project.name,
+      reason,
+    } as const
+    const requestSha256 = sha256(
+      canonicalJson({
+        ...plan,
+        expectedLockVersion: input.expectedLockVersion,
+      }),
+    )
+    const result = await this.#releases.beginDecommission({
+      actor,
+      project,
+      expectedLockVersion: input.expectedLockVersion,
+      reason,
+      idempotencyKey: input.idempotencyKey,
+      requestSha256,
+      requestId,
+      planText: canonicalJson(plan),
+      dataId: environment.dataIds.projects,
+      group: environment.dataIds.routeGroup,
+      base,
+      targetContent: compileDecommissionProjectList(base.content, project.name),
+    })
+    return result.release
+  }
+
   async list(actor: Actor, projectId: string): Promise<ProjectReleaseListResult> {
-    const project = await this.#projects.findIdentity(actor, projectId)
+    const project = await this.#projects.findIdentityForHistory(actor, projectId)
     if (!project) throw notFound('Project')
     return { items: await this.#releases.listByProject(project.id) }
   }
@@ -249,7 +369,7 @@ export class DefaultReleaseService implements ReleaseService {
   async get(actor: Actor, releaseId: string): Promise<ProjectReleaseView> {
     const release = await this.#releases.findByPublicId(releaseId)
     if (!release) throw notFound('Release')
-    const project = await this.#projects.findIdentity(actor, release.projectId)
+    const project = await this.#projects.findIdentityForHistory(actor, release.projectId)
     if (!project) throw notFound('Release')
     return release
   }
@@ -261,7 +381,7 @@ export class DefaultReleaseService implements ReleaseService {
     requestId: string,
   ): Promise<QueuePublicationResult> {
     const release = await this.get(actor, releaseId)
-    const project = await this.#projects.findIdentity(actor, release.projectId)
+    const project = await this.#projects.findIdentityForHistory(actor, release.projectId)
     if (!project) throw notFound('Release')
     await this.requirePublisher(actor, project.environment_public_id)
     if (!this.#nacos.available) {
@@ -276,6 +396,13 @@ export class DefaultReleaseService implements ReleaseService {
     if (!role) throw notFound('Project')
     if (!['admin', 'publisher'].includes(role)) throw forbidden()
   }
+
+  private async requireAdmin(actor: Actor, environmentPublicId: Buffer): Promise<void> {
+    const environmentId = bufferToPublicId(environmentPublicId)
+    const role = await this.#environments.role(actor, environmentId)
+    if (!role) throw notFound('Project')
+    if (role !== 'admin') throw forbidden()
+  }
 }
 
 export class UnavailableReleaseService implements ReleaseService {
@@ -284,6 +411,10 @@ export class UnavailableReleaseService implements ReleaseService {
   }
 
   async list(): Promise<never> {
+    throw unavailable('DATABASE_UNCONFIGURED', 'MySQL is not configured')
+  }
+
+  async createDecommission(): Promise<never> {
     throw unavailable('DATABASE_UNCONFIGURED', 'MySQL is not configured')
   }
 
