@@ -5,6 +5,7 @@
 #include <bit>
 #include <charconv>
 #include <limits>
+#include <unordered_set>
 #include <utility>
 
 namespace fiber::access_server {
@@ -37,6 +38,15 @@ AccessConfigError project_error(std::string_view field, std::string_view message
 }
 
 bool is_nonempty(const std::optional<std::string> &value) noexcept { return value && !value->empty(); }
+
+bool has_non_whitespace(std::string_view value) noexcept {
+    for (const unsigned char ch: value) {
+        if (ch != ' ' && ch != '\t' && ch != '\r' && ch != '\n' && ch != '\f' && ch != '\v') {
+            return true;
+        }
+    }
+    return false;
+}
 
 std::int32_t java_int32_narrow(std::int64_t value) noexcept {
     const auto bits = static_cast<std::uint32_t>(static_cast<std::uint64_t>(value) & 0xFFFF'FFFFULL);
@@ -136,6 +146,8 @@ compile_header_templates(const StringConfigMap &input, std::size_t route_index, 
 
 struct PendingRouteCompile {
     std::optional<std::string> condition;
+    std::optional<std::string> script;
+    bool has_predicate = false;
     CompiledHeaderTemplates::Builder proxy_headers;
     CompiledHeaderTemplates::Builder response_headers;
 };
@@ -194,6 +206,25 @@ std::expected<void, AccessConfigError> compile_route_scripts(CompiledRoute &rout
         route.condition_program.emplace(std::move(*program));
     }
 
+    if (pending.script) {
+        if (!compiler.compile_route_script) {
+            return std::unexpected(route_error(AccessConfigErrorCode::InvalidField, route_index, "script",
+                                               "route script compiler is not configured"));
+        }
+        auto program =
+                compiler.compile_route_script(compiler.context, constants, *pending.script, route.path_variable_names);
+        if (!program) {
+            return std::unexpected(
+                    route_error(AccessConfigErrorCode::InvalidField, route_index, "script", program.error()));
+        }
+        if (!program->valid()) {
+            return std::unexpected(route_error(AccessConfigErrorCode::InvalidField, route_index, "script",
+                                               "script compiler returned an invalid program"));
+        }
+        route.script_program = std::make_shared<script::Script>(std::move(*program));
+        return {};
+    }
+
     if (route.response) {
         if (route.response->body_kind == ResponseBodyKind::Template) {
             if (!route.response->body_template) {
@@ -224,6 +255,50 @@ std::expected<void, AccessConfigError> compile_route_scripts(CompiledRoute &rout
         return compile_template(*route.proxy->rewrite, "rewrite");
     }
     return {};
+}
+
+bool is_http_token(std::string_view value) noexcept {
+    if (value.empty() || value.size() > 64) {
+        return false;
+    }
+    for (const unsigned char ch: value) {
+        const bool alpha_numeric = (ch >= '0' && ch <= '9') || (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z');
+        const bool punctuation = ch == '!' || ch == '#' || ch == '$' || ch == '%' || ch == '&' || ch == '\'' ||
+                                 ch == '*' || ch == '+' || ch == '-' || ch == '.' || ch == '^' || ch == '_' ||
+                                 ch == '`' || ch == '|' || ch == '~';
+        if (!alpha_numeric && !punctuation) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool has_script_only_field_conflict(const RouteConfig &source) noexcept {
+    return source.service.has_value() || source.cluster.has_value() || !source.addresses.empty() ||
+           source.condition.has_value() || !source.proxy_headers.empty() || !source.response_headers.empty() ||
+           !source.context.empty() || source.rewrite.has_value() || source.status != 0 || source.body.has_value() ||
+           source.timeout_millis.has_value() || source.max_client_body_size.has_value() ||
+           source.max_proxy_body_size.has_value() || source.websocket_timeout_millis.has_value() ||
+           source.flush.has_value();
+}
+
+std::string method_route_key(std::string_view path, std::string_view method,
+                             const std::optional<std::string> &condition) {
+    std::string signature;
+    signature.reserve(method.size() + (condition ? condition->size() : 0) + 48);
+    signature.append("method:");
+    signature.append(std::to_string(method.size()));
+    signature.push_back(':');
+    signature.append(method);
+    signature.append(";condition:");
+    if (condition) {
+        signature.append(std::to_string(condition->size()));
+        signature.push_back(':');
+        signature.append(*condition);
+    } else {
+        signature.append("none");
+    }
+    return conditional_route_key(path, signature);
 }
 
 bool ascii_iequals(std::string_view left, std::string_view right) noexcept {
@@ -378,15 +453,40 @@ std::expected<CompiledRoute, AccessConfigError> compile_route(const RouteConfig 
     CompiledRoute route;
     route.path = *source.path;
     route.type = *source.type;
-    route.max_client_body_size = source.max_client_body_size;
+    if (source.method) {
+        if (!is_http_token(*source.method)) {
+            return std::unexpected(route_error(AccessConfigErrorCode::InvalidField, route_index, "method",
+                                               "method must be a non-empty HTTP token"));
+        }
+        route.method = *source.method;
+    }
     if (is_nonempty(source.condition)) {
         pending.condition = *source.condition;
+    }
+    pending.has_predicate = route.method.has_value() || pending.condition.has_value();
+    if (route.method) {
+        route.key = method_route_key(route.path, *route.method, pending.condition);
+    } else if (pending.condition) {
         route.key = conditional_route_key(route.path, *pending.condition);
     } else {
         route.key = route.path;
     }
 
-    if (route.type == RouteType::Response) {
+    if (route.type == RouteType::Script) {
+        if (!source.script || !has_non_whitespace(*source.script)) {
+            return std::unexpected(
+                    route_error(AccessConfigErrorCode::InvalidField, route_index, "script", "route script is empty"));
+        }
+        if (has_script_only_field_conflict(source)) {
+            return std::unexpected(route_error(AccessConfigErrorCode::InvalidCombination, route_index, "script",
+                                               "script route only supports path, method, script, and allows"));
+        }
+        pending.script = *source.script;
+    } else if (source.script.has_value()) {
+        return std::unexpected(route_error(AccessConfigErrorCode::InvalidCombination, route_index, "script",
+                                           "script is only valid for SCRIPT routes"));
+    } else if (route.type == RouteType::Response) {
+        route.max_client_body_size = source.max_client_body_size;
         if (source.status < 100 || source.status >= 1000) {
             return std::unexpected(
                     route_error(AccessConfigErrorCode::OutOfRange, route_index, "status", "invalid status code"));
@@ -431,6 +531,7 @@ std::expected<CompiledRoute, AccessConfigError> compile_route(const RouteConfig 
         response.response_headers = std::move(*headers);
         route.response.emplace(std::move(response));
     } else {
+        route.max_client_body_size = source.max_client_body_size;
         if (source.timeout_millis && *source.timeout_millis < 5) {
             return std::unexpected(
                     route_error(AccessConfigErrorCode::OutOfRange, route_index, "timeout", "timeout is too small"));
@@ -563,8 +664,14 @@ public:
     }
 
     std::uint32_t on_route_mount(std::uint32_t node_id, std::string_view, std::uint32_t &route_index) {
-        if (last_node_id_ == node_id && last_route_ != kNoRoute && !pending_[last_route_].condition) {
+        if (last_node_id_ != node_id) {
+            route_keys_.clear();
+        }
+        if (last_node_id_ == node_id && last_route_ != kNoRoute && !pending_[last_route_].has_predicate) {
             set_error(route_index, AccessConfigErrorCode::Conflict, "exists dead route");
+        }
+        if (!route_keys_.emplace(routes_[route_index].key).second) {
+            set_error(route_index, AccessConfigErrorCode::Conflict, "route predicate is duplicate");
         }
         last_node_id_ = node_id;
         last_route_ = route_index;
@@ -584,6 +691,7 @@ private:
 
     std::vector<CompiledRoute> &routes_;
     std::span<const PendingRouteCompile> pending_;
+    std::unordered_set<std::string_view> route_keys_;
     std::optional<AccessConfigError> error_;
     std::uint32_t last_node_id_ = util::RoutePathMatcher<std::uint32_t>::kInvalidIndex;
     std::uint32_t last_route_ = kNoRoute;

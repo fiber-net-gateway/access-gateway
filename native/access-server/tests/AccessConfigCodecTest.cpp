@@ -210,6 +210,23 @@ TEST(AccessConfigCodecTest, KeepsJavaDefaultsAndUnknownEnumAsNull) {
     EXPECT_FALSE(require_route(**unknown, 0).type);
 }
 
+TEST(AccessConfigCodecTest, ParsesMethodAndScriptRoutes) {
+    auto result = parse_project_config(
+            R"({"routes":[{"path":"/run/:id","method":"POST","type":"SCRIPT","script":"return $path.id;"}]})");
+
+    ASSERT_TRUE(result) << result.error().message;
+    ASSERT_TRUE(*result);
+    const RouteConfig &route = require_route(**result, 0);
+    ASSERT_TRUE(route.path);
+    EXPECT_EQ(*route.path, "/run/:id");
+    ASSERT_TRUE(route.method);
+    EXPECT_EQ(*route.method, "POST");
+    ASSERT_TRUE(route.type);
+    EXPECT_EQ(*route.type, RouteType::Script);
+    ASSERT_TRUE(route.script);
+    EXPECT_EQ(*route.script, "return $path.id;");
+}
+
 TEST(AccessConfigCodecTest, ParsesJavaDurationAndDataSizeBoundaries) {
     auto result = parse_project_config(R"({"routes":[{"timeout":-1,"websocket_timeout":"2147484s",)"
                                        R"("max_client_body_size":0,"max_proxy_body_size":"1G"}]})");

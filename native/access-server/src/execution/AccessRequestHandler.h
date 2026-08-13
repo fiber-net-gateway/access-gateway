@@ -32,10 +32,13 @@ struct AccessRequestScriptAdapter {
     using TemplateFunction = Result<void> (*)(void *context, http_script::ScriptExchangeCtx &script_context,
                                               const script::Script &program, std::string_view expression,
                                               std::string &output) noexcept;
+    using RouteFunction = async::Task<Result<void>> (*)(void *context, http_script::ScriptExchangeCtx &script_context,
+                                                        script::Script &program) noexcept;
 
     void *context = nullptr;
     ConditionFunction evaluate_condition = nullptr;
     TemplateFunction evaluate_template = nullptr;
+    RouteFunction execute_route_script = nullptr;
 };
 
 struct AccessRequestHandlerOptions {

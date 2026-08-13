@@ -10,7 +10,7 @@ import {
 
 test('creates an empty ordered YAML route model', () => {
   assert.deepEqual(initialRouteModel(), {
-    schemaVersion: 4,
+    schemaVersion: 5,
     kind: 'project_routes_yaml',
     networkPolicy: {
       source: 'route',
@@ -26,6 +26,8 @@ test('creates independent RESPONSE and PROXY YAML route items', () => {
   const response = createRouteItem('RESPONSE')
   const proxy = createRouteItem('PROXY')
   assert.notEqual(response.id, proxy.id)
+  assert.equal(response.format, 'yaml')
+  assert.equal(proxy.format, 'yaml')
   assert.equal(analyzeRouteSource(response).type, 'RESPONSE')
   assert.equal(analyzeRouteSource(proxy).type, 'PROXY')
 
@@ -36,12 +38,13 @@ test('creates independent RESPONSE and PROXY YAML route items', () => {
 
 test('reports malformed documents, duplicate keys, anchors, and non-mapping roots', () => {
   for (const source of ['path: [', 'path: /one\npath: /two\ntype: RESPONSE', '- one\n- two']) {
-    const result = analyzeRouteSource({ id: crypto.randomUUID(), source })
+    const result = analyzeRouteSource({ id: crypto.randomUUID(), format: 'yaml', source })
     assert.ok(result.issues.length > 0, source)
   }
 
   const anchored = analyzeRouteSource({
     id: crypto.randomUUID(),
+    format: 'yaml',
     source: 'path: &routePath /one\ntype: RESPONSE\nrewrite: *routePath',
   })
   assert.ok(anchored.issues.some((issue) => issue.code.includes('ANCHOR')))
@@ -51,6 +54,7 @@ test('reports malformed documents, duplicate keys, anchors, and non-mapping root
 test('derives route card metadata without dropping advanced YAML fields', () => {
   const result = analyzeRouteSource({
     id: crypto.randomUUID(),
+    format: 'yaml',
     source: `path: /v1/*
 type: PROXY
 condition: $req.method == 'GET'
@@ -67,6 +71,7 @@ proxy_headers:
 test('reports missing and unknown route fields before server validation', () => {
   const result = analyzeRouteSource({
     id: crypto.randomUUID(),
+    format: 'yaml',
     source: 'status: 200\nfuture_field: true',
   })
   assert.ok(result.issues.some((issue) => issue.code === 'INVALID_ROUTE_PATH'))
@@ -77,6 +82,7 @@ test('reports missing and unknown route fields before server validation', () => 
 test('rejects a scalar response_headers block even though it is valid YAML syntax', () => {
   const result = analyzeRouteSource({
     id: crypto.randomUUID(),
+    format: 'yaml',
     source: 'path: /\nstatus: 200\ntype: RESPONSE\nresponse_headers:\n  X-Heassf',
   })
 
@@ -90,8 +96,25 @@ test('rejects a scalar response_headers block even though it is valid YAML synta
 test('rejects YAML scalar values that cannot be represented safely in JSON', () => {
   const result = analyzeRouteSource({
     id: crypto.randomUUID(),
+    format: 'yaml',
     source: 'path: /unsafe\ntype: RESPONSE\nstatus: 9007199254740993',
   })
 
   assert.ok(result.issues.some((issue) => issue.code === 'ROUTE_VALUE_NOT_JSON_SAFE'))
+})
+
+test('creates and analyzes JavaScript routes with external match metadata', () => {
+  const route = createRouteItem('JS')
+  assert.equal(route.format, 'js')
+  if (route.format !== 'js') throw new Error('expected JavaScript route')
+  assert.equal(analyzeRouteSource(route).type, 'SCRIPT')
+  assert.equal(analyzeRouteSource(route).path, '/script/:id')
+
+  const invalid = analyzeRouteSource({
+    ...route,
+    method: 'GET POST',
+    source: ' ',
+  })
+  assert.ok(invalid.issues.some((issue) => issue.code === 'INVALID_ROUTE_METHOD'))
+  assert.ok(invalid.issues.some((issue) => issue.code === 'EMPTY_ROUTE_SCRIPT'))
 })

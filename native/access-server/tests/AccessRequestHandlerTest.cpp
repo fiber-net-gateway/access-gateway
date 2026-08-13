@@ -246,6 +246,14 @@ RouteConfig proxy_route(std::string path, std::string service = "orders/gray") {
     return route;
 }
 
+RouteConfig script_route(std::string path, std::string source) {
+    RouteConfig route;
+    route.path = std::move(path);
+    route.type = RouteType::Script;
+    route.script = std::move(source);
+    return route;
+}
+
 ProjectConfig project(HostStrategyConfig strategy, std::vector<std::optional<RouteConfig>> routes) {
     ProjectConfig config;
     config.version = 1;
@@ -490,6 +498,145 @@ TEST(AccessRequestHandlerTest, WritesLiveResponseAndExposesPathVariablesToScript
     EXPECT_NE(response.find("Strict-Transport-Security: override\r\n"), std::string::npos);
     EXPECT_NE(response.find("Content-Length: 19\r\n"), std::string::npos);
     EXPECT_EQ(response_body(response), "item=42;method=POST");
+}
+
+TEST(AccessRequestHandlerTest, MatchesMethodBeforeConditionAndUsesAllMethodFallback) {
+    RouteConfig get = response_route("/method", "get");
+    get.method = "GET";
+    RouteConfig post = response_route("/method", "post");
+    post.method = "POST";
+    RouteConfig fallback = response_route("/method", "fallback");
+
+    RouteConfigStore store;
+    publish(store, project({}, {std::move(get), std::move(post), std::move(fallback)}));
+
+    const std::string get_response = run_request(store, "GET /method HTTP/1.1\r\n"
+                                                        "Host: api.example.com\r\n"
+                                                        "Connection: close\r\n\r\n");
+    EXPECT_EQ(response_body(get_response), "get");
+    const std::string post_response = run_request(store, "POST /method HTTP/1.1\r\n"
+                                                         "Host: api.example.com\r\n"
+                                                         "Connection: close\r\n\r\n");
+    EXPECT_EQ(response_body(post_response), "post");
+    const std::string put_response = run_request(store, "PUT /method HTTP/1.1\r\n"
+                                                        "Host: api.example.com\r\n"
+                                                        "Connection: close\r\n\r\n");
+    EXPECT_EQ(response_body(put_response), "fallback");
+}
+
+TEST(AccessRequestHandlerTest, CombinesMethodAndConditionAsOrderedPredicates) {
+    AccessScriptRuntime scripts;
+    RouteConfig conditional = response_route("/method-condition", "conditional");
+    conditional.method = "GET";
+    conditional.condition = "$query.accept === 'yes'";
+    RouteConfig fallback = response_route("/method-condition", "fallback");
+
+    RouteConfigStore store(scripts.compiler_adapter());
+    publish(store, project({}, {std::move(conditional), std::move(fallback)}));
+
+    const std::string matched = run_request(store,
+                                            "GET /method-condition?accept=yes HTTP/1.1\r\n"
+                                            "Host: api.example.com\r\n"
+                                            "Connection: close\r\n\r\n",
+                                            scripts.request_adapter());
+    EXPECT_EQ(response_body(matched), "conditional");
+    const std::string condition_rejected = run_request(store,
+                                                       "GET /method-condition HTTP/1.1\r\n"
+                                                       "Host: api.example.com\r\n"
+                                                       "Connection: close\r\n\r\n",
+                                                       scripts.request_adapter());
+    EXPECT_EQ(response_body(condition_rejected), "fallback");
+    const std::string method_rejected = run_request(store,
+                                                    "POST /method-condition?accept=yes HTTP/1.1\r\n"
+                                                    "Host: api.example.com\r\n"
+                                                    "Connection: close\r\n\r\n",
+                                                    scripts.request_adapter());
+    EXPECT_EQ(response_body(method_rejected), "fallback");
+}
+
+TEST(AccessRequestHandlerTest, ExecutesJavaScriptRouteWithExternalMethodAndPathPattern) {
+    AccessScriptRuntime scripts;
+    RouteConfig post = script_route(
+            "/script/:id", "resp.setHeader('X-Script', $path.id); return {id: $path.id, method: $req.method};");
+    post.method = "POST";
+    RouteConfig fallback = response_route("/script/:id", "fallback");
+
+    RouteConfigStore store(scripts.compiler_adapter());
+    publish(store, project({}, {std::move(post), std::move(fallback)}));
+
+    const std::string matched = run_request(store,
+                                            "POST /script/42 HTTP/1.1\r\n"
+                                            "Host: api.example.com\r\n"
+                                            "Connection: close\r\n\r\n",
+                                            scripts.request_adapter());
+    EXPECT_TRUE(matched.starts_with("HTTP/1.1 200 OK\r\n"));
+    EXPECT_NE(matched.find("X-Script: 42\r\n"), std::string::npos);
+    EXPECT_EQ(response_body(matched), R"({"id":"42","method":"POST"})");
+
+    const std::string skipped = run_request(store,
+                                            "GET /script/42 HTTP/1.1\r\n"
+                                            "Host: api.example.com\r\n"
+                                            "Connection: close\r\n\r\n",
+                                            scripts.request_adapter());
+    EXPECT_EQ(response_body(skipped), "fallback");
+}
+
+TEST(AccessRequestHandlerTest, JavaScriptRouteCanSendAnAsyncResponse) {
+    AccessScriptRuntime scripts;
+    RouteConfig route = script_route("/script-send", "resp.send(202, 'accepted');");
+    RouteConfigStore store(scripts.compiler_adapter());
+    publish(store, project({}, {std::move(route)}));
+
+    const std::string response = run_request(store,
+                                             "GET /script-send HTTP/1.1\r\n"
+                                             "Host: api.example.com\r\n"
+                                             "Connection: close\r\n\r\n",
+                                             scripts.request_adapter());
+    EXPECT_TRUE(response.starts_with("HTTP/1.1 202 Accepted\r\n"));
+    EXPECT_EQ(response_body(response), "accepted");
+}
+
+TEST(AccessRequestHandlerTest, JavaScriptRouteMapsVoidAndExceptionResults) {
+    AccessScriptRuntime scripts;
+    RouteConfig no_content = script_route("/script-void", "let completed = true;");
+    RouteConfig failure = script_route("/script-failure", "JSON.parse('{bad');");
+    RouteConfigStore store(scripts.compiler_adapter());
+    publish(store, project({}, {std::move(no_content), std::move(failure)}));
+
+    const std::string no_content_response = run_request(store,
+                                                        "GET /script-void HTTP/1.1\r\n"
+                                                        "Host: api.example.com\r\n"
+                                                        "Connection: close\r\n\r\n",
+                                                        scripts.request_adapter());
+    EXPECT_TRUE(no_content_response.starts_with("HTTP/1.1 204 No Content\r\n"));
+    EXPECT_TRUE(response_body(no_content_response).empty());
+
+    const std::string failure_response = run_request(store,
+                                                     "GET /script-failure HTTP/1.1\r\n"
+                                                     "Host: api.example.com\r\n"
+                                                     "Connection: close\r\n\r\n",
+                                                     scripts.request_adapter());
+    EXPECT_TRUE(failure_response.starts_with("HTTP/1.1 500 Internal Server Error\r\n"));
+    EXPECT_EQ(response_body(failure_response),
+              R"({"name":"SCRIPT_EXECUTION","message":"route script execution failed","meta":null})");
+    EXPECT_EQ(failure_response.find("{bad"), std::string::npos);
+}
+
+TEST(AccessRequestHandlerTest, JavaScriptRouteRejectsUnknownLengthRequestBodies) {
+    AccessScriptRuntime scripts;
+    RouteConfig route = script_route("/script-body", "return req.readBinary();");
+    RouteConfigStore store(scripts.compiler_adapter());
+    publish(store, project({}, {std::move(route)}));
+
+    const std::string response = run_request(store,
+                                             "POST /script-body HTTP/1.1\r\n"
+                                             "Host: api.example.com\r\n"
+                                             "Transfer-Encoding: chunked\r\n"
+                                             "Connection: close\r\n\r\n"
+                                             "1\r\na\r\n0\r\n\r\n",
+                                             scripts.request_adapter());
+    EXPECT_TRUE(response.starts_with("HTTP/1.1 413 Payload Too Large\r\n"));
+    EXPECT_NE(response_body(response).find("REQ_BODY_TOO_LARGE"), std::string_view::npos);
 }
 
 TEST(AccessRequestHandlerTest, SkipsConditionalRouteWithoutScriptAdapter) {

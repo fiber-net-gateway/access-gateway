@@ -43,10 +43,21 @@ export interface ProjectView {
   updatedAt: string
 }
 
-export interface RouteItemModel {
+export interface YamlRouteItemModel {
   id: string
+  format: 'yaml'
   source: string
 }
+
+export interface JavaScriptRouteItemModel {
+  id: string
+  format: 'js'
+  source: string
+  path: string
+  method?: string
+}
+
+export type RouteItemModel = YamlRouteItemModel | JavaScriptRouteItemModel
 
 export type HttpsRedirect = 'off' | '301' | '302' | '307' | '308'
 
@@ -58,7 +69,7 @@ export interface ProjectNetworkPolicy {
 }
 
 export interface ProjectRoutesModel {
-  schemaVersion: 4
+  schemaVersion: 5
   kind: 'project_routes_yaml'
   networkPolicy: ProjectNetworkPolicy
   routes: readonly RouteItemModel[]

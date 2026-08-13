@@ -2,6 +2,7 @@
 
 #include <utility>
 
+#include <fiber/http_script/HttpScriptLib.h>
 #include <fiber/http_script/RequestFuncs.h>
 #include <fiber/http_script/ScriptExchangeCtx.h>
 #include <fiber/script/JsGc.h>
@@ -29,15 +30,19 @@ std::string script_failure_message(const script::ScriptResult &result) {
 } // namespace
 
 AccessScriptRuntime::AccessScriptRuntime() {
-    http_script::register_request_funcs(library_);
-    library_.add_ext_ops(&exchange_const_extension_, http_script::ExchangeConstExtension::ops());
-    library_.add_ext_ops(&route_extension_, http_script::RouteScriptExtension::ops());
+    http_script::register_request_funcs(expression_library_);
+    http_script::register_http_functions_to_lib(route_library_);
+    expression_library_.add_ext_ops(&exchange_const_extension_, http_script::ExchangeConstExtension::ops());
+    expression_library_.add_ext_ops(&route_extension_, http_script::RouteScriptExtension::ops());
+    route_library_.add_ext_ops(&exchange_const_extension_, http_script::ExchangeConstExtension::ops());
+    route_library_.add_ext_ops(&route_extension_, http_script::RouteScriptExtension::ops());
 }
 
 ScriptCompilerAdapter AccessScriptRuntime::compiler_adapter() noexcept {
     return ScriptCompilerAdapter{
             .context = this,
             .compile_expression = compile_expression,
+            .compile_route_script = compile_route_script,
     };
 }
 
@@ -46,7 +51,23 @@ AccessRequestScriptAdapter AccessScriptRuntime::request_adapter() noexcept {
             .context = this,
             .evaluate_condition = evaluate_condition,
             .evaluate_template = evaluate_template,
+            .execute_route_script = execute_route_script,
     };
+}
+
+ScriptCompilerAdapter::Result
+AccessScriptRuntime::compile_route_script(void *context, http_script::ConstPackage::Builder &constants,
+                                          std::string_view source, std::span<const std::string> path_variable_names) {
+    auto &runtime = *static_cast<AccessScriptRuntime *>(context);
+    http_script::RouteScriptExtension::CompileScope compile_scope(runtime.route_extension_, constants,
+                                                                  path_variable_names, false);
+    auto compiled = script::compile_script(runtime.route_library_, source, true);
+    if (!compiled) {
+        std::string message = "route script compile failed at script offset ";
+        message.append(std::to_string(compiled.error().position));
+        return std::unexpected(std::move(message));
+    }
+    return std::move(*compiled);
 }
 
 ScriptCompilerAdapter::Result
@@ -61,7 +82,7 @@ AccessScriptRuntime::compile_expression(void *context, http_script::ConstPackage
     source.append("return ");
     source.append(expression);
     source.push_back(';');
-    auto compiled = script::compile_script(runtime.library_, source, false);
+    auto compiled = script::compile_script(runtime.expression_library_, source, false);
     if (!compiled) {
         std::string message = compiled.error().message;
         message.append(" at expression offset ");
@@ -101,6 +122,37 @@ Result<void> AccessScriptRuntime::evaluate_template(void *, http_script::ScriptE
         script::std_lib::node_as_text(result.value(), output);
     }
     return {};
+}
+
+async::Task<Result<void>> AccessScriptRuntime::execute_route_script(void *,
+                                                                    http_script::ScriptExchangeCtx &script_context,
+                                                                    script::Script &program) noexcept {
+    script::JsValue root = script::JsValue::make_undefined();
+    auto result = co_await program.exec_async(root, &script_context, script_context.heap());
+    if (script_context.response_header_sent()) {
+        co_return Result<void>{};
+    }
+
+    common::IoResult<void> written;
+    switch (result.kind) {
+        case script::ScriptResultKind::Void:
+            written = co_await script_context.write_empty(204);
+            break;
+        case script::ScriptResultKind::Value:
+            written = co_await script_context.write_json(200, result.value());
+            break;
+        case script::ScriptResultKind::Exception:
+        case script::ScriptResultKind::Abort:
+            co_return std::unexpected(Err::from_exception(Exception{
+                    .name = "SCRIPT_EXECUTION",
+                    .message = "route script execution failed",
+                    .status = 500,
+            }));
+    }
+    if (!written) {
+        co_return std::unexpected(Err::from_error(written.error()));
+    }
+    co_return Result<void>{};
 }
 
 } // namespace fiber::access_server

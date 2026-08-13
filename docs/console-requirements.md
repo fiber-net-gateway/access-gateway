@@ -3,7 +3,7 @@
 - 状态：Draft v0.7（网络策略、可更新逻辑证书与 SAN 派生 SNI 选择控制面 P0 已实现）
 - 适用范围：`web/`、`server/`，以及实现校验、证书生效和激活证据所需的
   `native/access-server/` 配套能力
-- 产品主线：域名 Project → 逐条 YAML Route → 保存配置版本 → 选择当前/历史版本 → 发布到 rnacos
+- 产品主线：域名 Project → 逐条 YAML/JavaScript Route → 保存配置版本 → 选择当前/历史版本 → 发布到 rnacos
 - 事实基线：当前仓库 `native/access-server` 及其 Java 兼容契约
 - 取代版本：Draft v0.1（环境、结构化路由表单和灰度规则优先的方案）
 
@@ -11,7 +11,7 @@
 
 本文重新定义 Access Gateway Console 的产品范围和交互模型。Console 不再围绕“环境管理”或
 “灰度规则管理”组织功能，而是帮助网关维护者完成一个更短、更清晰的工作流：创建域名，逐条编写
-YAML 路由，把配置显式保存为不可变版本并选择当前版本或历史版本发布到 rnacos；TLS 证书与
+YAML 或 JavaScript 路由，把配置显式保存为不可变版本并选择当前版本或历史版本发布到 rnacos；TLS 证书与
 Project 分开管理，由证书 DNS SAN 自动形成 ClientHello SNI 选择索引。
 
 本文是产品、前端、后端、原生数据面和测试共同使用的需求基线，不是数据库 DDL 或视觉稿。
@@ -25,8 +25,8 @@ Project 分开管理，由证书 DNS SAN 自动形成 ClientHello SNI 选择索�
    `api.example.com`，不再向用户暴露抽象项目名。
 2. **Route 是 Console 的第一重点。** 项目详情默认打开路由页，路由创建、编辑、排序、校验和
    发布是最短操作路径。
-3. **每条 Route 使用独立 YAML 编辑器。** 页面不再要求用户编辑整份 Project JSON，也不以大量
-   结构化表单拆散高级路由能力。
+3. **每条 Route 使用独立编辑器。** YAML Route 在正文中提供 path/可选 method 和执行配置；
+   JavaScript Route 使用外置 path/可选 method 加脚本正文。页面不要求用户编辑整份 Project JSON。
 4. **TLS 配置是一等且独立的对象。** Console 管理稳定逻辑证书及其不可变版本、DNS SAN
    自动选择范围、有效期和部署状态；证书不绑定 Project，私钥不进入 rnacos route payload。
 5. **发布目标固定为一个部署配置的 rnacos。** 普通用户不创建、选择或切换环境，用户可见 API
@@ -60,7 +60,7 @@ Project 分开管理，由证书 DNS SAN 自动形成 ClientHello SNI 选择索�
 ### 3.1 产品目标
 
 - 让用户从域名项目列表进入后，可以在同一上下文完成 Route 编写、版本管理和发布。
-- 让每条 Route 都有独立、可排序、可折叠、可定位错误的 YAML 编辑器。
+- 让每条 YAML/JavaScript Route 都有独立、可排序、可折叠、可定位错误的编辑器。
 - 保留 RESPONSE、PROXY、condition、rewrite、headers、CIDR、body limit 和 WebSocket 等完整
   native route 能力。
 - 在写入 rnacos 前完成 YAML、项目关系和 native authoritative validation。
@@ -111,12 +111,12 @@ Project 分开管理，由证书 DNS SAN 自动形成 ClientHello SNI 选择索�
 ### 5.1 核心对象
 
 - **Project**：一个规范化 exact domain，以及其路由配置版本、Release 历史和状态摘要。
-- **Route Item**：Project 下有稳定控制面 ID 和顺序的一条路由；用户编辑内容是一份独立 YAML
-  mapping，ID 和顺序不写入 wire payload。
-- **Working Copy**：浏览器中基于某个配置版本继续编辑的临时内容，可以包含未完成或无效 YAML；
+- **Route Item**：Project 下有稳定控制面 ID 和顺序的一条路由；格式为 YAML mapping 或
+  JavaScript 脚本。JS 的 path/可选 method 存在条目元数据中；ID、format 和顺序不直接写入 wire。
+- **Working Copy**：浏览器中基于某个配置版本继续编辑的临时内容，可以包含未完成或无效 Route；
   未显式保存前不是服务端版本，不能作为发布来源。
-- **Configuration Version**：用户点击“保存为版本”后形成的不可变路由配置快照，包含 Route YAML
-  原文、Route 稳定 ID、Route 顺序和进入 route wire payload 的 Project 路由设置，不包含证书私钥
+- **Configuration Version**：用户点击“保存为版本”后形成的不可变路由配置快照，包含 Route 格式、
+  YAML/JavaScript 原文、JS 外置匹配字段、Route 稳定 ID、顺序和进入 route wire payload 的 Project 设置，不包含证书私钥
   或 rnacos 连接信息。每个 Project 内使用单调递增的展示号 `V1`、`V2`……；最新版本称为“当前
   配置版本”，其余为“历史配置版本”。内部可以继续由 `draft_revisions` 承载，但 UI/API 不把它
   描述成可变草稿。
@@ -228,13 +228,13 @@ Project 页面固定显示域名、当前配置版本、未保存状态、rnacos
 新版 Project 固定为单域名。旧配置若一个 project 包含多个 Host 或 project key 不是合法域名，
 必须通过有预览和人工确认的迁移流程处理；P0 不自动拆分或静默改名。
 
-### 7.2 逐条 YAML Route 编辑器
+### 7.2 逐条 YAML/JavaScript Route 编辑器
 
 | ID          | 优先级 | 需求                                                                               |
 | ----------- | ------ | ---------------------------------------------------------------------------------- |
-| CON-RTE-001 | P0     | 每条 Route 渲染为独立卡片，卡片内使用代码编辑器编辑一份 YAML mapping               |
-| CON-RTE-002 | P0     | 支持新增 RESPONSE/PROXY 模板、复制、删除、折叠和拖拽/键盘排序                      |
-| CON-RTE-003 | P0     | 卡片标题从 YAML 派生 `path`、`type` 和 condition 摘要；解析失败时显示稳定 Route ID |
+| CON-RTE-001 | P0     | 每条 Route 渲染为独立卡片，显式选择 YAML mapping 或 JavaScript 脚本格式            |
+| CON-RTE-002 | P0     | 支持新增 RESPONSE/PROXY YAML 或 JS 模板、复制、删除、折叠和拖拽/键盘排序           |
+| CON-RTE-003 | P0     | YAML 从正文派生 path/method/type；JS 从外置 path/method 展示；失败时显示稳定 ID    |
 | CON-RTE-004 | P0     | 编辑器支持 YAML 高亮、缩进、行号、查找、撤销、括号匹配，以及行内和 gutter 错误提示 |
 | CON-RTE-005 | P0     | 支持字段补全、字段说明和 RESPONSE/PROXY snippet，但不强制用户切换到表单            |
 | CON-RTE-006 | P0     | Route 顺序独立持久化；同一路径条件路由的先后变化必须作为语义 diff 展示             |
@@ -260,6 +260,7 @@ response_headers:
 
 ```yaml
 path: /api/users/*
+method: GET
 type: PROXY
 service: user-service/stable
 rewrite: /internal/users
@@ -396,7 +397,7 @@ SAN，不需要业务流量验证。到期状态必须随时间持续计算；�
 
 ### 7.4.1 网络策略配置
 
-网络策略作为 Configuration Version schema v4 的一部分保存，而不是可漂移的 Project 当前属性。
+网络策略作为 Configuration Version schema v5 的一部分保存，而不是可漂移的 Project 当前属性。
 其中 HTTPS redirect 独立配置为关闭/301/302/307/308，并编译到 exact HostStrategy；CIDR 支持
 “Route 自主管理”和“Project 统一策略”两种互斥模式。统一模式把允许 CIDR 和优先拒绝 CIDR
 确定性编译进每条 route `allows`，并禁止 Route YAML 同时声明 `allows`。详细需求、迁移、API、
@@ -601,20 +602,20 @@ Route 不能破坏历史 Release 和审计引用。
 - 移除环境选择、环境徽标和灰度规则入口；
 - 新 API 使用单部署作用域和 `/api/projects`；
 - Project 固定为规范化域名；
-- 建立 YAML Route Item、顺序和不可变 Configuration Version 模型。
+- 建立 YAML/JavaScript Route Item、顺序和不可变 Configuration Version 模型。
 
 ### 阶段 1：Route-first 编辑器
 
 - Project 列表和 Project/Routes 主页面；
-- 每条 Route 一个 YAML 代码编辑器；
+- 每条 Route 一个 YAML 或 JavaScript 代码编辑器；
 - 新增、复制、删除、排序、保存为版本、乐观锁和未保存保护；
 - 当前/历史版本列表、只读查看、diff 和恢复为新版本；
-- YAML/schema/Project 校验、源码 diff 和语义 diff。
+- YAML/JS 元数据/schema/Project 校验、源码 diff 和语义 diff。
 
 ### 阶段 2：证书与权威校验
 
 - 逻辑证书上传、加密存储、SAN/有效期/key match 校验、不可变版本、SAN 派生 SNI 索引和到期状态；
-- YAML 到 wire JSON 的版本化确定性编译器；
+- YAML/JavaScript Route 到 wire JSON 的版本化确定性编译器；
 - native validator CLI/adapter、错误到 Route 行列的映射；
 - wire 预览与 Release 前 fail-closed gate。
 
@@ -645,11 +646,10 @@ Route 不能破坏历史 Release 和审计引用。
    `environmentId` URL；页面没有灰度规则入口。
 2. **创建域名**：输入 `API.Example.com.` 后创建 `api.example.com` Project 和空 Route Working Copy；
    URL、通配符和重复域名被准确拒绝。
-3. **逐条 YAML 编辑**：用户从模板新增 RESPONSE 和 PROXY Route，页面显示两个独立编辑器；修改
-   一条不会改变另一条的内容、撤销栈或保存状态。
-4. **错误定位**：某条 YAML 存在重复 key 或 condition 编译错误时仍可保存配置版本，但卡片和
-   准确行列显示错误，创建 Release 被阻止。
-5. **顺序语义**：拖动同 path condition Route 后，语义 diff 显示顺序变化，最终 JSON 数组严格按
+3. **逐条混合编辑**：用户新增 RESPONSE/PROXY YAML 与 JavaScript Route；JS 必须提供外置 path，
+   method 可选；修改一条不会改变另一条的内容或保存状态。
+4. **错误定位**：某条 YAML 存在重复 key、JS 缺 path 或脚本编译失败时，卡片显示错误并阻止保存。
+5. **顺序语义**：拖动同 path method/condition Route 后，最终 JSON 数组严格按
    新顺序生成。
 6. **完整能力**：至少成功编译一个 TEXT RESPONSE、一个 service PROXY、一个 static-address
    PROXY 和一个 WebSocket Route。

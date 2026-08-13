@@ -2,7 +2,7 @@
 
 - 状态：Draft v0.5
 - 上游需求：[Access Gateway Console 产品需求文档](console-requirements.md)
-- 核心流程：逐条 YAML Route → 保存配置版本 → 选择当前/历史版本 → 创建 Release → 发布到 rnacos
+- 核心流程：逐条 YAML/JavaScript Route → 保存配置版本 → 选择当前/历史版本 → 创建 Release → 发布到 rnacos
 - 适用范围：`web/`、`server/`、MySQL migration、rnacos publication worker，以及必要的
   `native/access-server/` 校验和激活证据接口
 - 实现基线：Configuration Version API 与历史 UI、按当前/历史版本创建 Release、Native Validator
@@ -397,9 +397,18 @@ Restoration 请求中的路径 `versionId` 是历史编辑来源，`baseVersionI
   "changeSummary": "为用户接口增加 30s 超时",
   "forceSameContent": false,
   "model": {
-    "schemaVersion": 2,
+    "schemaVersion": 5,
     "kind": "project_routes_yaml",
-    "routes": [{ "id": "uuid", "source": "path: /api/*\ntype: PROXY\n..." }]
+    "routes": [
+      { "id": "uuid", "format": "yaml", "source": "path: /api/*\nmethod: GET\ntype: PROXY\n..." },
+      {
+        "id": "uuid",
+        "format": "js",
+        "path": "/jobs/:id",
+        "method": "POST",
+        "source": "return {id: $path.id};"
+      }
+    ]
   }
 }
 ```

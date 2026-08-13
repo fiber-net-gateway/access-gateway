@@ -50,6 +50,36 @@ TEST(NativeValidatorProtocolTest, ReturnsStructuredCompiledModelErrors) {
     EXPECT_NE(response.find(R"("field":"routes[0].status")"), std::string::npos) << response;
 }
 
+TEST(NativeValidatorProtocolTest, CompilesMixedMethodAndJavaScriptRoutes) {
+    constexpr std::string_view payload = R"({
+        "version": 4,
+        "host": {"example.com": {"https": "S_NOT_MUST"}},
+        "routes": [
+            {"path": "/items", "method": "GET", "type": "RESPONSE", "status": 200},
+            {"path": "/items/:id", "method": "POST", "type": "SCRIPT",
+             "script": "return {id: $path.id};"}
+        ]
+    })";
+
+    const std::string response =
+            fiber::access_server::process_native_validator_request(request("project_route", "example", payload));
+    EXPECT_NE(response.find(R"("valid":true)"), std::string::npos) << response;
+    EXPECT_NE(response.find(R"("routeCount":2)"), std::string::npos) << response;
+}
+
+TEST(NativeValidatorProtocolTest, ReportsJavaScriptCompileErrorsWithoutEchoingSource) {
+    constexpr std::string_view payload = R"({
+        "host": {"example.com": {}},
+        "routes": [{"path": "/script", "type": "SCRIPT", "script": "secret_marker + ;"}]
+    })";
+
+    const std::string response =
+            fiber::access_server::process_native_validator_request(request("project_route", "example", payload));
+    EXPECT_NE(response.find(R"("valid":false)"), std::string::npos) << response;
+    EXPECT_NE(response.find(R"("field":"routes[0].script")"), std::string::npos) << response;
+    EXPECT_EQ(response.find("secret_marker"), std::string::npos) << response;
+}
+
 TEST(NativeValidatorProtocolTest, RejectsInvalidProtocolAndBase64WithoutEchoingPayload) {
     const std::string malformed = fiber::access_server::process_native_validator_request("not-json");
     EXPECT_NE(malformed.find(R"("code":"invalid_request")"), std::string::npos) << malformed;

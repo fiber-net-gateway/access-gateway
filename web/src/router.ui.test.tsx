@@ -82,7 +82,7 @@ function installApiMock() {
     routeCount: 1,
   }
   const model = {
-    schemaVersion: 4,
+    schemaVersion: 5,
     kind: 'project_routes_yaml',
     networkPolicy: {
       source: 'route',
@@ -93,7 +93,7 @@ function installApiMock() {
     routes: [],
   }
   const historicalModel = {
-    schemaVersion: 4,
+    schemaVersion: 5,
     kind: 'project_routes_yaml',
     networkPolicy: {
       source: 'route',
@@ -101,7 +101,13 @@ function installApiMock() {
       allowedCidrs: [],
       deniedCidrs: [],
     },
-    routes: [{ id: routeId, source: 'path: /historical\ntype: RESPONSE\nstatus: 200' }],
+    routes: [
+      {
+        id: routeId,
+        format: 'yaml',
+        source: 'path: /historical\ntype: RESPONSE\nstatus: 200',
+      },
+    ],
   }
   const certificate = {
     id: certificateId,
@@ -332,6 +338,31 @@ describe('application routes', () => {
     expect(await screen.findByRole('heading', { name: 'Routes' })).toBeTruthy()
     expect(screen.getByRole('link', { name: /Versions/u })).toBeTruthy()
     expect(router.state.location.pathname).toBe(`/projects/${projectId}/routes`)
+  })
+
+  test('creates a JavaScript route with external path and optional method fields', async () => {
+    installApiMock()
+    const router = createMemoryRouter(appRoutes, {
+      initialEntries: [`/projects/${projectId}/routes`],
+    })
+    const user = userEvent.setup()
+    render(<RouterProvider router={router} />)
+
+    await screen.findByRole('heading', { name: 'Routes' })
+    await user.click(screen.getByRole('button', { name: '+ JS' }))
+
+    const path = screen.getByRole('textbox', { name: '路由 1 Path pattern' })
+    const method = screen.getByRole('textbox', { name: '路由 1 Method' })
+    const editor = await screen.findByRole('textbox', { name: /路由 1：SCRIPT/u })
+    expect((path as HTMLInputElement).value).toBe('/script/:id')
+    expect((method as HTMLInputElement).value).toBe('')
+    expect((editor as HTMLTextAreaElement).value).toContain('$req.method')
+
+    await user.clear(path)
+    await user.type(path, '/jobs/:id')
+    await user.type(method, 'POST')
+    expect(await screen.findByText('POST · JS')).toBeTruthy()
+    expect(screen.getByText('/jobs/:id')).toBeTruthy()
   })
 
   test('renders a stable not-found page for unknown Console URLs', async () => {

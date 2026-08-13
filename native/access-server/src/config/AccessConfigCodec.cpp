@@ -627,9 +627,16 @@ DecodeResult<RouteConfig> route_config(const AccessJsonValue &value, std::string
                 return std::unexpected(std::move(decoded.error()));
             }
             result.path = std::move(*decoded);
+        } else if (entry.key == "method") {
+            auto decoded = nullable_java_string(entry.value, path);
+            if (!decoded) {
+                return std::unexpected(std::move(decoded.error()));
+            }
+            result.method = std::move(*decoded);
         } else if (entry.key == "type") {
-            auto decoded = java_enum<RouteType>(entry.value, path,
-                                                {{"PROXY", RouteType::Proxy}, {"RESPONSE", RouteType::Response}});
+            auto decoded = java_enum<RouteType>(
+                    entry.value, path,
+                    {{"PROXY", RouteType::Proxy}, {"RESPONSE", RouteType::Response}, {"SCRIPT", RouteType::Script}});
             if (!decoded) {
                 return std::unexpected(std::move(decoded.error()));
             }
@@ -730,6 +737,12 @@ DecodeResult<RouteConfig> route_config(const AccessJsonValue &value, std::string
                 return std::unexpected(std::move(decoded.error()));
             }
             result.allows = std::move(*decoded);
+        } else if (entry.key == "script") {
+            auto decoded = nullable_java_string(entry.value, path);
+            if (!decoded) {
+                return std::unexpected(std::move(decoded.error()));
+            }
+            result.script = std::move(*decoded);
         }
     }
     return result;

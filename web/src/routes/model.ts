@@ -2,10 +2,11 @@ import { isAlias, isMap, isScalar, LineCounter, parseDocument, visit } from 'yam
 
 import type { ProjectRoutesModel, RouteItemModel, RouteValidationIssue } from '../api/types'
 
-export type RouteTemplate = 'RESPONSE' | 'PROXY'
+export type RouteTemplate = 'RESPONSE' | 'PROXY' | 'JS'
 
 const routeFields = new Set([
   'path',
+  'method',
   'type',
   'service',
   'cluster',
@@ -42,9 +43,16 @@ timeout: 30s
 rewrite: /internal
 `
 
+const javaScriptTemplate = `return {
+  path: $req.path,
+  method: $req.method,
+}
+`
+
 export interface RouteSourceAnalysis {
   path: string | null
-  type: RouteTemplate | null
+  method: string | null
+  type: 'RESPONSE' | 'PROXY' | 'SCRIPT' | null
   condition: string | null
   issues: readonly RouteValidationIssue[]
 }
@@ -53,7 +61,7 @@ const analysisCache = new WeakMap<RouteItemModel, RouteSourceAnalysis>()
 
 export function initialRouteModel(): ProjectRoutesModel {
   return {
-    schemaVersion: 4,
+    schemaVersion: 5,
     kind: 'project_routes_yaml',
     networkPolicy: {
       source: 'route',
@@ -82,14 +90,23 @@ function createRouteId(): string {
 }
 
 export function createRouteItem(template: RouteTemplate): RouteItemModel {
+  if (template === 'JS') {
+    return {
+      id: createRouteId(),
+      format: 'js',
+      path: '/script/:id',
+      source: javaScriptTemplate,
+    }
+  }
   return {
     id: createRouteId(),
+    format: 'yaml',
     source: template === 'RESPONSE' ? responseTemplate : proxyTemplate,
   }
 }
 
 export function duplicateRouteItem(route: RouteItemModel): RouteItemModel {
-  return { id: createRouteId(), source: route.source }
+  return { ...route, id: createRouteId() }
 }
 
 function position(lineCounter: LineCounter, offset: number): { line: number; column: number } {
@@ -162,6 +179,7 @@ function validateRouteFieldShapes(
     if (field in value && !isScalarList(value[field])) addTypeIssue(field, 'sequence 或 null')
   }
   for (const field of [
+    'method',
     'service',
     'cluster',
     'condition',
@@ -190,6 +208,49 @@ function sourceIssue(
 }
 
 function analyzeRouteSourceUncached(route: RouteItemModel): RouteSourceAnalysis {
+  if (route.format === 'js') {
+    const issues: RouteValidationIssue[] = []
+    if (route.path.length < 1 || route.path.length > 2048) {
+      issues.push({
+        routeId: route.id,
+        path: 'path',
+        line: 1,
+        column: 1,
+        code: 'INVALID_ROUTE_PATH',
+        message: 'JS Route path 必须包含 1-2048 个字符',
+      })
+    }
+    if (
+      route.method !== undefined &&
+      (route.method.length > 64 || !/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/u.test(route.method))
+    ) {
+      issues.push({
+        routeId: route.id,
+        path: 'method',
+        line: 1,
+        column: 1,
+        code: 'INVALID_ROUTE_METHOD',
+        message: 'method 必须是 1-64 字节的 HTTP token；留空表示所有 method',
+      })
+    }
+    if (route.source.trim().length === 0) {
+      issues.push({
+        routeId: route.id,
+        path: 'source',
+        line: 1,
+        column: 1,
+        code: 'EMPTY_ROUTE_SCRIPT',
+        message: 'JS Route 脚本不能为空',
+      })
+    }
+    return {
+      path: route.path || null,
+      method: route.method ?? null,
+      type: 'SCRIPT',
+      condition: null,
+      issues,
+    }
+  }
   const lineCounter = new LineCounter()
   const document = parseDocument(route.source, {
     version: '1.2',
@@ -258,9 +319,11 @@ function analyzeRouteSourceUncached(route: RouteItemModel): RouteSourceAnalysis 
       code: 'ROUTE_ROOT_NOT_MAPPING',
       message: '每个编辑器只能包含一条 YAML mapping',
     })
-    return { path: null, type: null, condition: null, issues }
+    return { path: null, method: null, type: null, condition: null, issues }
   }
-  if (issues.length > 0) return { path: null, type: null, condition: null, issues }
+  if (issues.length > 0) {
+    return { path: null, method: null, type: null, condition: null, issues }
+  }
   const value: unknown = document.toJS({ maxAliasCount: 0 })
   if (typeof value !== 'object' || value === null || Array.isArray(value) || !isJsonSafe(value)) {
     if (!isJsonSafe(value)) {
@@ -273,7 +336,7 @@ function analyzeRouteSourceUncached(route: RouteItemModel): RouteSourceAnalysis 
         message: 'Route 值只能使用 JSON 安全的字符串、布尔值、数组、对象和安全整数',
       })
     }
-    return { path: null, type: null, condition: null, issues }
+    return { path: null, method: null, type: null, condition: null, issues }
   }
   const routeValue = value as Record<string, unknown>
   const type =
@@ -316,9 +379,28 @@ function analyzeRouteSourceUncached(route: RouteItemModel): RouteSourceAnalysis 
       ),
     )
   }
+  if (
+    routeValue.method !== undefined &&
+    routeValue.method !== null &&
+    (typeof routeValue.method !== 'string' ||
+      routeValue.method.length > 64 ||
+      !/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/u.test(routeValue.method))
+  ) {
+    issues.push(
+      sourceIssue(
+        route.id,
+        lineCounter,
+        'INVALID_ROUTE_METHOD',
+        'method 必须是 1-64 字节的 HTTP token；不配置表示所有 method',
+        'method',
+        fieldOffset(document, 'method'),
+      ),
+    )
+  }
   validateRouteFieldShapes(route, lineCounter, document, routeValue, issues)
   return {
     path: typeof routeValue.path === 'string' ? routeValue.path : null,
+    method: typeof routeValue.method === 'string' ? routeValue.method : null,
     type,
     condition: typeof routeValue.condition === 'string' ? routeValue.condition : null,
     issues,

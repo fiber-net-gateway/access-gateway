@@ -57,11 +57,14 @@ struct RouteMatch {
 class RouteMatchContext {
 public:
     RouteMatchContext(const std::vector<CompiledRoute> &routes, std::span<PathVariable> path_variables,
-                      RequestEvaluationContext &request) noexcept :
-        routes_(routes), path_variables_(path_variables), request_(request) {}
+                      std::string_view method, RequestEvaluationContext &request) noexcept :
+        routes_(routes), path_variables_(path_variables), method_(method), request_(request) {}
 
     bool matched(std::uint32_t, std::uint32_t route_index) noexcept {
         const CompiledRoute &route = routes_[route_index];
+        if (route.method && *route.method != method_) {
+            return false;
+        }
         const std::span<const PathVariable> captures = path_variables_.first(path_variable_count_);
         std::size_t bound_count = 0;
         for (; bound_count < route.path_constant_indices.size() && bound_count < captures.size(); ++bound_count) {
@@ -103,6 +106,7 @@ public:
 private:
     const std::vector<CompiledRoute> &routes_;
     std::span<PathVariable> path_variables_;
+    std::string_view method_;
     RequestEvaluationContext &request_;
     const CompiledRoute *matched_route_ = nullptr;
     std::span<const PathVariable> matched_path_variables_;
@@ -122,7 +126,7 @@ common::IoResult<RouteMatch> match_route(const ProjectRouteSnapshot &project, ht
     }
 
     std::span<PathVariable> path_variables(variable_data, variable_capacity);
-    RouteMatchContext context(project.routes(), path_variables, evaluation);
+    RouteMatchContext context(project.routes(), path_variables, exchange.method_view(), evaluation);
     (void) project.match_route_path(exchange.uri().path, context);
     return context.result();
 }
@@ -410,6 +414,24 @@ async::Task<Result<void>> AccessRequestHandler::handle_impl(http::HttpExchange &
                                                           .max_request_body_size = body_limit,
                                                   },
                                                   telemetry);
+    }
+
+    if (route.type == RouteType::Script) {
+        if (!body_spec.is_none() && !body_spec.is_content_length()) {
+            co_return std::unexpected(Err::from_exception(Exception::request_body_too_large()));
+        }
+        if (!route.script_program || !script_adapter_.execute_route_script) {
+            co_return std::unexpected(
+                    Err::from_exception(Exception::unknown("route script executor is not configured")));
+        }
+        if (!telemetry.finalize_response_headers()) {
+            co_return std::unexpected(Err::from_error(common::IoErr::NoMem));
+        }
+        for (const http::HttpHeaders::HeaderField &field: telemetry.response_headers()) {
+            telemetry.script_context().set_response_header(field.name_view(), field.value_view());
+        }
+        co_return co_await script_adapter_.execute_route_script(script_adapter_.context, telemetry.script_context(),
+                                                                *route.script_program);
     }
 
     co_return co_await response_executor_.execute(exchange, route, telemetry, template_evaluator, body_limit);

@@ -385,7 +385,12 @@ export function ProjectVersionsPage() {
             <div className="version-preview-routes">
               {previewVersion.model.routes.map((route, index) => (
                 <article key={route.id}>
-                  <strong>Route {index + 1}</strong>
+                  <strong>
+                    Route {index + 1} · {route.format.toUpperCase()}
+                    {route.format === 'js'
+                      ? ` · ${route.method ?? 'ALL METHODS'} ${route.path}`
+                      : ''}
+                  </strong>
                   <pre>{route.source}</pre>
                 </article>
               ))}

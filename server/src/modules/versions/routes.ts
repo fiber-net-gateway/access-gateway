@@ -48,7 +48,7 @@ const projectRoutesModelSchema = {
   additionalProperties: false,
   required: ['schemaVersion', 'kind', 'networkPolicy', 'routes'],
   properties: {
-    schemaVersion: { type: 'integer', const: 4 },
+    schemaVersion: { type: 'integer', const: 5 },
     kind: { type: 'string', const: 'project_routes_yaml' },
     networkPolicy: {
       type: 'object',
@@ -75,11 +75,17 @@ const projectRoutesModelSchema = {
       items: {
         type: 'object',
         additionalProperties: false,
-        required: ['id', 'source'],
+        required: ['id', 'format', 'source'],
         properties: {
           id: { type: 'string', format: 'uuid' },
+          format: { type: 'string', enum: ['yaml', 'js'] },
           source: { type: 'string', maxLength: 1048576 },
+          path: { type: 'string', minLength: 1, maxLength: 2048 },
+          method: { type: 'string', minLength: 1, maxLength: 64 },
         },
+        if: { properties: { format: { const: 'js' } }, required: ['format'] },
+        then: { required: ['path'] },
+        else: { not: { anyOf: [{ required: ['path'] }, { required: ['method'] }] } },
       },
     },
   },

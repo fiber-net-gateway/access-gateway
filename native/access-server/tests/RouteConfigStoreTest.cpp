@@ -16,6 +16,7 @@ using fiber::access_server::HostStrategyConfig;
 using fiber::access_server::ProjectConfig;
 using fiber::access_server::RouteConfig;
 using fiber::access_server::RouteConfigStore;
+using fiber::access_server::RouteType;
 
 ProjectConfig project_config(std::int32_t version, std::string host, std::string path) {
     RouteConfig route;
@@ -104,6 +105,26 @@ TEST(RouteConfigStoreTest, RejectsInvalidLocalScriptWithoutReplacingPublishedSna
 
     ASSERT_FALSE(rejected);
     EXPECT_EQ(rejected.error().field, "routes[0].condition");
+    EXPECT_EQ(store.pin(), before);
+    EXPECT_TRUE(store.pin()->match_host("api.example.com"));
+    EXPECT_FALSE(store.pin()->match_host("new.example.com"));
+}
+
+TEST(RouteConfigStoreTest, RejectsInvalidJavaScriptRouteWithoutReplacingPublishedSnapshot) {
+    AccessScriptRuntime scripts;
+    RouteConfigStore store(scripts.compiler_adapter());
+    ASSERT_TRUE(store.apply("demo", project_config(1, "api.example.com", "/one")));
+    auto before = store.pin();
+
+    ProjectConfig invalid = project_config(2, "new.example.com", "/script");
+    RouteConfig &route = *(*invalid.routes)[0];
+    route.type = RouteType::Script;
+    route.service.reset();
+    route.script = "return {broken: ;";
+    auto rejected = store.apply("demo", invalid);
+
+    ASSERT_FALSE(rejected);
+    EXPECT_EQ(rejected.error().field, "routes[0].script");
     EXPECT_EQ(store.pin(), before);
     EXPECT_TRUE(store.pin()->match_host("api.example.com"));
     EXPECT_FALSE(store.pin()->match_host("new.example.com"));

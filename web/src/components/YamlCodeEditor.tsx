@@ -16,6 +16,7 @@ import {
   indentOnInput,
   syntaxHighlighting,
 } from '@codemirror/language'
+import { javascript } from '@codemirror/lang-javascript'
 import { yaml } from '@codemirror/lang-yaml'
 import { lintGutter, lintKeymap, setDiagnostics, type Diagnostic } from '@codemirror/lint'
 import { highlightSelectionMatches, searchKeymap } from '@codemirror/search'
@@ -37,6 +38,7 @@ import { useEffect, useRef } from 'react'
 interface YamlCodeEditorProps {
   ariaLabel: string
   diagnostics: readonly YamlCodeEditorDiagnostic[]
+  language?: 'yaml' | 'javascript'
   value: string
   onChange(value: string): void
   onSave(): void
@@ -52,6 +54,7 @@ export interface YamlCodeEditorDiagnostic {
 
 const routeCompletions: readonly Completion[] = [
   { label: 'path', type: 'property', apply: 'path: /', detail: '请求路径' },
+  { label: 'method', type: 'property', apply: 'method: GET', detail: 'HTTP method；省略为全部' },
   { label: 'type', type: 'property', apply: 'type: PROXY', detail: 'PROXY / RESPONSE' },
   { label: 'service', type: 'property', apply: 'service: ', detail: 'NamingService 服务' },
   { label: 'cluster', type: 'property', apply: 'cluster: ', detail: '上游集群' },
@@ -171,6 +174,7 @@ const editorTheme = EditorView.theme({
 export function YamlCodeEditor({
   ariaLabel,
   diagnostics,
+  language = 'yaml',
   value,
   onChange,
   onSave,
@@ -205,12 +209,12 @@ export function YamlCodeEditor({
           syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
           bracketMatching(),
           closeBrackets(),
-          autocompletion({ override: [completeRouteField] }),
+          language === 'yaml' ? autocompletion({ override: [completeRouteField] }) : [],
           rectangularSelection(),
           crosshairCursor(),
           highlightActiveLine(),
           highlightSelectionMatches(),
-          yaml(),
+          language === 'yaml' ? yaml() : javascript(),
           editorTheme,
           ariaLabelCompartment.of(EditorView.contentAttributes.of({ 'aria-label': ariaLabel })),
           EditorView.updateListener.of((update) => {

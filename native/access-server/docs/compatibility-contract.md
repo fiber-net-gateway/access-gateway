@@ -234,6 +234,7 @@ bad routing 特殊入口返回 400、`BAD_REQUEST`、`error find router`。
 ```json
 {
   "path": "/v1/example",
+  "method": "POST",
   "type": "PROXY",
   "service": "example-service/gray",
   "cluster": "stable",
@@ -259,7 +260,8 @@ bad routing 特殊入口返回 400、`BAD_REQUEST`、`error find router`。
 | 字段 | 默认/规则 |
 | --- | --- |
 | `path` | 必须非空 |
-| `type` | `PROXY`；另支持 `RESPONSE` |
+| `method` | 可选 HTTP token；缺失/null 匹配所有 method，配置后大小写敏感精确匹配 |
+| `type` | `PROXY`；另支持 `RESPONSE` 和仓库扩展 `SCRIPT` |
 | `service` | 与 addresses 二选一的上游来源 |
 | `cluster` | 显式值覆盖 service 中 `/cluster` suffix |
 | `addresses` | service 为空时使用；两者都空则 build 失败 |
@@ -276,6 +278,7 @@ bad routing 特殊入口返回 400、`BAD_REQUEST`、`error find router`。
 | `websocket_timeout` | 大于 0 才开启 WebSocket 代理 |
 | `flush` | body flush；响应额外写 `X-Accel-Buffering: no` |
 | `allows` | CIDR allow/deny |
+| `script` | `SCRIPT` 的必填脚本正文；其他 type 不允许 |
 
 Body：
 
@@ -307,10 +310,18 @@ C++ handler 将默认值作为启动选项，并允许部署时覆盖；已知 C
 `allows` 中的每个值必须非空；Java build 会直接检查首字符，空字符串会导致配置构建
 失败。
 
-## 7. Path 与条件路由
+SCRIPT 是本仓库的 wire 扩展，不属于既有 Java 基线。它只允许 `path`、可选 `method`、`script`
+和 `allows`；脚本在候选快照发布前编译，请求期可使用 Fiber 公共 `req.*`、`resp.*` 与动态常量。
+Console 中 JavaScript Route 的 path/method 是正文外置字段，脚本正文不能声明匹配范围。
+为在当前 Fiber request API 下保持有界读取，SCRIPT Route 只接受无 body 或带合法 Content-Length
+且不超过 server 全局限制的请求；无法预先确定长度的 chunked/stream body fail closed 为 413。
+
+## 7. Path、Method 与条件路由
 
 - 使用 Path matcher 选择 route；
-- 同一个 path 可安装多条有 condition 的 route；
+- 同一个 path 可安装多条有 method 或 condition 的 route；
+- method 不匹配时继续尝试同 path 后续候选；method 缺失匹配所有请求；
+- method 与 condition 同时配置时为 AND，先比较 method，再执行 condition；
 - condition 必须是同步表达式；异步表达式配置拒绝；
 - 依次判断条件，首个满足者执行；
 - 节点已有无条件 route 后，再加入同节点 route 属于 dead-route conflict；placeholder
@@ -319,6 +330,9 @@ C++ handler 将默认值作为启动选项，并允许部署时覆盖；已知 C
   nibble 按低位到高位依次输出；
 - 未找到 Path 返回 404、`URL_NOT_MATCHED`，message：
   `url not matched is project:<project>`。
+
+method 不匹配同样沿用 404，不新增隐式 405/`Allow`。节点已有无 method 且无 condition 的 Route 后，
+同节点后续 Route 仍属于 dead-route conflict。
 
 本仓库 `RoutePathMatcher` 已通过聚焦用例验证静态段、参数段、wildcard、冲突和
 condition 顺序，并用于 compiled snapshot。条件表达式在候选快照发布前由本地脚本

@@ -23,7 +23,7 @@ const sourceVersionId = '00000000-0000-4000-8000-000000000003'
 const currentVersionId = '00000000-0000-4000-8000-000000000004'
 const routeId = '00000000-0000-4000-8000-000000000005'
 const sourceModel: ProjectRoutesModel = {
-  schemaVersion: 4,
+  schemaVersion: 5,
   kind: 'project_routes_yaml',
   networkPolicy: {
     source: 'route',
@@ -31,7 +31,13 @@ const sourceModel: ProjectRoutesModel = {
     allowedCidrs: [],
     deniedCidrs: [],
   },
-  routes: [{ id: routeId, source: 'path: /source\ntype: RESPONSE\nstatus: 200' }],
+  routes: [
+    {
+      id: routeId,
+      format: 'yaml',
+      source: 'path: /source\ntype: RESPONSE\nstatus: 200',
+    },
+  ],
 }
 const sourceVersion: ConfigurationVersionDetail = {
   id: sourceVersionId,
@@ -96,7 +102,13 @@ test('restoration saves an edited historical model while preserving its source',
   const service = createService(capture)
   const editedModel: ProjectRoutesModel = {
     ...sourceModel,
-    routes: [{ id: routeId, source: 'path: /edited\ntype: RESPONSE\nstatus: 201' }],
+    routes: [
+      {
+        id: routeId,
+        format: 'yaml',
+        source: 'path: /edited\ntype: RESPONSE\nstatus: 201',
+      },
+    ],
   }
 
   const saved = await service.restore(
@@ -161,6 +173,7 @@ test('saving rejects invalid YAML before creating a configuration version', asyn
           routes: [
             {
               id: routeId,
+              format: 'yaml',
               source: 'path: /\nstatus: 200\ntype: RESPONSE\nresponse_headers:\n  X-Heassf',
             },
           ],
@@ -193,7 +206,7 @@ test('edited historical restoration rejects invalid YAML before creating a versi
         idempotencyKey: 'restore-invalid-v19',
         model: {
           ...sourceModel,
-          routes: [{ id: routeId, source: 'path: [' }],
+          routes: [{ id: routeId, format: 'yaml', source: 'path: [' }],
         },
       },
       'request-4',

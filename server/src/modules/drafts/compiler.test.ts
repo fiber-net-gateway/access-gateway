@@ -6,7 +6,7 @@ import { compileProjectRoutes } from './compiler.js'
 
 function model(...sources: string[]): ProjectRoutesModel {
   return {
-    schemaVersion: 4,
+    schemaVersion: 5,
     kind: 'project_routes_yaml',
     networkPolicy: {
       source: 'route',
@@ -16,6 +16,7 @@ function model(...sources: string[]): ProjectRoutesModel {
     },
     routes: sources.map((source, index) => ({
       id: `00000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`,
+      format: 'yaml',
       source,
     })),
   }
@@ -47,7 +48,7 @@ test('compiles independent YAML routes into ordered Java-compatible project JSON
 test('rejects unsafe YAML features and reports the owning route', () => {
   const routeId = '00000000-0000-4000-8000-000000000001'
   const result = compileProjectRoutes('api.example.com', {
-    schemaVersion: 4,
+    schemaVersion: 5,
     kind: 'project_routes_yaml',
     networkPolicy: {
       source: 'route',
@@ -58,6 +59,7 @@ test('rejects unsafe YAML features and reports the owning route', () => {
     routes: [
       {
         id: routeId,
+        format: 'yaml',
         source: 'path: &shared /one\ntype: RESPONSE\nrewrite: *shared',
       },
     ],
@@ -66,6 +68,55 @@ test('rejects unsafe YAML features and reports the owning route', () => {
   assert.ok(result.issues.every((issue) => issue.routeId === routeId))
   assert.ok(result.issues.some((issue) => issue.code === 'YAML_ANCHOR_NOT_ALLOWED'))
   assert.ok(result.issues.some((issue) => issue.code === 'YAML_ALIAS_NOT_ALLOWED'))
+})
+
+test('compiles YAML method and mixed JavaScript routes in source order', () => {
+  const result = compileProjectRoutes('api.example.com', {
+    ...model('path: /items\nmethod: GET\ntype: RESPONSE\nstatus: 200'),
+    routes: [
+      ...model('path: /items\nmethod: GET\ntype: RESPONSE\nstatus: 200').routes,
+      {
+        id: '00000000-0000-4000-8000-000000000002',
+        format: 'js',
+        path: '/items/:id',
+        method: 'POST',
+        source: 'return {id: $path.id};',
+      },
+    ],
+  })
+
+  assert.deepEqual(result.issues, [])
+  const payload = JSON.parse(result.compiled!.payloadText) as { routes: unknown[] }
+  assert.deepEqual(payload.routes, [
+    { method: 'GET', path: '/items', status: 200, type: 'RESPONSE' },
+    {
+      method: 'POST',
+      path: '/items/:id',
+      script: 'return {id: $path.id};',
+      type: 'SCRIPT',
+    },
+  ])
+})
+
+test('rejects invalid methods and incomplete JavaScript route metadata', () => {
+  const invalidYaml = compileProjectRoutes(
+    'api.example.com',
+    model('path: /items\nmethod: GET POST\ntype: RESPONSE\nstatus: 200'),
+  )
+  assert.ok(invalidYaml.issues.some((issue) => issue.code === 'INVALID_ROUTE_METHOD'))
+
+  const invalidScript = compileProjectRoutes('api.example.com', {
+    ...model(),
+    routes: [
+      {
+        id: '00000000-0000-4000-8000-000000000001',
+        format: 'js',
+        path: '/script',
+        source: '   ',
+      },
+    ],
+  })
+  assert.ok(invalidScript.issues.some((issue) => issue.code === 'EMPTY_ROUTE_SCRIPT'))
 })
 
 test('rejects duplicate, unknown, and structurally incomplete route fields', () => {
