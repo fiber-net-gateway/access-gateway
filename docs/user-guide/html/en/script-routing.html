@@ -1,0 +1,667 @@
+<!-- Generated from docs/user-guide/en/script-routing.md; run npm run docs:build. -->
+<h1 id="access-gateway-script-route-usage">
+  Access Gateway script route usage<a
+    class="documentation-heading-anchor"
+    href="#access-gateway-script-route-usage"
+    aria-label="Link to Access Gateway script route usage"
+    >#</a
+  >
+</h1>
+<p>
+  A script Route reads request data, performs lightweight request-time computation, and directly
+  produces an HTTP response inside access-server. It is not Node.js, browser JavaScript, or a
+  general edge-functions platform. Source runs in Fiber&#39;s JS-like bytecode interpreter with a
+  fixed function set and explicit body and lifecycle boundaries.
+</p>
+<blockquote>
+  <p>
+    Selection rule: use <code>RESPONSE</code> for fixed output, <code>PROXY</code> for ordinary
+    HTTP/WebSocket forwarding, and a JavaScript Route only when request-time branching, JSON
+    assembly, encoding, or hashing is genuinely needed. Script Routes cannot currently make outbound
+    HTTP requests.
+  </p>
+</blockquote>
+<h2 id="1-create-one-in-the-console">
+  1. Create one in the Console<a
+    class="documentation-heading-anchor"
+    href="#1-create-one-in-the-console"
+    aria-label="Link to 1. Create one in the Console"
+    >#</a
+  >
+</h2>
+<ol>
+  <li>Open the Project <strong>Routes</strong> page.</li>
+  <li>Select <strong>+ JS</strong>.</li>
+  <li>Fill in the external <code>Path pattern</code> above the editor.</li>
+  <li>Optionally fill in <code>Method</code>; blank means every HTTP method.</li>
+  <li>Put only the script source in the JavaScript editor.</li>
+  <li>Fix local issues and save a new immutable configuration version.</li>
+  <li>
+    The server compiles a wire Route and passes it to Native Validator, which uses the same codec
+    and compiler as access-server.
+  </li>
+  <li>
+    After creating and executing a Release, observe Published and instance Active separately. Active
+    remains unknown without per-instance evidence.
+  </li>
+</ol>
+<p>The Console model is approximately:</p>
+<pre><code class="language-typescript">interface JavaScriptRouteItem {
+    id: string;
+    format: &quot;js&quot;;
+    path: string;
+    method?: string;
+    source: string;
+}
+</code></pre>
+<p>Publication deterministically compiles it to this rnacos wire shape:</p>
+<pre><code class="language-json">{
+    &quot;path&quot;: &quot;/diagnostics/:id&quot;,
+    &quot;method&quot;: &quot;POST&quot;,
+    &quot;type&quot;: &quot;SCRIPT&quot;,
+    &quot;script&quot;: &quot;let body = req.readJson(); return {id: $path.id, body};&quot;
+}
+</code></pre>
+<p>
+  Do not declare <code>path</code>, <code>method</code>, or <code>type</code> in source. Script text
+  is not the authority for match metadata.
+</p>
+<h2 id="2-minimal-example">
+  2. Minimal example<a
+    class="documentation-heading-anchor"
+    href="#2-minimal-example"
+    aria-label="Link to 2. Minimal example"
+    >#</a
+  >
+</h2>
+<p>External Path: <code>/diagnostics/:id</code></p>
+<p>External Method: <code>GET</code></p>
+<pre><code class="language-javascript">return {
+    id: $path.id,
+    method: $req.method,
+    path: $req.path,
+    source: $query.source || &quot;unknown&quot;
+};
+</code></pre>
+<p>
+  Because the script does not explicitly send a response, its object return becomes a 200 JSON
+  response.
+</p>
+<h2 id="3-matching-behavior">
+  3. Matching behavior<a
+    class="documentation-heading-anchor"
+    href="#3-matching-behavior"
+    aria-label="Link to 3. Matching behavior"
+    >#</a
+  >
+</h2>
+<p>A script runs only after the normal data-plane policy chain:</p>
+<ol>
+  <li>Host selects a Project;</li>
+  <li>Host-level <code>X-Entry</code> and HTTPS policy;</li>
+  <li>Path matching;</li>
+  <li>optional exact method matching;</li>
+  <li>Project/Route CIDR and request-body policy;</li>
+  <li>execution of the precompiled program.</li>
+</ol>
+<p>
+  Path supports static segments, <code>:name</code> parameters, and a final
+  <code>*name</code> wildcard. <code>$path.name</code> must refer to a variable in the external
+  Path; a typo rejects the entire candidate during Native Validator compilation.
+</p>
+<p>
+  A blank Method matches all. A configured Method is case-sensitive and byte-exact. Script Routes do
+  not support YAML <code>condition</code>, and a script cannot start executing and then decline in
+  favor of a later Route. Create separate same-Path Routes for method dispatch. Use a YAML condition
+  for candidate fallback, or have the script produce the complete response itself.
+</p>
+<h2 id="4-response-behavior">
+  4. Response behavior<a
+    class="documentation-heading-anchor"
+    href="#4-response-behavior"
+    aria-label="Link to 4. Response behavior"
+    >#</a
+  >
+</h2>
+<h3 id="4-1-implicit-response">
+  4.1 Implicit response<a
+    class="documentation-heading-anchor"
+    href="#4-1-implicit-response"
+    aria-label="Link to 4.1 Implicit response"
+    >#</a
+  >
+</h3>
+<p>When no <code>resp.send*()</code> call commits a response:</p>
+<table>
+  <thead>
+    <tr>
+      <th>Script result</th>
+      <th>HTTP behavior</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>return value;</code></td>
+      <td>200 with JSON-encoded value</td>
+    </tr>
+    <tr>
+      <td><code>return null;</code></td>
+      <td>200 with JSON <code>null</code></td>
+    </tr>
+    <tr>
+      <td><code>return undefined;</code></td>
+      <td>200 with JSON <code>null</code></td>
+    </tr>
+    <tr>
+      <td><code>return;</code> or fall off the end</td>
+      <td>204 with an empty body</td>
+    </tr>
+    <tr>
+      <td>Uncaught Exception / runtime Abort</td>
+      <td>500 <code>SCRIPT_EXECUTION</code>, if no response was committed</td>
+    </tr>
+  </tbody>
+</table>
+<p>
+  Use explicit responses for business APIs when status and content type should be obvious to
+  readers.
+</p>
+<h3 id="4-2-explicit-json">
+  4.2 Explicit JSON<a
+    class="documentation-heading-anchor"
+    href="#4-2-explicit-json"
+    aria-label="Link to 4.2 Explicit JSON"
+    >#</a
+  >
+</h3>
+<pre><code class="language-javascript">let page = req.getQuery(&quot;page&quot;) || &quot;1&quot;;
+
+resp.setHeader(&quot;Cache-Control&quot;, &quot;no-store&quot;);
+resp.sendJson(200, {
+    ok: true,
+    page,
+    requestPath: req.getPath()
+});
+return;
+</code></pre>
+<p>
+  <code>resp.sendJson(status, body)</code> sets <code>Content-Type: application/json</code> and ends
+  the response.
+</p>
+<h3 id="4-3-text-binary-and-empty-responses">
+  4.3 Text, binary, and empty responses<a
+    class="documentation-heading-anchor"
+    href="#4-3-text-binary-and-empty-responses"
+    aria-label="Link to 4.3 Text, binary, and empty responses"
+    >#</a
+  >
+</h3>
+<pre><code class="language-javascript">// Text; sets text/plain;charset=utf-8.
+resp.send(200, &quot;ready&quot;);
+return;
+</code></pre>
+<pre><code class="language-javascript">// Raw bytes; set Content-Type explicitly.
+let bytes = binary.fromHex(&quot;89504e47&quot;);
+resp.setHeader(&quot;Content-Type&quot;, &quot;application/octet-stream&quot;);
+resp.send(200, bytes);
+return;
+</code></pre>
+<pre><code class="language-javascript">resp.send(204);
+return;
+</code></pre>
+<p>
+  Send functions are asynchronous host functions, but the language has no <code>await</code>; the VM
+  suspends and resumes at the ordinary call. Return immediately after sending. Do not set headers
+  again, send twice, or expect an error after submission to change an already committed HTTP
+  response.
+</p>
+<h2 id="5-read-the-request">
+  5. Read the request<a
+    class="documentation-heading-anchor"
+    href="#5-read-the-request"
+    aria-label="Link to 5. Read the request"
+    >#</a
+  >
+</h2>
+<h3 id="5-1-metadata">
+  5.1 Metadata<a
+    class="documentation-heading-anchor"
+    href="#5-1-metadata"
+    aria-label="Link to 5.1 Metadata"
+    >#</a
+  >
+</h3>
+<pre><code class="language-javascript">let request = {
+    method: req.getMethod(),
+    uri: req.getUri(),
+    path: req.getPath(),
+    rawQuery: req.getQueryStr(),
+    contentType: req.getHeader(&quot;Content-Type&quot;),
+    query: req.getQuery(),
+    cookies: req.getCookie()
+};
+
+return request;
+</code></pre>
+<p>
+  Constants avoid materializing a complete header/query/cookie object when only known fields are
+  needed:
+</p>
+<pre><code class="language-javascript">return {
+    id: $path.id,
+    mode: $query.mode,
+    userAgent: $header.user_agent,
+    session: $cookie.session,
+    traceCluster: $context.hi_trace_cluster,
+    remoteAddress: $conn.remote_addr,
+    tls: $conn.tls
+};
+</code></pre>
+<p>
+  <code>$header</code>, <code>$cookie</code>, and <code>$context</code> fold ASCII case and
+  normalize <code>-</code> with <code>_</code>. A query key that cannot be written as an identifier
+  should use <code>req.getQuery(&quot;key.with.dot&quot;)</code>.
+</p>
+<h3 id="5-2-json-body">
+  5.2 JSON body<a
+    class="documentation-heading-anchor"
+    href="#5-2-json-body"
+    aria-label="Link to 5.2 JSON body"
+    >#</a
+  >
+</h3>
+<p>External Method: <code>POST</code></p>
+<pre><code class="language-javascript">try {
+    let input = req.readJson();
+    let name = input.name;
+
+    if (typeof name !== &quot;string&quot; || length(name) == 0) {
+        resp.sendJson(400, { error: &quot;name is required&quot; });
+        return;
+    }
+
+    resp.sendJson(201, {
+        name,
+        normalized: strings.toLower(strings.trim(name))
+    });
+    return;
+} catch (error) {
+    resp.sendJson(400, { error: &quot;invalid JSON body&quot; });
+    return;
+}
+</code></pre>
+<p>
+  <code>req.readJson()</code> buffers the complete body. Empty input, read failure, or invalid JSON
+  throws a catchable <code>Error</code>.
+</p>
+<h3 id="5-3-binary-body">
+  5.3 Binary body<a
+    class="documentation-heading-anchor"
+    href="#5-3-binary-body"
+    aria-label="Link to 5.3 Binary body"
+    >#</a
+  >
+</h3>
+<pre><code class="language-javascript">let payload = req.readBinary();
+return {
+    bytes: length(payload),
+    sha256: hash.sha256(payload),
+    base64: binary.base64Encode(payload)
+};
+</code></pre>
+<p>
+  An empty body returns a zero-length <code>Binary</code>. The complete body is made contiguous in
+  request memory.
+</p>
+<h3 id="5-4-discard-the-body">
+  5.4 Discard the body<a
+    class="documentation-heading-anchor"
+    href="#5-4-discard-the-body"
+    aria-label="Link to 5.4 Discard the body"
+    >#</a
+  >
+</h3>
+<pre><code class="language-javascript">req.discardBody();
+resp.send(204);
+return;
+</code></pre>
+<p>
+  The body is a one-shot stream. Do not combine or repeat <code>readJson()</code>,
+  <code>readBinary()</code>, and <code>discardBody()</code>.
+</p>
+<h2 id="6-request-body-boundary">
+  6. Request-body boundary<a
+    class="documentation-heading-anchor"
+    href="#6-request-body-boundary"
+    aria-label="Link to 6. Request-body boundary"
+    >#</a
+  >
+</h2>
+<p>
+  Because script body functions buffer the full body, access-server applies this fail-closed rule
+  before SCRIPT execution:
+</p>
+<ul>
+  <li>no body: allowed;</li>
+  <li>valid Content-Length within the global server request limit: allowed;</li>
+  <li>Content-Length over the limit: 413 <code>REQ_BODY_TOO_LARGE</code>;</li>
+  <li>chunked or otherwise unknown-length body: 413 <code>REQ_BODY_TOO_LARGE</code>.</li>
+</ul>
+<p>
+  SCRIPT does not accept a Route-level <code>max_client_body_size</code> field, and the Console
+  script editor does not expose one. Use <code>PROXY</code> for large bodies or end-to-end
+  streaming; do not read a body into a script to imitate a proxy.
+</p>
+<h2 id="7-headers-and-cookies">
+  7. Headers and cookies<a
+    class="documentation-heading-anchor"
+    href="#7-headers-and-cookies"
+    aria-label="Link to 7. Headers and cookies"
+    >#</a
+  >
+</h2>
+<h3 id="7-1-response-headers">
+  7.1 Response headers<a
+    class="documentation-heading-anchor"
+    href="#7-1-response-headers"
+    aria-label="Link to 7.1 Response headers"
+    >#</a
+  >
+</h3>
+<pre><code class="language-javascript">resp.setHeader(&quot;Content-Language&quot;, &quot;en&quot;);
+resp.addHeader(&quot;Vary&quot;, &quot;Accept-Language&quot;);
+resp.addHeader(&quot;Vary&quot;, &quot;Accept-Encoding&quot;);
+resp.sendJson(200, { ok: true });
+return;
+</code></pre>
+<p>
+  <code>setHeader</code> replaces a pending same-name value and <code>addHeader</code> appends. An
+  empty name or empty converted value throws <code>Error</code>. Protocol framing remains owned by
+  <code>HttpExchange</code>; do not set <code>Content-Length</code>, <code>Transfer-Encoding</code>,
+  <code>Connection</code>, or other hop-by-hop/framing fields.
+</p>
+<p>
+  Access-server&#39;s HSTS and trace response fields are copied into the script response context
+  before execution. A script can set ordinary business fields, but must never echo Authorization,
+  cookies, internal trace secrets, or request/response bodies.
+</p>
+<h3 id="7-2-cookie">
+  7.2 Cookie<a
+    class="documentation-heading-anchor"
+    href="#7-2-cookie"
+    aria-label="Link to 7.2 Cookie"
+    >#</a
+  >
+</h3>
+<pre><code class="language-javascript">let added = resp.addCookie({
+    name: &quot;locale&quot;,
+    value: &quot;en&quot;,
+    path: &quot;/&quot;,
+    maxAge: 3600,
+    secure: true,
+    httpOnly: true,
+    sameSite: &quot;Lax&quot;
+});
+
+if (!added) {
+    resp.sendJson(500, { error: &quot;cookie configuration is invalid&quot; });
+    return;
+}
+
+resp.send(204);
+return;
+</code></pre>
+<p>
+  <code>name</code> is required, <code>maxAge</code> must be an integer, boolean fields must be
+  booleans, and <code>sameSite</code> accepts only case-sensitive <code>Lax</code>,
+  <code>Strict</code>, or <code>None</code>. An invalid object returns false rather than a detailed
+  field error.
+</p>
+<h2 id="8-error-handling">
+  8. Error handling<a
+    class="documentation-heading-anchor"
+    href="#8-error-handling"
+    aria-label="Link to 8. Error handling"
+    >#</a
+  >
+</h2>
+<p>Standard-library and HTTP semantic errors are catchable:</p>
+<pre><code class="language-javascript">try {
+    let text = req.getHeader(&quot;X-JSON&quot;);
+    return { payload: JSON.parse(text) };
+} catch (error) {
+    resp.sendJson(400, { error: &quot;invalid payload&quot; });
+    return;
+}
+</code></pre>
+<p>
+  Return stable, non-sensitive client errors. Do not return the raw error object, script source,
+  headers, cookies, or bodies. An uncaught Exception or uncatchable runtime Abort maps to stable 500
+  <code>SCRIPT_EXECUTION</code> when the response has not already been committed.
+</p>
+<p>Keep configuration and request failures distinct:</p>
+<table>
+  <thead>
+    <tr>
+      <th>Stage</th>
+      <th>Example</th>
+      <th>Result</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Console local validation</td>
+      <td>Empty path, invalid method token, empty source</td>
+      <td>Save blocked</td>
+    </tr>
+    <tr>
+      <td>Server compilation</td>
+      <td>Invalid model shape, size, or wire compilation</td>
+      <td>Version/Release blocked</td>
+    </tr>
+    <tr>
+      <td>Native Validator</td>
+      <td>Syntax error, unknown function, missing <code>$path</code> capture</td>
+      <td>Candidate rejected; old snapshot retained</td>
+    </tr>
+    <tr>
+      <td>Request execution</td>
+      <td>Invalid JSON body, type error, explicit <code>throw</code></td>
+      <td>Catchable, otherwise 500</td>
+    </tr>
+    <tr>
+      <td>Runtime Abort</td>
+      <td>OOM, InvalidState, and similar failures</td>
+      <td>Not catchable; execution terminates</td>
+    </tr>
+  </tbody>
+</table>
+<p>
+  Validator errors should expose a stable code, Route field path, and bounded compile position, not
+  full source.
+</p>
+<h2 id="9-available-and-unavailable-capabilities">
+  9. Available and unavailable capabilities<a
+    class="documentation-heading-anchor"
+    href="#9-available-and-unavailable-capabilities"
+    aria-label="Link to 9. Available and unavailable capabilities"
+    >#</a
+  >
+</h2>
+<p>Available:</p>
+<ul>
+  <li>JS-like literals, variables, objects, arrays, operators, and control flow;</li>
+  <li>array, strings, binary, hash, math, rand, JSON, Object, and URL standard libraries;</li>
+  <li>request metadata/body through <code>req.*</code>;</li>
+  <li>headers, cookies, and responses through <code>resp.*</code>;</li>
+  <li>
+    <code>$path</code>, <code>$query</code>, <code>$header</code>, <code>$cookie</code>,
+    <code>$context</code>, <code>$req</code>, and <code>$conn</code>;
+  </li>
+  <li>
+    registered synchronous and asynchronous host functions, without <code>await</code> syntax;
+  </li>
+  <li>configuration-time compilation and request-time execution of immutable programs.</li>
+</ul>
+<p>Unavailable:</p>
+<ul>
+  <li>Node.js, browser APIs, or a complete ECMAScript runtime;</li>
+  <li>
+    <code>fetch</code>, XMLHttpRequest, files, environment variables, sockets, timers, modules, or
+    imports;
+  </li>
+  <li>Promise, <code>async</code>/<code>await</code>, user functions, or classes;</li>
+  <li><code>while</code>, classic three-part <code>for</code>, or regular expressions;</li>
+  <li>
+    dynamic object methods such as <code>items.push(x)</code>; use
+    <code>array.push(items, x)</code>;
+  </li>
+  <li>
+    outbound <code>directive backend = http &quot;...&quot;</code>, <code>http.request()</code>,
+    <code>proxyPass()</code>, or dynamic upstream APIs;
+  </li>
+  <li>
+    execution of real request scripts in the Console, control-plane server, or Native Validator.
+  </li>
+</ul>
+<p>
+  The pinned Fiber library contains HTTP upstream directives that other hosts may enable, but Access
+  Gateway compiles Routes with <code>http_directives_enabled = false</code>. Use a YAML
+  <code>PROXY</code> Route for upstream traffic so service discovery, protected headers, body
+  limits, observability, cancellation, and shutdown remain intact.
+</p>
+<h2 id="10-recipes">
+  10. Recipes<a
+    class="documentation-heading-anchor"
+    href="#10-recipes"
+    aria-label="Link to 10. Recipes"
+    >#</a
+  >
+</h2>
+<h3 id="10-1-bounded-diagnostics">
+  10.1 Bounded diagnostics<a
+    class="documentation-heading-anchor"
+    href="#10-1-bounded-diagnostics"
+    aria-label="Link to 10.1 Bounded diagnostics"
+    >#</a
+  >
+</h3>
+<p>External Path: <code>/_gateway/diagnostics</code></p>
+<p>External Method: <code>GET</code></p>
+<pre><code class="language-javascript">resp.setHeader(&quot;Cache-Control&quot;, &quot;no-store&quot;);
+resp.sendJson(200, {
+    method: $req.method,
+    path: $req.path,
+    httpVersion: $conn.http_version,
+    scheme: $conn.scheme,
+    tls: $conn.tls
+});
+return;
+</code></pre>
+<p>
+  Do not return remote addresses, internal headers, or trace context from a public endpoint without
+  explicit authentication, authorization, and field review.
+</p>
+<h3 id="10-2-stable-canary-bucket">
+  10.2 Stable canary bucket<a
+    class="documentation-heading-anchor"
+    href="#10-2-stable-canary-bucket"
+    aria-label="Link to 10.2 Stable canary bucket"
+    >#</a
+  >
+</h3>
+<pre><code class="language-javascript">let user = req.getCookie(&quot;user_id&quot;) || req.getHeader(&quot;X-User-Id&quot;) || &quot;anonymous&quot;;
+let canary = rand.canary(5, user);
+
+return {
+    bucket: canary ? &quot;canary&quot; : &quot;stable&quot;
+};
+</code></pre>
+<p>
+  Keyed <code>rand.canary()</code> uses a stable CRC-32 bucket. It is not suitable for cryptography,
+  tokens, or access control, and a script cannot dynamically proxy based on it. Use data-plane
+  cluster/gray policy for actual traffic splitting.
+</p>
+<h3 id="10-3-normalize-a-form-query">
+  10.3 Normalize a form query<a
+    class="documentation-heading-anchor"
+    href="#10-3-normalize-a-form-query"
+    aria-label="Link to 10.3 Normalize a form query"
+    >#</a
+  >
+</h3>
+<pre><code class="language-javascript">try {
+    let parsed = URL.parseQuery(req.getQueryStr());
+    parsed.page = parsed.page || &quot;1&quot;;
+    return {
+        parsed,
+        canonical: URL.buildQuery(parsed)
+    };
+} catch (error) {
+    resp.sendJson(400, { error: &quot;invalid query encoding&quot; });
+    return;
+}
+</code></pre>
+<p>
+  <code>URL.*</code> follows <code>application/x-www-form-urlencoded</code>: space encodes as
+  <code>+</code>, and <code>+</code> decodes as space.
+</p>
+<h3 id="10-4-content-digest">
+  10.4 Content digest<a
+    class="documentation-heading-anchor"
+    href="#10-4-content-digest"
+    aria-label="Link to 10.4 Content digest"
+    >#</a
+  >
+</h3>
+<pre><code class="language-javascript">let body = req.readBinary();
+resp.sendJson(200, {
+    length: length(body),
+    sha256: hash.sha256(body)
+});
+return;
+</code></pre>
+<p>
+  Use only for small requests within the global body limit. MD5 and SHA-1 are for interoperability
+  only; prefer SHA-256 for a non-keyed digest.
+</p>
+<h2 id="11-performance-and-security-guidance">
+  11. Performance and security guidance<a
+    class="documentation-heading-anchor"
+    href="#11-performance-and-security-guidance"
+    aria-label="Link to 11. Performance and security guidance"
+    >#</a
+  >
+</h2>
+<ol>
+  <li>Narrow traffic with Path and method before entering a script.</li>
+  <li>
+    Prefer <code>$header.x</code> and <code>$query.x</code> for known single values; materialize
+    whole objects only when enumerating.
+  </li>
+  <li>
+    Avoid repeated JSON parse/stringify and repeated copies or spreads of large arrays and objects.
+  </li>
+  <li>Bodies are fully buffered; keep them small and require Content-Length.</li>
+  <li>
+    Return immediately after sending; translate expected input errors into stable 4xx responses.
+  </li>
+  <li>Never create metrics labels from arbitrary Projects, Paths, headers, or user input.</li>
+  <li>Never log script source, Authorization, cookies, sensitive headers, or bodies.</li>
+  <li>
+    Use <code>resp.sendJson()</code> for JSON and <code>URL.*</code> for form encoding; do not
+    concatenate untrusted output.
+  </li>
+  <li>
+    Do not use hash or canary functions as authentication, authorization, or cryptographic
+    randomness.
+  </li>
+  <li>
+    Run Native Validator before publication and expect the old snapshot to survive failure. After
+    publication, require instance evidence before claiming activation.
+  </li>
+</ol>
+<p>
+  See the script language, standard-library, and HTTP API reference for every signature and
+  compatibility rule.
+</p>

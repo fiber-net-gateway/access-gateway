@@ -19,6 +19,19 @@ export const appRoutes = [
       { index: true, element: <Navigate replace to="/projects" /> },
       { path: 'certificates', element: <CertificatesPage /> },
       {
+        path: 'docs',
+        children: [
+          { index: true, element: <Navigate replace to="zh-CN/routing" /> },
+          {
+            path: ':language/:topic',
+            lazy: async () => {
+              const { DocumentationPage } = await import('./pages/DocumentationPage')
+              return { Component: DocumentationPage }
+            },
+          },
+        ],
+      },
+      {
         path: 'projects',
         children: [
           { index: true, element: <ProjectsIndexPage /> },
