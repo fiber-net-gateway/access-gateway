@@ -57,6 +57,8 @@ RUN npm ci
 
 COPY server/ server/
 COPY web/ web/
+COPY scripts/build-user-guide.mjs scripts/build-user-guide.mjs
+COPY docs/user-guide/ docs/user-guide/
 RUN npm run build
 
 FROM mirror.gcr.io/library/node:22-trixie-slim AS console-production-deps

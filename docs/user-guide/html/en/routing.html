@@ -1,0 +1,991 @@
+<!-- Generated from docs/user-guide/en/routing.md; run npm run docs:build. -->
+<h1 id="access-gateway-route-rules-and-detailed-usage">
+  Access Gateway route rules and detailed usage<a
+    class="documentation-heading-anchor"
+    href="#access-gateway-route-rules-and-detailed-usage"
+    aria-label="Link to Access Gateway route rules and detailed usage"
+    >#</a
+  >
+</h1>
+<p>
+  This guide is for developers and operators who configure Project routes in the Console. It
+  describes the Host, Path, Method, condition, CIDR, <code>RESPONSE</code>, <code>PROXY</code>, and
+  publication behavior implemented by this repository. The final authority is the wire codec, route
+  compiler, and Native Validator in <code>native/access-server</code>, not browser-side editor
+  hints.
+</p>
+<blockquote>
+  <p>
+    Qualification: this guide describes the repository-owned C++ data plane and pinned Fiber
+    revision <code>0fda7764bf94944aca4b674ab5ab311184703118</code>. Production script-corpus
+    differential verification and the final cutover gates are not all complete. This guide does not
+    claim production cutover readiness.
+  </p>
+</blockquote>
+<h2 id="1-core-model">
+  1. Core model<a
+    class="documentation-heading-anchor"
+    href="#1-core-model"
+    aria-label="Link to 1. Core model"
+    >#</a
+  >
+</h2>
+<p>
+  Only <code>access-server</code> receives or proxies gateway traffic. The Console edits, validates,
+  versions, and publishes configuration; it does not forward ordinary gateway requests.
+</p>
+<p>An inbound request is processed in roughly this order:</p>
+<ol>
+  <li>pin the current immutable configuration snapshot for the entire request;</li>
+  <li>normalize <code>Host</code> and select a Project from the global Host tree;</li>
+  <li>apply Host-level <code>X-Entry</code> and HTTPS policy;</li>
+  <li>
+    select Path candidates, then evaluate optional <code>method</code> and <code>condition</code> in
+    order;
+  </li>
+  <li>apply request-body and <code>X-Real-Ip</code> CIDR policy to the matched Route;</li>
+  <li>execute <code>RESPONSE</code>, <code>PROXY</code>, or <code>SCRIPT</code>;</li>
+  <li>emit bounded metrics, traces, and structured access logs.</li>
+</ol>
+<p>
+  The Route list is ordered, but list order only decides among candidates mounted at the same Path
+  matcher node. Across different shapes, the matcher first prefers static segments, then parameter
+  segments, then trailing wildcard segments.
+</p>
+<h2 id="2-configuration-and-lifecycle">
+  2. Configuration and lifecycle<a
+    class="documentation-heading-anchor"
+    href="#2-configuration-and-lifecycle"
+    aria-label="Link to 2. Configuration and lifecycle"
+    >#</a
+  >
+</h2>
+<h3 id="2-1-keep-the-three-states-separate">
+  2.1 Keep the three states separate<a
+    class="documentation-heading-anchor"
+    href="#2-1-keep-the-three-states-separate"
+    aria-label="Link to 2.1 Keep the three states separate"
+    >#</a
+  >
+</h3>
+<table>
+  <thead>
+    <tr>
+      <th>State</th>
+      <th>Meaning</th>
+      <th>Proves an instance is using it</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Draft / configuration version</td>
+      <td>Immutable content saved in the Console database</td>
+      <td>No</td>
+    </tr>
+    <tr>
+      <td>Published</td>
+      <td>Content written to and read back from rnacos</td>
+      <td>No</td>
+    </tr>
+    <tr>
+      <td>Active on instance</td>
+      <td>Typed activation evidence from a specific access-server instance</td>
+      <td>Yes</td>
+    </tr>
+  </tbody>
+</table>
+<p>
+  A successful rnacos write or matching readback proves publication, not activation. When
+  per-instance evidence does not exist, the Console must show activation as unknown rather than
+  rendering Published as Active.
+</p>
+<h3 id="2-2-console-editing-model">
+  2.2 Console editing model<a
+    class="documentation-heading-anchor"
+    href="#2-2-console-editing-model"
+    aria-label="Link to 2.2 Console editing model"
+    >#</a
+  >
+</h3>
+<p>A Project can contain both editor formats in one ordered list:</p>
+<ul>
+  <li>
+    YAML Route: one YAML mapping containing <code>path</code>, optional <code>method</code>, and
+    execution fields. YAML Routes can only be <code>PROXY</code> or <code>RESPONSE</code>.
+  </li>
+  <li>
+    JavaScript Route: the source contains only the script. <code>path</code> and optional
+    <code>method</code> are separate fields above the editor. Publication compiles it to wire
+    <code>type: SCRIPT</code>.
+  </li>
+</ul>
+<p>
+  Each editor contains one Route; do not put a <code>routes:</code> array in a Route editor. Drag or
+  keyboard reorder changes candidate order. Saving creates a new immutable configuration version and
+  never rewrites history.
+</p>
+<p>The Console parses YAML 1.2 with the core schema and additionally requires:</p>
+<ul>
+  <li>a mapping at the root;</li>
+  <li>unique keys;</li>
+  <li>no anchors, aliases, or explicit tags;</li>
+  <li>only JSON-safe strings, booleans, arrays, objects, <code>null</code>, and safe integers;</li>
+  <li>
+    rejection of unknown fields instead of relying on the native compatibility codec to ignore them;
+  </li>
+  <li>at most 1 MiB per source, 4 MiB total source per Project, and 5000 Routes.</li>
+</ul>
+<h2 id="3-host-and-project-selection">
+  3. Host and Project selection<a
+    class="documentation-heading-anchor"
+    href="#3-host-and-project-selection"
+    aria-label="Link to 3. Host and Project selection"
+    >#</a
+  >
+</h2>
+<h3 id="3-1-host-normalization">
+  3.1 Host normalization<a
+    class="documentation-heading-anchor"
+    href="#3-1-host-normalization"
+    aria-label="Link to 3.1 Host normalization"
+    >#</a
+  >
+</h3>
+<p>
+  Host matching is ASCII case-insensitive. A port and one trailing dot are removed before matching.
+  Bracketed IPv6 literals retain the address while a following port is removed. Empty Hosts,
+  consecutive dots, slashes, control bytes, and other invalid values do not enter the matcher.
+</p>
+<p>Supported patterns are:</p>
+<table>
+  <thead>
+    <tr>
+      <th>Pattern</th>
+      <th>Example</th>
+      <th>Match</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Exact</td>
+      <td><code>api.example.com</code></td>
+      <td>Only that Host</td>
+    </tr>
+    <tr>
+      <td>Global wildcard</td>
+      <td><code>*</code></td>
+      <td>Any valid Host</td>
+    </tr>
+    <tr>
+      <td>Suffix wildcard</td>
+      <td><code>*.example.com</code></td>
+      <td>
+        <code>a.example.com</code> and <code>a.b.example.com</code>, but not bare
+        <code>example.com</code>
+      </td>
+    </tr>
+  </tbody>
+</table>
+<p>
+  Two Projects cannot declare Host patterns that normalize to the same value. The Console normally
+  derives one exact Host from the Project domain, but direct wire configuration must still respect
+  global conflicts.
+</p>
+<p>
+  An unmatched Host returns HTTP 404 with error name <code>ROUTER_NOT_FOUND</code>. Path selection
+  starts only after a Host matches.
+</p>
+<h3 id="3-2-https-and-entry-policy">
+  3.2 HTTPS and entry policy<a
+    class="documentation-heading-anchor"
+    href="#3-2-https-and-entry-policy"
+    aria-label="Link to 3.2 HTTPS and entry policy"
+    >#</a
+  >
+</h3>
+<p>
+  A Host can leave HTTPS optional or redirect with status 301, 302, 307, or 308. A request is HTTPS
+  when its scheme or <code>X-Forwarded-Proto</code> is ASCII case-insensitively equal to
+  <code>https</code>. Otherwise the response is:
+</p>
+<pre><code class="language-text">Location: https://&lt;effective-host&gt;&lt;original-uri&gt;
+Strict-Transport-Security: max-age=31536000
+</code></pre>
+<p>
+  After a Host matches, access-server prepares HSTS for subsequent responses. Valid Route
+  <code>response_headers</code> can override it. If an entry mask is configured,
+  <code>X-Entry</code> must match an allowed <code>vdi</code>, <code>desktop</code>, or
+  <code>internet</code> entry; otherwise access-server returns 403 <code>ENTRY_ERROR</code>.
+</p>
+<h2 id="4-path-patterns">
+  4. Path patterns<a
+    class="documentation-heading-anchor"
+    href="#4-path-patterns"
+    aria-label="Link to 4. Path patterns"
+    >#</a
+  >
+</h2>
+<p>Path patterns contain ASCII bytes and are split on <code>/</code>:</p>
+<table>
+  <thead>
+    <tr>
+      <th>Form</th>
+      <th>Example</th>
+      <th>Meaning</th>
+      <th>Available to scripts/templates</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Static</td>
+      <td><code>/users/me</code></td>
+      <td>Exact segment</td>
+      <td>None</td>
+    </tr>
+    <tr>
+      <td>Parameter</td>
+      <td><code>/users/:id</code></td>
+      <td>Capture one segment; trailing <code>/</code> can bind empty</td>
+      <td><code>$path.id</code></td>
+    </tr>
+    <tr>
+      <td>Trailing wildcard</td>
+      <td><code>/assets/*rest</code></td>
+      <td>Capture the remaining path; must be last</td>
+      <td><code>$path.rest</code></td>
+    </tr>
+  </tbody>
+</table>
+<p>
+  For example, <code>/tenants/:tenant/files/*rest</code> matches
+  <code>/tenants/acme/files/a/b.txt</code> with <code>tenant = &quot;acme&quot;</code> and
+  <code>rest = &quot;a/b.txt&quot;</code>.
+</p>
+<p>Rules and limits:</p>
+<ul>
+  <li>
+    <code>*name</code> must be the last segment; <code>/assets/*rest/meta</code> rejects the
+    candidate snapshot;
+  </li>
+  <li>one pattern cannot repeat a variable name, so <code>/:id/children/:id</code> is invalid;</li>
+  <li>
+    a static branch has priority over a parameter branch, which has priority over a wildcard branch;
+  </li>
+  <li>Path matching is case-sensitive;</li>
+  <li>
+    the matcher collapses repeated <code>/</code> and preserves Java-compatible trailing-slash
+    behavior. For example, when only <code>/a/b/:value</code> exists, <code>/a/b/</code> matches
+    with an empty <code>value</code>. Do not distinguish business Routes with repeated or trailing
+    slashes; publish canonical patterns;
+  </li>
+  <li>
+    the query string is not part of Path matching; use <code>$query.*</code> or
+    <code>req.getQuery()</code>;
+  </li>
+  <li>
+    <code>$path.name</code> must name a capture declared by the current pattern, or configuration
+    compilation fails.
+  </li>
+</ul>
+<p>
+  A method mismatch does not produce 405. If every Path candidate fails, the response is 404
+  <code>URL_NOT_MATCHED</code> and no implicit <code>Allow</code> header is added.
+</p>
+<h2 id="5-method-condition-and-ordering">
+  5. Method, condition, and ordering<a
+    class="documentation-heading-anchor"
+    href="#5-method-condition-and-ordering"
+    aria-label="Link to 5. Method, condition, and ordering"
+    >#</a
+  >
+</h2>
+<h3 id="5-1-method">
+  5.1 Method<a
+    class="documentation-heading-anchor"
+    href="#5-1-method"
+    aria-label="Link to 5.1 Method"
+    >#</a
+  >
+</h3>
+<p>
+  Omit <code>method</code> or set it to <code>null</code> to match every method. A configured value
+  must be a 1–64 byte HTTP token containing only:
+</p>
+<pre><code class="language-text">! # $ % &amp; &#39; * + - . ^ _ ` | ~ DIGIT ALPHA
+</code></pre>
+<p>
+  Matching is byte-for-byte and case-sensitive. Use conventional uppercase methods such as
+  <code>GET</code> and <code>POST</code>; <code>get</code> only matches an actual lowercase
+  <code>get</code> token and is not normalized.
+</p>
+<h3 id="5-2-condition">
+  5.2 Condition<a
+    class="documentation-heading-anchor"
+    href="#5-2-condition"
+    aria-label="Link to 5.2 Condition"
+    >#</a
+  >
+</h3>
+<p>A YAML Route can include a synchronous <code>condition</code> expression:</p>
+<pre><code class="language-yaml">path: /reports/:id
+method: GET
+type: PROXY
+condition: &#39;$query.preview == &quot;1&quot; &amp;&amp; $header.x_role == &quot;reviewer&quot;&#39;
+service: report-service/stable
+</code></pre>
+<p>
+  <code>method</code> and <code>condition</code> use AND semantics. Method is compared first; only
+  then are <code>$path</code> values bound and the condition evaluated. The field contains an
+  expression, not a <code>return</code> statement. Async functions such as
+  <code>req.readJson()</code> reject configuration compilation. A falsey result, uncaught exception,
+  or failed condition evaluation skips that candidate and continues with later candidates at the
+  same node.
+</p>
+<h3 id="5-3-candidate-order-at-one-path">
+  5.3 Candidate order at one path<a
+    class="documentation-heading-anchor"
+    href="#5-3-candidate-order-at-one-path"
+    aria-label="Link to 5.3 Candidate order at one path"
+    >#</a
+  >
+</h3>
+<p>This order is valid:</p>
+<ol>
+  <li><code>GET /items/:id</code> with a more specific condition;</li>
+  <li><code>GET /items/:id</code> without a condition;</li>
+  <li><code>POST /items/:id</code>;</li>
+  <li>an all-method <code>/items/:id</code> fallback.</li>
+</ol>
+<p>
+  The same Path can have different methods or conditions. An identical predicate is rejected. A
+  Route with neither method nor condition is the unconditional terminal candidate for that node;
+  another Route after it is dead and rejects the entire candidate snapshot.
+</p>
+<p>
+  Put a same-Path fallback last. Reordering static, parameter, and wildcard Routes does not override
+  the matcher&#39;s structural priority.
+</p>
+<h2 id="6-yaml-route-field-reference">
+  6. YAML Route field reference<a
+    class="documentation-heading-anchor"
+    href="#6-yaml-route-field-reference"
+    aria-label="Link to 6. YAML Route field reference"
+    >#</a
+  >
+</h2>
+<table>
+  <thead>
+    <tr>
+      <th>Field</th>
+      <th>Route types</th>
+      <th>Rule and default</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>path</code></td>
+      <td>All</td>
+      <td>Required, non-empty ASCII Path pattern</td>
+    </tr>
+    <tr>
+      <td><code>method</code></td>
+      <td>All</td>
+      <td>Optional; missing/<code>null</code> matches all, otherwise exact</td>
+    </tr>
+    <tr>
+      <td><code>type</code></td>
+      <td>All</td>
+      <td>YAML must use <code>RESPONSE</code> or <code>PROXY</code></td>
+    </tr>
+    <tr>
+      <td><code>condition</code></td>
+      <td>YAML</td>
+      <td>Optional synchronous expression</td>
+    </tr>
+    <tr>
+      <td><code>service</code></td>
+      <td>PROXY</td>
+      <td>Named service, optionally <code>service/cluster</code></td>
+    </tr>
+    <tr>
+      <td><code>cluster</code></td>
+      <td>PROXY</td>
+      <td>Explicit cluster overriding the service suffix</td>
+    </tr>
+    <tr>
+      <td><code>addresses</code></td>
+      <td>PROXY</td>
+      <td>Static HTTP(S) authorities used when <code>service</code> is absent</td>
+    </tr>
+    <tr>
+      <td><code>proxy_headers</code></td>
+      <td>PROXY</td>
+      <td>Header templates sent upstream</td>
+    </tr>
+    <tr>
+      <td><code>response_headers</code></td>
+      <td>RESPONSE/PROXY</td>
+      <td>Header templates sent to the client</td>
+    </tr>
+    <tr>
+      <td><code>context</code></td>
+      <td>PROXY</td>
+      <td>Trace/CAT context templates</td>
+    </tr>
+    <tr>
+      <td><code>rewrite</code></td>
+      <td>PROXY</td>
+      <td>Upstream path template; original query is appended</td>
+    </tr>
+    <tr>
+      <td><code>status</code></td>
+      <td>RESPONSE</td>
+      <td>Required; native accepts 100–999; use standard HTTP statuses</td>
+    </tr>
+    <tr>
+      <td><code>body</code></td>
+      <td>RESPONSE</td>
+      <td>Optional; missing means an empty body</td>
+    </tr>
+    <tr>
+      <td><code>timeout</code></td>
+      <td>PROXY</td>
+      <td>Response-header timeout; default 60000 ms, minimum 5 ms</td>
+    </tr>
+    <tr>
+      <td><code>max_client_body_size</code></td>
+      <td>RESPONSE/PROXY</td>
+      <td>Request limit; missing or numeric 0 uses the server default</td>
+    </tr>
+    <tr>
+      <td><code>max_proxy_body_size</code></td>
+      <td>PROXY</td>
+      <td>Non-zero value overrides the upstream-response limit</td>
+    </tr>
+    <tr>
+      <td><code>websocket_timeout</code></td>
+      <td>PROXY</td>
+      <td>Positive value enables WebSocket tunneling and sets tunnel I/O timeout</td>
+    </tr>
+    <tr>
+      <td><code>flush</code></td>
+      <td>PROXY</td>
+      <td><code>true</code> reduces local buffering and adds <code>X-Accel-Buffering: no</code></td>
+    </tr>
+    <tr>
+      <td><code>allows</code></td>
+      <td>All</td>
+      <td>CIDR allow/deny sequence; <code>!</code> prefixes deny entries</td>
+    </tr>
+  </tbody>
+</table>
+<p>
+  Durations accept integer milliseconds or case-insensitive strings such as <code>500</code>,
+  <code>500ms</code>, and <code>5s</code>. Data sizes accept integer bytes or binary units such as
+  <code>64k</code>, <code>4m</code>, and <code>1g</code>. New configuration should use clear,
+  non-negative values and must not depend on legacy Java overflow or negative-value behavior.
+</p>
+<p>
+  Header and <code>context</code> mapping values must be scalar or <code>null</code>; the Console
+  deterministically compiles them to wire scalars. Never place credentials, cookies, Authorization
+  values, bodies, or other secrets in documentation, change summaries, audit details, or logs.
+</p>
+<h2 id="7-response-routes">
+  7. RESPONSE Routes<a
+    class="documentation-heading-anchor"
+    href="#7-response-routes"
+    aria-label="Link to 7. RESPONSE Routes"
+    >#</a
+  >
+</h2>
+<h3 id="7-1-text">
+  7.1 Text<a class="documentation-heading-anchor" href="#7-1-text" aria-label="Link to 7.1 Text"
+    >#</a
+  >
+</h3>
+<pre><code class="language-yaml">path: /healthz
+method: GET
+type: RESPONSE
+status: 200
+body:
+    type: TEXT
+    content: ok
+response_headers:
+    Content-Type: text/plain; charset=utf-8
+    Cache-Control: no-store
+</code></pre>
+<p><code>TEXT</code> content must be non-empty and is sent as UTF-8 bytes.</p>
+<h3 id="7-2-base64">
+  7.2 Base64<a
+    class="documentation-heading-anchor"
+    href="#7-2-base64"
+    aria-label="Link to 7.2 Base64"
+    >#</a
+  >
+</h3>
+<pre><code class="language-yaml">path: /pixel.gif
+method: GET
+type: RESPONSE
+status: 200
+body:
+    type: BASE64
+    content: R0lGODlhAQABAAAAACw=
+response_headers:
+    Content-Type: image/gif
+</code></pre>
+<p>
+  <code>BASE64</code> is decoded while compiling configuration. Invalid characters or padding reject
+  the candidate snapshot rather than failing on the first request.
+</p>
+<h3 id="7-3-template">
+  7.3 Template<a
+    class="documentation-heading-anchor"
+    href="#7-3-template"
+    aria-label="Link to 7.3 Template"
+    >#</a
+  >
+</h3>
+<pre><code class="language-yaml">path: /hello/:name
+method: GET
+type: RESPONSE
+status: 200
+body:
+    type: TEMPLATE
+    content: &#39;{&quot;message&quot;:&quot;hello ${$path.name}&quot;}&#39;
+response_headers:
+    Content-Type: application/json; charset=utf-8
+    X-Request-Method: &quot;${$req.method}&quot;
+</code></pre>
+<p>
+  Templates concatenate text; they do not automatically apply JSON, HTML, or URL escaping. Encode
+  untrusted input at the output boundary. For nontrivial JSON, prefer a JavaScript Route with
+  <code>resp.sendJson()</code>.
+</p>
+<p>
+  Each <code>${expression}</code> is compiled during configuration loading and evaluated
+  synchronously per request. Template text supports <code>\\</code>, <code>\$</code>,
+  <code>\{</code>, and <code>\}</code> escapes. <code>null</code>, <code>undefined</code>, objects,
+  and arrays render as empty text; scalar values use compatibility text conversion.
+</p>
+<p>
+  A RESPONSE drains the request body, then atomically prepares all Route response headers and the
+  body. If any template or header validation fails, no partial Route output is committed and stable
+  error handling takes over.
+</p>
+<p>The Route cannot override these hop-by-hop/framing response headers:</p>
+<pre><code class="language-text">Connection, Content-Length, Proxy-Connection, Keep-Alive,
+Proxy-Authenticate, Proxy-Authorization, TE, Trailer,
+Transfer-Encoding, Upgrade
+</code></pre>
+<h2 id="8-proxy-routes">
+  8. PROXY Routes<a
+    class="documentation-heading-anchor"
+    href="#8-proxy-routes"
+    aria-label="Link to 8. PROXY Routes"
+    >#</a
+  >
+</h2>
+<h3 id="8-1-namingservice-upstream">
+  8.1 NamingService upstream<a
+    class="documentation-heading-anchor"
+    href="#8-1-namingservice-upstream"
+    aria-label="Link to 8.1 NamingService upstream"
+    >#</a
+  >
+</h3>
+<pre><code class="language-yaml">path: /api/orders/:id
+method: GET
+type: PROXY
+service: orders/stable
+timeout: 30s
+rewrite: &quot;/internal/orders/${$path.id}&quot;
+proxy_headers:
+    X-Tenant: &quot;${$header.x_tenant}&quot;
+response_headers:
+    Cache-Control: no-store
+</code></pre>
+<p>
+  <code>service: orders/stable</code> means service <code>orders</code> with default cluster
+  <code>stable</code>. A separate non-empty <code>cluster</code> overrides the suffix. NamingService
+  selects only enabled, healthy, positive-weight instances. No eligible instance produces a stable
+  503 error; traffic is never handed to the Console.
+</p>
+<h3 id="8-2-static-upstream">
+  8.2 Static upstream<a
+    class="documentation-heading-anchor"
+    href="#8-2-static-upstream"
+    aria-label="Link to 8.2 Static upstream"
+    >#</a
+  >
+</h3>
+<pre><code class="language-yaml">path: /legacy/*rest
+type: PROXY
+addresses:
+    - http://127.0.0.1:8080
+    - https://legacy.internal:8443
+rewrite: &quot;/${$path.rest}&quot;
+timeout: 20s
+</code></pre>
+<p>
+  A non-empty <code>service</code> takes precedence; <code>addresses</code> is not its failure
+  fallback. Omit <code>service</code> to use static addresses. Without a scheme, port 443 implies
+  HTTPS and other ports imply HTTP. Explicitly specify <code>http://</code> or
+  <code>https://</code> to avoid port-dependent meaning.
+</p>
+<h3 id="8-3-request-and-response-forwarding">
+  8.3 Request and response forwarding<a
+    class="documentation-heading-anchor"
+    href="#8-3-request-and-response-forwarding"
+    aria-label="Link to 8.3 Request and response forwarding"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>the original method is preserved;</li>
+  <li>without <code>rewrite</code>, the raw URI and percent-encoding are preserved;</li>
+  <li>
+    <code>rewrite</code> produces the path; an empty result becomes <code>/</code>, then the
+    original query is appended;
+  </li>
+  <li>the downstream body streams upstream and never passes through the Console/control plane;</li>
+  <li>
+    <code>proxy_headers</code> overrides or suppresses a same-name inbound header; an empty template
+    writes nothing;
+  </li>
+  <li>
+    fixed hop-by-hop/framing headers and inbound <code>Host</code> are not copied directly; target
+    authority supplies Host;
+  </li>
+  <li>
+    access-server finally forces <code>x-ploto-source-app</code> to
+    <code>&lt;project&gt;.unifiedAccess</code>;
+  </li>
+  <li>upstream status is preserved and response hop-by-hop fields are filtered;</li>
+  <li>
+    <code>response_headers</code> can override ordinary upstream fields; explicit Location/Refresh
+    disables auto-rewrite;
+  </li>
+  <li>the upstream body is bounded by <code>max_proxy_body_size</code> or the server default.</li>
+</ul>
+<p>
+  A connection failure can select another endpoint only before the upstream request header starts,
+  for at most four selections including the first. Once header transmission begins, no retry occurs,
+  preventing duplicate non-idempotent submissions.
+</p>
+<h3 id="8-4-flush-and-streaming">
+  8.4 Flush and streaming<a
+    class="documentation-heading-anchor"
+    href="#8-4-flush-and-streaming"
+    aria-label="Link to 8.4 Flush and streaming"
+    >#</a
+  >
+</h3>
+<p>
+  Use <code>flush: true</code> for SSE, streaming JSON, and other low-latency chunked responses. It
+  reduces local body aggregation and adds <code>X-Accel-Buffering: no</code>. It does not disable
+  buffering in a CDN, Ingress, browser, or protocol stack outside access-server; validate the
+  complete path separately.
+</p>
+<h3 id="8-5-websocket">
+  8.5 WebSocket<a
+    class="documentation-heading-anchor"
+    href="#8-5-websocket"
+    aria-label="Link to 8.5 WebSocket"
+    >#</a
+  >
+</h3>
+<pre><code class="language-yaml">path: /socket
+type: PROXY
+service: realtime/stable
+websocket_timeout: 300s
+</code></pre>
+<p>
+  The Java-compatible HTTP/1.1 path requires <code>websocket_timeout &gt; 0</code>,
+  <code>Upgrade</code> case-insensitively equal to <code>websocket</code>, and
+  <code>Connection</code> case-insensitively but exactly equal to <code>upgrade</code>. A
+  comma-separated token list does not satisfy this legacy check. After a successful 101 handshake,
+  the connection becomes a bidirectional tunnel and the timeout applies to tunnel I/O.
+</p>
+<h2 id="9-cidr-and-body-policy">
+  9. CIDR and body policy<a
+    class="documentation-heading-anchor"
+    href="#9-cidr-and-body-policy"
+    aria-label="Link to 9. CIDR and body policy"
+    >#</a
+  >
+</h2>
+<h3 id="9-1-route-cidr">
+  9.1 Route CIDR<a
+    class="documentation-heading-anchor"
+    href="#9-1-route-cidr"
+    aria-label="Link to 9.1 Route CIDR"
+    >#</a
+  >
+</h3>
+<pre><code class="language-yaml">path: /admin/*rest
+type: PROXY
+service: admin/stable
+allows:
+    - 10.0.0.0/8
+    - 2001:db8::/32
+    - &quot;!10.20.0.0/16&quot;
+</code></pre>
+<p>Entries without <code>!</code> form the allow set; prefixed entries form the deny set:</p>
+<ol>
+  <li>if the allow set is non-empty, the source must match at least one allow;</li>
+  <li>any deny match rejects the source;</li>
+  <li>deny therefore wins in the final result.</li>
+</ol>
+<p>
+  The source comes from <code>X-Real-Ip</code>. For Java compatibility, a missing or unparsable
+  value skips CIDR checks. Your trust boundary must therefore ensure only a trusted frontend can set
+  or replace this header. Rejected requests return 403 <code>NOT_ALLOW_IP</code>.
+</p>
+<p>
+  When Console Network Policy makes Project policy authoritative, the compiler injects one
+  allow/deny list into every wire Route. Route YAML must not also define <code>allows</code>, or
+  validation reports a policy conflict.
+</p>
+<h3 id="9-2-request-body-limits">
+  9.2 Request-body limits<a
+    class="documentation-heading-anchor"
+    href="#9-2-request-body-limits"
+    aria-label="Link to 9.2 Request-body limits"
+    >#</a
+  >
+</h3>
+<p>
+  The server startup setting supplies the default request-body limit. A non-zero Route
+  <code>max_client_body_size</code> overrides it. Exceeding the effective limit returns 413
+  <code>REQ_BODY_TOO_LARGE</code>. PROXY enforces limits for both Content-Length and streaming
+  bodies.
+</p>
+<p>
+  JavaScript Routes currently accept only no body or a valid Content-Length not exceeding the global
+  request limit. An unknown-length chunked/streaming body fails closed with 413 before script
+  execution. See the script-route guide for the full boundary.
+</p>
+<h2 id="10-variables-available-to-templates-and-conditions">
+  10. Variables available to templates and conditions<a
+    class="documentation-heading-anchor"
+    href="#10-variables-available-to-templates-and-conditions"
+    aria-label="Link to 10. Variables available to templates and conditions"
+    >#</a
+  >
+</h2>
+<p>These constants are resolved at configuration time and read at request time:</p>
+<pre><code class="language-text">$path.&lt;route-variable&gt;
+$query.&lt;query-name&gt;
+$header.&lt;normalized-header-name&gt;
+$cookie.&lt;normalized-cookie-name&gt;
+$context.&lt;context-name&gt;
+
+$req.uri        $req.method      $req.path       $req.query
+$conn.remote_addr  $conn.remote_port  $conn.http_version  $conn.scheme  $conn.tls
+</code></pre>
+<p>
+  <code>$header</code>, <code>$cookie</code>, and <code>$context</code> fold ASCII case and
+  normalize <code>-</code> with <code>_</code>. For example,
+  <code>$header.x_forwarded_for</code> reads <code>X-Forwarded-For</code>. Query or cookie names
+  that are not valid identifiers must use <code>req.getQuery(&quot;...&quot;)</code> or
+  <code>req.getCookie(&quot;...&quot;)</code>.
+</p>
+<p>
+  Conditions and templates expose the synchronous standard library and synchronous request metadata
+  only. <code>resp.*</code> is unavailable, and async body functions are rejected. See the script
+  language and API reference for the complete list.
+</p>
+<h2 id="11-rnacos-wire-contract">
+  11. rnacos wire contract<a
+    class="documentation-heading-anchor"
+    href="#11-rnacos-wire-contract"
+    aria-label="Link to 11. rnacos wire contract"
+    >#</a
+  >
+</h2>
+<p>Preserve these default locations:</p>
+<table>
+  <thead>
+    <tr>
+      <th>Purpose</th>
+      <th>Data ID</th>
+      <th>Group</th>
+      <th>Content</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Project list</td>
+      <td><code>ploto.unified-access.projects</code></td>
+      <td><code>ACCESS-SERVER</code></td>
+      <td>Semicolon-separated string, not JSON</td>
+    </tr>
+    <tr>
+      <td>Project Route</td>
+      <td><code>ploto.unified-access.route.&lt;project&gt;</code></td>
+      <td><code>ACCESS-SERVER</code></td>
+      <td>Project JSON</td>
+    </tr>
+    <tr>
+      <td>Production gray rules</td>
+      <td><code>ploto.unified-access.gray-match</code></td>
+      <td><code>DEFAULT_GROUP</code></td>
+      <td>Gray JSON</td>
+    </tr>
+  </tbody>
+</table>
+<p>A simplified Project payload is:</p>
+<pre><code class="language-json">{
+    &quot;version&quot;: 42,
+    &quot;host&quot;: {
+        &quot;api.example.com&quot;: {
+            &quot;https&quot;: &quot;S_NOT_MUST&quot;
+        }
+    },
+    &quot;routes&quot;: [
+        {
+            &quot;path&quot;: &quot;/healthz&quot;,
+            &quot;method&quot;: &quot;GET&quot;,
+            &quot;type&quot;: &quot;RESPONSE&quot;,
+            &quot;status&quot;: 200,
+            &quot;body&quot;: { &quot;type&quot;: &quot;TEXT&quot;, &quot;content&quot;: &quot;ok&quot; }
+        }
+    ]
+}
+</code></pre>
+<p>
+  Do not publish the Console&#39;s normalized model directly. The publisher must deterministically
+  compile the compatibility format, and the Project list must remain a semicolon-separated string.
+</p>
+<h2 id="12-update-failure-and-rollback-semantics">
+  12. Update, failure, and rollback semantics<a
+    class="documentation-heading-anchor"
+    href="#12-update-failure-and-rollback-semantics"
+    aria-label="Link to 12. Update, failure, and rollback semantics"
+    >#</a
+  >
+</h2>
+<ul>
+  <li>a candidate with the same Project <code>version</code> as the active snapshot is ignored;</li>
+  <li>
+    a non-empty candidate is fully decoded and has its Path matcher, CIDRs, templates, scripts, and
+    upstream dependencies prepared before atomic publication;
+  </li>
+  <li>
+    any failure preserves the last successful snapshot; requests never observe a partial model;
+  </li>
+  <li>empty Project route content preserves current configuration and is not deletion;</li>
+  <li>missing or empty <code>host</code> unloads that Project&#39;s Host and Routes;</li>
+  <li>
+    removing a Project from the Project list cancels its subscription and unloads it, which is
+    distinct from a failed update;
+  </li>
+  <li>
+    rollback creates a new Release from historical content and never rewrites Release history;
+  </li>
+  <li>
+    every rnacos resource write, readback, failure, and later instance evidence is recorded
+    separately because rnacos does not provide a multi-resource transaction.
+  </li>
+</ul>
+<h2 id="13-common-failures">
+  13. Common failures<a
+    class="documentation-heading-anchor"
+    href="#13-common-failures"
+    aria-label="Link to 13. Common failures"
+    >#</a
+  >
+</h2>
+<table>
+  <thead>
+    <tr>
+      <th>HTTP / error</th>
+      <th>Common cause</th>
+      <th>Check first</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>404 <code>ROUTER_NOT_FOUND</code></td>
+      <td>Invalid, missing, or unmatched Host</td>
+      <td>Actual Host/port, Project domain, wildcard</td>
+    </tr>
+    <tr>
+      <td>404 <code>URL_NOT_MATCHED</code></td>
+      <td>Every Path/method/condition failed</td>
+      <td>Pattern shape, case, order, condition values</td>
+    </tr>
+    <tr>
+      <td>403 <code>ENTRY_ERROR</code></td>
+      <td><code>X-Entry</code> not allowed by Host policy</td>
+      <td>Trusted frontend value and network policy</td>
+    </tr>
+    <tr>
+      <td>403 <code>NOT_ALLOW_IP</code></td>
+      <td><code>X-Real-Ip</code> rejected by CIDR</td>
+      <td>Header provenance, allow/deny overlap, IP family</td>
+    </tr>
+    <tr>
+      <td>413 <code>REQ_BODY_TOO_LARGE</code></td>
+      <td>Route/global body limit or unknown-length SCRIPT body</td>
+      <td>Content-Length, transfer encoding, limits</td>
+    </tr>
+    <tr>
+      <td>500 template/script error</td>
+      <td>Expression failure or uncaught script error</td>
+      <td>Native field path, arguments, <code>$path</code> names</td>
+    </tr>
+    <tr>
+      <td>503 no hosts/circuit break</td>
+      <td>No eligible NamingService endpoint</td>
+      <td>service, cluster, enabled/healthy/weight</td>
+    </tr>
+  </tbody>
+</table>
+<p>
+  During an update, distinguish Draft, Published, and instance Active before diagnosing traffic. An
+  old snapshot continuing to serve does not mean an invalid candidate became active, and rnacos
+  readback success does not prove activation.
+</p>
+<h2 id="14-recommended-practices">
+  14. Recommended practices<a
+    class="documentation-heading-anchor"
+    href="#14-recommended-practices"
+    aria-label="Link to 14. Recommended practices"
+    >#</a
+  >
+</h2>
+<ol>
+  <li>
+    Order the most specific method/condition candidates before an all-method fallback at the same
+    Path.
+  </li>
+  <li>
+    Give static, parameter, and wildcard patterns clear responsibilities; avoid subtle shadowing.
+  </li>
+  <li>For public APIs, explicitly set method, body limit, timeout, and trusted-source CIDRs.</li>
+  <li>
+    Put scheme and port in static addresses; name service and cluster clearly for NamingService
+    Routes.
+  </li>
+  <li>
+    Use RESPONSE for fixed output, PROXY for ordinary forwarding, and SCRIPT only for request-time
+    computation.
+  </li>
+  <li>
+    Keep conditions and templates short, synchronous, and side-effect free; move complex logic
+    upstream.
+  </li>
+  <li>
+    Never expose credentials, cookies, Authorization, sensitive headers, or bodies in templates,
+    errors, or logs.
+  </li>
+  <li>
+    Run Native Validator before publication and wait for real instance evidence afterward; unknown
+    remains unknown.
+  </li>
+  <li>
+    Compatibility claims require both native and Console validation plus the documented
+    differential/cutover gates, not unit tests alone.
+  </li>
+</ol>

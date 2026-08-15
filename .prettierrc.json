@@ -2,5 +2,16 @@
   "singleQuote": true,
   "semi": false,
   "trailingComma": "all",
-  "printWidth": 100
+  "printWidth": 100,
+  "overrides": [
+    {
+      "files": ["docs/user-guide/zh-CN/*.md", "docs/user-guide/en/*.md"],
+      "options": {
+        "singleQuote": false,
+        "semi": true,
+        "trailingComma": "none",
+        "tabWidth": 4
+      }
+    }
+  ]
 }

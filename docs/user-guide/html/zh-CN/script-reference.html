@@ -1,0 +1,1095 @@
+<!-- Generated from docs/user-guide/zh-CN/script-reference.md; run npm run docs:build. -->
+<h1 id="access-gateway-脚本语法-标准库与-http-api-参考">
+  Access Gateway 脚本语法、标准库与 HTTP API 参考<a
+    class="documentation-heading-anchor"
+    href="#access-gateway-脚本语法-标准库与-http-api-参考"
+    aria-label="Link to Access Gateway 脚本语法、标准库与 HTTP API 参考"
+    >#</a
+  >
+</h1>
+<p>
+  本文是 Access Gateway Route condition、template 和 JavaScript Route 使用的完整脚本参考。文中的
+  TypeScript 只用于描述参数与返回值；运行时不是 TypeScript/JavaScript 引擎，也不读取
+  <code>.d.ts</code> 文件。
+</p>
+<p>
+  实现来源是当前仓库的
+  <code>native/access-server/src/runtime/AccessScriptRuntime.cpp</code>，以及固定 Fiber revision
+  <code>0fda7764bf94944aca4b674ab5ab311184703118</code> 中的 <code>script</code> 和
+  <code>http_script</code> 模块。
+</p>
+<h2 id="1-运行时概览">
+  1. 运行时概览<a
+    class="documentation-heading-anchor"
+    href="#1-运行时概览"
+    aria-label="Link to 1. 运行时概览"
+    >#</a
+  >
+</h2>
+<p>Fiber Script 是面向网关配置的轻量 JS-like 字节码解释器：</p>
+<ul>
+  <li>配置加载阶段完成 tokenize、parse、字节码编译、函数解析和常量校验；</li>
+  <li>只有完整 Project 候选全部成功，才发布新的不可变快照；</li>
+  <li>请求阶段复用编译产物，每次请求使用独立 heap 和 <code>ScriptExchangeCtx</code>；</li>
+  <li>同步和异步宿主函数在编译期已知；脚本调用异步函数时仍不写 <code>await</code>；</li>
+  <li>未知函数、参数数量不匹配、未知常量或不允许的能力都是配置期错误。</li>
+</ul>
+<pre><code class="language-javascript">// readJson 和 sendJson 是异步宿主函数，但语法中没有 await。
+let body = req.readJson();
+resp.sendJson(200, body);
+return;
+</code></pre>
+<p>Access Gateway 有三种脚本上下文：</p>
+<table>
+  <thead>
+    <tr>
+      <th>上下文</th>
+      <th>允许赋值/控制流</th>
+      <th>异步函数</th>
+      <th><code>req.*</code></th>
+      <th><code>resp.*</code></th>
+      <th>请求常量</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>YAML <code>condition</code></td>
+      <td>否；输入是一条表达式</td>
+      <td>拒绝</td>
+      <td>仅同步 metadata</td>
+      <td>否</td>
+      <td>是</td>
+    </tr>
+    <tr>
+      <td>Template <code>${...}</code></td>
+      <td>否；每段是一条表达式</td>
+      <td>拒绝</td>
+      <td>仅同步 metadata</td>
+      <td>否</td>
+      <td>是</td>
+    </tr>
+    <tr>
+      <td>JavaScript Route</td>
+      <td>是；完整脚本</td>
+      <td>允许已注册异步函数</td>
+      <td>是</td>
+      <td>是</td>
+      <td>是</td>
+    </tr>
+  </tbody>
+</table>
+<p>所有 Access Gateway 上下文都禁用出站 HTTP directive。</p>
+<h2 id="2-数据类型">
+  2. 数据类型<a
+    class="documentation-heading-anchor"
+    href="#2-数据类型"
+    aria-label="Link to 2. 数据类型"
+    >#</a
+  >
+</h2>
+<p>可用下列近似类型描述脚本值：</p>
+<pre><code class="language-typescript">declare class Binary {
+    private readonly __scriptBinaryBrand: never;
+}
+
+type ScriptPrimitive = undefined | null | boolean | number | string | Binary;
+type ScriptArray = ScriptValue[];
+type ScriptObject = { [key: string]: ScriptValue };
+type ScriptValue = ScriptPrimitive | ScriptArray | ScriptObject;
+</code></pre>
+<h3 id="2-1-类型规则">
+  2.1 类型规则<a
+    class="documentation-heading-anchor"
+    href="#2-1-类型规则"
+    aria-label="Link to 2.1 类型规则"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>
+    数字内部区分 signed 64-bit integer 和 <code>double</code>，脚本层统一表现为
+    <code>number</code>；
+  </li>
+  <li>
+    <code>undefined</code> 表示缺失属性、未初始化变量或 API 的“无值”，与 <code>null</code> 不同；
+  </li>
+  <li>
+    字符串使用 WTF-8/UTF-16 语义，<code>length()</code>、字符串下标和
+    <code>strings.substring()</code> 的位置单位是 UTF-16 code unit；例如
+    <code>length(&quot;😀&quot;) == 2</code>；
+  </li>
+  <li>
+    <code>Binary</code> 保存原始 byte，通常来自
+    <code>req.readBinary()</code>、<code>binary.base64Decode()</code>、
+    <code>binary.fromHex()</code> 或宿主；
+  </li>
+  <li>
+    array 和 object 是可变引用值；<code>array.push/pop</code>、<code
+      >Object.assign/deleteProperties</code
+    >
+    原地修改；
+  </li>
+  <li>object 属性保持插入顺序；相关迭代和 JSON 输出遵循该顺序；</li>
+  <li>
+    Route script 的根值 <code>$</code> 由 Access Gateway 以 <code>undefined</code> 传入。不要用
+    <code>$.field</code>；请求数据应从 <code>$req</code>、<code>$path</code> 或
+    <code>req.*</code> 读取。
+  </li>
+</ul>
+<p><code>typeof</code> 返回本运行时的类型名：</p>
+<pre><code class="language-text">undefined, null, boolean, number, string, binary,
+array, object, iterator, exception
+</code></pre>
+<h2 id="3-词法和基本语法">
+  3. 词法和基本语法<a
+    class="documentation-heading-anchor"
+    href="#3-词法和基本语法"
+    aria-label="Link to 3. 词法和基本语法"
+    >#</a
+  >
+</h2>
+<h3 id="3-1-注释与字面量">
+  3.1 注释与字面量<a
+    class="documentation-heading-anchor"
+    href="#3-1-注释与字面量"
+    aria-label="Link to 3.1 注释与字面量"
+    >#</a
+  >
+</h3>
+<p>支持 <code>//</code> 行注释和 <code>/* ... */</code> 块注释，以及以下字面量：</p>
+<pre><code class="language-javascript">let integer = 42;
+let floating = 0.25;
+let enabled = true;
+let empty = null;
+let missing = undefined;
+let text = &quot;gateway&quot;;
+let anotherText = &quot;route&quot;;
+let list = [1, 2, integer];
+let object = { name: text, enabled: enabled };
+</code></pre>
+<p>未闭合字符串、注释或 template literal 是配置期 parse error。</p>
+<h3 id="3-2-变量-object-和-array">
+  3.2 变量、object 和 array<a
+    class="documentation-heading-anchor"
+    href="#3-2-变量-object-和-array"
+    aria-label="Link to 3.2 变量、object 和 array"
+    >#</a
+  >
+</h3>
+<p>只使用 <code>let</code> 声明变量：</p>
+<pre><code class="language-javascript">let name = &quot;fiber&quot;;
+let base = { a: 1 };
+let object = { name, ...base, [&quot;dynamic-key&quot;]: 2 };
+let list = [0, ...[1, 2], 3];
+
+let first = list[0];
+let current = object.name;
+object.name = &quot;gateway&quot;;
+object[&quot;new-key&quot;] = 2;
+</code></pre>
+<p>
+  支持 object 属性简写、计算属性和 spread，array 也支持 spread。object 字面量中重复的静态 key 是
+  编译错误。array 下标赋值只能修改已有下标；追加请用 <code>array.push(list, value)</code>。
+</p>
+<p><code>let</code> 声明必须以分号结束。为避免解析歧义，所有 statement 都应写分号。</p>
+<h3 id="3-3-运算符">
+  3.3 运算符<a
+    class="documentation-heading-anchor"
+    href="#3-3-运算符"
+    aria-label="Link to 3.3 运算符"
+    >#</a
+  >
+</h3>
+<pre><code class="language-text">一元：+  -  !  typeof
+算术：+  -  *  /  %
+比较：&lt;  &lt;=  &gt;  &gt;=  ==  !=  ===  !==
+逻辑：&amp;&amp;  ||
+成员：in
+条件：condition ? whenTrue : whenFalse
+赋值：=
+</code></pre>
+<ul>
+  <li><code>&amp;&amp;</code>、<code>||</code> 短路并返回参与运算的值，可用于默认值；</li>
+  <li>
+    任一操作数为 string 时，<code>+</code> 执行字符串拼接；object、array 和 binary 不能隐式拼接；
+  </li>
+  <li>
+    数值运算接受 number、boolean 和 <code>null</code>，不会像普通 JavaScript 一样把任意 string
+    隐式转成 number；
+  </li>
+  <li>
+    <code>==</code>/<code>!=</code> 是宽松比较，<code>===</code>/<code>!==</code>
+    是严格比较；array/object 的严格比较使用引用身份；
+  </li>
+  <li>
+    <code>key in object</code> 判断属性是否存在，<code>index in array</code>
+    判断整数下标是否在范围内，其他组合为 false；
+  </li>
+  <li>
+    <code>~</code> match 运算符能被 parser 识别，但当前 bytecode compiler 会拒绝，正则能力未开放；
+  </li>
+  <li>
+    不支持 <code>++</code>、<code>--</code>、复合赋值、可选链或 nullish coalescing；使用显式表达式。
+  </li>
+</ul>
+<p>示例：</p>
+<pre><code class="language-javascript">let role = $header.x_role || &quot;guest&quot;;
+let allowed = role === &quot;admin&quot; || role === &quot;operator&quot;;
+return allowed ? { ok: true } : { ok: false };
+</code></pre>
+<h3 id="3-4-控制流">
+  3.4 控制流<a
+    class="documentation-heading-anchor"
+    href="#3-4-控制流"
+    aria-label="Link to 3.4 控制流"
+    >#</a
+  >
+</h3>
+<p>
+  支持 <code>if/else</code>、双变量
+  <code>for-of</code>、<code>break</code>、<code>continue</code>、<code>return</code>、<code
+    >try/catch</code
+  >
+  和 <code>throw</code>：
+</p>
+<pre><code class="language-javascript">let result = [];
+
+if (req.getMethod() === &quot;GET&quot;) {
+    for (let index, value of [1, 2, 3]) {
+        if (value == 2) {
+            continue;
+        }
+        array.push(result, value);
+    }
+} else {
+    return [];
+}
+
+return result;
+</code></pre>
+<p><code>for-of</code> 只支持以下形式：</p>
+<pre><code class="language-javascript">// array: key 是从 0 开始的下标，value 是元素。
+for (let key, value of arrayValue) {
+    // ...
+}
+
+// object: key 是属性名，value 是属性值，按插入顺序。
+for (let key, value of objectValue) {
+    // ...
+}
+</code></pre>
+<p>
+  迭代期间增加/删除 array 元素或 object 属性属于结构修改，会产生可捕获
+  <code>IterationError</code>；更新已有 object 属性的 value 不属于结构修改。
+</p>
+<p>
+  不支持 <code>while</code>、<code>do/while</code>、传统三段式
+  <code>for</code>、<code>switch</code>、function/class 声明、arrow function、 generator、module 或
+  Promise。
+</p>
+<h3 id="3-5-异常">
+  3.5 异常<a class="documentation-heading-anchor" href="#3-5-异常" aria-label="Link to 3.5 异常"
+    >#</a
+  >
+</h3>
+<pre><code class="language-javascript">try {
+    let value = JSON.parse(req.getHeader(&quot;X-JSON&quot;));
+    return { ok: true, value };
+} catch (error) {
+    return { ok: false };
+}
+</code></pre>
+<p>
+  <code>throw value;</code> 可以抛出任意 ScriptValue。类型、范围、JSON/URL parse 和 HTTP
+  函数错误也可被 <code>try/catch</code> 捕获。
+</p>
+<p>运行结果区分：</p>
+<ul>
+  <li>Exception：脚本语义错误，可被 catch；未捕获时 Route 返回 500；</li>
+  <li>Abort：运行时终止，例如 OutOfMemory、InvalidState、Timeout，脚本不能捕获。</li>
+</ul>
+<p>不要把捕获到的原始 error 直接返回客户端，它可能暴露实现细节。</p>
+<h3 id="3-6-template-literal">
+  3.6 Template literal<a
+    class="documentation-heading-anchor"
+    href="#3-6-template-literal"
+    aria-label="Link to 3.6 Template literal"
+    >#</a
+  >
+</h3>
+<p>脚本正文支持反引号 template literal：</p>
+<pre><code class="language-javascript">let id = $path.id;
+return `item-${id}-${1 + 2}`;
+</code></pre>
+<p>YAML Route 的 template 是另一层配置语法：正文不带反引号，使用 <code>${expression}</code>：</p>
+<pre><code class="language-yaml">rewrite: &quot;/internal/${$path.id}&quot;
+response_headers:
+    X-Route: &quot;item-${$path.id}&quot;
+</code></pre>
+<p>两者都在配置期编译。YAML template expression 禁止赋值和异步函数。</p>
+<h3 id="3-7-函数调用与参数">
+  3.7 函数调用与参数<a
+    class="documentation-heading-anchor"
+    href="#3-7-函数调用与参数"
+    aria-label="Link to 3.7 函数调用与参数"
+    >#</a
+  >
+</h3>
+<p>函数名在编译期静态解析：</p>
+<pre><code class="language-javascript">array.push(items, 1, 2);
+array.push(items, ...moreItems);
+Object.assign(target, ...sources);
+</code></pre>
+<p>
+  未知函数、固定参数数量不匹配、spread 与签名不兼容或重载歧义会导致配置编译失败。没有动态 prototype
+  method；<code>items.push(x)</code> 不可用，必须写 <code>array.push(items, x)</code>。
+</p>
+<h2 id="4-标准库总览">
+  4. 标准库总览<a
+    class="documentation-heading-anchor"
+    href="#4-标准库总览"
+    aria-label="Link to 4. 标准库总览"
+    >#</a
+  >
+</h2>
+<p>
+  下列函数在 condition、template 和 JavaScript Route 中均注册；condition/template 只能调用同步函数。
+</p>
+<pre><code class="language-text">length                         includes
+array.join                     array.pop                       array.push
+strings.hasPrefix              strings.hasSuffix               strings.toLower
+strings.toUpper                strings.trim                    strings.trimLeft
+strings.trimRight              strings.split                   strings.contains
+strings.contains_any           strings.index                   strings.indexAny
+strings.lastIndex              strings.lastIndexAny            strings.repeat
+strings.substring              strings.toString
+binary.base64Encode            binary.base64Decode             binary.hex
+binary.fromHex                 binary.getUtf8Bytes
+hash.crc32                     hash.md5                         hash.sha1
+hash.sha256
+math.floor                     math.abs
+rand.random                    rand.canary
+JSON.parse                     JSON.stringify
+Object.assign                  Object.keys                     Object.values
+Object.deleteProperties
+URL.encodeComponent            URL.decodeComponent             URL.parseQuery
+URL.buildQuery
+</code></pre>
+<h2 id="5-通用函数">
+  5. 通用函数<a
+    class="documentation-heading-anchor"
+    href="#5-通用函数"
+    aria-label="Link to 5. 通用函数"
+    >#</a
+  >
+</h2>
+<pre><code class="language-typescript">function length(value?: ScriptValue): number;
+function includes(container: string | ScriptValue[], ...items: ScriptValue[]): boolean;
+</code></pre>
+<h3 id="length-value">
+  <code>length(value)</code
+  ><a class="documentation-heading-anchor" href="#length-value" aria-label="Link to `length(value)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>省略参数等同于 <code>null</code>；</li>
+  <li>string 返回 UTF-16 code unit 数；</li>
+  <li>Binary 返回 byte 数；array 返回元素数；object 返回属性数；</li>
+  <li><code>null</code>、<code>undefined</code>、number、boolean 和其他类型返回 0。</li>
+</ul>
+<h3 id="includes-container-items">
+  <code>includes(container, ...items)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#includes-container-items"
+    aria-label="Link to `includes(container, ...items)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>string container 要求每个 item 都是它的 substring；</li>
+  <li>array container 要求每个 item 都能以严格相等 <code>===</code> 找到；</li>
+  <li>其他 container 返回 false；</li>
+  <li>没有 item 时，合法 string/array container 返回 true。</li>
+</ul>
+<h2 id="6-array-函数">
+  6. Array 函数<a
+    class="documentation-heading-anchor"
+    href="#6-array-函数"
+    aria-label="Link to 6. Array 函数"
+    >#</a
+  >
+</h2>
+<pre><code class="language-typescript">namespace array {
+    function join(values: ScriptValue[], separator?: ScriptValue): string;
+    function pop(values: ScriptValue[]): ScriptValue | null;
+    function push(values: ScriptValue[], ...items: ScriptValue[]): ScriptValue[];
+}
+</code></pre>
+<ul>
+  <li>
+    <code>array.join()</code> 默认 separator 是空字符串，不是 JavaScript
+    的逗号。string、number、boolean 转为 text；<code>null</code>、<code>undefined</code>、container
+    和 Binary 作为空文本；非 array 抛 TypeError；
+  </li>
+  <li>
+    <code>array.pop()</code> 原地删除并返回末项，空 array 返回 <code>null</code>，非 array 抛
+    TypeError；
+  </li>
+  <li>
+    <code>array.push()</code> 原地追加并返回 array 自身，不返回新 length，非 array 抛 TypeError。
+  </li>
+</ul>
+<h2 id="7-string-函数">
+  7. String 函数<a
+    class="documentation-heading-anchor"
+    href="#7-string-函数"
+    aria-label="Link to 7. String 函数"
+    >#</a
+  >
+</h2>
+<pre><code class="language-typescript">namespace strings {
+    function hasPrefix(text: string, prefix: string): boolean;
+    function hasSuffix(text: string, suffix: string): boolean;
+    function toLower(text: string): string | null;
+    function toUpper(text: string): string | null;
+
+    function trim(text: string, cutset?: string | null): string | null;
+    function trimLeft(text: string, cutset?: string | null): string | null;
+    function trimRight(text: string, cutset?: string | null): string | null;
+    function split(text: string, separators?: string | null): string[] | null;
+
+    function contains(text: string, value: string): boolean | null;
+    function contains_any(text: string, chars: string): boolean | null;
+    function index(text: string, value: string): number | null;
+    function indexAny(text: string, chars: string): number | null;
+    function lastIndex(text: string, value: string): number | null;
+    function lastIndexAny(text: string, chars: string): number | null;
+
+    function repeat(text: string, count: number): string | null;
+    function substring(text: string, start?: number, end?: number): string | null;
+
+    function toString(): string;
+    function toString(value: ScriptValue): string;
+}
+</code></pre>
+<p>
+  共同规则：需要 string 的参数类型错误时，多数函数按兼容语义返回 <code>null</code>；<code
+    >hasPrefix()</code
+  >
+  和 <code>hasSuffix()</code> 返回 false，而不是抛异常。
+</p>
+<ul>
+  <li>
+    <code>toLower()</code>/<code>toUpper()</code> 只转换 ASCII <code>A-Z</code>/<code>a-z</code>，非
+    ASCII byte 保持不变；
+  </li>
+  <li><code>trim(text)</code> 删除两端 byte value <code>&lt;= 0x20</code> 的字符；</li>
+  <li>
+    传入 <code>cutset</code> 时，trim 函数把它当作一个完整 substring
+    从对应端反复删除，不是字符集合；
+  </li>
+  <li><code>trimLeft/trimRight</code> 未传 cutset 时删除当前实现支持的 ASCII Java whitespace；</li>
+  <li>
+    <code>split(text)</code> 未传 separator 返回 <code>[text]</code>；传入后把 separator 当作
+    Unicode code point 集合， 任一字符都可分隔，连续和尾部分隔符不生成空项；
+  </li>
+  <li><code>contains_any/indexAny</code> 把 <code>chars</code> 当作 code point 集合；</li>
+  <li><code>index/indexAny/lastIndex</code> 返回 UTF-16 index，找不到返回 -1；</li>
+  <li>
+    <code>lastIndexAny</code> 保留兼容行为：按
+    <code>chars</code> 的字符顺序，返回第一个有匹配候选字符的最后位置，不是所有
+    候选位置的全局最大值；
+  </li>
+  <li>
+    <code>repeat</code> 的浮点 count 向 0 截断，负值或非数值返回 null；单次结果限制 16 MiB，超过会
+    Abort；
+  </li>
+  <li>
+    <code>substring</code> 的 start/end 是 UTF-16 index，默认 0 和 <code>2147483647</code>；负 start
+    归零，<code>end &lt;= start</code> 返回空字符串；
+  </li>
+  <li>
+    <code>toString()</code> 无参数返回空字符串；<code>null</code>/<code>undefined</code> 返回
+    <code>&quot;null&quot;</code>；object/array 返回内部兼容文本
+    <code>&lt;ObjectNode&gt;</code>/<code>&lt;ArrayNode&gt;</code>，不是 JSON。需要 JSON 时使用
+    <code>JSON.stringify()</code>。
+  </li>
+</ul>
+<p><code>strings.match</code> 和 <code>strings.findAll</code> 未注册。</p>
+<h2 id="8-binary-函数">
+  8. Binary 函数<a
+    class="documentation-heading-anchor"
+    href="#8-binary-函数"
+    aria-label="Link to 8. Binary 函数"
+    >#</a
+  >
+</h2>
+<pre><code class="language-typescript">namespace binary {
+    function base64Encode(value: Binary): string | undefined;
+    function base64Decode(value: string): Binary | undefined;
+    function hex(value: Binary): string;
+    function fromHex(value: string): Binary;
+    function getUtf8Bytes(value: ScriptValue): Binary;
+}
+</code></pre>
+<ul>
+  <li><code>base64Encode</code> 只接受 Binary，其他类型返回 undefined；</li>
+  <li>
+    <code>base64Decode</code> 只接受 string，其他类型返回 undefined；非法字符、padding、非 4
+    倍数长度或 whitespace 抛 RangeError；
+  </li>
+  <li><code>hex</code> 返回小写 hex，非 Binary 抛 TypeError；</li>
+  <li>
+    <code>fromHex</code> 严格要求偶数长度和合法 hex，非法内容抛 RangeError，非 string 抛 TypeError；
+  </li>
+  <li>
+    <code>getUtf8Bytes</code> 把兼容文本表示编码为 UTF-8。object/array 分别编码
+    <code>&lt;ObjectNode&gt;</code> 和 <code>&lt;ArrayNode&gt;</code>，它不是 JSON-to-bytes；需要
+    JSON byte 时先 <code>JSON.stringify()</code>，再传给该函数；
+  </li>
+  <li>
+    当前没有通用的 Binary-to-UTF-8-string decoder。需要解析 JSON body 时直接使用
+    <code>req.readJson()</code>。
+  </li>
+</ul>
+<h2 id="9-hash-函数">
+  9. Hash 函数<a
+    class="documentation-heading-anchor"
+    href="#9-hash-函数"
+    aria-label="Link to 9. Hash 函数"
+    >#</a
+  >
+</h2>
+<pre><code class="language-typescript">namespace hash {
+    function crc32(value: ScriptValue): number;
+    function md5(value: string | Binary): string;
+    function sha1(value: string | Binary): string;
+    function sha256(value: string | Binary): string;
+}
+</code></pre>
+<ul>
+  <li>
+    <code>crc32</code> 对兼容文本表示计算 CRC-32，返回 <code>0..0xffffffff</code>；container 和
+    Binary 的兼容文本为空；
+  </li>
+  <li>md5/sha1/sha256 接受 UTF-8 string 或原始 Binary，返回小写 hex，其他类型抛 TypeError；</li>
+  <li>MD5 和 SHA-1 只用于旧系统互操作，不用于签名、密码或任何要求抗碰撞性的安全设计。</li>
+</ul>
+<h2 id="10-math-与随机函数">
+  10. Math 与随机函数<a
+    class="documentation-heading-anchor"
+    href="#10-math-与随机函数"
+    aria-label="Link to 10. Math 与随机函数"
+    >#</a
+  >
+</h2>
+<pre><code class="language-typescript">namespace math {
+    function floor(value: number): number;
+    function abs(value: number): number;
+}
+
+namespace rand {
+    function random(max?: number): number;
+    function canary(ratio: number, ...keys: ScriptValue[]): boolean;
+}
+</code></pre>
+<ul>
+  <li>
+    <code>math.floor</code> 对 integer 原样返回，对 floating 向负无穷取整；非 number 抛 TypeError；
+  </li>
+  <li>
+    <code>math.abs</code> 返回绝对值；为 Java 兼容，<code>INT64_MIN</code> 保持原值；非 number 抛
+    TypeError；
+  </li>
+  <li>
+    <code>rand.random(max)</code> 返回 <code>[0,max)</code> 均匀 integer，max 默认 1000，floating 向
+    0 截断；<code>max &lt;= 0</code> 抛 RangeError，非 number 抛 TypeError；
+  </li>
+  <li>
+    <code>rand.canary(ratio, ...keys)</code>：ratio &lt;= 0 恒 false，&gt;= 100 恒 true；无 key
+    时随机分桶，有 key 时按 参数顺序累计 CRC-32 并稳定映射到 <code>[0,100)</code>；非数值 ratio 按
+    0；
+  </li>
+  <li>
+    <code>rand.*</code> 不是密码学随机源，也不能替代 data-plane 的 production gray/service
+    selection。
+  </li>
+</ul>
+<h2 id="11-json-函数">
+  11. JSON 函数<a
+    class="documentation-heading-anchor"
+    href="#11-json-函数"
+    aria-label="Link to 11. JSON 函数"
+    >#</a
+  >
+</h2>
+<pre><code class="language-typescript">namespace JSON {
+    function parse(text: string): ScriptValue;
+    function stringify(value: ScriptValue): string | undefined;
+}
+</code></pre>
+<ul>
+  <li>
+    <code>JSON.parse</code> 只接受 string；非法 JSON 抛带解析 message 和 byte offset 的
+    SyntaxError，非 string 抛 TypeError；
+  </li>
+  <li>
+    <code>JSON.stringify(undefined)</code> 返回 undefined；nested undefined 编码为 JSON null；
+  </li>
+  <li>
+    顶层 NaN 和正负 infinity 编码为文本 <code>&quot;null&quot;</code>；其他非法 number 或不可编码
+    value 抛 TypeError；
+  </li>
+  <li>Binary 编码为 Base64 JSON string；</li>
+  <li>object property 按插入顺序输出；</li>
+  <li>发送 HTTP JSON 优先用 <code>resp.sendJson()</code>，避免手工设置 content type 和 body。</li>
+</ul>
+<h2 id="12-object-函数">
+  12. Object 函数<a
+    class="documentation-heading-anchor"
+    href="#12-object-函数"
+    aria-label="Link to 12. Object 函数"
+    >#</a
+  >
+</h2>
+<pre><code class="language-typescript">namespace Object {
+    function assign(
+        target: ScriptObject,
+        source: ScriptValue,
+        ...sources: ScriptValue[]
+    ): ScriptObject;
+
+    function keys(value: ScriptObject): string[];
+    function values(value: ScriptObject): ScriptValue[];
+
+    function deleteProperties(
+        target: ScriptObject,
+        key: ScriptValue,
+        ...keys: ScriptValue[]
+    ): ScriptObject;
+}
+</code></pre>
+<ul>
+  <li>
+    <code>Object.assign</code> 原地 merge object source 并返回 target；非 object source 静默跳过，非
+    object target 抛 TypeError；覆盖属性不改变插入位置；
+  </li>
+  <li><code>Object.keys/values</code> 按插入顺序返回新 array，非 object 抛 TypeError；</li>
+  <li>
+    <code>Object.deleteProperties</code> 原地删除所有 string key 并返回 target；非 string 和不存在的
+    key 静默跳过， 非 object target 抛 TypeError。
+  </li>
+</ul>
+<h2 id="13-url-表单函数">
+  13. URL 表单函数<a
+    class="documentation-heading-anchor"
+    href="#13-url-表单函数"
+    aria-label="Link to 13. URL 表单函数"
+    >#</a
+  >
+</h2>
+<p>
+  这些函数使用 <code>application/x-www-form-urlencoded</code>，不是 ECMAScript 全局
+  <code>encodeURIComponent</code>：空格编码为 <code>+</code>，<code>+</code> 解码为空格。
+</p>
+<pre><code class="language-typescript">namespace URL {
+    function encodeComponent(value: string): string;
+    function decodeComponent(value: string): string;
+
+    function parseQuery(value: string): {
+        [key: string]: string | string[];
+    };
+
+    function buildQuery(
+        value?: null | undefined | { [key: string]: ScriptValue | ScriptValue[] }
+    ): string | null | undefined;
+}
+</code></pre>
+<ul>
+  <li>
+    <code>encodeComponent</code> 保留
+    alphanumeric、<code>-</code>、<code>_</code>、<code>.</code>、<code>*</code>，space 变
+    <code>+</code>，其余 UTF-8 byte 用大写 <code>%HH</code>；非 string 抛 TypeError；
+  </li>
+  <li>
+    <code>decodeComponent</code> 解码 <code>+</code> 和 <code>%HH</code>；非法 percent escape 抛
+    RangeError，非 string 抛 TypeError；
+  </li>
+  <li>
+    <code>parseQuery</code> 返回 object；重复 key 从 string 提升为 array 并继续追加；无
+    <code>=</code> 的字段 value 为空 string；空段跳过；
+  </li>
+  <li>
+    <code>buildQuery</code> 按 object property 插入顺序生成 query；array 展开为重复 key，空 array
+    不生成字段； null/undefined 原样返回，其他非 object 抛 TypeError。
+  </li>
+</ul>
+<h2 id="14-request-http-api-req">
+  14. Request HTTP API：<code>req.*</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#14-request-http-api-req"
+    aria-label="Link to 14. Request HTTP API：`req.*`"
+    >#</a
+  >
+</h2>
+<pre><code class="language-typescript">declare namespace req {
+    function getHeader(): { [name: string]: string };
+    function getHeader(name: string): string | undefined | null;
+
+    function getQuery(): { [name: string]: string };
+    function getQuery(name: string): string | undefined;
+
+    function getCookie(): { [name: string]: string };
+    function getCookie(name: string): string | undefined;
+
+    function getUri(): string;
+    function getPath(): string;
+    function getQueryStr(): string;
+    function getMethod(): string;
+
+    function readJson(): ScriptValue;
+    function readBinary(): Binary;
+    function discardBody(): null;
+}
+</code></pre>
+<h3 id="14-1-metadata">
+  14.1 Metadata<a
+    class="documentation-heading-anchor"
+    href="#14-1-metadata"
+    aria-label="Link to 14.1 Metadata"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>
+    <code>getHeader()</code> 延迟构造并在本次执行缓存 request header object；同名字段折叠为一个
+    value；
+  </li>
+  <li>
+    <code>getHeader(name)</code> 按 HTTP header 名称规则查找；不存在返回 undefined，空名称或非
+    string 返回 null；
+  </li>
+  <li>
+    <code>getQuery()</code> 解析 raw query；重复 key 保留最后值；错误 percent escape
+    保留错误前已解析内容；
+  </li>
+  <li><code>getQuery(name)</code> 不存在、空名称或非 string 返回 undefined；</li>
+  <li><code>getCookie()</code> 解析全部 Cookie header，同名 cookie 后值覆盖前值；</li>
+  <li><code>getCookie(name)</code> 不存在、空名称或非 string 返回 undefined；</li>
+  <li>
+    <code>getUri()</code> 返回 raw request target <code>path[?query]</code>，不含 scheme/host；
+  </li>
+  <li>
+    <code>getPath()</code> 返回解析后 path；<code>getQueryStr()</code> 返回不含 <code>?</code> 的
+    raw query；
+  </li>
+  <li><code>getMethod()</code> 返回原始 method token。</li>
+</ul>
+<h3 id="14-2-body">
+  14.2 Body<a class="documentation-heading-anchor" href="#14-2-body" aria-label="Link to 14.2 Body"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>
+    <code>readJson()</code> 完整读取并 parse JSON；空 body、读取失败或非法 JSON 抛可捕获 Error；
+  </li>
+  <li><code>readBinary()</code> 完整读取 raw byte；空 body 返回 0-byte Binary；</li>
+  <li><code>discardBody()</code> 排空 body 并返回 null，底层 drain error 按兼容行为忽略；</li>
+  <li>body 是一次性 stream，三个函数不能组合或重复读取；</li>
+  <li>
+    Access Gateway host 只允许无 body，或已知且在全局限制内的 Content-Length body 进入
+    SCRIPT；未知长度 body 在函数调用前已经以 413 拒绝；
+  </li>
+  <li>
+    condition/template 虽然能解析同步 <code>req.*</code>，但任何 body 函数都是
+    async，会导致配置编译失败。
+  </li>
+</ul>
+<h2 id="15-response-http-api-resp">
+  15. Response HTTP API：<code>resp.*</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#15-response-http-api-resp"
+    aria-label="Link to 15. Response HTTP API：`resp.*`"
+    >#</a
+  >
+</h2>
+<pre><code class="language-typescript">type HeaderValue = string | number | boolean | null;
+
+interface ResponseCookie {
+    name: string;
+    value?: ScriptValue;
+    domain?: string;
+    path?: string;
+    maxAge?: number;
+    secure?: boolean;
+    httpOnly?: boolean;
+    sameSite?: &quot;Lax&quot; | &quot;Strict&quot; | &quot;None&quot;;
+}
+
+declare namespace resp {
+    function setHeader(name: string, value: HeaderValue): null;
+    function addHeader(name: string, value: HeaderValue): null;
+    function addCookie(cookie: ResponseCookie): boolean;
+
+    function sendJson(status: number, body: ScriptValue): null;
+    function send(status: number): null;
+    function send(status: number, body: ScriptValue): null;
+}
+</code></pre>
+<h3 id="15-1-header-和-cookie">
+  15.1 Header 和 Cookie<a
+    class="documentation-heading-anchor"
+    href="#15-1-header-和-cookie"
+    aria-label="Link to 15.1 Header 和 Cookie"
+    >#</a
+  >
+</h3>
+<ul>
+  <li><code>setHeader</code> 替换同名 pending header；<code>addHeader</code> 追加；</li>
+  <li>header name 或兼容文本化后的 value 为空抛 Error；header 已发出后静默不修改；</li>
+  <li>
+    <code>addCookie</code> 编码并追加 Set-Cookie；name 必填；maxAge 只接受 integer；secure/httpOnly
+    只接受 boolean； sameSite 大小写敏感；成功 true，无效 object/field false；
+  </li>
+  <li>不要设置 hop-by-hop/framing header，不要输出 secret。</li>
+</ul>
+<h3 id="15-2-发送">
+  15.2 发送<a class="documentation-heading-anchor" href="#15-2-发送" aria-label="Link to 15.2 发送"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>
+    <code>sendJson(status, body)</code> JSON encode body，设置
+    <code>application/json</code> 并发送固定长度响应；status 非 integer 回退 200；undefined 编码为
+    JSON null，Binary 编码为 Base64 JSON string；
+  </li>
+  <li><code>send(status)</code> 发送空 body；</li>
+  <li><code>send(status, Binary)</code> 原样发送，不自动设置 content type；</li>
+  <li>
+    <code>send(status, string)</code> 以 UTF-8 发送并设置 <code>text/plain;charset=utf-8</code>；
+  </li>
+  <li><code>send(status, other)</code> 走 JSON 并设置 <code>application/json</code>；</li>
+  <li>send 函数提交 header 并结束 stream。正常脚本只调用一次，随后立即 <code>return;</code>。</li>
+</ul>
+<h2 id="16-路由和连接常量">
+  16. 路由和连接常量<a
+    class="documentation-heading-anchor"
+    href="#16-路由和连接常量"
+    aria-label="Link to 16. 路由和连接常量"
+    >#</a
+  >
+</h2>
+<pre><code class="language-typescript">declare const $path: { [routeVariable: string]: string | null };
+declare const $query: { [queryName: string]: string | null };
+declare const $header: { [normalizedHeaderName: string]: string | null };
+declare const $cookie: { [normalizedCookieName: string]: string | null };
+declare const $context: { [contextName: string]: string | null };
+
+declare const $req: {
+    uri: string;
+    method: string;
+    path: string;
+    query: string;
+};
+
+declare const $conn: {
+    remote_addr: string | null;
+    remote_port: number;
+    http_version: &quot;HTTP/0.9&quot; | &quot;HTTP/1.0&quot; | &quot;HTTP/1.1&quot; | &quot;HTTP/2&quot; | &quot;HTTP/3&quot;;
+    scheme: string;
+    tls: boolean;
+};
+</code></pre>
+<p>解析规则：</p>
+<ul>
+  <li>
+    <code>$path.name</code> 必须是当前 Path 的 capture name，否则配置编译失败；运行时未绑定返回
+    null；
+  </li>
+  <li>
+    <code>$req</code> 只允许 <code>uri/method/path/query</code>，<code>$conn</code>
+    只允许上面五个字段，未知字段是配置错误；
+  </li>
+  <li>
+    <code>$query.key</code> 和 <code>$context.key</code> 可为任意合法 script identifier，不存在返回
+    null；
+  </li>
+  <li>
+    <code>$header/$cookie/$context</code> 名称 ASCII case-insensitive，<code>-</code> 与
+    <code>_</code> 归一化；
+  </li>
+  <li>
+    dot 后必须是合法 identifier；特殊 key 使用 <code>req.getQuery/getCookie/getHeader</code>；
+  </li>
+  <li>
+    常量名称在 Project 配置编译期去重并分配 slot，请求期按 slot 绑定；读取已知单值通常比构造完整
+    object 更轻量。
+  </li>
+</ul>
+<p>示例：</p>
+<pre><code class="language-javascript">return {
+    id: $path.id,
+    source: $query.source,
+    forwardedFor: $header.x_forwarded_for,
+    session: $cookie.session,
+    traceCluster: $context.hi_trace_cluster,
+    method: $req.method,
+    remoteAddress: $conn.remote_addr,
+    tls: $conn.tls
+};
+</code></pre>
+<h2 id="17-出站-http-能力">
+  17. 出站 HTTP 能力<a
+    class="documentation-heading-anchor"
+    href="#17-出站-http-能力"
+    aria-label="Link to 17. 出站 HTTP 能力"
+    >#</a
+  >
+</h2>
+<p>Access Gateway JavaScript Route <strong>没有</strong>以下 API：</p>
+<pre><code class="language-text">fetch(...)
+http.request(...)
+http.proxyPass(...)
+directive backend = http &quot;@service&quot;
+backend.request(...)
+backend.proxyPass(...)
+</code></pre>
+<p>
+  固定 Fiber 模块包含可由其他应用宿主启用的 HTTP directive 和 upstream client，但
+  <code>AccessScriptRuntime</code> 创建 compile scope 时明确传入
+  <code>http_directives_enabled = false</code>，也没有为请求 注入 outbound
+  <code>HttpScriptServices</code>。因此这些名字会在配置编译期失败，而不是在运行时偷偷绕过策略。
+</p>
+<p>
+  需要 upstream 时使用 YAML <code>PROXY</code> Route。这样才能统一应用
+  NamingService、静态地址校验、header 保护、body
+  limit、WebSocket、连接池、重试、trace、metrics、取消和 shutdown 语义。
+</p>
+<h2 id="18-返回-错误和-http-映射">
+  18. 返回、错误和 HTTP 映射<a
+    class="documentation-heading-anchor"
+    href="#18-返回-错误和-http-映射"
+    aria-label="Link to 18. 返回、错误和 HTTP 映射"
+    >#</a
+  >
+</h2>
+<p>JavaScript Route 未显式发送时：</p>
+<table>
+  <thead>
+    <tr>
+      <th>ScriptResult</th>
+      <th>映射</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Value</td>
+      <td>200 JSON</td>
+    </tr>
+    <tr>
+      <td>Void（<code>return;</code> 或落到结尾）</td>
+      <td>204 empty</td>
+    </tr>
+    <tr>
+      <td>Exception / Abort</td>
+      <td>500 <code>SCRIPT_EXECUTION</code></td>
+    </tr>
+  </tbody>
+</table>
+<p>
+  若 <code>resp.send*</code> 已提交
+  header，宿主不会尝试第二次响应。发送后执行更多代码仍可能浪费资源或产生不可见 错误，因此必须立即
+  return。
+</p>
+<p>
+  Condition 的 Exception/Abort/non-value 不生成 500，而是让该候选 condition 视为 false。Template 的
+  失败则让所处 RESPONSE/PROXY 准备失败并进入稳定 500 错误路径。
+</p>
+<p>
+  配置错误会拒绝整个候选快照并保留上一成功快照；同 version 候选会被忽略。Draft 保存、rnacos
+  Published 和 instance Active 是不同状态，脚本成功通过 Native Validator 也不等于任何实例已经激活。
+</p>
+<h2 id="19-快速选择表">
+  19. 快速选择表<a
+    class="documentation-heading-anchor"
+    href="#19-快速选择表"
+    aria-label="Link to 19. 快速选择表"
+    >#</a
+  >
+</h2>
+<table>
+  <thead>
+    <tr>
+      <th>目标</th>
+      <th>推荐 API</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>读取一个 Path capture</td>
+      <td><code>$path.id</code></td>
+    </tr>
+    <tr>
+      <td>读取一个已知 query/header/cookie</td>
+      <td><code>$query.x</code> / <code>$header.x</code> / <code>$cookie.x</code></td>
+    </tr>
+    <tr>
+      <td>读取特殊字符 key</td>
+      <td><code>req.getQuery(&quot;a.b&quot;)</code> 等</td>
+    </tr>
+    <tr>
+      <td>枚举全部 query/header/cookie</td>
+      <td><code>req.getQuery()</code> / <code>getHeader()</code> / <code>getCookie()</code></td>
+    </tr>
+    <tr>
+      <td>读取 JSON</td>
+      <td><code>req.readJson()</code></td>
+    </tr>
+    <tr>
+      <td>读取 byte</td>
+      <td><code>req.readBinary()</code></td>
+    </tr>
+    <tr>
+      <td>返回 JSON</td>
+      <td><code>resp.sendJson(status, value)</code></td>
+    </tr>
+    <tr>
+      <td>返回 text</td>
+      <td><code>resp.send(status, text)</code></td>
+    </tr>
+    <tr>
+      <td>返回 byte</td>
+      <td><code>resp.send(status, binary)</code> 并显式 Content-Type</td>
+    </tr>
+    <tr>
+      <td>JSON encode/decode string</td>
+      <td><code>JSON.stringify/parse</code></td>
+    </tr>
+    <tr>
+      <td>Form query encode/decode</td>
+      <td><code>URL.buildQuery/parseQuery</code></td>
+    </tr>
+    <tr>
+      <td>Base64</td>
+      <td><code>binary.base64Encode/base64Decode</code></td>
+    </tr>
+    <tr>
+      <td>安全摘要</td>
+      <td><code>hash.sha256</code></td>
+    </tr>
+    <tr>
+      <td>稳定百分比分桶</td>
+      <td><code>rand.canary(ratio, key...)</code>，仅非安全用途</td>
+    </tr>
+    <tr>
+      <td>普通 upstream 转发</td>
+      <td>不用脚本；创建 YAML <code>PROXY</code> Route</td>
+    </tr>
+  </tbody>
+</table>

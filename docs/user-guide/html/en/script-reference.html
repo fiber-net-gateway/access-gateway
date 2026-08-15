@@ -1,0 +1,1140 @@
+<!-- Generated from docs/user-guide/en/script-reference.md; run npm run docs:build. -->
+<h1 id="access-gateway-script-language-standard-library-and-http-api-reference">
+  Access Gateway script language, standard library, and HTTP API reference<a
+    class="documentation-heading-anchor"
+    href="#access-gateway-script-language-standard-library-and-http-api-reference"
+    aria-label="Link to Access Gateway script language, standard library, and HTTP API reference"
+    >#</a
+  >
+</h1>
+<p>
+  This is the complete script reference for Access Gateway Route conditions, templates, and
+  JavaScript Routes. TypeScript below is notation for parameters and return values only. The runtime
+  is not a TypeScript/JavaScript engine and does not read <code>.d.ts</code> files.
+</p>
+<p>
+  The implementation comes from
+  <code>native/access-server/src/runtime/AccessScriptRuntime.cpp</code> and the
+  <code>script</code> and <code>http_script</code> modules in pinned Fiber revision
+  <code>0fda7764bf94944aca4b674ab5ab311184703118</code>.
+</p>
+<h2 id="1-runtime-overview">
+  1. Runtime overview<a
+    class="documentation-heading-anchor"
+    href="#1-runtime-overview"
+    aria-label="Link to 1. Runtime overview"
+    >#</a
+  >
+</h2>
+<p>Fiber Script is a lightweight JS-like bytecode interpreter for gateway configuration:</p>
+<ul>
+  <li>
+    tokenization, parsing, bytecode compilation, function resolution, and constant validation happen
+    while loading configuration;
+  </li>
+  <li>a new immutable Project snapshot is published only after every candidate Route succeeds;</li>
+  <li>
+    requests reuse compiled programs, with one heap and <code>ScriptExchangeCtx</code> per request;
+  </li>
+  <li>
+    synchronous and asynchronous host functions are known at compile time; async calls still have no
+    <code>await</code>;
+  </li>
+  <li>
+    unknown functions, wrong argument counts, unknown constants, and forbidden capabilities are
+    configuration errors.
+  </li>
+</ul>
+<pre><code class="language-javascript">// readJson and sendJson are async host functions, but there is no await syntax.
+let body = req.readJson();
+resp.sendJson(200, body);
+return;
+</code></pre>
+<p>Access Gateway provides three contexts:</p>
+<table>
+  <thead>
+    <tr>
+      <th>Context</th>
+      <th>Assignment/control flow</th>
+      <th>Async calls</th>
+      <th><code>req.*</code></th>
+      <th><code>resp.*</code></th>
+      <th>Request constants</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>YAML <code>condition</code></td>
+      <td>No; one expression</td>
+      <td>Rejected</td>
+      <td>Sync metadata only</td>
+      <td>No</td>
+      <td>Yes</td>
+    </tr>
+    <tr>
+      <td>Template <code>${...}</code></td>
+      <td>No; one expression per segment</td>
+      <td>Rejected</td>
+      <td>Sync metadata only</td>
+      <td>No</td>
+      <td>Yes</td>
+    </tr>
+    <tr>
+      <td>JavaScript Route</td>
+      <td>Yes; complete script</td>
+      <td>Registered async calls allowed</td>
+      <td>Yes</td>
+      <td>Yes</td>
+      <td>Yes</td>
+    </tr>
+  </tbody>
+</table>
+<p>Outbound HTTP directives are disabled in every Access Gateway context.</p>
+<h2 id="2-value-types">
+  2. Value types<a
+    class="documentation-heading-anchor"
+    href="#2-value-types"
+    aria-label="Link to 2. Value types"
+    >#</a
+  >
+</h2>
+<p>These approximate types describe script values:</p>
+<pre><code class="language-typescript">declare class Binary {
+    private readonly __scriptBinaryBrand: never;
+}
+
+type ScriptPrimitive = undefined | null | boolean | number | string | Binary;
+type ScriptArray = ScriptValue[];
+type ScriptObject = { [key: string]: ScriptValue };
+type ScriptValue = ScriptPrimitive | ScriptArray | ScriptObject;
+</code></pre>
+<h3 id="2-1-type-rules">
+  2.1 Type rules<a
+    class="documentation-heading-anchor"
+    href="#2-1-type-rules"
+    aria-label="Link to 2.1 Type rules"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>
+    numbers internally distinguish signed 64-bit integers and <code>double</code>, but both appear
+    as <code>number</code>;
+  </li>
+  <li>
+    <code>undefined</code> means a missing property, uninitialized value, or an API&#39;s “no
+    value”; it differs from <code>null</code>;
+  </li>
+  <li>
+    strings use WTF-8/UTF-16 semantics. <code>length()</code>, string indexing, and
+    <code>strings.substring()</code> positions are UTF-16 code units, so
+    <code>length(&quot;😀&quot;) == 2</code>;
+  </li>
+  <li>
+    <code>Binary</code> stores raw bytes and usually comes from <code>req.readBinary()</code>,
+    <code>binary.base64Decode()</code>, <code>binary.fromHex()</code>, or the host;
+  </li>
+  <li>
+    arrays and objects are mutable references. <code>array.push/pop</code> and
+    <code>Object.assign/deleteProperties</code> mutate;
+  </li>
+  <li>object properties preserve insertion order, which controls iteration and JSON output;</li>
+  <li>
+    Access Gateway passes <code>undefined</code> as a Route script&#39;s root <code>$</code>. Do not
+    use <code>$.field</code>; use <code>$req</code>, <code>$path</code>, and <code>req.*</code>.
+  </li>
+</ul>
+<p><code>typeof</code> returns runtime-specific names:</p>
+<pre><code class="language-text">undefined, null, boolean, number, string, binary,
+array, object, iterator, exception
+</code></pre>
+<h2 id="3-lexical-and-basic-syntax">
+  3. Lexical and basic syntax<a
+    class="documentation-heading-anchor"
+    href="#3-lexical-and-basic-syntax"
+    aria-label="Link to 3. Lexical and basic syntax"
+    >#</a
+  >
+</h2>
+<h3 id="3-1-comments-and-literals">
+  3.1 Comments and literals<a
+    class="documentation-heading-anchor"
+    href="#3-1-comments-and-literals"
+    aria-label="Link to 3.1 Comments and literals"
+    >#</a
+  >
+</h3>
+<p>
+  Both <code>//</code> line comments and <code>/* ... */</code> block comments are supported,
+  together with these literals:
+</p>
+<pre><code class="language-javascript">let integer = 42;
+let floating = 0.25;
+let enabled = true;
+let empty = null;
+let missing = undefined;
+let text = &quot;gateway&quot;;
+let anotherText = &quot;route&quot;;
+let list = [1, 2, integer];
+let object = { name: text, enabled: enabled };
+</code></pre>
+<p>An unterminated string, comment, or template literal is a configuration-time parse error.</p>
+<h3 id="3-2-variables-objects-and-arrays">
+  3.2 Variables, objects, and arrays<a
+    class="documentation-heading-anchor"
+    href="#3-2-variables-objects-and-arrays"
+    aria-label="Link to 3.2 Variables, objects, and arrays"
+    >#</a
+  >
+</h3>
+<p>Variables use <code>let</code>:</p>
+<pre><code class="language-javascript">let name = &quot;fiber&quot;;
+let base = { a: 1 };
+let object = { name, ...base, [&quot;dynamic-key&quot;]: 2 };
+let list = [0, ...[1, 2], 3];
+
+let first = list[0];
+let current = object.name;
+object.name = &quot;gateway&quot;;
+object[&quot;new-key&quot;] = 2;
+</code></pre>
+<p>
+  Object property shorthand, computed properties, and object/array spread are supported. Duplicate
+  static keys in one object literal are compile errors. Array-index assignment can only replace an
+  existing index; append with <code>array.push(list, value)</code>.
+</p>
+<p>
+  A <code>let</code> declaration must end in a semicolon. Terminate every statement to avoid parser
+  ambiguity.
+</p>
+<h3 id="3-3-operators">
+  3.3 Operators<a
+    class="documentation-heading-anchor"
+    href="#3-3-operators"
+    aria-label="Link to 3.3 Operators"
+    >#</a
+  >
+</h3>
+<pre><code class="language-text">Unary:       +  -  !  typeof
+Arithmetic:  +  -  *  /  %
+Comparison:  &lt;  &lt;=  &gt;  &gt;=  ==  !=  ===  !==
+Logical:     &amp;&amp;  ||
+Membership:  in
+Conditional: condition ? whenTrue : whenFalse
+Assignment:  =
+</code></pre>
+<ul>
+  <li>
+    <code>&amp;&amp;</code> and <code>||</code> short-circuit and return an operand value, making
+    them useful for defaults;
+  </li>
+  <li>
+    if either operand is a string, <code>+</code> concatenates strings; objects, arrays, and Binary
+    do not concatenate implicitly;
+  </li>
+  <li>
+    numeric operations accept numbers, booleans, and <code>null</code>, but do not coerce arbitrary
+    strings as ordinary JavaScript does;
+  </li>
+  <li>
+    <code>==</code>/<code>!=</code> are loose and <code>===</code>/<code>!==</code> strict; strict
+    array/object comparison uses reference identity;
+  </li>
+  <li>
+    <code>key in object</code> tests a property, and <code>index in array</code> tests an in-range
+    integer index; other combinations are false;
+  </li>
+  <li>
+    the parser recognizes the <code>~</code> match operator, but the current bytecode compiler
+    rejects it; regex is absent;
+  </li>
+  <li>
+    <code>++</code>, <code>--</code>, compound assignment, optional chaining, and nullish coalescing
+    are unsupported.
+  </li>
+</ul>
+<pre><code class="language-javascript">let role = $header.x_role || &quot;guest&quot;;
+let allowed = role === &quot;admin&quot; || role === &quot;operator&quot;;
+return allowed ? { ok: true } : { ok: false };
+</code></pre>
+<h3 id="3-4-control-flow">
+  3.4 Control flow<a
+    class="documentation-heading-anchor"
+    href="#3-4-control-flow"
+    aria-label="Link to 3.4 Control flow"
+    >#</a
+  >
+</h3>
+<p>
+  Supported statements include <code>if/else</code>, two-variable <code>for-of</code>,
+  <code>break</code>, <code>continue</code>, <code>return</code>, <code>try/catch</code>, and
+  <code>throw</code>:
+</p>
+<pre><code class="language-javascript">let result = [];
+
+if (req.getMethod() === &quot;GET&quot;) {
+    for (let index, value of [1, 2, 3]) {
+        if (value == 2) {
+            continue;
+        }
+        array.push(result, value);
+    }
+} else {
+    return [];
+}
+
+return result;
+</code></pre>
+<p><code>for-of</code> has exactly these forms:</p>
+<pre><code class="language-javascript">// Array: key is a zero-based index, value is the element.
+for (let key, value of arrayValue) {
+    // ...
+}
+
+// Object: key/value follow property insertion order.
+for (let key, value of objectValue) {
+    // ...
+}
+</code></pre>
+<p>
+  Adding or removing array elements or object properties during iteration is a structural change and
+  raises a catchable <code>IterationError</code>. Updating an existing object property&#39;s value
+  is not structural.
+</p>
+<p>
+  There is no <code>while</code>, <code>do/while</code>, classic three-part <code>for</code>,
+  <code>switch</code>, function/class declaration, arrow function, generator, module, or Promise.
+</p>
+<h3 id="3-5-exceptions">
+  3.5 Exceptions<a
+    class="documentation-heading-anchor"
+    href="#3-5-exceptions"
+    aria-label="Link to 3.5 Exceptions"
+    >#</a
+  >
+</h3>
+<pre><code class="language-javascript">try {
+    let value = JSON.parse(req.getHeader(&quot;X-JSON&quot;));
+    return { ok: true, value };
+} catch (error) {
+    return { ok: false };
+}
+</code></pre>
+<p>
+  <code>throw value;</code> can throw any ScriptValue. Type, range, JSON/URL parse, and HTTP
+  semantic errors can also be caught.
+</p>
+<p>Runtime results distinguish:</p>
+<ul>
+  <li>Exception: a semantic script error, catchable by the script and a 500 if uncaught;</li>
+  <li>
+    Abort: runtime termination such as OutOfMemory, InvalidState, or Timeout, which cannot be
+    caught.
+  </li>
+</ul>
+<p>Do not return the raw caught error to a client because it may expose implementation detail.</p>
+<h3 id="3-6-template-literals">
+  3.6 Template literals<a
+    class="documentation-heading-anchor"
+    href="#3-6-template-literals"
+    aria-label="Link to 3.6 Template literals"
+    >#</a
+  >
+</h3>
+<p>Script source supports backtick template literals:</p>
+<pre><code class="language-javascript">let id = $path.id;
+return `item-${id}-${1 + 2}`;
+</code></pre>
+<p>YAML Route templates are a separate configuration layer, without surrounding backticks:</p>
+<pre><code class="language-yaml">rewrite: &quot;/internal/${$path.id}&quot;
+response_headers:
+    X-Route: &quot;item-${$path.id}&quot;
+</code></pre>
+<p>
+  Both compile with configuration. YAML template expressions reject assignment and async functions.
+</p>
+<h3 id="3-7-function-calls-and-arguments">
+  3.7 Function calls and arguments<a
+    class="documentation-heading-anchor"
+    href="#3-7-function-calls-and-arguments"
+    aria-label="Link to 3.7 Function calls and arguments"
+    >#</a
+  >
+</h3>
+<p>Function names resolve statically at compile time:</p>
+<pre><code class="language-javascript">array.push(items, 1, 2);
+array.push(items, ...moreItems);
+Object.assign(target, ...sources);
+</code></pre>
+<p>
+  An unknown function, wrong fixed argument count, incompatible spread, or overload ambiguity
+  rejects configuration. There are no dynamic prototype methods: <code>items.push(x)</code> is
+  unavailable; use <code>array.push(items, x)</code>.
+</p>
+<h2 id="4-standard-library-index">
+  4. Standard-library index<a
+    class="documentation-heading-anchor"
+    href="#4-standard-library-index"
+    aria-label="Link to 4. Standard-library index"
+    >#</a
+  >
+</h2>
+<p>
+  All functions below exist in conditions, templates, and JavaScript Routes; conditions/templates
+  can call only synchronous functions.
+</p>
+<pre><code class="language-text">length                         includes
+array.join                     array.pop                       array.push
+strings.hasPrefix              strings.hasSuffix               strings.toLower
+strings.toUpper                strings.trim                    strings.trimLeft
+strings.trimRight              strings.split                   strings.contains
+strings.contains_any           strings.index                   strings.indexAny
+strings.lastIndex              strings.lastIndexAny            strings.repeat
+strings.substring              strings.toString
+binary.base64Encode            binary.base64Decode             binary.hex
+binary.fromHex                 binary.getUtf8Bytes
+hash.crc32                     hash.md5                         hash.sha1
+hash.sha256
+math.floor                     math.abs
+rand.random                    rand.canary
+JSON.parse                     JSON.stringify
+Object.assign                  Object.keys                     Object.values
+Object.deleteProperties
+URL.encodeComponent            URL.decodeComponent             URL.parseQuery
+URL.buildQuery
+</code></pre>
+<h2 id="5-general-functions">
+  5. General functions<a
+    class="documentation-heading-anchor"
+    href="#5-general-functions"
+    aria-label="Link to 5. General functions"
+    >#</a
+  >
+</h2>
+<pre><code class="language-typescript">function length(value?: ScriptValue): number;
+function includes(container: string | ScriptValue[], ...items: ScriptValue[]): boolean;
+</code></pre>
+<p><code>length(value)</code>:</p>
+<ul>
+  <li>omitted input is equivalent to <code>null</code>;</li>
+  <li>strings return UTF-16 code-unit count;</li>
+  <li>Binary returns byte count, arrays element count, and objects property count;</li>
+  <li><code>null</code>, <code>undefined</code>, numbers, booleans, and other values return 0.</li>
+</ul>
+<p><code>includes(container, ...items)</code>:</p>
+<ul>
+  <li>for a string, every item must be a substring;</li>
+  <li>for an array, every item must be found with strict <code>===</code> equality;</li>
+  <li>other containers return false;</li>
+  <li>a valid string/array with no items returns true.</li>
+</ul>
+<h2 id="6-array-functions">
+  6. Array functions<a
+    class="documentation-heading-anchor"
+    href="#6-array-functions"
+    aria-label="Link to 6. Array functions"
+    >#</a
+  >
+</h2>
+<pre><code class="language-typescript">namespace array {
+    function join(values: ScriptValue[], separator?: ScriptValue): string;
+    function pop(values: ScriptValue[]): ScriptValue | null;
+    function push(values: ScriptValue[], ...items: ScriptValue[]): ScriptValue[];
+}
+</code></pre>
+<ul>
+  <li>
+    <code>array.join()</code> defaults to an empty separator, not JavaScript&#39;s comma. Strings,
+    numbers, and booleans become text; <code>null</code>, <code>undefined</code>, containers, and
+    Binary become empty text. Non-array input throws TypeError.
+  </li>
+  <li>
+    <code>array.pop()</code> mutates and returns the final element; an empty array returns
+    <code>null</code>. Non-array throws TypeError.
+  </li>
+  <li>
+    <code>array.push()</code> mutates and returns the array itself, not its new length. Non-array
+    throws TypeError.
+  </li>
+</ul>
+<h2 id="7-string-functions">
+  7. String functions<a
+    class="documentation-heading-anchor"
+    href="#7-string-functions"
+    aria-label="Link to 7. String functions"
+    >#</a
+  >
+</h2>
+<pre><code class="language-typescript">namespace strings {
+    function hasPrefix(text: string, prefix: string): boolean;
+    function hasSuffix(text: string, suffix: string): boolean;
+    function toLower(text: string): string | null;
+    function toUpper(text: string): string | null;
+
+    function trim(text: string, cutset?: string | null): string | null;
+    function trimLeft(text: string, cutset?: string | null): string | null;
+    function trimRight(text: string, cutset?: string | null): string | null;
+    function split(text: string, separators?: string | null): string[] | null;
+
+    function contains(text: string, value: string): boolean | null;
+    function contains_any(text: string, chars: string): boolean | null;
+    function index(text: string, value: string): number | null;
+    function indexAny(text: string, chars: string): number | null;
+    function lastIndex(text: string, value: string): number | null;
+    function lastIndexAny(text: string, chars: string): number | null;
+
+    function repeat(text: string, count: number): string | null;
+    function substring(text: string, start?: number, end?: number): string | null;
+
+    function toString(): string;
+    function toString(value: ScriptValue): string;
+}
+</code></pre>
+<p>
+  For a wrong required string type, most functions return <code>null</code>;
+  <code>hasPrefix()</code> and <code>hasSuffix()</code> return false instead of throwing.
+</p>
+<ul>
+  <li>
+    <code>toLower()</code>/<code>toUpper()</code> transform ASCII <code>A-Z</code>/<code>a-z</code>
+    only; non-ASCII bytes remain unchanged;
+  </li>
+  <li><code>trim(text)</code> removes bytes <code>&lt;= 0x20</code> from both ends;</li>
+  <li>
+    when supplied, <code>cutset</code> is a complete substring repeatedly removed from an edge, not
+    a character set;
+  </li>
+  <li>
+    without cutset, <code>trimLeft/trimRight</code> remove the implementation&#39;s ASCII Java
+    whitespace;
+  </li>
+  <li>
+    <code>split(text)</code> without separators returns <code>[text]</code>; with separators it
+    treats them as a Unicode code-point set, with no empty entries for consecutive or trailing
+    separators;
+  </li>
+  <li><code>contains_any/indexAny</code> treat <code>chars</code> as a code-point set;</li>
+  <li><code>index/indexAny/lastIndex</code> return UTF-16 indices and -1 when absent;</li>
+  <li>
+    compatibility quirk: <code>lastIndexAny</code> checks candidate characters in
+    <code>chars</code> order and returns the last occurrence of the first candidate that exists, not
+    the global maximum across candidates;
+  </li>
+  <li>
+    <code>repeat</code> truncates a floating count toward zero; negative/non-numeric input returns
+    null. One result is limited to 16 MiB, after which execution Aborts;
+  </li>
+  <li>
+    <code>substring</code> uses UTF-16 indices, defaults to 0 and <code>2147483647</code>, clamps
+    negative start to zero, and returns empty when <code>end &lt;= start</code>;
+  </li>
+  <li>
+    zero-argument <code>toString()</code> returns empty. <code>null</code>/<code>undefined</code>
+    return <code>&quot;null&quot;</code>; objects/arrays return
+    <code>&lt;ObjectNode&gt;</code>/<code>&lt;ArrayNode&gt;</code>, not JSON. Use
+    <code>JSON.stringify()</code> for JSON.
+  </li>
+</ul>
+<p><code>strings.match</code> and <code>strings.findAll</code> are not registered.</p>
+<h2 id="8-binary-functions">
+  8. Binary functions<a
+    class="documentation-heading-anchor"
+    href="#8-binary-functions"
+    aria-label="Link to 8. Binary functions"
+    >#</a
+  >
+</h2>
+<pre><code class="language-typescript">namespace binary {
+    function base64Encode(value: Binary): string | undefined;
+    function base64Decode(value: string): Binary | undefined;
+    function hex(value: Binary): string;
+    function fromHex(value: string): Binary;
+    function getUtf8Bytes(value: ScriptValue): Binary;
+}
+</code></pre>
+<ul>
+  <li><code>base64Encode</code> accepts only Binary; other types return undefined;</li>
+  <li>
+    <code>base64Decode</code> accepts only strings; other types return undefined. Invalid
+    characters, padding, length not divisible by four, or whitespace throw RangeError;
+  </li>
+  <li><code>hex</code> returns lowercase hex and throws TypeError for non-Binary;</li>
+  <li>
+    <code>fromHex</code> requires even length and valid hex; invalid content throws RangeError and
+    non-string TypeError;
+  </li>
+  <li>
+    <code>getUtf8Bytes</code> encodes compatibility text as UTF-8. Objects/arrays become
+    <code>&lt;ObjectNode&gt;</code> and <code>&lt;ArrayNode&gt;</code>, not JSON bytes. For JSON
+    bytes, stringify first;
+  </li>
+  <li>
+    there is no general Binary-to-UTF-8-string decoder. Use <code>req.readJson()</code> to parse a
+    JSON request body.
+  </li>
+</ul>
+<h2 id="9-hash-functions">
+  9. Hash functions<a
+    class="documentation-heading-anchor"
+    href="#9-hash-functions"
+    aria-label="Link to 9. Hash functions"
+    >#</a
+  >
+</h2>
+<pre><code class="language-typescript">namespace hash {
+    function crc32(value: ScriptValue): number;
+    function md5(value: string | Binary): string;
+    function sha1(value: string | Binary): string;
+    function sha256(value: string | Binary): string;
+}
+</code></pre>
+<ul>
+  <li>
+    <code>crc32</code> hashes compatibility text and returns <code>0..0xffffffff</code>; container
+    and Binary compatibility text is empty;
+  </li>
+  <li>
+    md5/sha1/sha256 accept UTF-8 strings or raw Binary and return lowercase hex; other types throw
+    TypeError;
+  </li>
+  <li>
+    MD5 and SHA-1 are for legacy interoperability only, not signatures, passwords, or
+    collision-resistant use.
+  </li>
+</ul>
+<h2 id="10-math-and-random-functions">
+  10. Math and random functions<a
+    class="documentation-heading-anchor"
+    href="#10-math-and-random-functions"
+    aria-label="Link to 10. Math and random functions"
+    >#</a
+  >
+</h2>
+<pre><code class="language-typescript">namespace math {
+    function floor(value: number): number;
+    function abs(value: number): number;
+}
+
+namespace rand {
+    function random(max?: number): number;
+    function canary(ratio: number, ...keys: ScriptValue[]): boolean;
+}
+</code></pre>
+<ul>
+  <li>
+    <code>math.floor</code> preserves integers and rounds floating values toward negative infinity;
+    non-number throws TypeError;
+  </li>
+  <li>
+    <code>math.abs</code> returns absolute value; <code>INT64_MIN</code> remains unchanged for Java
+    compatibility; non-number throws;
+  </li>
+  <li>
+    <code>rand.random(max)</code> returns a uniform integer in <code>[0,max)</code>, with default
+    1000 and floating max truncated toward zero; <code>max &lt;= 0</code> throws RangeError and
+    non-number TypeError;
+  </li>
+  <li>
+    <code>rand.canary(ratio,...keys)</code> is false at ratio &lt;= 0 and true at ratio &gt;= 100.
+    Without keys it is random; with keys it accumulates CRC-32 in argument order for a stable
+    <code>[0,100)</code> bucket. Non-numeric ratio is zero;
+  </li>
+  <li>
+    <code>rand.*</code> is not cryptographic randomness and does not replace production data-plane
+    gray/service selection.
+  </li>
+</ul>
+<h2 id="11-json-functions">
+  11. JSON functions<a
+    class="documentation-heading-anchor"
+    href="#11-json-functions"
+    aria-label="Link to 11. JSON functions"
+    >#</a
+  >
+</h2>
+<pre><code class="language-typescript">namespace JSON {
+    function parse(text: string): ScriptValue;
+    function stringify(value: ScriptValue): string | undefined;
+}
+</code></pre>
+<ul>
+  <li>
+    <code>JSON.parse</code> accepts only a string. Invalid JSON throws SyntaxError with a parse
+    message and byte offset; non-string throws TypeError;
+  </li>
+  <li>
+    <code>JSON.stringify(undefined)</code> returns undefined; nested undefined becomes JSON null;
+  </li>
+  <li>
+    top-level NaN and infinities encode as text <code>&quot;null&quot;</code>; other invalid numbers
+    or unencodable values throw;
+  </li>
+  <li>Binary becomes a Base64 JSON string;</li>
+  <li>object properties are emitted in insertion order;</li>
+  <li>prefer <code>resp.sendJson()</code> when producing an HTTP JSON response.</li>
+</ul>
+<h2 id="12-object-functions">
+  12. Object functions<a
+    class="documentation-heading-anchor"
+    href="#12-object-functions"
+    aria-label="Link to 12. Object functions"
+    >#</a
+  >
+</h2>
+<pre><code class="language-typescript">namespace Object {
+    function assign(
+        target: ScriptObject,
+        source: ScriptValue,
+        ...sources: ScriptValue[]
+    ): ScriptObject;
+
+    function keys(value: ScriptObject): string[];
+    function values(value: ScriptObject): ScriptValue[];
+
+    function deleteProperties(
+        target: ScriptObject,
+        key: ScriptValue,
+        ...keys: ScriptValue[]
+    ): ScriptObject;
+}
+</code></pre>
+<ul>
+  <li>
+    <code>Object.assign</code> mutates target with object sources and returns target. Non-object
+    sources are skipped; non-object target throws TypeError. Overwrite does not change insertion
+    position.
+  </li>
+  <li>
+    <code>Object.keys/values</code> return new arrays in insertion order and throw TypeError for
+    non-object.
+  </li>
+  <li>
+    <code>Object.deleteProperties</code> mutates target by removing string keys and returns target.
+    Non-string or absent keys are skipped; non-object target throws TypeError.
+  </li>
+</ul>
+<h2 id="13-url-form-functions">
+  13. URL form functions<a
+    class="documentation-heading-anchor"
+    href="#13-url-form-functions"
+    aria-label="Link to 13. URL form functions"
+    >#</a
+  >
+</h2>
+<p>
+  These use <code>application/x-www-form-urlencoded</code>, not ECMAScript
+  <code>encodeURIComponent</code>: space encodes as <code>+</code>, and <code>+</code> decodes as
+  space.
+</p>
+<pre><code class="language-typescript">namespace URL {
+    function encodeComponent(value: string): string;
+    function decodeComponent(value: string): string;
+
+    function parseQuery(value: string): {
+        [key: string]: string | string[];
+    };
+
+    function buildQuery(
+        value?: null | undefined | { [key: string]: ScriptValue | ScriptValue[] }
+    ): string | null | undefined;
+}
+</code></pre>
+<ul>
+  <li>
+    <code>encodeComponent</code> preserves alphanumeric, <code>-</code>, <code>_</code>,
+    <code>.</code>, and <code>*</code>; space becomes <code>+</code>; remaining UTF-8 bytes use
+    uppercase <code>%HH</code>. Non-string throws TypeError.
+  </li>
+  <li>
+    <code>decodeComponent</code> decodes <code>+</code> and <code>%HH</code>; bad percent escapes
+    throw RangeError and non-string TypeError.
+  </li>
+  <li>
+    <code>parseQuery</code> returns an object. A duplicate key promotes a string to an array and
+    keeps appending. A field without <code>=</code> has empty value; empty segments are skipped.
+  </li>
+  <li>
+    <code>buildQuery</code> follows object insertion order. Arrays become repeated keys, empty
+    arrays produce no field, null/undefined pass through, and other non-object values throw
+    TypeError.
+  </li>
+</ul>
+<h2 id="14-request-http-api-req">
+  14. Request HTTP API: <code>req.*</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#14-request-http-api-req"
+    aria-label="Link to 14. Request HTTP API: `req.*`"
+    >#</a
+  >
+</h2>
+<pre><code class="language-typescript">declare namespace req {
+    function getHeader(): { [name: string]: string };
+    function getHeader(name: string): string | undefined | null;
+
+    function getQuery(): { [name: string]: string };
+    function getQuery(name: string): string | undefined;
+
+    function getCookie(): { [name: string]: string };
+    function getCookie(name: string): string | undefined;
+
+    function getUri(): string;
+    function getPath(): string;
+    function getQueryStr(): string;
+    function getMethod(): string;
+
+    function readJson(): ScriptValue;
+    function readBinary(): Binary;
+    function discardBody(): null;
+}
+</code></pre>
+<h3 id="14-1-metadata">
+  14.1 Metadata<a
+    class="documentation-heading-anchor"
+    href="#14-1-metadata"
+    aria-label="Link to 14.1 Metadata"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>
+    <code>getHeader()</code> lazily builds and caches a request-header object; repeated fields
+    collapse to one value;
+  </li>
+  <li>
+    <code>getHeader(name)</code> uses HTTP name lookup. Missing returns undefined; empty/non-string
+    name returns null;
+  </li>
+  <li>
+    <code>getQuery()</code> parses the raw query and keeps the last repeated key. On malformed
+    percent escape, values parsed before the error remain available;
+  </li>
+  <li><code>getQuery(name)</code> returns undefined for absent, empty, or non-string names;</li>
+  <li>
+    <code>getCookie()</code> parses every Cookie field; a later same-name cookie overwrites an
+    earlier one;
+  </li>
+  <li><code>getCookie(name)</code> returns undefined for absent, empty, or non-string names;</li>
+  <li><code>getUri()</code> returns raw <code>path[?query]</code>, without scheme or host;</li>
+  <li>
+    <code>getPath()</code> returns parsed path; <code>getQueryStr()</code> raw query without
+    <code>?</code>; <code>getMethod()</code> the original method.
+  </li>
+</ul>
+<h3 id="14-2-body">
+  14.2 Body<a class="documentation-heading-anchor" href="#14-2-body" aria-label="Link to 14.2 Body"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>
+    <code>readJson()</code> buffers and parses the full body; empty body, read failure, or invalid
+    JSON throws Error;
+  </li>
+  <li><code>readBinary()</code> buffers raw bytes; empty body returns a zero-length Binary;</li>
+  <li>
+    <code>discardBody()</code> drains and returns null; drain error is ignored for compatibility;
+  </li>
+  <li>the body is one-shot, so do not combine or repeat these three calls;</li>
+  <li>
+    Access Gateway allows only no body or a known Content-Length within the global limit into
+    SCRIPT. An unknown-length body has already failed with 413 before the function can run;
+  </li>
+  <li>
+    conditions/templates can call sync <code>req.*</code> metadata, but body calls are async and
+    reject compilation.
+  </li>
+</ul>
+<h2 id="15-response-http-api-resp">
+  15. Response HTTP API: <code>resp.*</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#15-response-http-api-resp"
+    aria-label="Link to 15. Response HTTP API: `resp.*`"
+    >#</a
+  >
+</h2>
+<pre><code class="language-typescript">type HeaderValue = string | number | boolean | null;
+
+interface ResponseCookie {
+    name: string;
+    value?: ScriptValue;
+    domain?: string;
+    path?: string;
+    maxAge?: number;
+    secure?: boolean;
+    httpOnly?: boolean;
+    sameSite?: &quot;Lax&quot; | &quot;Strict&quot; | &quot;None&quot;;
+}
+
+declare namespace resp {
+    function setHeader(name: string, value: HeaderValue): null;
+    function addHeader(name: string, value: HeaderValue): null;
+    function addCookie(cookie: ResponseCookie): boolean;
+
+    function sendJson(status: number, body: ScriptValue): null;
+    function send(status: number): null;
+    function send(status: number, body: ScriptValue): null;
+}
+</code></pre>
+<h3 id="15-1-headers-and-cookies">
+  15.1 Headers and cookies<a
+    class="documentation-heading-anchor"
+    href="#15-1-headers-and-cookies"
+    aria-label="Link to 15.1 Headers and cookies"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>
+    <code>setHeader</code> replaces a pending same-name field; <code>addHeader</code> appends;
+  </li>
+  <li>
+    empty name or empty compatibility-text value throws Error; after headers are sent, mutation is
+    ignored;
+  </li>
+  <li>
+    <code>addCookie</code> encodes and appends Set-Cookie. Name is required; maxAge must be integer;
+    secure/httpOnly must be boolean; sameSite is case-sensitive. Success returns true and invalid
+    object/field false;
+  </li>
+  <li>do not set hop-by-hop/framing headers or output secrets.</li>
+</ul>
+<h3 id="15-2-sending">
+  15.2 Sending<a
+    class="documentation-heading-anchor"
+    href="#15-2-sending"
+    aria-label="Link to 15.2 Sending"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>
+    <code>sendJson(status,body)</code> JSON-encodes, sets <code>application/json</code>, and sends a
+    fixed-length response. A non-integer status falls back to 200; undefined becomes JSON null and
+    Binary a Base64 JSON string;
+  </li>
+  <li><code>send(status)</code> sends an empty body;</li>
+  <li><code>send(status,Binary)</code> writes raw bytes without an automatic content type;</li>
+  <li>
+    <code>send(status,string)</code> writes UTF-8 and sets <code>text/plain;charset=utf-8</code>;
+  </li>
+  <li><code>send(status,other)</code> uses JSON and <code>application/json</code>;</li>
+  <li>send commits headers and ends the stream. Call one send function and immediately return.</li>
+</ul>
+<h2 id="16-route-and-connection-constants">
+  16. Route and connection constants<a
+    class="documentation-heading-anchor"
+    href="#16-route-and-connection-constants"
+    aria-label="Link to 16. Route and connection constants"
+    >#</a
+  >
+</h2>
+<pre><code class="language-typescript">declare const $path: { [routeVariable: string]: string | null };
+declare const $query: { [queryName: string]: string | null };
+declare const $header: { [normalizedHeaderName: string]: string | null };
+declare const $cookie: { [normalizedCookieName: string]: string | null };
+declare const $context: { [contextName: string]: string | null };
+
+declare const $req: {
+    uri: string;
+    method: string;
+    path: string;
+    query: string;
+};
+
+declare const $conn: {
+    remote_addr: string | null;
+    remote_port: number;
+    http_version: &quot;HTTP/0.9&quot; | &quot;HTTP/1.0&quot; | &quot;HTTP/1.1&quot; | &quot;HTTP/2&quot; | &quot;HTTP/3&quot;;
+    scheme: string;
+    tls: boolean;
+};
+</code></pre>
+<p>Resolution rules:</p>
+<ul>
+  <li>
+    <code>$path.name</code> must name a current Path capture or configuration compilation fails; an
+    unbound runtime value is null;
+  </li>
+  <li>
+    <code>$req</code> allows only <code>uri/method/path/query</code>, and <code>$conn</code> only
+    the five fields above. Unknown fields fail;
+  </li>
+  <li>
+    <code>$query.key</code> and <code>$context.key</code> accept any valid script identifier and
+    return null when absent;
+  </li>
+  <li>
+    <code>$header/$cookie/$context</code> names are ASCII case-insensitive with <code>-</code> and
+    <code>_</code> normalized;
+  </li>
+  <li>
+    a key after <code>.</code> must be an identifier; use <code>req.get*</code> for special names;
+  </li>
+  <li>
+    names are deduplicated into Project compile-time slots and bound by index per request. A known
+    single-value constant is usually cheaper than constructing a complete object.
+  </li>
+</ul>
+<pre><code class="language-javascript">return {
+    id: $path.id,
+    source: $query.source,
+    forwardedFor: $header.x_forwarded_for,
+    session: $cookie.session,
+    traceCluster: $context.hi_trace_cluster,
+    method: $req.method,
+    remoteAddress: $conn.remote_addr,
+    tls: $conn.tls
+};
+</code></pre>
+<h2 id="17-outbound-http-capability">
+  17. Outbound HTTP capability<a
+    class="documentation-heading-anchor"
+    href="#17-outbound-http-capability"
+    aria-label="Link to 17. Outbound HTTP capability"
+    >#</a
+  >
+</h2>
+<p>Access Gateway JavaScript Routes do <strong>not</strong> provide:</p>
+<pre><code class="language-text">fetch(...)
+http.request(...)
+http.proxyPass(...)
+directive backend = http &quot;@service&quot;
+backend.request(...)
+backend.proxyPass(...)
+</code></pre>
+<p>
+  The pinned Fiber module contains upstream directives that another application host may enable, but
+  <code>AccessScriptRuntime</code> explicitly uses <code>http_directives_enabled = false</code> and
+  provides no outbound <code>HttpScriptServices</code>. These names fail configuration compilation
+  rather than bypassing policy at runtime.
+</p>
+<p>
+  Use a YAML <code>PROXY</code> Route for upstream traffic so NamingService, static-target
+  validation, protected headers, body limits, WebSocket behavior, pools, retries, traces, metrics,
+  cancellation, and shutdown all apply.
+</p>
+<h2 id="18-return-errors-and-http-mapping">
+  18. Return, errors, and HTTP mapping<a
+    class="documentation-heading-anchor"
+    href="#18-return-errors-and-http-mapping"
+    aria-label="Link to 18. Return, errors, and HTTP mapping"
+    >#</a
+  >
+</h2>
+<p>Without an explicit send, a JavaScript Route maps results as follows:</p>
+<table>
+  <thead>
+    <tr>
+      <th>ScriptResult</th>
+      <th>Mapping</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Value</td>
+      <td>200 JSON</td>
+    </tr>
+    <tr>
+      <td>Void (<code>return;</code> or end of source)</td>
+      <td>204 empty</td>
+    </tr>
+    <tr>
+      <td>Exception / Abort</td>
+      <td>500 <code>SCRIPT_EXECUTION</code></td>
+    </tr>
+  </tbody>
+</table>
+<p>
+  After <code>resp.send*</code> commits headers, the host does not attempt a second response. More
+  code can still waste resources or produce invisible errors, so return immediately.
+</p>
+<p>
+  For a condition, Exception/Abort/non-value does not produce 500; it makes that candidate condition
+  false. A template failure makes its RESPONSE/PROXY preparation fail and enter the stable 500 error
+  path.
+</p>
+<p>
+  A configuration error rejects the complete candidate and retains the previous successful snapshot.
+  A same-version candidate is ignored. Saving a Draft, publishing to rnacos, and proving instance
+  Active are distinct; passing Native Validator does not prove any instance activation.
+</p>
+<h2 id="19-quick-selection-table">
+  19. Quick selection table<a
+    class="documentation-heading-anchor"
+    href="#19-quick-selection-table"
+    aria-label="Link to 19. Quick selection table"
+    >#</a
+  >
+</h2>
+<table>
+  <thead>
+    <tr>
+      <th>Goal</th>
+      <th>Preferred API</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Read one Path capture</td>
+      <td><code>$path.id</code></td>
+    </tr>
+    <tr>
+      <td>Read one known query/header/cookie</td>
+      <td><code>$query.x</code> / <code>$header.x</code> / <code>$cookie.x</code></td>
+    </tr>
+    <tr>
+      <td>Read a key with special characters</td>
+      <td><code>req.getQuery(&quot;a.b&quot;)</code>, etc.</td>
+    </tr>
+    <tr>
+      <td>Enumerate all query/header/cookie values</td>
+      <td><code>req.getQuery()</code> / <code>getHeader()</code> / <code>getCookie()</code></td>
+    </tr>
+    <tr>
+      <td>Read JSON</td>
+      <td><code>req.readJson()</code></td>
+    </tr>
+    <tr>
+      <td>Read bytes</td>
+      <td><code>req.readBinary()</code></td>
+    </tr>
+    <tr>
+      <td>Return JSON</td>
+      <td><code>resp.sendJson(status,value)</code></td>
+    </tr>
+    <tr>
+      <td>Return text</td>
+      <td><code>resp.send(status,text)</code></td>
+    </tr>
+    <tr>
+      <td>Return bytes</td>
+      <td><code>resp.send(status,binary)</code> plus explicit Content-Type</td>
+    </tr>
+    <tr>
+      <td>Encode/decode a JSON string</td>
+      <td><code>JSON.stringify/parse</code></td>
+    </tr>
+    <tr>
+      <td>Encode/decode a form query</td>
+      <td><code>URL.buildQuery/parseQuery</code></td>
+    </tr>
+    <tr>
+      <td>Base64</td>
+      <td><code>binary.base64Encode/base64Decode</code></td>
+    </tr>
+    <tr>
+      <td>Non-keyed secure digest choice</td>
+      <td><code>hash.sha256</code></td>
+    </tr>
+    <tr>
+      <td>Stable percentage bucket</td>
+      <td><code>rand.canary(ratio,key...)</code>, for non-security use only</td>
+    </tr>
+    <tr>
+      <td>Ordinary upstream forwarding</td>
+      <td>Do not script; create a YAML <code>PROXY</code> Route</td>
+    </tr>
+  </tbody>
+</table>

@@ -326,6 +326,34 @@ afterEach(() => {
 })
 
 describe('application routes', () => {
+  test('renders generated documentation and keeps the topic while switching language', async () => {
+    installApiMock()
+    const router = createMemoryRouter(appRoutes, {
+      initialEntries: ['/docs/en/script-reference'],
+    })
+    const user = userEvent.setup()
+
+    render(<RouterProvider router={router} />)
+
+    expect(
+      await screen.findByRole('heading', {
+        name: /Access Gateway script language, standard library, and HTTP API reference/u,
+      }),
+    ).toBeTruthy()
+    expect(
+      screen.getByRole('link', { name: /Script and API reference/u }).getAttribute('aria-current'),
+    ).toBe('page')
+
+    await user.click(screen.getByRole('link', { name: '简体中文' }))
+
+    expect(
+      await screen.findByRole('heading', {
+        name: /Access Gateway 脚本语法、标准库与 HTTP API 参考/u,
+      }),
+    ).toBeTruthy()
+    expect(router.state.location.pathname).toBe('/docs/zh-CN/script-reference')
+  })
+
   test('opens a Project Routes page directly from its URL', async () => {
     installApiMock()
     const router = createMemoryRouter(appRoutes, {
