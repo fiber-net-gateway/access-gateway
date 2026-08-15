@@ -403,6 +403,110 @@ Object.deleteProperties
 URL.encodeComponent            URL.decodeComponent             URL.parseQuery
 URL.buildQuery
 </code></pre>
+<h3 id="4-1-how-to-read-the-function-entries">
+  4.1 How to read the function entries<a
+    class="documentation-heading-anchor"
+    href="#4-1-how-to-read-the-function-entries"
+    aria-label="Link to 4.1 How to read the function entries"
+    >#</a
+  >
+</h3>
+<p>
+  Signatures use TypeScript-like notation for documentation only; the script language does not
+  implement TypeScript. <code>?</code> or <code>= default</code> marks an optional argument, and
+  <code>...items</code> marks variadic arguments. Function names and argument counts resolve at
+  <strong>configuration compile time</strong>:
+</p>
+<ul>
+  <li>
+    a missing required argument, an extra fixed argument, an unknown function, or an unresolved
+    overload rejects the candidate configuration; this is not a runtime exception and
+    <code>try/catch</code> cannot catch it;
+  </li>
+  <li>
+    the runtime inserts the documented value for omitted optional arguments; a variadic list may be
+    empty and may use <code>...array</code> expansion;
+  </li>
+  <li>
+    argument types are generally checked at <strong>execution time</strong>. Every entry&#39;s
+    “Exceptions” line states whether a wrong type returns <code>null</code>, <code>undefined</code>,
+    or <code>false</code>, or raises a catchable exception;
+  </li>
+  <li>
+    “returns the original object/array” means in-place mutation with the same identity, not a copy;
+  </li>
+  <li>
+    unless stated otherwise, string indices and lengths use UTF-16 code units, while Binary lengths
+    use bytes.
+  </li>
+</ul>
+<h3 id="4-2-exceptions-and-execution-aborts-are-different">
+  4.2 Exceptions and execution aborts are different<a
+    class="documentation-heading-anchor"
+    href="#4-2-exceptions-and-execution-aborts-are-different"
+    aria-label="Link to 4.2 Exceptions and execution aborts are different"
+    >#</a
+  >
+</h3>
+<table>
+  <thead>
+    <tr>
+      <th>Result</th>
+      <th>Catchable</th>
+      <th>Final JavaScript Route handling</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>TypeError</code></td>
+      <td>Yes</td>
+      <td>Uncaught: 500 <code>SCRIPT_EXECUTION</code></td>
+    </tr>
+    <tr>
+      <td><code>RangeError</code></td>
+      <td>Yes</td>
+      <td>Uncaught: 500 <code>SCRIPT_EXECUTION</code></td>
+    </tr>
+    <tr>
+      <td><code>SyntaxError</code></td>
+      <td>Yes</td>
+      <td>Uncaught: 500 <code>SCRIPT_EXECUTION</code></td>
+    </tr>
+    <tr>
+      <td><code>Error</code></td>
+      <td>Yes</td>
+      <td>HTTP read/encode/write failures; uncaught: 500</td>
+    </tr>
+    <tr>
+      <td><code>Abort</code></td>
+      <td>No</td>
+      <td>
+        <code>OutOfMemory</code>, <code>Timeout</code>, <code>Cancelled</code>,
+        <code>InvalidState</code>, etc.
+      </td>
+    </tr>
+    <tr>
+      <td>Configuration compile error</td>
+      <td>No</td>
+      <td>Candidate snapshot rejected; previous snapshot remains live</td>
+    </tr>
+  </tbody>
+</table>
+<p>
+  An entry&#39;s “Exceptions” line describes catchable script exceptions. Any function that
+  allocates a result string, Binary, array, or object can abort with <code>OutOfMemory</code> when
+  resources are exhausted. Async HTTP functions may also be aborted by host cancellation or timeout.
+  An abort is not a script <code>throw</code> and never enters <code>catch</code>. Entries repeat
+  abort behavior only where the function has an additional stable limit.
+</p>
+<pre><code class="language-javascript">let decoded;
+try {
+    decoded = binary.base64Decode(&quot;not-base64&quot;);
+} catch (e) {
+    // RangeError is caught here.
+    decoded = binary.fromHex(&quot;&quot;);
+}
+</code></pre>
 <h2 id="5-general-functions">
   5. General functions<a
     class="documentation-heading-anchor"
@@ -414,20 +518,64 @@ URL.buildQuery
 <pre><code class="language-typescript">function length(value?: ScriptValue): number;
 function includes(container: string | ScriptValue[], ...items: ScriptValue[]): boolean;
 </code></pre>
-<p><code>length(value)</code>:</p>
+<h3 id="length-value-null">
+  <code>length(value = null)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#length-value-null"
+    aria-label="Link to `length(value = null)`"
+    >#</a
+  >
+</h3>
 <ul>
-  <li>omitted input is equivalent to <code>null</code>;</li>
-  <li>strings return UTF-16 code-unit count;</li>
-  <li>Binary returns byte count, arrays element count, and objects property count;</li>
-  <li><code>null</code>, <code>undefined</code>, numbers, booleans, and other values return 0.</li>
+  <li>
+    Parameter: <code>value</code> may be any script value and defaults to <code>null</code> when
+    omitted.
+  </li>
+  <li>
+    Returns: integer. A string returns its UTF-16 code-unit count; Binary returns bytes; an array
+    returns elements; an object returns own properties. <code>null</code>, <code>undefined</code>,
+    numbers, booleans, and internal-only kinds return 0.
+  </li>
+  <li>Exceptions: none.</li>
+  <li>Side effects: none.</li>
 </ul>
-<p><code>includes(container, ...items)</code>:</p>
+<pre><code class="language-javascript">return {
+    ascii: length(&quot;abc&quot;), // 3
+    emoji: length(&quot;A😀&quot;), // 3: A is one unit and 😀 is two
+    bytes: length(binary.fromHex(&quot;00ff10&quot;)), // 3
+    fields: length({ a: 1, b: 2 }), // 2
+    omitted: length() // 0
+};
+</code></pre>
+<h3 id="includes-container-items">
+  <code>includes(container, ...items)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#includes-container-items"
+    aria-label="Link to `includes(container, ...items)`"
+    >#</a
+  >
+</h3>
 <ul>
-  <li>for a string, every item must be a substring;</li>
-  <li>for an array, every item must be found with strict <code>===</code> equality;</li>
-  <li>other containers return false;</li>
-  <li>a valid string/array with no items returns true.</li>
+  <li>Parameter <code>container</code>: required; only a string or array has matching behavior.</li>
+  <li>Parameter <code>items</code>: zero or more values to test.</li>
+  <li>
+    Returns: boolean. For a string, every item must itself be a string and a substring. For an
+    array, every item must be present under strict <code>===</code> equality. Another container
+    type, or a non-string item against a string, returns <code>false</code>. A valid string/array
+    with no items returns <code>true</code>.
+  </li>
+  <li>Exceptions: none.</li>
+  <li>Side effects: none.</li>
 </ul>
+<pre><code class="language-javascript">return {
+    text: includes(&quot;access-gateway&quot;, &quot;access&quot;, &quot;way&quot;), // true
+    methods: includes([&quot;GET&quot;, &quot;POST&quot;], req.getMethod()),
+    strict: includes([1], &quot;1&quot;), // false: 1 !== &quot;1&quot;
+    emptyCheck: includes([]) // true
+};
+</code></pre>
 <h2 id="6-array-functions">
   6. Array functions<a
     class="documentation-heading-anchor"
@@ -442,21 +590,78 @@ function includes(container: string | ScriptValue[], ...items: ScriptValue[]): b
     function push(values: ScriptValue[], ...items: ScriptValue[]): ScriptValue[];
 }
 </code></pre>
+<h3 id="array-join-values-separator">
+  <code>array.join(values, separator = &quot;&quot;)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#array-join-values-separator"
+    aria-label='Link to `array.join(values, separator = "")`'
+    >#</a
+  >
+</h3>
 <ul>
+  <li>Parameter <code>values</code>: required array.</li>
   <li>
-    <code>array.join()</code> defaults to an empty separator, not JavaScript&#39;s comma. Strings,
-    numbers, and booleans become text; <code>null</code>, <code>undefined</code>, containers, and
-    Binary become empty text. Non-array input throws TypeError.
+    Parameter <code>separator</code>: optional and defaults to an empty string, not JavaScript&#39;s
+    comma. Strings, integers, floats, and booleans become text; <code>null</code>,
+    <code>undefined</code>, arrays, objects, and Binary become empty text.
   </li>
   <li>
-    <code>array.pop()</code> mutates and returns the final element; an empty array returns
-    <code>null</code>. Non-array throws TypeError.
+    Returns: a new string. Each element uses the same compatibility-text conversion as the
+    separator.
   </li>
-  <li>
-    <code>array.push()</code> mutates and returns the array itself, not its new length. Non-array
-    throws TypeError.
-  </li>
+  <li>Exceptions: throws <code>TypeError</code> when <code>values</code> is not an array.</li>
+  <li>Side effects: does not modify the input array.</li>
 </ul>
+<pre><code class="language-javascript">return array.join([&quot;route&quot;, 7, null, true], &quot;|&quot;);
+// &quot;route|7||true&quot;
+</code></pre>
+<h3 id="array-pop-values">
+  <code>array.pop(values)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#array-pop-values"
+    aria-label="Link to `array.pop(values)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>Parameter <code>values</code>: required array.</li>
+  <li>Returns: the former last element; an empty array returns <code>null</code>.</li>
+  <li>Exceptions: throws <code>TypeError</code> when <code>values</code> is not an array.</li>
+  <li>Side effects: removes one element in place; an empty array is unchanged.</li>
+</ul>
+<pre><code class="language-javascript">let values = [&quot;a&quot;, &quot;b&quot;];
+let last = array.pop(values);
+return { last: last, remaining: values };
+// {&quot;last&quot;:&quot;b&quot;,&quot;remaining&quot;:[&quot;a&quot;]}
+</code></pre>
+<h3 id="array-push-values-items">
+  <code>array.push(values, ...items)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#array-push-values-items"
+    aria-label="Link to `array.push(values, ...items)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>Parameter <code>values</code>: required array.</li>
+  <li>
+    Parameter <code>items</code>: zero or more values; <code>...anotherArray</code> expansion is
+    supported.
+  </li>
+  <li>
+    Returns: the modified <code>values</code> array itself, <strong>not</strong> its new length.
+  </li>
+  <li>Exceptions: throws <code>TypeError</code> when <code>values</code> is not an array.</li>
+  <li>Side effects: appends items in argument order; no items leaves the array unchanged.</li>
+</ul>
+<pre><code class="language-javascript">let values = [1];
+let same = array.push(values, 2, ...[3, 4]);
+return { values: values, sameObject: same === values };
+// {&quot;values&quot;:[1,2,3,4],&quot;sameObject&quot;:true}
+</code></pre>
 <h2 id="7-string-functions">
   7. String functions<a
     class="documentation-heading-anchor"
@@ -535,6 +740,386 @@ function includes(container: string | ScriptValue[], ...items: ScriptValue[]): b
     <code>JSON.stringify()</code> for JSON.
   </li>
 </ul>
+<h3 id="strings-hasprefix-text-prefix">
+  <code>strings.hasPrefix(text, prefix)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#strings-hasprefix-text-prefix"
+    aria-label="Link to `strings.hasPrefix(text, prefix)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>Parameters: both <code>text</code> and <code>prefix</code> are required strings.</li>
+  <li>
+    Returns: boolean <code>true</code> when <code>text</code> starts with <code>prefix</code>;
+    otherwise <code>false</code>. An empty prefix matches every valid string.
+  </li>
+  <li>Exceptions: none; a non-string argument returns <code>false</code>.</li>
+</ul>
+<pre><code class="language-javascript">return strings.hasPrefix(&quot;/api/v1/orders&quot;, &quot;/api/&quot;); // true
+</code></pre>
+<h3 id="strings-hassuffix-text-suffix">
+  <code>strings.hasSuffix(text, suffix)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#strings-hassuffix-text-suffix"
+    aria-label="Link to `strings.hasSuffix(text, suffix)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>Parameters: both <code>text</code> and <code>suffix</code> are required strings.</li>
+  <li>
+    Returns: boolean <code>true</code> when <code>text</code> ends with <code>suffix</code>;
+    otherwise <code>false</code>. An empty suffix matches every valid string.
+  </li>
+  <li>Exceptions: none; a non-string argument returns <code>false</code>.</li>
+</ul>
+<pre><code class="language-javascript">return strings.hasSuffix(&quot;archive.tar.gz&quot;, &quot;.gz&quot;); // true
+</code></pre>
+<h3 id="strings-tolower-text">
+  <code>strings.toLower(text)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#strings-tolower-text"
+    aria-label="Link to `strings.toLower(text)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>Parameter <code>text</code>: required string.</li>
+  <li>
+    Returns: a new string with ASCII <code>A-Z</code> changed to <code>a-z</code>. Multibyte UTF-8
+    characters are unchanged. A non-string returns <code>null</code>.
+  </li>
+  <li>Exceptions: none.</li>
+</ul>
+<pre><code class="language-javascript">return strings.toLower(&quot;API-ÄBC-中文&quot;); // &quot;api-Äbc-中文&quot;
+</code></pre>
+<h3 id="strings-toupper-text">
+  <code>strings.toUpper(text)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#strings-toupper-text"
+    aria-label="Link to `strings.toUpper(text)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>Parameter <code>text</code>: required string.</li>
+  <li>
+    Returns: a new string with ASCII <code>a-z</code> changed to <code>A-Z</code>. Non-ASCII
+    characters remain unchanged. A non-string returns <code>null</code>.
+  </li>
+  <li>Exceptions: none.</li>
+</ul>
+<pre><code class="language-javascript">return strings.toUpper(&quot;api-äbc-中文&quot;); // &quot;API-äBC-中文&quot;
+</code></pre>
+<h3 id="strings-trim-text-cutset-null">
+  <code>strings.trim(text, cutset = null)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#strings-trim-text-cutset-null"
+    aria-label="Link to `strings.trim(text, cutset = null)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>Parameter <code>text</code>: required string; a non-string returns <code>null</code>.</li>
+  <li>
+    Parameter <code>cutset</code>: optional. Omitted, <code>null</code>, or another non-string
+    removes bytes <code>&lt;= 0x20</code> from both ends. A string is treated as one
+    <strong>complete substring</strong> repeatedly removed from both ends.
+  </li>
+  <li>Returns: the trimmed string. An empty cutset removes nothing.</li>
+  <li>Exceptions: none.</li>
+</ul>
+<pre><code class="language-javascript">return {
+    whitespace: strings.trim(&quot; \t value \n&quot;), // &quot;value&quot;
+    marker: strings.trim(&quot;ababvalueabab&quot;, &quot;ab&quot;) // &quot;value&quot;
+};
+</code></pre>
+<h3 id="strings-trimleft-text-cutset-null">
+  <code>strings.trimLeft(text, cutset = null)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#strings-trimleft-text-cutset-null"
+    aria-label="Link to `strings.trimLeft(text, cutset = null)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>Parameter <code>text</code>: required string; a non-string returns <code>null</code>.</li>
+  <li>
+    Parameter <code>cutset</code>: omitted/non-string removes ASCII Java whitespace in
+    <code>0x09..0x0d</code> and <code>0x1c..0x20</code>; a string is repeatedly removed as one
+    complete substring from the left.
+  </li>
+  <li>Returns: a new string without changing the original value.</li>
+  <li>Exceptions: none.</li>
+</ul>
+<pre><code class="language-javascript">return strings.trimLeft(&quot;///v1/items///&quot;, &quot;/&quot;); // &quot;v1/items///&quot;
+</code></pre>
+<h3 id="strings-trimright-text-cutset-null">
+  <code>strings.trimRight(text, cutset = null)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#strings-trimright-text-cutset-null"
+    aria-label="Link to `strings.trimRight(text, cutset = null)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>Parameters follow <code>trimLeft()</code>, but only the right edge is processed.</li>
+  <li>
+    Returns: the processed string. An empty cutset removes nothing; a non-string
+    <code>text</code> returns <code>null</code>.
+  </li>
+  <li>Exceptions: none.</li>
+</ul>
+<pre><code class="language-javascript">return strings.trimRight(&quot;///v1/items///&quot;, &quot;/&quot;); // &quot;///v1/items&quot;
+</code></pre>
+<h3 id="strings-split-text-separators-null">
+  <code>strings.split(text, separators = null)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#strings-split-text-separators-null"
+    aria-label="Link to `strings.split(text, separators = null)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>Parameter <code>text</code>: required string; a non-string returns <code>null</code>.</li>
+  <li>
+    Parameter <code>separators</code>: omitted/non-string performs no split and returns an array
+    containing the original string. A string is a set of Unicode code points, each acting as an
+    independent separator rather than one delimiter substring.
+  </li>
+  <li>
+    Returns: a new string array. Consecutive, leading, and trailing separators produce no empty
+    entries. An explicit empty separator matches nothing, so non-empty text returns
+    <code>[text]</code>, while empty text returns <code>[]</code>.
+  </li>
+  <li>Exceptions: none.</li>
+</ul>
+<pre><code class="language-javascript">return {
+    parts: strings.split(&quot;a,b;;c,&quot;, &quot;,;&quot;), // [&quot;a&quot;, &quot;b&quot;, &quot;c&quot;]
+    untouched: strings.split(&quot;a,b&quot;) // [&quot;a,b&quot;]
+};
+</code></pre>
+<h3 id="strings-contains-text-value">
+  <code>strings.contains(text, value)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#strings-contains-text-value"
+    aria-label="Link to `strings.contains(text, value)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>Parameters: required strings; <code>value</code> is matched as a complete substring.</li>
+  <li>
+    Returns: boolean <code>true</code> when found and <code>false</code> otherwise. An empty value
+    returns <code>true</code>. A non-string argument returns <code>null</code>.
+  </li>
+  <li>Exceptions: none.</li>
+</ul>
+<pre><code class="language-javascript">return strings.contains(&quot;access-gateway&quot;, &quot;gateway&quot;); // true
+</code></pre>
+<h3 id="strings-contains-any-text-chars">
+  <code>strings.contains_any(text, chars)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#strings-contains-any-text-chars"
+    aria-label="Link to `strings.contains_any(text, chars)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>
+    Parameters: <code>text</code> is a required string; <code>chars</code> is a set of Unicode code
+    points, not a substring.
+  </li>
+  <li>
+    Returns: whether any candidate character occurs. Empty <code>chars</code> returns
+    <code>false</code>; a wrong type returns <code>null</code>.
+  </li>
+  <li>Exceptions: none.</li>
+</ul>
+<pre><code class="language-javascript">return strings.contains_any(&quot;route-42&quot;, &quot;xyz2&quot;); // true because &quot;2&quot; matches
+</code></pre>
+<h3 id="strings-index-text-value">
+  <code>strings.index(text, value)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#strings-index-text-value"
+    aria-label="Link to `strings.index(text, value)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>Parameters: two required strings; <code>value</code> is matched as a complete substring.</li>
+  <li>
+    Returns: the first match&#39;s UTF-16 index, integer <code>-1</code> when absent, or
+    <code>null</code> for a wrong type.
+  </li>
+  <li>Exceptions: none.</li>
+</ul>
+<pre><code class="language-javascript">return strings.index(&quot;😀-route&quot;, &quot;route&quot;); // 3 because 😀 occupies two UTF-16 units
+</code></pre>
+<h3 id="strings-indexany-text-chars">
+  <code>strings.indexAny(text, chars)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#strings-indexany-text-chars"
+    aria-label="Link to `strings.indexAny(text, chars)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>
+    Parameters: two required strings; each Unicode code point in <code>chars</code> is a candidate.
+  </li>
+  <li>
+    Returns: the UTF-16 index of the first occurrence of any candidate, <code>-1</code> when absent,
+    or <code>null</code> for a wrong type.
+  </li>
+  <li>Exceptions: none.</li>
+</ul>
+<pre><code class="language-javascript">return strings.indexAny(&quot;abc-123&quot;, &quot;93c&quot;); // 2: &quot;c&quot; occurs first in text
+</code></pre>
+<h3 id="strings-lastindex-text-value">
+  <code>strings.lastIndex(text, value)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#strings-lastindex-text-value"
+    aria-label="Link to `strings.lastIndex(text, value)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>Parameters: two required strings; <code>value</code> is matched as a complete substring.</li>
+  <li>
+    Returns: the last match&#39;s UTF-16 index, <code>-1</code> when absent,
+    <code>length(text)</code> for an empty value, or <code>null</code> for a wrong type.
+  </li>
+  <li>Exceptions: none.</li>
+</ul>
+<pre><code class="language-javascript">return strings.lastIndex(&quot;a/b/a&quot;, &quot;a&quot;); // 4
+</code></pre>
+<h3 id="strings-lastindexany-text-chars">
+  <code>strings.lastIndexAny(text, chars)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#strings-lastindexany-text-chars"
+    aria-label="Link to `strings.lastIndexAny(text, chars)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>
+    Parameters: two required strings. Candidates are visited in Unicode code-point order within
+    <code>chars</code>.
+  </li>
+  <li>
+    Returns: the last UTF-16 index of the <strong>first candidate character</strong> that occurs in
+    <code>text</code>. Only when that candidate is absent does the function examine the next
+    candidate. Returns <code>-1</code> when all are absent and <code>null</code> on a wrong type.
+  </li>
+  <li>Exceptions: none.</li>
+  <li>Compatibility note: this is not the global maximum position across all candidates.</li>
+</ul>
+<pre><code class="language-javascript">return strings.lastIndexAny(&quot;abca&quot;, &quot;bc&quot;);
+// 1: &quot;b&quot; is the first candidate and its last position is 1; &quot;c&quot; at 2 is not examined
+</code></pre>
+<h3 id="strings-repeat-text-count">
+  <code>strings.repeat(text, count)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#strings-repeat-text-count"
+    aria-label="Link to `strings.repeat(text, count)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>Parameter <code>text</code>: required string; a non-string returns <code>null</code>.</li>
+  <li>
+    Parameter <code>count</code>: integer or float. A float truncates toward zero and follows
+    compatible 32-bit integer semantics. A non-number or negative value returns <code>null</code>.
+  </li>
+  <li>
+    Returns: a new string repeated <code>count</code> times. Zero or empty text returns empty; one
+    returns the original string value.
+  </li>
+  <li>Exceptions: none.</li>
+  <li>
+    Execution abort: an output over 16 MiB aborts with <code>OutOfMemory</code>;
+    <code>catch</code> cannot intercept it.
+  </li>
+</ul>
+<pre><code class="language-javascript">return strings.repeat(&quot;ab&quot;, 3.9); // &quot;ababab&quot;
+</code></pre>
+<h3 id="strings-substring-text-start-0-end-2147483647">
+  <code>strings.substring(text, start = 0, end = 2147483647)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#strings-substring-text-start-0-end-2147483647"
+    aria-label="Link to `strings.substring(text, start = 0, end = 2147483647)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>Parameter <code>text</code>: required string; a non-string returns <code>null</code>.</li>
+  <li>
+    Parameters <code>start</code>/<code>end</code>: UTF-16 indices. Numbers truncate toward zero;
+    booleans become 0/1; a string that begins with a valid integer uses that integer prefix (for
+    example, <code>&quot;4x&quot;</code> becomes 4); <code>null</code>, <code>undefined</code>, and
+    other values become 0. Negative start clamps to 0.
+  </li>
+  <li>
+    Returns: the half-open range <code>[start, end)</code>. <code>start &gt;= length(text)</code> or
+    <code>end &lt;= start</code> returns empty; an end beyond the length clamps to the end of the
+    string.
+  </li>
+  <li>Exceptions: none.</li>
+</ul>
+<pre><code class="language-javascript">return {
+    normal: strings.substring(&quot;gateway&quot;, 0, 4), // &quot;gate&quot;
+    clamped: strings.substring(&quot;gateway&quot;, -5, 4), // &quot;gate&quot;
+    converted: strings.substring(&quot;gateway&quot;, &quot;4&quot;, 99) // &quot;way&quot;
+};
+</code></pre>
+<h3 id="strings-tostring-strings-tostring-value">
+  <code>strings.toString()</code> / <code>strings.toString(value)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#strings-tostring-strings-tostring-value"
+    aria-label="Link to `strings.toString()` / `strings.toString(value)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>Parameters: either zero or one. Zero arguments returns an empty string.</li>
+  <li>
+    Returns: string. <code>null</code>/<code>undefined</code> become <code>&quot;null&quot;</code>;
+    strings, numbers, and booleans use text; Binary uses its raw-byte compatibility text;
+    arrays/objects become literal
+    <code>&quot;&lt;ArrayNode&gt;&quot;</code>/<code>&quot;&lt;ObjectNode&gt;&quot;</code>.
+  </li>
+  <li>Exceptions: none.</li>
+  <li>
+    Note: this is not a JSON encoder. Use <code>JSON.stringify()</code> for objects, arrays, or
+    stable wire data.
+  </li>
+</ul>
+<pre><code class="language-javascript">return {
+    empty: strings.toString(), // &quot;&quot;
+    missing: strings.toString(null), // &quot;null&quot;
+    object: strings.toString({ ok: true }), // &quot;&lt;ObjectNode&gt;&quot;
+    json: JSON.stringify({ ok: true }) // &quot;{\&quot;ok\&quot;:true}&quot;
+};
+</code></pre>
 <p><code>strings.match</code> and <code>strings.findAll</code> are not registered.</p>
 <h2 id="8-binary-functions">
   8. Binary functions<a
@@ -552,27 +1137,123 @@ function includes(container: string | ScriptValue[], ...items: ScriptValue[]): b
     function getUtf8Bytes(value: ScriptValue): Binary;
 }
 </code></pre>
+<h3 id="binary-base64encode-value">
+  <code>binary.base64Encode(value)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#binary-base64encode-value"
+    aria-label="Link to `binary.base64Encode(value)`"
+    >#</a
+  >
+</h3>
 <ul>
-  <li><code>base64Encode</code> accepts only Binary; other types return undefined;</li>
+  <li>Parameter <code>value</code>: required; only Binary is encoded.</li>
   <li>
-    <code>base64Decode</code> accepts only strings; other types return undefined. Invalid
-    characters, padding, length not divisible by four, or whitespace throw RangeError;
+    Returns: a standard Base64 string with required <code>=</code> padding; zero-byte Binary returns
+    empty. A non-Binary value returns <code>undefined</code>.
   </li>
-  <li><code>hex</code> returns lowercase hex and throws TypeError for non-Binary;</li>
+  <li>Exceptions: none; a wrong type is not exceptional.</li>
+</ul>
+<pre><code class="language-javascript">let bytes = binary.fromHex(&quot;48656c6c6f&quot;);
+return binary.base64Encode(bytes); // &quot;SGVsbG8=&quot;
+</code></pre>
+<h3 id="binary-base64decode-value">
+  <code>binary.base64Decode(value)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#binary-base64decode-value"
+    aria-label="Link to `binary.base64Decode(value)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>Parameter <code>value</code>: required; only a string is decoded.</li>
   <li>
-    <code>fromHex</code> requires even length and valid hex; invalid content throws RangeError and
-    non-string TypeError;
+    Returns: Binary; an empty string returns zero-byte Binary. A non-string returns
+    <code>undefined</code>.
   </li>
   <li>
-    <code>getUtf8Bytes</code> encodes compatibility text as UTF-8. Objects/arrays become
-    <code>&lt;ObjectNode&gt;</code> and <code>&lt;ArrayNode&gt;</code>, not JSON bytes. For JSON
-    bytes, stringify first;
-  </li>
-  <li>
-    there is no general Binary-to-UTF-8-string decoder. Use <code>req.readJson()</code> to parse a
-    JSON request body.
+    Exceptions: throws <code>RangeError</code> for illegal Base64 characters, incorrect/excess
+    padding, a length not divisible by four, or embedded whitespace.
   </li>
 </ul>
+<pre><code class="language-javascript">try {
+    return binary.hex(binary.base64Decode(&quot;AP8=&quot;)); // &quot;00ff&quot;
+} catch (e) {
+    return &quot;invalid base64&quot;;
+}
+</code></pre>
+<h3 id="binary-hex-value">
+  <code>binary.hex(value)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#binary-hex-value"
+    aria-label="Link to `binary.hex(value)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>Parameter <code>value</code>: required Binary.</li>
+  <li>
+    Returns: a lowercase hexadecimal string with two characters per byte; zero-byte Binary returns
+    empty.
+  </li>
+  <li>Exceptions: throws <code>TypeError</code> for a non-Binary value.</li>
+</ul>
+<pre><code class="language-javascript">return binary.hex(binary.base64Decode(&quot;AQID&quot;)); // &quot;010203&quot;
+</code></pre>
+<h3 id="binary-fromhex-value">
+  <code>binary.fromHex(value)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#binary-fromhex-value"
+    aria-label="Link to `binary.fromHex(value)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>
+    Parameter <code>value</code>: required string; uppercase and lowercase hex digits are accepted.
+  </li>
+  <li>
+    Returns: Binary with one byte per two hex digits; an empty string returns zero-byte Binary.
+  </li>
+  <li>
+    Exceptions: throws <code>TypeError</code> for a non-string and <code>RangeError</code> for odd
+    length or a non-hex digit.
+  </li>
+</ul>
+<pre><code class="language-javascript">return binary.base64Encode(binary.fromHex(&quot;48656C6C6F&quot;)); // &quot;SGVsbG8=&quot;
+</code></pre>
+<h3 id="binary-getutf8bytes-value">
+  <code>binary.getUtf8Bytes(value)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#binary-getutf8bytes-value"
+    aria-label="Link to `binary.getUtf8Bytes(value)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>Parameter <code>value</code>: any required script value.</li>
+  <li>
+    Returns: compatibility-text bytes. A string uses UTF-8; numbers, booleans, and
+    <code>null</code> use their text; <code>undefined</code> uses empty text; Binary preserves raw
+    bytes; arrays/objects use
+    <code>&quot;&lt;ArrayNode&gt;&quot;</code>/<code>&quot;&lt;ObjectNode&gt;&quot;</code>.
+  </li>
+  <li>Exceptions: none.</li>
+  <li>
+    Note: this is not JSON-to-bytes. Use <code>binary.getUtf8Bytes(JSON.stringify(value))</code> for
+    JSON wire bytes. There is no general Binary-to-UTF-8-string decoder; use
+    <code>req.readJson()</code> for a JSON request body.
+  </li>
+</ul>
+<pre><code class="language-javascript">return {
+    text: binary.hex(binary.getUtf8Bytes(&quot;Hi&quot;)), // &quot;4869&quot;
+    json: binary.hex(binary.getUtf8Bytes(JSON.stringify({ ok: true })))
+};
+</code></pre>
 <h2 id="9-hash-functions">
   9. Hash functions<a
     class="documentation-heading-anchor"
@@ -588,20 +1269,93 @@ function includes(container: string | ScriptValue[], ...items: ScriptValue[]): b
     function sha256(value: string | Binary): string;
 }
 </code></pre>
+<h3 id="hash-crc32-value">
+  <code>hash.crc32(value)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#hash-crc32-value"
+    aria-label="Link to `hash.crc32(value)`"
+    >#</a
+  >
+</h3>
 <ul>
   <li>
-    <code>crc32</code> hashes compatibility text and returns <code>0..0xffffffff</code>; container
-    and Binary compatibility text is empty;
+    Parameter <code>value</code>: any required value. Strings use UTF-8 bytes; integers, floats,
+    booleans, and <code>null</code> use text; <code>undefined</code>, arrays, objects, and Binary
+    use empty text.
+  </li>
+  <li>Returns: integer in <code>0..4294967295</code>. Empty text returns 0.</li>
+  <li>Exceptions: none.</li>
+</ul>
+<pre><code class="language-javascript">return hash.crc32(&quot;123456789&quot;); // 3421780262 (0xcbf43926)
+</code></pre>
+<h3 id="hash-md5-value">
+  <code>hash.md5(value)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#hash-md5-value"
+    aria-label="Link to `hash.md5(value)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>Parameter <code>value</code>: required UTF-8 string or Binary; Binary uses raw bytes.</li>
+  <li>Returns: a 32-character lowercase hexadecimal string.</li>
+  <li>
+    Exceptions: throws <code>TypeError</code> for another input type. An unrecoverable digest
+    backend failure aborts with <code>HostFault</code>.
   </li>
   <li>
-    md5/sha1/sha256 accept UTF-8 strings or raw Binary and return lowercase hex; other types throw
-    TypeError;
-  </li>
-  <li>
-    MD5 and SHA-1 are for legacy interoperability only, not signatures, passwords, or
-    collision-resistant use.
+    Security: legacy interoperability only; never use for passwords, signatures, or collision
+    resistance.
   </li>
 </ul>
+<pre><code class="language-javascript">return hash.md5(&quot;abc&quot;); // &quot;900150983cd24fb0d6963f7d28e17f72&quot;
+</code></pre>
+<h3 id="hash-sha1-value">
+  <code>hash.sha1(value)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#hash-sha1-value"
+    aria-label="Link to `hash.sha1(value)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>Parameter <code>value</code>: required UTF-8 string or Binary.</li>
+  <li>Returns: a 40-character lowercase hexadecimal string.</li>
+  <li>
+    Exceptions: throws <code>TypeError</code> for another input type. An unrecoverable digest
+    backend failure aborts with <code>HostFault</code>.
+  </li>
+  <li>Security: legacy interoperability only; do not use in new security designs.</li>
+</ul>
+<pre><code class="language-javascript">return hash.sha1(&quot;abc&quot;); // &quot;a9993e364706816aba3e25717850c26c9cd0d89d&quot;
+</code></pre>
+<h3 id="hash-sha256-value">
+  <code>hash.sha256(value)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#hash-sha256-value"
+    aria-label="Link to `hash.sha256(value)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>Parameter <code>value</code>: required UTF-8 string or Binary.</li>
+  <li>Returns: a 64-character lowercase hexadecimal string.</li>
+  <li>
+    Exceptions: throws <code>TypeError</code> for another input type. An unrecoverable digest
+    backend failure aborts with <code>HostFault</code>.
+  </li>
+  <li>
+    Security: this is an unkeyed digest, not a MAC. Do not substitute
+    <code>sha256(secret + data)</code> for a reviewed HMAC.
+  </li>
+</ul>
+<pre><code class="language-javascript">return hash.sha256(&quot;abc&quot;);
+// &quot;ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad&quot;
+</code></pre>
 <h2 id="10-math-and-random-functions">
   10. Math and random functions<a
     class="documentation-heading-anchor"
@@ -620,30 +1374,110 @@ namespace rand {
     function canary(ratio: number, ...keys: ScriptValue[]): boolean;
 }
 </code></pre>
+<h3 id="math-floor-value">
+  <code>math.floor(value)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#math-floor-value"
+    aria-label="Link to `math.floor(value)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>Parameter <code>value</code>: required integer or float.</li>
+  <li>
+    Returns: an integer unchanged, or a finite float rounded toward negative infinity and returned
+    as an integer.
+  </li>
+  <li>Exceptions: throws <code>TypeError</code> for a non-number.</li>
+</ul>
+<pre><code class="language-javascript">return { positive: math.floor(3.9), negative: math.floor(-1.2) };
+// {&quot;positive&quot;:3,&quot;negative&quot;:-2}
+</code></pre>
+<h3 id="math-abs-value">
+  <code>math.abs(value)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#math-abs-value"
+    aria-label="Link to `math.abs(value)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>Parameter <code>value</code>: required integer or float.</li>
+  <li>
+    Returns: the absolute value with the same numeric kind. For Java compatibility, the minimum
+    64-bit integer <code>-9223372036854775808</code> has no representable positive peer and remains
+    unchanged.
+  </li>
+  <li>Exceptions: throws <code>TypeError</code> for a non-number.</li>
+</ul>
+<pre><code class="language-javascript">return { integer: math.abs(-7), floating: math.abs(-1.25) };
+// {&quot;integer&quot;:7,&quot;floating&quot;:1.25}
+</code></pre>
+<h3 id="rand-random-max-1000">
+  <code>rand.random(max = 1000)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#rand-random-max-1000"
+    aria-label="Link to `rand.random(max = 1000)`"
+    >#</a
+  >
+</h3>
 <ul>
   <li>
-    <code>math.floor</code> preserves integers and rounds floating values toward negative infinity;
-    non-number throws TypeError;
+    Parameter <code>max</code>: optional integer or float, default 1000. A float truncates toward
+    zero; extreme floats saturate at 64-bit boundaries.
+  </li>
+  <li>Returns: a uniformly sampled integer in the half-open range <code>[0, max)</code>.</li>
+  <li>
+    Exceptions: throws <code>TypeError</code> for a non-number and <code>RangeError</code> when
+    converted <code>max &lt;= 0</code>.
   </li>
   <li>
-    <code>math.abs</code> returns absolute value; <code>INT64_MIN</code> remains unchanged for Java
-    compatibility; non-number throws;
-  </li>
-  <li>
-    <code>rand.random(max)</code> returns a uniform integer in <code>[0,max)</code>, with default
-    1000 and floating max truncated toward zero; <code>max &lt;= 0</code> throws RangeError and
-    non-number TypeError;
-  </li>
-  <li>
-    <code>rand.canary(ratio,...keys)</code> is false at ratio &lt;= 0 and true at ratio &gt;= 100.
-    Without keys it is random; with keys it accumulates CRC-32 in argument order for a stable
-    <code>[0,100)</code> bucket. Non-numeric ratio is zero;
-  </li>
-  <li>
-    <code>rand.*</code> is not cryptographic randomness and does not replace production data-plane
-    gray/service selection.
+    Stability: per-worker-thread and nondeterministic; not a cryptographically secure random source.
   </li>
 </ul>
+<pre><code class="language-javascript">let shard = rand.random(16); // 0 through 15
+return shard;
+</code></pre>
+<h3 id="rand-canary-ratio-keys">
+  <code>rand.canary(ratio, ...keys)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#rand-canary-ratio-keys"
+    aria-label="Link to `rand.canary(ratio, ...keys)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>
+    Parameter <code>ratio</code>: required target percentage. Integers/floats become an integer;
+    booleans become 1/0; other types become 0.
+  </li>
+  <li>
+    Parameter <code>keys</code>: zero or more values. With keys, non-empty compatibility text is fed
+    into one cumulative CRC-32 in argument order. <code>null</code> is text
+    <code>&quot;null&quot;</code>; <code>undefined</code>, containers, and Binary are empty and
+    skipped. No separator is inserted between keys.
+  </li>
+  <li>
+    Returns: <code>false</code> for <code>ratio &lt;= 0</code> and <code>true</code> for
+    <code>ratio &gt;= 100</code>. An intermediate ratio without keys uses a random bucket; with keys
+    it maps deterministically into <code>0..99</code> for the same argument sequence and runtime.
+  </li>
+  <li>Exceptions: none.</li>
+  <li>
+    Scope: suitable for non-security sampling inside a script, but not for authorization, tokens,
+    cryptographic randomness, or replacing Access Gateway&#39;s production gray/service selection.
+  </li>
+</ul>
+<pre><code class="language-javascript">let selected = rand.canary(5, $header.x_user_id, $path.id);
+if (selected) {
+    resp.setHeader(&quot;X-Canary&quot;, &quot;1&quot;);
+}
+return selected;
+</code></pre>
 <h2 id="11-json-functions">
   11. JSON functions<a
     class="documentation-heading-anchor"
@@ -657,22 +1491,73 @@ namespace rand {
     function stringify(value: ScriptValue): string | undefined;
 }
 </code></pre>
+<h3 id="json-parse-text">
+  <code>JSON.parse(text)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#json-parse-text"
+    aria-label="Link to `JSON.parse(text)`"
+    >#</a
+  >
+</h3>
 <ul>
   <li>
-    <code>JSON.parse</code> accepts only a string. Invalid JSON throws SyntaxError with a parse
-    message and byte offset; non-string throws TypeError;
+    Parameter <code>text</code>: required string; it is not implicitly converted through
+    <code>strings.toString()</code>.
   </li>
   <li>
-    <code>JSON.stringify(undefined)</code> returns undefined; nested undefined becomes JSON null;
+    Returns: the ScriptValue represented by the JSON document, including an object, array, or
+    scalar.
   </li>
   <li>
-    top-level NaN and infinities encode as text <code>&quot;null&quot;</code>; other invalid numbers
-    or unencodable values throw;
+    Exceptions: throws <code>TypeError</code> for a non-string. An empty string, malformed/trailing
+    input, or a decoder-limit violation throws <code>SyntaxError</code> carrying the decoder message
+    and failing byte offset.
   </li>
-  <li>Binary becomes a Base64 JSON string;</li>
-  <li>object properties are emitted in insertion order;</li>
-  <li>prefer <code>resp.sendJson()</code> when producing an HTTP JSON response.</li>
+  <li>Side effects: none.</li>
 </ul>
+<pre><code class="language-javascript">try {
+    let value = JSON.parse(&#39;{&quot;enabled&quot;:true,&quot;weight&quot;:10}&#39;);
+    return value.weight; // 10
+} catch (e) {
+    return null;
+}
+</code></pre>
+<h3 id="json-stringify-value">
+  <code>JSON.stringify(value)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#json-stringify-value"
+    aria-label="Link to `JSON.stringify(value)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>Parameter <code>value</code>: any required script value.</li>
+  <li>
+    Returns: a JSON text string. Top-level <code>undefined</code> returns the script value
+    <code>undefined</code>, not a string; nested <code>undefined</code> becomes JSON
+    <code>null</code>. Top-level <code>NaN</code> and infinities return string
+    <code>&quot;null&quot;</code>. Binary becomes a Base64 JSON string, and object properties retain
+    insertion order.
+  </li>
+  <li>
+    Exceptions: throws <code>TypeError</code> for an unencodable internal value, invalid string,
+    maximum-depth violation, or an unencodable nested number/value.
+  </li>
+  <li>
+    Note: this only creates a string and sets no HTTP headers. Use <code>resp.sendJson()</code> for
+    a JSON response.
+  </li>
+</ul>
+<pre><code class="language-javascript">let encoded = JSON.stringify({
+    ok: true,
+    missing: undefined,
+    bytes: binary.fromHex(&quot;0102&quot;)
+});
+return encoded;
+// &quot;{\&quot;ok\&quot;:true,\&quot;missing\&quot;:null,\&quot;bytes\&quot;:\&quot;AQI=\&quot;}&quot;
+</code></pre>
 <h2 id="12-object-functions">
   12. Object functions<a
     class="documentation-heading-anchor"
@@ -698,21 +1583,95 @@ namespace rand {
     ): ScriptObject;
 }
 </code></pre>
+<h3 id="object-assign-target-source-sources">
+  <code>Object.assign(target, source, ...sources)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#object-assign-target-source-sources"
+    aria-label="Link to `Object.assign(target, source, ...sources)`"
+    >#</a
+  >
+</h3>
 <ul>
+  <li>Parameter <code>target</code>: required object and write target.</li>
   <li>
-    <code>Object.assign</code> mutates target with object sources and returns target. Non-object
-    sources are skipped; non-object target throws TypeError. Overwrite does not change insertion
-    position.
+    Parameters <code>source</code>/<code>sources</code>: at least one source argument. Only own
+    properties of object sources are copied; a non-object source is silently skipped.
   </li>
   <li>
-    <code>Object.keys/values</code> return new arrays in insertion order and throw TypeError for
-    non-object.
+    Returns: the modified <code>target</code> itself. A later value overwrites an earlier same-name
+    property; overwriting does not change insertion order, while a new property is appended. Values
+    use ScriptValue reference semantics; this is not a recursive deep merge.
   </li>
+  <li>Exceptions: throws <code>TypeError</code> when <code>target</code> is not an object.</li>
+  <li>Side effects: modifies <code>target</code> in place.</li>
+</ul>
+<pre><code class="language-javascript">let target = { a: 1, keep: true };
+let same = Object.assign(target, { a: 2 }, null, { b: 3 });
+return { value: target, sameObject: same === target };
+// {&quot;value&quot;:{&quot;a&quot;:2,&quot;keep&quot;:true,&quot;b&quot;:3},&quot;sameObject&quot;:true}
+</code></pre>
+<h3 id="object-keys-value">
+  <code>Object.keys(value)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#object-keys-value"
+    aria-label="Link to `Object.keys(value)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>Parameter <code>value</code>: required object.</li>
+  <li>Returns: a new string array of all own property names in insertion order.</li>
+  <li>Exceptions: throws <code>TypeError</code> for a non-object.</li>
+  <li>Side effects: none.</li>
+</ul>
+<pre><code class="language-javascript">return Object.keys({ first: 1, second: 2 }); // [&quot;first&quot;, &quot;second&quot;]
+</code></pre>
+<h3 id="object-values-value">
+  <code>Object.values(value)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#object-values-value"
+    aria-label="Link to `Object.values(value)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>Parameter <code>value</code>: required object.</li>
   <li>
-    <code>Object.deleteProperties</code> mutates target by removing string keys and returns target.
-    Non-string or absent keys are skipped; non-object target throws TypeError.
+    Returns: a new array of all own property values in the same order as <code>Object.keys()</code>.
+  </li>
+  <li>Exceptions: throws <code>TypeError</code> for a non-object.</li>
+  <li>
+    Side effects: does not change the object; contained array/object values are not deep-copied.
   </li>
 </ul>
+<pre><code class="language-javascript">return Object.values({ first: 1, second: &quot;two&quot; }); // [1, &quot;two&quot;]
+</code></pre>
+<h3 id="object-deleteproperties-target-key-keys">
+  <code>Object.deleteProperties(target, key, ...keys)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#object-deleteproperties-target-key-keys"
+    aria-label="Link to `Object.deleteProperties(target, key, ...keys)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>Parameter <code>target</code>: required object.</li>
+  <li>
+    Parameters <code>key</code>/<code>keys</code>: at least one value. Only strings are property
+    names; non-strings and absent names are silently skipped.
+  </li>
+  <li>Returns: the modified <code>target</code> itself.</li>
+  <li>Exceptions: throws <code>TypeError</code> when <code>target</code> is not an object.</li>
+  <li>Side effects: removes properties in argument order.</li>
+</ul>
+<pre><code class="language-javascript">let value = { password: &quot;redact&quot;, visible: true, token: &quot;redact&quot; };
+Object.deleteProperties(value, &quot;password&quot;, 123, &quot;token&quot;, &quot;missing&quot;);
+return value; // {&quot;visible&quot;:true}
+</code></pre>
 <h2 id="13-url-form-functions">
   13. URL form functions<a
     class="documentation-heading-anchor"
@@ -739,26 +1698,109 @@ namespace rand {
     ): string | null | undefined;
 }
 </code></pre>
+<h3 id="url-encodecomponent-value">
+  <code>URL.encodeComponent(value)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#url-encodecomponent-value"
+    aria-label="Link to `URL.encodeComponent(value)`"
+    >#</a
+  >
+</h3>
 <ul>
+  <li>Parameter <code>value</code>: required string, encoded by UTF-8 byte.</li>
   <li>
-    <code>encodeComponent</code> preserves alphanumeric, <code>-</code>, <code>_</code>,
-    <code>.</code>, and <code>*</code>; space becomes <code>+</code>; remaining UTF-8 bytes use
-    uppercase <code>%HH</code>. Non-string throws TypeError.
+    Returns: a form-urlencoded component. <code>A-Z a-z 0-9 - _ . *</code> pass through, ASCII space
+    becomes <code>+</code>, and every other byte becomes uppercase <code>%HH</code>.
   </li>
+  <li>Exceptions: throws <code>TypeError</code> for a non-string.</li>
   <li>
-    <code>decodeComponent</code> decodes <code>+</code> and <code>%HH</code>; bad percent escapes
-    throw RangeError and non-string TypeError.
-  </li>
-  <li>
-    <code>parseQuery</code> returns an object. A duplicate key promotes a string to an array and
-    keeps appending. A field without <code>=</code> has empty value; empty segments are skipped.
-  </li>
-  <li>
-    <code>buildQuery</code> follows object insertion order. Arrays become repeated keys, empty
-    arrays produce no field, null/undefined pass through, and other non-object values throw
-    TypeError.
+    Note: unlike ECMAScript <code>encodeURIComponent</code>, this encodes space as <code>+</code>,
+    not <code>%20</code>.
   </li>
 </ul>
+<pre><code class="language-javascript">return URL.encodeComponent(&quot;a b/中&quot;); // &quot;a+b%2F%E4%B8%AD&quot;
+</code></pre>
+<h3 id="url-decodecomponent-value">
+  <code>URL.decodeComponent(value)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#url-decodecomponent-value"
+    aria-label="Link to `URL.decodeComponent(value)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>Parameter <code>value</code>: required string.</li>
+  <li>
+    Returns: a decoded string. <code>+</code> becomes space and valid <code>%HH</code> becomes one
+    byte. Malformed UTF-8 after byte decoding is repaired with U+FFFD replacement characters.
+  </li>
+  <li>
+    Exceptions: throws <code>TypeError</code> for a non-string and <code>RangeError</code> for an
+    incomplete or non-hex percent escape.
+  </li>
+</ul>
+<pre><code class="language-javascript">return URL.decodeComponent(&quot;a+b%2F%E4%B8%AD&quot;); // &quot;a b/中&quot;
+</code></pre>
+<h3 id="url-parsequery-value">
+  <code>URL.parseQuery(value)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#url-parsequery-value"
+    aria-label="Link to `URL.parseQuery(value)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>Parameter <code>value</code>: required query string without a leading <code>?</code>.</li>
+  <li>
+    Returns: a new object whose values are strings or string arrays. <code>&amp;</code> separates
+    fields and the first <code>=</code> splits key/value. A non-empty field without
+    <code>=</code> gets an empty-string value; empty fields are skipped. A repeated key starts as a
+    string, is promoted to an array on its second occurrence, and then appends in order.
+  </li>
+  <li>
+    Exceptions: throws <code>TypeError</code> for a non-string and <code>RangeError</code> if any
+    key/value has a malformed percent escape; no partial object is returned.
+  </li>
+</ul>
+<pre><code class="language-javascript">return URL.parseQuery(&quot;tag=a&amp;tag=b&amp;page=2&amp;flag&quot;);
+// {&quot;tag&quot;:[&quot;a&quot;,&quot;b&quot;],&quot;page&quot;:&quot;2&quot;,&quot;flag&quot;:&quot;&quot;}
+</code></pre>
+<h3 id="url-buildquery-value-undefined">
+  <code>URL.buildQuery(value = undefined)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#url-buildquery-value-undefined"
+    aria-label="Link to `URL.buildQuery(value = undefined)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>
+    Parameter <code>value</code>: optional. Object property names become keys; scalar values use
+    compatibility text; array values expand into repeated fields; an empty array produces no field.
+  </li>
+  <li>
+    Returns: a form-urlencoded string in property insertion order without a leading <code>?</code>;
+    every emitted field has <code>=</code>. An empty object returns empty. Top-level
+    <code>null</code>/<code>undefined</code> pass through unchanged, so the result is not always a
+    string.
+  </li>
+  <li>
+    Exceptions: throws <code>TypeError</code> for a non-object other than
+    <code>null</code>/<code>undefined</code>.
+  </li>
+  <li>
+    Conversion: object/array elements inside a value array become
+    <code>&quot;&lt;ObjectNode&gt;&quot;</code>/<code>&quot;&lt;ArrayNode&gt;&quot;</code>.
+    Explicitly call <code>JSON.stringify()</code> when a query value must carry JSON.
+  </li>
+</ul>
+<pre><code class="language-javascript">return URL.buildQuery({ tag: [&quot;a&quot;, &quot;b&quot;], page: 2, empty: null });
+// &quot;tag=a&amp;tag=b&amp;page=2&amp;empty=null&quot;
+</code></pre>
 <h2 id="14-request-http-api-req">
   14. Request HTTP API: <code>req.*</code
   ><a
@@ -845,6 +1887,254 @@ namespace rand {
     reject compilation.
   </li>
 </ul>
+<h3 id="req-getheader-req-getheader-name">
+  <code>req.getHeader()</code> / <code>req.getHeader(name)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#req-getheader-req-getheader-name"
+    aria-label="Link to `req.getHeader()` / `req.getHeader(name)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>
+    Zero-argument overload: builds and caches a request-header object for this script context.
+    Repeated fields collapse to one string value; prefer the named overload for stable access to one
+    field.
+  </li>
+  <li>
+    Parameter <code>name</code>: the one-argument overload requires a non-empty string and follows
+    case-insensitive HTTP header-name lookup.
+  </li>
+  <li>
+    Returns: the cached object without a name; with a name, string when present,
+    <code>undefined</code> when absent, and <code>null</code> for an empty or non-string name.
+  </li>
+  <li>Exceptions: none for normal inputs.</li>
+</ul>
+<pre><code class="language-javascript">let all = req.getHeader();
+return {
+    contentType: req.getHeader(&quot;Content-Type&quot;),
+    hostFromObject: all.host
+};
+</code></pre>
+<h3 id="req-getquery-req-getquery-name">
+  <code>req.getQuery()</code> / <code>req.getQuery(name)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#req-getquery-req-getquery-name"
+    aria-label="Link to `req.getQuery()` / `req.getQuery(name)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>
+    Zero-argument overload: returns a cached object parsed from the raw query with string values; a
+    repeated key keeps its last value. Parsing is form-urlencoded. A malformed percent escape does
+    not throw: fields decoded before the error remain in the object.
+  </li>
+  <li>
+    Parameter <code>name</code>: the one-argument overload requires a non-empty string and uses
+    case-sensitive key matching.
+  </li>
+  <li>
+    Returns: the cached object without a name; with a name, string when present and
+    <code>undefined</code> when absent. An empty or non-string name also returns
+    <code>undefined</code>.
+  </li>
+  <li>Exceptions: none.</li>
+</ul>
+<pre><code class="language-javascript">// For /search?q=fiber&amp;page=2
+return {
+    query: req.getQuery(&quot;q&quot;), // &quot;fiber&quot;
+    page: req.getQuery().page, // &quot;2&quot;
+    missing: req.getQuery(&quot;missing&quot;) // undefined
+};
+</code></pre>
+<h3 id="req-getcookie-req-getcookie-name">
+  <code>req.getCookie()</code> / <code>req.getCookie(name)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#req-getcookie-req-getcookie-name"
+    aria-label="Link to `req.getCookie()` / `req.getCookie(name)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>
+    Zero-argument overload: returns a cached object parsed from all <code>Cookie</code> headers.
+    Values are strings and a later same-name cookie overwrites an earlier one. The parser accepts
+    lax <code>;</code>-separated cookie pairs.
+  </li>
+  <li>
+    Parameter <code>name</code>: the one-argument overload requires a non-empty string; cookie names
+    are case-sensitive.
+  </li>
+  <li>
+    Returns: the cached object without a name; with a name, string when present. Absent, empty, or
+    non-string names return <code>undefined</code>.
+  </li>
+  <li>Exceptions: none.</li>
+</ul>
+<pre><code class="language-javascript">let cookies = req.getCookie();
+return {
+    session: req.getCookie(&quot;session&quot;),
+    theme: cookies.theme
+};
+</code></pre>
+<h3 id="req-geturi">
+  <code>req.getUri()</code
+  ><a class="documentation-heading-anchor" href="#req-geturi" aria-label="Link to `req.getUri()`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>Parameters: none.</li>
+  <li>
+    Returns: the raw request-target string as <code>path[?query]</code>, without scheme,
+    authority/Host, or fragment.
+  </li>
+  <li>Exceptions: none.</li>
+</ul>
+<pre><code class="language-javascript">// For /orders/42?expand=items
+return req.getUri(); // &quot;/orders/42?expand=items&quot;
+</code></pre>
+<h3 id="req-getpath">
+  <code>req.getPath()</code
+  ><a class="documentation-heading-anchor" href="#req-getpath" aria-label="Link to `req.getPath()`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>Parameters: none.</li>
+  <li>Returns: the parsed path string without <code>?</code> or query.</li>
+  <li>Exceptions: none.</li>
+</ul>
+<pre><code class="language-javascript">return req.getPath(); // for example, &quot;/orders/42&quot;
+</code></pre>
+<h3 id="req-getquerystr">
+  <code>req.getQueryStr()</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#req-getquerystr"
+    aria-label="Link to `req.getQueryStr()`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>Parameters: none.</li>
+  <li>
+    Returns: the raw query without a leading <code>?</code>; no query returns empty. No form
+    decoding is performed.
+  </li>
+  <li>Exceptions: none.</li>
+</ul>
+<pre><code class="language-javascript">return req.getQueryStr(); // for example, &quot;expand=items&amp;lang=en&quot;
+</code></pre>
+<h3 id="req-getmethod">
+  <code>req.getMethod()</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#req-getmethod"
+    aria-label="Link to `req.getMethod()`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>Parameters: none.</li>
+  <li>
+    Returns: the current request method token, such as <code>&quot;GET&quot;</code> or
+    <code>&quot;POST&quot;</code>.
+  </li>
+  <li>Exceptions: none.</li>
+</ul>
+<pre><code class="language-javascript">if (req.getMethod() !== &quot;POST&quot;) {
+    resp.sendJson(405, { error: &quot;METHOD_NOT_ALLOWED&quot; });
+    return;
+}
+</code></pre>
+<h3 id="req-readjson">
+  <code>req.readJson()</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#req-readjson"
+    aria-label="Link to `req.readJson()`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>
+    Parameters: none. This is an async host function, but script code calls it directly without
+    <code>await</code>.
+  </li>
+  <li>Returns: any JSON ScriptValue after fully consuming and parsing the request body.</li>
+  <li>
+    Exceptions: a read failure raises <code>Error(&quot;read request body failed&quot;)</code>; an
+    empty body raises <code>Error(&quot;client did not sent body&quot;)</code>; malformed JSON
+    raises <code>Error(&quot;invalid json body&quot;)</code>. Unlike <code>JSON.parse()</code>, it
+    does not expose detailed <code>SyntaxError</code> parse data.
+  </li>
+  <li>
+    Side effects: consumes the one-shot body. Do not call another body reader or operation that
+    requires the original body afterward.
+  </li>
+</ul>
+<pre><code class="language-javascript">try {
+    let body = req.readJson();
+    return { name: body.name, accepted: true };
+} catch (e) {
+    resp.sendJson(400, { error: &quot;INVALID_JSON_BODY&quot; });
+    return;
+}
+</code></pre>
+<h3 id="req-readbinary">
+  <code>req.readBinary()</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#req-readbinary"
+    aria-label="Link to `req.readBinary()`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>Parameters: none; async host function.</li>
+  <li>Returns: Binary containing the full request body; an empty body returns zero-byte Binary.</li>
+  <li>
+    Exceptions: a body read failure raises <code>Error(&quot;read request body failed&quot;)</code>.
+  </li>
+  <li>Side effects: consumes the one-shot body and coalesces all bytes in memory.</li>
+</ul>
+<pre><code class="language-javascript">let body = req.readBinary();
+return {
+    size: length(body),
+    sha256: hash.sha256(body)
+};
+</code></pre>
+<h3 id="req-discardbody">
+  <code>req.discardBody()</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#req-discardbody"
+    aria-label="Link to `req.discardBody()`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>Parameters: none; async host function.</li>
+  <li>Returns: <code>null</code>.</li>
+  <li>
+    Exceptions: the compatibility implementation ignores the underlying drain error and raises no
+    catchable exception.
+  </li>
+  <li>
+    Side effects: consumes and discards the remaining request body; useful before an early response
+    when preserving connection-reuse conditions.
+  </li>
+</ul>
+<pre><code class="language-javascript">req.discardBody();
+resp.send(204);
+return;
+</code></pre>
 <h2 id="15-response-http-api-resp">
   15. Response HTTP API: <code>resp.*</code
   ><a
@@ -922,6 +2212,231 @@ declare namespace resp {
   <li><code>send(status,other)</code> uses JSON and <code>application/json</code>;</li>
   <li>send commits headers and ends the stream. Call one send function and immediately return.</li>
 </ul>
+<h3 id="resp-setheader-name-value">
+  <code>resp.setHeader(name, value)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#resp-setheader-name-value"
+    aria-label="Link to `resp.setHeader(name, value)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>Parameter <code>name</code>: required non-empty string.</li>
+  <li>
+    Parameter <code>value</code>: required. Strings, integers, floats, booleans, and
+    <code>null</code> become compatibility text. Empty strings, <code>undefined</code>, arrays,
+    objects, and Binary produce empty text and are invalid.
+  </li>
+  <li>Returns: <code>null</code>.</li>
+  <li>
+    Exceptions: an invalid name or empty converted value raises
+    <code>Error(&quot;set header require string key value&quot;)</code>.
+  </li>
+  <li>
+    Side effects: replaces the same-name pending response header. A valid call after headers are
+    committed silently makes no wire change.
+  </li>
+</ul>
+<pre><code class="language-javascript">resp.setHeader(&quot;Cache-Control&quot;, &quot;no-store&quot;);
+resp.setHeader(&quot;X-Route-Version&quot;, 7);
+return { ok: true };
+</code></pre>
+<h3 id="resp-addheader-name-value">
+  <code>resp.addHeader(name, value)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#resp-addheader-name-value"
+    aria-label="Link to `resp.addHeader(name, value)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>Parameters and text conversion match <code>resp.setHeader()</code>.</li>
+  <li>Returns: <code>null</code>.</li>
+  <li>
+    Exceptions: an invalid name/value raises
+    <code>Error(&quot;add header require string key value&quot;)</code>.
+  </li>
+  <li>
+    Side effects: appends rather than replaces, for fields such as multiple
+    <code>Set-Cookie</code> values. A valid call after headers are committed silently makes no wire
+    change.
+  </li>
+</ul>
+<pre><code class="language-javascript">resp.addHeader(&quot;Vary&quot;, &quot;Accept-Encoding&quot;);
+resp.addHeader(&quot;Vary&quot;, &quot;Origin&quot;);
+return { ok: true };
+</code></pre>
+<h3 id="resp-addcookie-cookie">
+  <code>resp.addCookie(cookie)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#resp-addcookie-cookie"
+    aria-label="Link to `resp.addCookie(cookie)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>Parameter <code>cookie</code>: required object. Unknown fields are ignored.</li>
+</ul>
+<table>
+  <thead>
+    <tr>
+      <th>Field</th>
+      <th>Accepted type</th>
+      <th>Default/behavior</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>name</code></td>
+      <td>Non-empty RFC token-character string</td>
+      <td>Required; invalid makes the function return <code>false</code></td>
+    </tr>
+    <tr>
+      <td><code>value</code></td>
+      <td>Any scalar</td>
+      <td>Compatibility text; absent/unrenderable becomes empty</td>
+    </tr>
+    <tr>
+      <td><code>domain</code></td>
+      <td>string</td>
+      <td>Non-string/empty omits <code>Domain</code></td>
+    </tr>
+    <tr>
+      <td><code>path</code></td>
+      <td>string</td>
+      <td>Non-string/empty omits <code>Path</code></td>
+    </tr>
+    <tr>
+      <td><code>maxAge</code></td>
+      <td>integer</td>
+      <td>Non-integer/negative omits it; <code>0</code> emits <code>Max-Age=0</code></td>
+    </tr>
+    <tr>
+      <td><code>secure</code></td>
+      <td>boolean</td>
+      <td>Only strict boolean <code>true</code> emits <code>Secure</code></td>
+    </tr>
+    <tr>
+      <td><code>httpOnly</code></td>
+      <td>boolean</td>
+      <td>Only strict boolean <code>true</code> emits <code>HttpOnly</code></td>
+    </tr>
+    <tr>
+      <td><code>sameSite</code></td>
+      <td>
+        <code>&quot;Lax&quot;</code>, <code>&quot;Strict&quot;</code>, or
+        <code>&quot;None&quot;</code>
+      </td>
+      <td>Case-sensitive; anything else omits <code>SameSite</code></td>
+    </tr>
+  </tbody>
+</table>
+<ul>
+  <li>
+    Returns: <code>true</code> after successful encoding and insertion into pending
+    <code>Set-Cookie</code>; <code>false</code> for a non-object or missing/empty/invalid-token
+    name.
+  </li>
+  <li>
+    Exceptions: no function-specific catchable exception; invalid cookies are represented by
+    <code>false</code>.
+  </li>
+  <li>
+    Side effects: appends one <code>Set-Cookie</code>. Call it before <code>send*()</code> because
+    committed headers cannot change.
+  </li>
+</ul>
+<pre><code class="language-javascript">let added = resp.addCookie({
+    name: &quot;session&quot;,
+    value: &quot;abc123&quot;,
+    path: &quot;/&quot;,
+    maxAge: 3600,
+    secure: true,
+    httpOnly: true,
+    sameSite: &quot;Lax&quot;
+});
+return { cookieAdded: added };
+</code></pre>
+<h3 id="resp-sendjson-status-body">
+  <code>resp.sendJson(status, body)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#resp-sendjson-status-body"
+    aria-label="Link to `resp.sendJson(status, body)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>
+    Parameter <code>status</code>: required. Only an integer is used; another type falls back to
+    200. The function does not pre-validate the status range, so an invalid HTTP status ultimately
+    appears as a send failure.
+  </li>
+  <li>
+    Parameter <code>body</code>: any ScriptValue encoded with the HTTP JSON encoder. Top-level
+    <code>undefined</code> becomes JSON <code>null</code>; Binary becomes a Base64 JSON string.
+  </li>
+  <li>Returns: <code>null</code> after successfully sending headers and the complete body.</li>
+  <li>
+    Exceptions: JSON encoding or header/body write failure raises
+    <code>Error(&quot;error send json&quot;)</code>.
+  </li>
+  <li>
+    Side effects: sets <code>Content-Type: application/json</code>, sends a fixed-<code
+      >Content-Length</code
+    >
+    response, and ends the stream.
+  </li>
+</ul>
+<pre><code class="language-javascript">resp.sendJson(201, {
+    id: $path.id,
+    created: true
+});
+return;
+</code></pre>
+<h3 id="resp-send-status-resp-send-status-body">
+  <code>resp.send(status)</code> / <code>resp.send(status, body)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#resp-send-status-resp-send-status-body"
+    aria-label="Link to `resp.send(status)` / `resp.send(status, body)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>
+    Parameter <code>status</code>: required. Only an integer is used; another type falls back to
+    200.
+  </li>
+  <li>
+    Parameter <code>body</code>: optional. Omitted sends zero bytes. Binary is raw with no automatic
+    Content-Type; a string is UTF-8 with <code>text/plain;charset=utf-8</code>; another value is
+    JSON with <code>application/json</code>.
+  </li>
+  <li>Returns: <code>null</code> after a successful send.</li>
+  <li>
+    Exceptions: an empty-response failure raises <code>Error(&quot;error send&quot;)</code>; Binary
+    write failure raises <code>Error(&quot;error write binary response&quot;)</code>; text failure
+    raises <code>Error(&quot;error textual response&quot;)</code>; JSON encoding/write failure
+    raises <code>Error(&quot;error send json&quot;)</code>.
+  </li>
+  <li>
+    Side effects: commits response headers and ends the stream. A normal execution calls exactly one
+    <code>send*()</code> and returns immediately afterward.
+  </li>
+</ul>
+<pre><code class="language-javascript">if (req.getMethod() === &quot;HEAD&quot;) {
+    resp.send(204);
+    return;
+}
+
+resp.setHeader(&quot;Content-Type&quot;, &quot;application/octet-stream&quot;);
+resp.send(200, binary.fromHex(&quot;89504e47&quot;));
+return;
+</code></pre>
 <h2 id="16-route-and-connection-constants">
   16. Route and connection constants<a
     class="documentation-heading-anchor"
