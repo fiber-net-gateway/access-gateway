@@ -266,6 +266,47 @@ URL.encodeComponent            URL.decodeComponent             URL.parseQuery
 URL.buildQuery
 ```
 
+### 4.1 How to read the function entries
+
+Signatures use TypeScript-like notation for documentation only; the script language does not implement
+TypeScript. `?` or `= default` marks an optional argument, and `...items` marks variadic arguments. Function
+names and argument counts resolve at **configuration compile time**:
+
+- a missing required argument, an extra fixed argument, an unknown function, or an unresolved overload rejects
+  the candidate configuration; this is not a runtime exception and `try/catch` cannot catch it;
+- the runtime inserts the documented value for omitted optional arguments; a variadic list may be empty and may
+  use `...array` expansion;
+- argument types are generally checked at **execution time**. Every entry's “Exceptions” line states whether a
+  wrong type returns `null`, `undefined`, or `false`, or raises a catchable exception;
+- “returns the original object/array” means in-place mutation with the same identity, not a copy;
+- unless stated otherwise, string indices and lengths use UTF-16 code units, while Binary lengths use bytes.
+
+### 4.2 Exceptions and execution aborts are different
+
+| Result                      | Catchable | Final JavaScript Route handling                             |
+| --------------------------- | --------- | ----------------------------------------------------------- |
+| `TypeError`                 | Yes       | Uncaught: 500 `SCRIPT_EXECUTION`                            |
+| `RangeError`                | Yes       | Uncaught: 500 `SCRIPT_EXECUTION`                            |
+| `SyntaxError`               | Yes       | Uncaught: 500 `SCRIPT_EXECUTION`                            |
+| `Error`                     | Yes       | HTTP read/encode/write failures; uncaught: 500              |
+| `Abort`                     | No        | `OutOfMemory`, `Timeout`, `Cancelled`, `InvalidState`, etc. |
+| Configuration compile error | No        | Candidate snapshot rejected; previous snapshot remains live |
+
+An entry's “Exceptions” line describes catchable script exceptions. Any function that allocates a result string,
+Binary, array, or object can abort with `OutOfMemory` when resources are exhausted. Async HTTP functions may also
+be aborted by host cancellation or timeout. An abort is not a script `throw` and never enters `catch`. Entries
+repeat abort behavior only where the function has an additional stable limit.
+
+```javascript
+let decoded;
+try {
+    decoded = binary.base64Decode("not-base64");
+} catch (e) {
+    // RangeError is caught here.
+    decoded = binary.fromHex("");
+}
+```
+
 ## 5. General functions
 
 ```typescript
@@ -273,19 +314,42 @@ function length(value?: ScriptValue): number;
 function includes(container: string | ScriptValue[], ...items: ScriptValue[]): boolean;
 ```
 
-`length(value)`:
+### `length(value = null)`
 
-- omitted input is equivalent to `null`;
-- strings return UTF-16 code-unit count;
-- Binary returns byte count, arrays element count, and objects property count;
-- `null`, `undefined`, numbers, booleans, and other values return 0.
+- Parameter: `value` may be any script value and defaults to `null` when omitted.
+- Returns: integer. A string returns its UTF-16 code-unit count; Binary returns bytes; an array returns elements;
+  an object returns own properties. `null`, `undefined`, numbers, booleans, and internal-only kinds return 0.
+- Exceptions: none.
+- Side effects: none.
 
-`includes(container, ...items)`:
+```javascript
+return {
+    ascii: length("abc"), // 3
+    emoji: length("A😀"), // 3: A is one unit and 😀 is two
+    bytes: length(binary.fromHex("00ff10")), // 3
+    fields: length({ a: 1, b: 2 }), // 2
+    omitted: length() // 0
+};
+```
 
-- for a string, every item must be a substring;
-- for an array, every item must be found with strict `===` equality;
-- other containers return false;
-- a valid string/array with no items returns true.
+### `includes(container, ...items)`
+
+- Parameter `container`: required; only a string or array has matching behavior.
+- Parameter `items`: zero or more values to test.
+- Returns: boolean. For a string, every item must itself be a string and a substring. For an array, every item
+  must be present under strict `===` equality. Another container type, or a non-string item against a string,
+  returns `false`. A valid string/array with no items returns `true`.
+- Exceptions: none.
+- Side effects: none.
+
+```javascript
+return {
+    text: includes("access-gateway", "access", "way"), // true
+    methods: includes(["GET", "POST"], req.getMethod()),
+    strict: includes([1], "1"), // false: 1 !== "1"
+    emptyCheck: includes([]) // true
+};
+```
 
 ## 6. Array functions
 
@@ -297,10 +361,48 @@ namespace array {
 }
 ```
 
-- `array.join()` defaults to an empty separator, not JavaScript's comma. Strings, numbers, and booleans
-  become text; `null`, `undefined`, containers, and Binary become empty text. Non-array input throws TypeError.
-- `array.pop()` mutates and returns the final element; an empty array returns `null`. Non-array throws TypeError.
-- `array.push()` mutates and returns the array itself, not its new length. Non-array throws TypeError.
+### `array.join(values, separator = "")`
+
+- Parameter `values`: required array.
+- Parameter `separator`: optional and defaults to an empty string, not JavaScript's comma. Strings, integers,
+  floats, and booleans become text; `null`, `undefined`, arrays, objects, and Binary become empty text.
+- Returns: a new string. Each element uses the same compatibility-text conversion as the separator.
+- Exceptions: throws `TypeError` when `values` is not an array.
+- Side effects: does not modify the input array.
+
+```javascript
+return array.join(["route", 7, null, true], "|");
+// "route|7||true"
+```
+
+### `array.pop(values)`
+
+- Parameter `values`: required array.
+- Returns: the former last element; an empty array returns `null`.
+- Exceptions: throws `TypeError` when `values` is not an array.
+- Side effects: removes one element in place; an empty array is unchanged.
+
+```javascript
+let values = ["a", "b"];
+let last = array.pop(values);
+return { last: last, remaining: values };
+// {"last":"b","remaining":["a"]}
+```
+
+### `array.push(values, ...items)`
+
+- Parameter `values`: required array.
+- Parameter `items`: zero or more values; `...anotherArray` expansion is supported.
+- Returns: the modified `values` array itself, **not** its new length.
+- Exceptions: throws `TypeError` when `values` is not an array.
+- Side effects: appends items in argument order; no items leaves the array unchanged.
+
+```javascript
+let values = [1];
+let same = array.push(values, 2, ...[3, 4]);
+return { values: values, sameObject: same === values };
+// {"values":[1,2,3,4],"sameObject":true}
+```
 
 ## 7. String functions
 
@@ -351,6 +453,220 @@ instead of throwing.
 - zero-argument `toString()` returns empty. `null`/`undefined` return `"null"`; objects/arrays return
   `<ObjectNode>`/`<ArrayNode>`, not JSON. Use `JSON.stringify()` for JSON.
 
+### `strings.hasPrefix(text, prefix)`
+
+- Parameters: both `text` and `prefix` are required strings.
+- Returns: boolean `true` when `text` starts with `prefix`; otherwise `false`. An empty prefix matches every
+  valid string.
+- Exceptions: none; a non-string argument returns `false`.
+
+```javascript
+return strings.hasPrefix("/api/v1/orders", "/api/"); // true
+```
+
+### `strings.hasSuffix(text, suffix)`
+
+- Parameters: both `text` and `suffix` are required strings.
+- Returns: boolean `true` when `text` ends with `suffix`; otherwise `false`. An empty suffix matches every valid
+  string.
+- Exceptions: none; a non-string argument returns `false`.
+
+```javascript
+return strings.hasSuffix("archive.tar.gz", ".gz"); // true
+```
+
+### `strings.toLower(text)`
+
+- Parameter `text`: required string.
+- Returns: a new string with ASCII `A-Z` changed to `a-z`. Multibyte UTF-8 characters are unchanged. A
+  non-string returns `null`.
+- Exceptions: none.
+
+```javascript
+return strings.toLower("API-ÄBC-中文"); // "api-Äbc-中文"
+```
+
+### `strings.toUpper(text)`
+
+- Parameter `text`: required string.
+- Returns: a new string with ASCII `a-z` changed to `A-Z`. Non-ASCII characters remain unchanged. A non-string
+  returns `null`.
+- Exceptions: none.
+
+```javascript
+return strings.toUpper("api-äbc-中文"); // "API-äBC-中文"
+```
+
+### `strings.trim(text, cutset = null)`
+
+- Parameter `text`: required string; a non-string returns `null`.
+- Parameter `cutset`: optional. Omitted, `null`, or another non-string removes bytes `<= 0x20` from both ends.
+  A string is treated as one **complete substring** repeatedly removed from both ends.
+- Returns: the trimmed string. An empty cutset removes nothing.
+- Exceptions: none.
+
+```javascript
+return {
+    whitespace: strings.trim(" \t value \n"), // "value"
+    marker: strings.trim("ababvalueabab", "ab") // "value"
+};
+```
+
+### `strings.trimLeft(text, cutset = null)`
+
+- Parameter `text`: required string; a non-string returns `null`.
+- Parameter `cutset`: omitted/non-string removes ASCII Java whitespace in
+  `0x09..0x0d` and `0x1c..0x20`; a string is repeatedly removed as one complete substring from the left.
+- Returns: a new string without changing the original value.
+- Exceptions: none.
+
+```javascript
+return strings.trimLeft("///v1/items///", "/"); // "v1/items///"
+```
+
+### `strings.trimRight(text, cutset = null)`
+
+- Parameters follow `trimLeft()`, but only the right edge is processed.
+- Returns: the processed string. An empty cutset removes nothing; a non-string `text` returns `null`.
+- Exceptions: none.
+
+```javascript
+return strings.trimRight("///v1/items///", "/"); // "///v1/items"
+```
+
+### `strings.split(text, separators = null)`
+
+- Parameter `text`: required string; a non-string returns `null`.
+- Parameter `separators`: omitted/non-string performs no split and returns an array containing the original
+  string. A string is a set of Unicode code points, each acting as an independent separator rather than one
+  delimiter substring.
+- Returns: a new string array. Consecutive, leading, and trailing separators produce no empty entries. An
+  explicit empty separator matches nothing, so non-empty text returns `[text]`, while empty text returns `[]`.
+- Exceptions: none.
+
+```javascript
+return {
+    parts: strings.split("a,b;;c,", ",;"), // ["a", "b", "c"]
+    untouched: strings.split("a,b") // ["a,b"]
+};
+```
+
+### `strings.contains(text, value)`
+
+- Parameters: required strings; `value` is matched as a complete substring.
+- Returns: boolean `true` when found and `false` otherwise. An empty value returns `true`. A non-string argument
+  returns `null`.
+- Exceptions: none.
+
+```javascript
+return strings.contains("access-gateway", "gateway"); // true
+```
+
+### `strings.contains_any(text, chars)`
+
+- Parameters: `text` is a required string; `chars` is a set of Unicode code points, not a substring.
+- Returns: whether any candidate character occurs. Empty `chars` returns `false`; a wrong type returns `null`.
+- Exceptions: none.
+
+```javascript
+return strings.contains_any("route-42", "xyz2"); // true because "2" matches
+```
+
+### `strings.index(text, value)`
+
+- Parameters: two required strings; `value` is matched as a complete substring.
+- Returns: the first match's UTF-16 index, integer `-1` when absent, or `null` for a wrong type.
+- Exceptions: none.
+
+```javascript
+return strings.index("😀-route", "route"); // 3 because 😀 occupies two UTF-16 units
+```
+
+### `strings.indexAny(text, chars)`
+
+- Parameters: two required strings; each Unicode code point in `chars` is a candidate.
+- Returns: the UTF-16 index of the first occurrence of any candidate, `-1` when absent, or `null` for a wrong
+  type.
+- Exceptions: none.
+
+```javascript
+return strings.indexAny("abc-123", "93c"); // 2: "c" occurs first in text
+```
+
+### `strings.lastIndex(text, value)`
+
+- Parameters: two required strings; `value` is matched as a complete substring.
+- Returns: the last match's UTF-16 index, `-1` when absent, `length(text)` for an empty value, or `null` for a
+  wrong type.
+- Exceptions: none.
+
+```javascript
+return strings.lastIndex("a/b/a", "a"); // 4
+```
+
+### `strings.lastIndexAny(text, chars)`
+
+- Parameters: two required strings. Candidates are visited in Unicode code-point order within `chars`.
+- Returns: the last UTF-16 index of the **first candidate character** that occurs in `text`. Only when that
+  candidate is absent does the function examine the next candidate. Returns `-1` when all are absent and `null`
+  on a wrong type.
+- Exceptions: none.
+- Compatibility note: this is not the global maximum position across all candidates.
+
+```javascript
+return strings.lastIndexAny("abca", "bc");
+// 1: "b" is the first candidate and its last position is 1; "c" at 2 is not examined
+```
+
+### `strings.repeat(text, count)`
+
+- Parameter `text`: required string; a non-string returns `null`.
+- Parameter `count`: integer or float. A float truncates toward zero and follows compatible 32-bit integer
+  semantics. A non-number or negative value returns `null`.
+- Returns: a new string repeated `count` times. Zero or empty text returns empty; one returns the original string
+  value.
+- Exceptions: none.
+- Execution abort: an output over 16 MiB aborts with `OutOfMemory`; `catch` cannot intercept it.
+
+```javascript
+return strings.repeat("ab", 3.9); // "ababab"
+```
+
+### `strings.substring(text, start = 0, end = 2147483647)`
+
+- Parameter `text`: required string; a non-string returns `null`.
+- Parameters `start`/`end`: UTF-16 indices. Numbers truncate toward zero; booleans become 0/1; a string that
+  begins with a valid integer uses that integer prefix (for example, `"4x"` becomes 4); `null`, `undefined`, and
+  other values become 0. Negative start clamps to 0.
+- Returns: the half-open range `[start, end)`. `start >= length(text)` or `end <= start` returns empty; an end
+  beyond the length clamps to the end of the string.
+- Exceptions: none.
+
+```javascript
+return {
+    normal: strings.substring("gateway", 0, 4), // "gate"
+    clamped: strings.substring("gateway", -5, 4), // "gate"
+    converted: strings.substring("gateway", "4", 99) // "way"
+};
+```
+
+### `strings.toString()` / `strings.toString(value)`
+
+- Parameters: either zero or one. Zero arguments returns an empty string.
+- Returns: string. `null`/`undefined` become `"null"`; strings, numbers, and booleans use text; Binary uses its
+  raw-byte compatibility text; arrays/objects become literal `"<ArrayNode>"`/`"<ObjectNode>"`.
+- Exceptions: none.
+- Note: this is not a JSON encoder. Use `JSON.stringify()` for objects, arrays, or stable wire data.
+
+```javascript
+return {
+    empty: strings.toString(), // ""
+    missing: strings.toString(null), // "null"
+    object: strings.toString({ ok: true }), // "<ObjectNode>"
+    json: JSON.stringify({ ok: true }) // "{\"ok\":true}"
+};
+```
+
 `strings.match` and `strings.findAll` are not registered.
 
 ## 8. Binary functions
@@ -365,14 +681,69 @@ namespace binary {
 }
 ```
 
-- `base64Encode` accepts only Binary; other types return undefined;
-- `base64Decode` accepts only strings; other types return undefined. Invalid characters, padding, length not
-  divisible by four, or whitespace throw RangeError;
-- `hex` returns lowercase hex and throws TypeError for non-Binary;
-- `fromHex` requires even length and valid hex; invalid content throws RangeError and non-string TypeError;
-- `getUtf8Bytes` encodes compatibility text as UTF-8. Objects/arrays become `<ObjectNode>` and `<ArrayNode>`,
-  not JSON bytes. For JSON bytes, stringify first;
-- there is no general Binary-to-UTF-8-string decoder. Use `req.readJson()` to parse a JSON request body.
+### `binary.base64Encode(value)`
+
+- Parameter `value`: required; only Binary is encoded.
+- Returns: a standard Base64 string with required `=` padding; zero-byte Binary returns empty. A non-Binary
+  value returns `undefined`.
+- Exceptions: none; a wrong type is not exceptional.
+
+```javascript
+let bytes = binary.fromHex("48656c6c6f");
+return binary.base64Encode(bytes); // "SGVsbG8="
+```
+
+### `binary.base64Decode(value)`
+
+- Parameter `value`: required; only a string is decoded.
+- Returns: Binary; an empty string returns zero-byte Binary. A non-string returns `undefined`.
+- Exceptions: throws `RangeError` for illegal Base64 characters, incorrect/excess padding, a length not divisible
+  by four, or embedded whitespace.
+
+```javascript
+try {
+    return binary.hex(binary.base64Decode("AP8=")); // "00ff"
+} catch (e) {
+    return "invalid base64";
+}
+```
+
+### `binary.hex(value)`
+
+- Parameter `value`: required Binary.
+- Returns: a lowercase hexadecimal string with two characters per byte; zero-byte Binary returns empty.
+- Exceptions: throws `TypeError` for a non-Binary value.
+
+```javascript
+return binary.hex(binary.base64Decode("AQID")); // "010203"
+```
+
+### `binary.fromHex(value)`
+
+- Parameter `value`: required string; uppercase and lowercase hex digits are accepted.
+- Returns: Binary with one byte per two hex digits; an empty string returns zero-byte Binary.
+- Exceptions: throws `TypeError` for a non-string and `RangeError` for odd length or a non-hex digit.
+
+```javascript
+return binary.base64Encode(binary.fromHex("48656C6C6F")); // "SGVsbG8="
+```
+
+### `binary.getUtf8Bytes(value)`
+
+- Parameter `value`: any required script value.
+- Returns: compatibility-text bytes. A string uses UTF-8; numbers, booleans, and `null` use their text;
+  `undefined` uses empty text; Binary preserves raw bytes; arrays/objects use
+  `"<ArrayNode>"`/`"<ObjectNode>"`.
+- Exceptions: none.
+- Note: this is not JSON-to-bytes. Use `binary.getUtf8Bytes(JSON.stringify(value))` for JSON wire bytes. There
+  is no general Binary-to-UTF-8-string decoder; use `req.readJson()` for a JSON request body.
+
+```javascript
+return {
+    text: binary.hex(binary.getUtf8Bytes("Hi")), // "4869"
+    json: binary.hex(binary.getUtf8Bytes(JSON.stringify({ ok: true })))
+};
+```
 
 ## 9. Hash functions
 
@@ -385,10 +756,53 @@ namespace hash {
 }
 ```
 
-- `crc32` hashes compatibility text and returns `0..0xffffffff`; container and Binary compatibility text is
-  empty;
-- md5/sha1/sha256 accept UTF-8 strings or raw Binary and return lowercase hex; other types throw TypeError;
-- MD5 and SHA-1 are for legacy interoperability only, not signatures, passwords, or collision-resistant use.
+### `hash.crc32(value)`
+
+- Parameter `value`: any required value. Strings use UTF-8 bytes; integers, floats, booleans, and `null` use
+  text; `undefined`, arrays, objects, and Binary use empty text.
+- Returns: integer in `0..4294967295`. Empty text returns 0.
+- Exceptions: none.
+
+```javascript
+return hash.crc32("123456789"); // 3421780262 (0xcbf43926)
+```
+
+### `hash.md5(value)`
+
+- Parameter `value`: required UTF-8 string or Binary; Binary uses raw bytes.
+- Returns: a 32-character lowercase hexadecimal string.
+- Exceptions: throws `TypeError` for another input type. An unrecoverable digest backend failure aborts with
+  `HostFault`.
+- Security: legacy interoperability only; never use for passwords, signatures, or collision resistance.
+
+```javascript
+return hash.md5("abc"); // "900150983cd24fb0d6963f7d28e17f72"
+```
+
+### `hash.sha1(value)`
+
+- Parameter `value`: required UTF-8 string or Binary.
+- Returns: a 40-character lowercase hexadecimal string.
+- Exceptions: throws `TypeError` for another input type. An unrecoverable digest backend failure aborts with
+  `HostFault`.
+- Security: legacy interoperability only; do not use in new security designs.
+
+```javascript
+return hash.sha1("abc"); // "a9993e364706816aba3e25717850c26c9cd0d89d"
+```
+
+### `hash.sha256(value)`
+
+- Parameter `value`: required UTF-8 string or Binary.
+- Returns: a 64-character lowercase hexadecimal string.
+- Exceptions: throws `TypeError` for another input type. An unrecoverable digest backend failure aborts with
+  `HostFault`.
+- Security: this is an unkeyed digest, not a MAC. Do not substitute `sha256(secret + data)` for a reviewed HMAC.
+
+```javascript
+return hash.sha256("abc");
+// "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+```
 
 ## 10. Math and random functions
 
@@ -404,14 +818,62 @@ namespace rand {
 }
 ```
 
-- `math.floor` preserves integers and rounds floating values toward negative infinity; non-number throws
-  TypeError;
-- `math.abs` returns absolute value; `INT64_MIN` remains unchanged for Java compatibility; non-number throws;
-- `rand.random(max)` returns a uniform integer in `[0,max)`, with default 1000 and floating max truncated
-  toward zero; `max <= 0` throws RangeError and non-number TypeError;
-- `rand.canary(ratio,...keys)` is false at ratio <= 0 and true at ratio >= 100. Without keys it is random;
-  with keys it accumulates CRC-32 in argument order for a stable `[0,100)` bucket. Non-numeric ratio is zero;
-- `rand.*` is not cryptographic randomness and does not replace production data-plane gray/service selection.
+### `math.floor(value)`
+
+- Parameter `value`: required integer or float.
+- Returns: an integer unchanged, or a finite float rounded toward negative infinity and returned as an integer.
+- Exceptions: throws `TypeError` for a non-number.
+
+```javascript
+return { positive: math.floor(3.9), negative: math.floor(-1.2) };
+// {"positive":3,"negative":-2}
+```
+
+### `math.abs(value)`
+
+- Parameter `value`: required integer or float.
+- Returns: the absolute value with the same numeric kind. For Java compatibility, the minimum 64-bit integer
+  `-9223372036854775808` has no representable positive peer and remains unchanged.
+- Exceptions: throws `TypeError` for a non-number.
+
+```javascript
+return { integer: math.abs(-7), floating: math.abs(-1.25) };
+// {"integer":7,"floating":1.25}
+```
+
+### `rand.random(max = 1000)`
+
+- Parameter `max`: optional integer or float, default 1000. A float truncates toward zero; extreme floats
+  saturate at 64-bit boundaries.
+- Returns: a uniformly sampled integer in the half-open range `[0, max)`.
+- Exceptions: throws `TypeError` for a non-number and `RangeError` when converted `max <= 0`.
+- Stability: per-worker-thread and nondeterministic; not a cryptographically secure random source.
+
+```javascript
+let shard = rand.random(16); // 0 through 15
+return shard;
+```
+
+### `rand.canary(ratio, ...keys)`
+
+- Parameter `ratio`: required target percentage. Integers/floats become an integer; booleans become 1/0; other
+  types become 0.
+- Parameter `keys`: zero or more values. With keys, non-empty compatibility text is fed into one cumulative
+  CRC-32 in argument order. `null` is text `"null"`; `undefined`, containers, and Binary are empty and skipped.
+  No separator is inserted between keys.
+- Returns: `false` for `ratio <= 0` and `true` for `ratio >= 100`. An intermediate ratio without keys uses a
+  random bucket; with keys it maps deterministically into `0..99` for the same argument sequence and runtime.
+- Exceptions: none.
+- Scope: suitable for non-security sampling inside a script, but not for authorization, tokens, cryptographic
+  randomness, or replacing Access Gateway's production gray/service selection.
+
+```javascript
+let selected = rand.canary(5, $header.x_user_id, $path.id);
+if (selected) {
+    resp.setHeader("X-Canary", "1");
+}
+return selected;
+```
 
 ## 11. JSON functions
 
@@ -422,13 +884,42 @@ namespace JSON {
 }
 ```
 
-- `JSON.parse` accepts only a string. Invalid JSON throws SyntaxError with a parse message and byte offset;
-  non-string throws TypeError;
-- `JSON.stringify(undefined)` returns undefined; nested undefined becomes JSON null;
-- top-level NaN and infinities encode as text `"null"`; other invalid numbers or unencodable values throw;
-- Binary becomes a Base64 JSON string;
-- object properties are emitted in insertion order;
-- prefer `resp.sendJson()` when producing an HTTP JSON response.
+### `JSON.parse(text)`
+
+- Parameter `text`: required string; it is not implicitly converted through `strings.toString()`.
+- Returns: the ScriptValue represented by the JSON document, including an object, array, or scalar.
+- Exceptions: throws `TypeError` for a non-string. An empty string, malformed/trailing input, or a decoder-limit
+  violation throws `SyntaxError` carrying the decoder message and failing byte offset.
+- Side effects: none.
+
+```javascript
+try {
+    let value = JSON.parse('{"enabled":true,"weight":10}');
+    return value.weight; // 10
+} catch (e) {
+    return null;
+}
+```
+
+### `JSON.stringify(value)`
+
+- Parameter `value`: any required script value.
+- Returns: a JSON text string. Top-level `undefined` returns the script value `undefined`, not a string; nested
+  `undefined` becomes JSON `null`. Top-level `NaN` and infinities return string `"null"`. Binary becomes a
+  Base64 JSON string, and object properties retain insertion order.
+- Exceptions: throws `TypeError` for an unencodable internal value, invalid string, maximum-depth violation, or
+  an unencodable nested number/value.
+- Note: this only creates a string and sets no HTTP headers. Use `resp.sendJson()` for a JSON response.
+
+```javascript
+let encoded = JSON.stringify({
+    ok: true,
+    missing: undefined,
+    bytes: binary.fromHex("0102")
+});
+return encoded;
+// "{\"ok\":true,\"missing\":null,\"bytes\":\"AQI=\"}"
+```
 
 ## 12. Object functions
 
@@ -451,11 +942,60 @@ namespace Object {
 }
 ```
 
-- `Object.assign` mutates target with object sources and returns target. Non-object sources are skipped;
-  non-object target throws TypeError. Overwrite does not change insertion position.
-- `Object.keys/values` return new arrays in insertion order and throw TypeError for non-object.
-- `Object.deleteProperties` mutates target by removing string keys and returns target. Non-string or absent keys
-  are skipped; non-object target throws TypeError.
+### `Object.assign(target, source, ...sources)`
+
+- Parameter `target`: required object and write target.
+- Parameters `source`/`sources`: at least one source argument. Only own properties of object sources are copied;
+  a non-object source is silently skipped.
+- Returns: the modified `target` itself. A later value overwrites an earlier same-name property; overwriting does
+  not change insertion order, while a new property is appended. Values use ScriptValue reference semantics; this
+  is not a recursive deep merge.
+- Exceptions: throws `TypeError` when `target` is not an object.
+- Side effects: modifies `target` in place.
+
+```javascript
+let target = { a: 1, keep: true };
+let same = Object.assign(target, { a: 2 }, null, { b: 3 });
+return { value: target, sameObject: same === target };
+// {"value":{"a":2,"keep":true,"b":3},"sameObject":true}
+```
+
+### `Object.keys(value)`
+
+- Parameter `value`: required object.
+- Returns: a new string array of all own property names in insertion order.
+- Exceptions: throws `TypeError` for a non-object.
+- Side effects: none.
+
+```javascript
+return Object.keys({ first: 1, second: 2 }); // ["first", "second"]
+```
+
+### `Object.values(value)`
+
+- Parameter `value`: required object.
+- Returns: a new array of all own property values in the same order as `Object.keys()`.
+- Exceptions: throws `TypeError` for a non-object.
+- Side effects: does not change the object; contained array/object values are not deep-copied.
+
+```javascript
+return Object.values({ first: 1, second: "two" }); // [1, "two"]
+```
+
+### `Object.deleteProperties(target, key, ...keys)`
+
+- Parameter `target`: required object.
+- Parameters `key`/`keys`: at least one value. Only strings are property names; non-strings and absent names are
+  silently skipped.
+- Returns: the modified `target` itself.
+- Exceptions: throws `TypeError` when `target` is not an object.
+- Side effects: removes properties in argument order.
+
+```javascript
+let value = { password: "redact", visible: true, token: "redact" };
+Object.deleteProperties(value, "password", 123, "token", "missing");
+return value; // {"visible":true}
+```
 
 ## 13. URL form functions
 
@@ -477,13 +1017,58 @@ namespace URL {
 }
 ```
 
-- `encodeComponent` preserves alphanumeric, `-`, `_`, `.`, and `*`; space becomes `+`; remaining UTF-8
-  bytes use uppercase `%HH`. Non-string throws TypeError.
-- `decodeComponent` decodes `+` and `%HH`; bad percent escapes throw RangeError and non-string TypeError.
-- `parseQuery` returns an object. A duplicate key promotes a string to an array and keeps appending. A field
-  without `=` has empty value; empty segments are skipped.
-- `buildQuery` follows object insertion order. Arrays become repeated keys, empty arrays produce no field,
-  null/undefined pass through, and other non-object values throw TypeError.
+### `URL.encodeComponent(value)`
+
+- Parameter `value`: required string, encoded by UTF-8 byte.
+- Returns: a form-urlencoded component. `A-Z a-z 0-9 - _ . *` pass through, ASCII space becomes `+`, and every
+  other byte becomes uppercase `%HH`.
+- Exceptions: throws `TypeError` for a non-string.
+- Note: unlike ECMAScript `encodeURIComponent`, this encodes space as `+`, not `%20`.
+
+```javascript
+return URL.encodeComponent("a b/中"); // "a+b%2F%E4%B8%AD"
+```
+
+### `URL.decodeComponent(value)`
+
+- Parameter `value`: required string.
+- Returns: a decoded string. `+` becomes space and valid `%HH` becomes one byte. Malformed UTF-8 after byte
+  decoding is repaired with U+FFFD replacement characters.
+- Exceptions: throws `TypeError` for a non-string and `RangeError` for an incomplete or non-hex percent escape.
+
+```javascript
+return URL.decodeComponent("a+b%2F%E4%B8%AD"); // "a b/中"
+```
+
+### `URL.parseQuery(value)`
+
+- Parameter `value`: required query string without a leading `?`.
+- Returns: a new object whose values are strings or string arrays. `&` separates fields and the first `=` splits
+  key/value. A non-empty field without `=` gets an empty-string value; empty fields are skipped. A repeated key
+  starts as a string, is promoted to an array on its second occurrence, and then appends in order.
+- Exceptions: throws `TypeError` for a non-string and `RangeError` if any key/value has a malformed percent
+  escape; no partial object is returned.
+
+```javascript
+return URL.parseQuery("tag=a&tag=b&page=2&flag");
+// {"tag":["a","b"],"page":"2","flag":""}
+```
+
+### `URL.buildQuery(value = undefined)`
+
+- Parameter `value`: optional. Object property names become keys; scalar values use compatibility text; array
+  values expand into repeated fields; an empty array produces no field.
+- Returns: a form-urlencoded string in property insertion order without a leading `?`; every emitted field has
+  `=`. An empty object returns empty. Top-level `null`/`undefined` pass through unchanged, so the result is not
+  always a string.
+- Exceptions: throws `TypeError` for a non-object other than `null`/`undefined`.
+- Conversion: object/array elements inside a value array become `"<ObjectNode>"`/`"<ArrayNode>"`. Explicitly
+  call `JSON.stringify()` when a query value must carry JSON.
+
+```javascript
+return URL.buildQuery({ tag: ["a", "b"], page: 2, empty: null });
+// "tag=a&tag=b&page=2&empty=null"
+```
 
 ## 14. Request HTTP API: `req.*`
 
@@ -531,6 +1116,154 @@ declare namespace req {
   unknown-length body has already failed with 413 before the function can run;
 - conditions/templates can call sync `req.*` metadata, but body calls are async and reject compilation.
 
+### `req.getHeader()` / `req.getHeader(name)`
+
+- Zero-argument overload: builds and caches a request-header object for this script context. Repeated fields
+  collapse to one string value; prefer the named overload for stable access to one field.
+- Parameter `name`: the one-argument overload requires a non-empty string and follows case-insensitive HTTP
+  header-name lookup.
+- Returns: the cached object without a name; with a name, string when present, `undefined` when absent, and `null`
+  for an empty or non-string name.
+- Exceptions: none for normal inputs.
+
+```javascript
+let all = req.getHeader();
+return {
+    contentType: req.getHeader("Content-Type"),
+    hostFromObject: all.host
+};
+```
+
+### `req.getQuery()` / `req.getQuery(name)`
+
+- Zero-argument overload: returns a cached object parsed from the raw query with string values; a repeated key keeps its
+  last value. Parsing is form-urlencoded. A malformed percent escape does not throw: fields decoded before the
+  error remain in the object.
+- Parameter `name`: the one-argument overload requires a non-empty string and uses case-sensitive key matching.
+- Returns: the cached object without a name; with a name, string when present and `undefined` when absent. An empty
+  or non-string name also returns `undefined`.
+- Exceptions: none.
+
+```javascript
+// For /search?q=fiber&page=2
+return {
+    query: req.getQuery("q"), // "fiber"
+    page: req.getQuery().page, // "2"
+    missing: req.getQuery("missing") // undefined
+};
+```
+
+### `req.getCookie()` / `req.getCookie(name)`
+
+- Zero-argument overload: returns a cached object parsed from all `Cookie` headers. Values are strings and a later
+  same-name cookie overwrites an earlier one. The parser accepts lax `;`-separated cookie pairs.
+- Parameter `name`: the one-argument overload requires a non-empty string; cookie names are case-sensitive.
+- Returns: the cached object without a name; with a name, string when present. Absent, empty, or non-string names
+  return `undefined`.
+- Exceptions: none.
+
+```javascript
+let cookies = req.getCookie();
+return {
+    session: req.getCookie("session"),
+    theme: cookies.theme
+};
+```
+
+### `req.getUri()`
+
+- Parameters: none.
+- Returns: the raw request-target string as `path[?query]`, without scheme, authority/Host, or fragment.
+- Exceptions: none.
+
+```javascript
+// For /orders/42?expand=items
+return req.getUri(); // "/orders/42?expand=items"
+```
+
+### `req.getPath()`
+
+- Parameters: none.
+- Returns: the parsed path string without `?` or query.
+- Exceptions: none.
+
+```javascript
+return req.getPath(); // for example, "/orders/42"
+```
+
+### `req.getQueryStr()`
+
+- Parameters: none.
+- Returns: the raw query without a leading `?`; no query returns empty. No form decoding is performed.
+- Exceptions: none.
+
+```javascript
+return req.getQueryStr(); // for example, "expand=items&lang=en"
+```
+
+### `req.getMethod()`
+
+- Parameters: none.
+- Returns: the current request method token, such as `"GET"` or `"POST"`.
+- Exceptions: none.
+
+```javascript
+if (req.getMethod() !== "POST") {
+    resp.sendJson(405, { error: "METHOD_NOT_ALLOWED" });
+    return;
+}
+```
+
+### `req.readJson()`
+
+- Parameters: none. This is an async host function, but script code calls it directly without `await`.
+- Returns: any JSON ScriptValue after fully consuming and parsing the request body.
+- Exceptions: a read failure raises `Error("read request body failed")`; an empty body raises
+  `Error("client did not sent body")`; malformed JSON raises `Error("invalid json body")`. Unlike
+  `JSON.parse()`, it does not expose detailed `SyntaxError` parse data.
+- Side effects: consumes the one-shot body. Do not call another body reader or operation that requires the
+  original body afterward.
+
+```javascript
+try {
+    let body = req.readJson();
+    return { name: body.name, accepted: true };
+} catch (e) {
+    resp.sendJson(400, { error: "INVALID_JSON_BODY" });
+    return;
+}
+```
+
+### `req.readBinary()`
+
+- Parameters: none; async host function.
+- Returns: Binary containing the full request body; an empty body returns zero-byte Binary.
+- Exceptions: a body read failure raises `Error("read request body failed")`.
+- Side effects: consumes the one-shot body and coalesces all bytes in memory.
+
+```javascript
+let body = req.readBinary();
+return {
+    size: length(body),
+    sha256: hash.sha256(body)
+};
+```
+
+### `req.discardBody()`
+
+- Parameters: none; async host function.
+- Returns: `null`.
+- Exceptions: the compatibility implementation ignores the underlying drain error and raises no catchable
+  exception.
+- Side effects: consumes and discards the remaining request body; useful before an early response when preserving
+  connection-reuse conditions.
+
+```javascript
+req.discardBody();
+resp.send(204);
+return;
+```
+
 ## 15. Response HTTP API: `resp.*`
 
 ```typescript
@@ -575,6 +1308,112 @@ declare namespace resp {
 - `send(status,string)` writes UTF-8 and sets `text/plain;charset=utf-8`;
 - `send(status,other)` uses JSON and `application/json`;
 - send commits headers and ends the stream. Call one send function and immediately return.
+
+### `resp.setHeader(name, value)`
+
+- Parameter `name`: required non-empty string.
+- Parameter `value`: required. Strings, integers, floats, booleans, and `null` become compatibility text. Empty
+  strings, `undefined`, arrays, objects, and Binary produce empty text and are invalid.
+- Returns: `null`.
+- Exceptions: an invalid name or empty converted value raises
+  `Error("set header require string key value")`.
+- Side effects: replaces the same-name pending response header. A valid call after headers are committed silently
+  makes no wire change.
+
+```javascript
+resp.setHeader("Cache-Control", "no-store");
+resp.setHeader("X-Route-Version", 7);
+return { ok: true };
+```
+
+### `resp.addHeader(name, value)`
+
+- Parameters and text conversion match `resp.setHeader()`.
+- Returns: `null`.
+- Exceptions: an invalid name/value raises `Error("add header require string key value")`.
+- Side effects: appends rather than replaces, for fields such as multiple `Set-Cookie` values. A valid call after
+  headers are committed silently makes no wire change.
+
+```javascript
+resp.addHeader("Vary", "Accept-Encoding");
+resp.addHeader("Vary", "Origin");
+return { ok: true };
+```
+
+### `resp.addCookie(cookie)`
+
+- Parameter `cookie`: required object. Unknown fields are ignored.
+
+| Field      | Accepted type                        | Default/behavior                                      |
+| ---------- | ------------------------------------ | ----------------------------------------------------- |
+| `name`     | Non-empty RFC token-character string | Required; invalid makes the function return `false`   |
+| `value`    | Any scalar                           | Compatibility text; absent/unrenderable becomes empty |
+| `domain`   | string                               | Non-string/empty omits `Domain`                       |
+| `path`     | string                               | Non-string/empty omits `Path`                         |
+| `maxAge`   | integer                              | Non-integer/negative omits it; `0` emits `Max-Age=0`  |
+| `secure`   | boolean                              | Only strict boolean `true` emits `Secure`             |
+| `httpOnly` | boolean                              | Only strict boolean `true` emits `HttpOnly`           |
+| `sameSite` | `"Lax"`, `"Strict"`, or `"None"`     | Case-sensitive; anything else omits `SameSite`        |
+
+- Returns: `true` after successful encoding and insertion into pending `Set-Cookie`; `false` for a non-object or
+  missing/empty/invalid-token name.
+- Exceptions: no function-specific catchable exception; invalid cookies are represented by `false`.
+- Side effects: appends one `Set-Cookie`. Call it before `send*()` because committed headers cannot change.
+
+```javascript
+let added = resp.addCookie({
+    name: "session",
+    value: "abc123",
+    path: "/",
+    maxAge: 3600,
+    secure: true,
+    httpOnly: true,
+    sameSite: "Lax"
+});
+return { cookieAdded: added };
+```
+
+### `resp.sendJson(status, body)`
+
+- Parameter `status`: required. Only an integer is used; another type falls back to 200. The function does not
+  pre-validate the status range, so an invalid HTTP status ultimately appears as a send failure.
+- Parameter `body`: any ScriptValue encoded with the HTTP JSON encoder. Top-level `undefined` becomes JSON
+  `null`; Binary becomes a Base64 JSON string.
+- Returns: `null` after successfully sending headers and the complete body.
+- Exceptions: JSON encoding or header/body write failure raises `Error("error send json")`.
+- Side effects: sets `Content-Type: application/json`, sends a fixed-`Content-Length` response, and ends the
+  stream.
+
+```javascript
+resp.sendJson(201, {
+    id: $path.id,
+    created: true
+});
+return;
+```
+
+### `resp.send(status)` / `resp.send(status, body)`
+
+- Parameter `status`: required. Only an integer is used; another type falls back to 200.
+- Parameter `body`: optional. Omitted sends zero bytes. Binary is raw with no automatic Content-Type; a string is
+  UTF-8 with `text/plain;charset=utf-8`; another value is JSON with `application/json`.
+- Returns: `null` after a successful send.
+- Exceptions: an empty-response failure raises `Error("error send")`; Binary write failure raises
+  `Error("error write binary response")`; text failure raises `Error("error textual response")`; JSON
+  encoding/write failure raises `Error("error send json")`.
+- Side effects: commits response headers and ends the stream. A normal execution calls exactly one `send*()` and
+  returns immediately afterward.
+
+```javascript
+if (req.getMethod() === "HEAD") {
+    resp.send(204);
+    return;
+}
+
+resp.setHeader("Content-Type", "application/octet-stream");
+resp.send(200, binary.fromHex("89504e47"));
+return;
+```
 
 ## 16. Route and connection constants
 

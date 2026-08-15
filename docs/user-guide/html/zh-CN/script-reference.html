@@ -375,6 +375,103 @@ Object.deleteProperties
 URL.encodeComponent            URL.decodeComponent             URL.parseQuery
 URL.buildQuery
 </code></pre>
+<h3 id="4-1-如何阅读函数说明">
+  4.1 如何阅读函数说明<a
+    class="documentation-heading-anchor"
+    href="#4-1-如何阅读函数说明"
+    aria-label="Link to 4.1 如何阅读函数说明"
+    >#</a
+  >
+</h3>
+<p>
+  下文使用接近 TypeScript 的写法表达签名，但它只是文档记法，不表示脚本支持 TypeScript。<code
+    >?</code
+  >
+  或 <code>= default</code> 表示可省略参数，<code>...items</code>
+  表示可变参数。所有函数名和参数数量都在<strong>配置编译期</strong>解析：
+</p>
+<ul>
+  <li>
+    少传必填参数、多传固定参数、调用不存在的函数或无法解析重载，会拒绝候选配置；这不是运行时异常，
+    不能用 <code>try/catch</code> 捕获；
+  </li>
+  <li>
+    可选参数由运行时插入文档列出的默认值；可变参数可以为空，也可以使用 <code>...array</code> 展开；
+  </li>
+  <li>
+    参数类型通常在<strong>执行期</strong>检查。各函数的“异常”字段明确说明类型错误是返回
+    <code>null</code>/<code>undefined</code>/ <code>false</code>，还是抛出可捕获异常；
+  </li>
+  <li>“返回原对象/原数组”表示原地修改且保持对象 identity，不会创建副本；</li>
+  <li>string 的 index/length 除特别说明外使用 UTF-16 code unit，Binary 的 length 使用 byte。</li>
+</ul>
+<h3 id="4-2-异常与执行中止不是一回事">
+  4.2 异常与执行中止不是一回事<a
+    class="documentation-heading-anchor"
+    href="#4-2-异常与执行中止不是一回事"
+    aria-label="Link to 4.2 异常与执行中止不是一回事"
+    >#</a
+  >
+</h3>
+<table>
+  <thead>
+    <tr>
+      <th>结果</th>
+      <th>能否 <code>catch</code></th>
+      <th>JavaScript Route 的最终处理</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>TypeError</code></td>
+      <td>是</td>
+      <td>未捕获时映射为 500 <code>SCRIPT_EXECUTION</code></td>
+    </tr>
+    <tr>
+      <td><code>RangeError</code></td>
+      <td>是</td>
+      <td>未捕获时映射为 500 <code>SCRIPT_EXECUTION</code></td>
+    </tr>
+    <tr>
+      <td><code>SyntaxError</code></td>
+      <td>是</td>
+      <td>未捕获时映射为 500 <code>SCRIPT_EXECUTION</code></td>
+    </tr>
+    <tr>
+      <td><code>Error</code></td>
+      <td>是</td>
+      <td>HTTP 读取、编码或写入失败等；未捕获时映射为 500</td>
+    </tr>
+    <tr>
+      <td><code>Abort</code></td>
+      <td>否</td>
+      <td>
+        例如
+        <code>OutOfMemory</code
+        >、<code>Timeout</code>、<code>Cancelled</code>、<code>InvalidState</code>；500
+      </td>
+    </tr>
+    <tr>
+      <td>配置编译错误</td>
+      <td>否</td>
+      <td>候选快照被拒绝，旧快照继续服务</td>
+    </tr>
+  </tbody>
+</table>
+<p>
+  每个条目的“异常”默认只描述脚本可捕获异常。任何需要分配结果 string、Binary、array 或 object
+  的函数， 都可能在资源耗尽时以 <code>OutOfMemory</code> 中止；HTTP
+  异步函数还可能因宿主取消或超时中止。中止不是脚本语言的 <code>throw</code>，不会进入
+  <code>catch</code>。文档只在函数存在额外、稳定的中止条件时重复标注。
+</p>
+<pre><code class="language-javascript">let decoded;
+try {
+    decoded = binary.base64Decode(&quot;not-base64&quot;);
+} catch (e) {
+    // RangeError 会进入这里。
+    decoded = binary.fromHex(&quot;&quot;);
+}
+</code></pre>
 <h2 id="5-通用函数">
   5. 通用函数<a
     class="documentation-heading-anchor"
@@ -386,18 +483,33 @@ URL.buildQuery
 <pre><code class="language-typescript">function length(value?: ScriptValue): number;
 function includes(container: string | ScriptValue[], ...items: ScriptValue[]): boolean;
 </code></pre>
-<h3 id="length-value">
-  <code>length(value)</code
-  ><a class="documentation-heading-anchor" href="#length-value" aria-label="Link to `length(value)`"
+<h3 id="length-value-null">
+  <code>length(value = null)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#length-value-null"
+    aria-label="Link to `length(value = null)`"
     >#</a
   >
 </h3>
 <ul>
-  <li>省略参数等同于 <code>null</code>；</li>
-  <li>string 返回 UTF-16 code unit 数；</li>
-  <li>Binary 返回 byte 数；array 返回元素数；object 返回属性数；</li>
-  <li><code>null</code>、<code>undefined</code>、number、boolean 和其他类型返回 0。</li>
+  <li>参数：<code>value</code> 可为任意脚本值；省略时默认 <code>null</code>。</li>
+  <li>
+    返回：integer。string 返回 UTF-16 code unit 数；Binary 返回 byte 数；array 返回元素数；object
+    返回自有属性数；<code>null</code>、<code>undefined</code>、number、boolean 及其他内部类型返回
+    0。
+  </li>
+  <li>异常：不抛可捕获异常。</li>
+  <li>副作用：无。</li>
 </ul>
+<pre><code class="language-javascript">return {
+    ascii: length(&quot;abc&quot;), // 3
+    emoji: length(&quot;A😀&quot;), // 3：A 为 1，😀 为两个 UTF-16 code unit
+    bytes: length(binary.fromHex(&quot;00ff10&quot;)), // 3
+    fields: length({ a: 1, b: 2 }), // 2
+    omitted: length() // 0
+};
+</code></pre>
 <h3 id="includes-container-items">
   <code>includes(container, ...items)</code
   ><a
@@ -408,11 +520,24 @@ function includes(container: string | ScriptValue[], ...items: ScriptValue[]): b
   >
 </h3>
 <ul>
-  <li>string container 要求每个 item 都是它的 substring；</li>
-  <li>array container 要求每个 item 都能以严格相等 <code>===</code> 找到；</li>
-  <li>其他 container 返回 false；</li>
-  <li>没有 item 时，合法 string/array container 返回 true。</li>
+  <li>参数 <code>container</code>：必填，只对 string 或 array 有匹配语义。</li>
+  <li>参数 <code>items</code>：零个或多个待检查值。</li>
+  <li>
+    返回：boolean。string container 要求每个 item 都是 string 且都是它的 substring；array container
+    要求每个 item 都能用严格相等 <code>===</code> 找到。其他 container 或 string 中出现非 string
+    item 时返回 <code>false</code>。<code>items</code> 为空时，合法 string/array container 返回
+    <code>true</code>。
+  </li>
+  <li>异常：不抛可捕获异常。</li>
+  <li>副作用：无。</li>
 </ul>
+<pre><code class="language-javascript">return {
+    text: includes(&quot;access-gateway&quot;, &quot;access&quot;, &quot;way&quot;), // true
+    methods: includes([&quot;GET&quot;, &quot;POST&quot;], req.getMethod()),
+    strict: includes([1], &quot;1&quot;), // false：1 !== &quot;1&quot;
+    emptyCheck: includes([]) // true
+};
+</code></pre>
 <h2 id="6-array-函数">
   6. Array 函数<a
     class="documentation-heading-anchor"
@@ -427,20 +552,74 @@ function includes(container: string | ScriptValue[], ...items: ScriptValue[]): b
     function push(values: ScriptValue[], ...items: ScriptValue[]): ScriptValue[];
 }
 </code></pre>
+<h3 id="array-join-values-separator">
+  <code>array.join(values, separator = &quot;&quot;)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#array-join-values-separator"
+    aria-label='Link to `array.join(values, separator = "")`'
+    >#</a
+  >
+</h3>
 <ul>
+  <li>参数 <code>values</code>：必填，必须是 array。</li>
   <li>
-    <code>array.join()</code> 默认 separator 是空字符串，不是 JavaScript
-    的逗号。string、number、boolean 转为 text；<code>null</code>、<code>undefined</code>、container
-    和 Binary 作为空文本；非 array 抛 TypeError；
+    参数 <code>separator</code>：可选，默认空字符串，不是 JavaScript 原生
+    <code>join()</code> 的逗号。string、integer、float 和 boolean
+    转为文本；<code>null</code>、<code>undefined</code>、array、object 和 Binary 转为空文本。
   </li>
+  <li>返回：新 string。每个元素使用与 separator 相同的兼容文本转换。</li>
+  <li>异常：<code>values</code> 不是 array 时抛 <code>TypeError</code>。</li>
+  <li>副作用：不修改输入 array。</li>
+</ul>
+<pre><code class="language-javascript">return array.join([&quot;route&quot;, 7, null, true], &quot;|&quot;);
+// &quot;route|7||true&quot;
+</code></pre>
+<h3 id="array-pop-values">
+  <code>array.pop(values)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#array-pop-values"
+    aria-label="Link to `array.pop(values)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>参数 <code>values</code>：必填，必须是 array。</li>
+  <li>返回：删除前的最后一个元素；空 array 返回 <code>null</code>。</li>
+  <li>异常：<code>values</code> 不是 array 时抛 <code>TypeError</code>。</li>
+  <li>副作用：原地删除一个元素；对空 array 不做修改。</li>
+</ul>
+<pre><code class="language-javascript">let values = [&quot;a&quot;, &quot;b&quot;];
+let last = array.pop(values);
+return { last: last, remaining: values };
+// {&quot;last&quot;:&quot;b&quot;,&quot;remaining&quot;:[&quot;a&quot;]}
+</code></pre>
+<h3 id="array-push-values-items">
+  <code>array.push(values, ...items)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#array-push-values-items"
+    aria-label="Link to `array.push(values, ...items)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>参数 <code>values</code>：必填，必须是 array。</li>
   <li>
-    <code>array.pop()</code> 原地删除并返回末项，空 array 返回 <code>null</code>，非 array 抛
-    TypeError；
+    参数 <code>items</code>：零个或多个任意脚本值，也可以通过 <code>...anotherArray</code> 展开。
   </li>
+  <li>返回：被修改的 <code>values</code> 本身，<strong>不是</strong>新长度。</li>
+  <li>异常：<code>values</code> 不是 array 时抛 <code>TypeError</code>。</li>
   <li>
-    <code>array.push()</code> 原地追加并返回 array 自身，不返回新 length，非 array 抛 TypeError。
+    副作用：按参数顺序把 <code>items</code> 原地追加到 <code>values</code>；没有 item 时保持不变。
   </li>
 </ul>
+<pre><code class="language-javascript">let values = [1];
+let same = array.push(values, 2, ...[3, 4]);
+return { values: values, sameObject: same === values };
+// {&quot;values&quot;:[1,2,3,4],&quot;sameObject&quot;:true}
+</code></pre>
 <h2 id="7-string-函数">
   7. String 函数<a
     class="documentation-heading-anchor"
@@ -517,6 +696,373 @@ function includes(container: string | ScriptValue[], ...items: ScriptValue[]): b
     <code>JSON.stringify()</code>。
   </li>
 </ul>
+<h3 id="strings-hasprefix-text-prefix">
+  <code>strings.hasPrefix(text, prefix)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#strings-hasprefix-text-prefix"
+    aria-label="Link to `strings.hasPrefix(text, prefix)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>参数：<code>text</code> 和 <code>prefix</code> 都必须是 string；二者都必填。</li>
+  <li>
+    返回：以 <code>prefix</code> 开头时为 boolean <code>true</code>，否则为 <code>false</code>。空
+    prefix 匹配任何合法 string。
+  </li>
+  <li>异常：不抛；任一参数不是 string 时返回 <code>false</code>。</li>
+</ul>
+<pre><code class="language-javascript">return strings.hasPrefix(&quot;/api/v1/orders&quot;, &quot;/api/&quot;); // true
+</code></pre>
+<h3 id="strings-hassuffix-text-suffix">
+  <code>strings.hasSuffix(text, suffix)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#strings-hassuffix-text-suffix"
+    aria-label="Link to `strings.hasSuffix(text, suffix)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>参数：<code>text</code> 和 <code>suffix</code> 都必须是 string；二者都必填。</li>
+  <li>
+    返回：以 <code>suffix</code> 结尾时为 boolean <code>true</code>，否则为 <code>false</code>。空
+    suffix 匹配任何合法 string。
+  </li>
+  <li>异常：不抛；任一参数不是 string 时返回 <code>false</code>。</li>
+</ul>
+<pre><code class="language-javascript">return strings.hasSuffix(&quot;archive.tar.gz&quot;, &quot;.gz&quot;); // true
+</code></pre>
+<h3 id="strings-tolower-text">
+  <code>strings.toLower(text)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#strings-tolower-text"
+    aria-label="Link to `strings.toLower(text)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>参数 <code>text</code>：必填 string。</li>
+  <li>
+    返回：新 string，只把 ASCII <code>A-Z</code> 转为 <code>a-z</code>；UTF-8 多字节字符保持不变。非
+    string 返回 <code>null</code>。
+  </li>
+  <li>异常：不抛可捕获异常。</li>
+</ul>
+<pre><code class="language-javascript">return strings.toLower(&quot;API-ÄBC-中文&quot;); // &quot;api-Äbc-中文&quot;
+</code></pre>
+<h3 id="strings-toupper-text">
+  <code>strings.toUpper(text)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#strings-toupper-text"
+    aria-label="Link to `strings.toUpper(text)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>参数 <code>text</code>：必填 string。</li>
+  <li>
+    返回：新 string，只把 ASCII <code>a-z</code> 转为 <code>A-Z</code>；非 ASCII 字符保持不变。非
+    string 返回 <code>null</code>。
+  </li>
+  <li>异常：不抛可捕获异常。</li>
+</ul>
+<pre><code class="language-javascript">return strings.toUpper(&quot;api-äbc-中文&quot;); // &quot;API-äBC-中文&quot;
+</code></pre>
+<h3 id="strings-trim-text-cutset-null">
+  <code>strings.trim(text, cutset = null)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#strings-trim-text-cutset-null"
+    aria-label="Link to `strings.trim(text, cutset = null)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>参数 <code>text</code>：必填 string；非 string 返回 <code>null</code>。</li>
+  <li>
+    参数 <code>cutset</code>：可选。省略、<code>null</code> 或其他非 string 值时，删除两端 byte
+    value <code>&lt;= 0x20</code> 的字符； 传 string 时，把它当作一个<strong>完整 substring</strong
+    >从左右两端反复删除。
+  </li>
+  <li>返回：trim 后的新 string。空 cutset 不做任何删除。</li>
+  <li>异常：不抛可捕获异常。</li>
+</ul>
+<pre><code class="language-javascript">return {
+    whitespace: strings.trim(&quot; \t value \n&quot;), // &quot;value&quot;
+    marker: strings.trim(&quot;ababvalueabab&quot;, &quot;ab&quot;) // &quot;value&quot;
+};
+</code></pre>
+<h3 id="strings-trimleft-text-cutset-null">
+  <code>strings.trimLeft(text, cutset = null)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#strings-trimleft-text-cutset-null"
+    aria-label="Link to `strings.trimLeft(text, cutset = null)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>参数 <code>text</code>：必填 string；非 string 返回 <code>null</code>。</li>
+  <li>
+    参数 <code>cutset</code>：省略或非 string 时，删除左侧 ASCII Java whitespace
+    <code>0x09..0x0d</code>、<code>0x1c..0x20</code>；传 string 时，从左侧反复删除完整 substring。
+  </li>
+  <li>返回：处理后的 string；不修改原值。</li>
+  <li>异常：不抛可捕获异常。</li>
+</ul>
+<pre><code class="language-javascript">return strings.trimLeft(&quot;///v1/items///&quot;, &quot;/&quot;); // &quot;v1/items///&quot;
+</code></pre>
+<h3 id="strings-trimright-text-cutset-null">
+  <code>strings.trimRight(text, cutset = null)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#strings-trimright-text-cutset-null"
+    aria-label="Link to `strings.trimRight(text, cutset = null)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>参数与 <code>trimLeft()</code> 相同，但只处理右端。</li>
+  <li>
+    返回：处理后的 string；空 cutset 不做删除，非 string <code>text</code> 返回 <code>null</code>。
+  </li>
+  <li>异常：不抛可捕获异常。</li>
+</ul>
+<pre><code class="language-javascript">return strings.trimRight(&quot;///v1/items///&quot;, &quot;/&quot;); // &quot;///v1/items&quot;
+</code></pre>
+<h3 id="strings-split-text-separators-null">
+  <code>strings.split(text, separators = null)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#strings-split-text-separators-null"
+    aria-label="Link to `strings.split(text, separators = null)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>参数 <code>text</code>：必填 string；非 string 返回 <code>null</code>。</li>
+  <li>
+    参数 <code>separators</code>：省略或非 string 时不拆分，返回只含原 string 的 array；传 string
+    时，其中每个 Unicode code point 都是独立分隔符，不把整个字符串当作一个 delimiter。
+  </li>
+  <li>
+    返回：新 string array。连续分隔符会合并，前导/尾随分隔符不生成空元素；显式空 separators 不匹配
+    任何字符，因此非空 text 返回 <code>[text]</code>，空 text 返回 <code>[]</code>。
+  </li>
+  <li>异常：不抛可捕获异常。</li>
+</ul>
+<pre><code class="language-javascript">return {
+    parts: strings.split(&quot;a,b;;c,&quot;, &quot;,;&quot;), // [&quot;a&quot;, &quot;b&quot;, &quot;c&quot;]
+    untouched: strings.split(&quot;a,b&quot;) // [&quot;a,b&quot;]
+};
+</code></pre>
+<h3 id="strings-contains-text-value">
+  <code>strings.contains(text, value)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#strings-contains-text-value"
+    aria-label="Link to `strings.contains(text, value)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>参数：<code>text</code> 和 <code>value</code> 都必须是 string。</li>
+  <li>
+    返回：找到完整 substring 时为 boolean <code>true</code>，找不到为 <code>false</code>；空 value
+    返回 <code>true</code>。任一参数 非 string 时返回 <code>null</code>。
+  </li>
+  <li>异常：不抛可捕获异常。</li>
+</ul>
+<pre><code class="language-javascript">return strings.contains(&quot;access-gateway&quot;, &quot;gateway&quot;); // true
+</code></pre>
+<h3 id="strings-contains-any-text-chars">
+  <code>strings.contains_any(text, chars)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#strings-contains-any-text-chars"
+    aria-label="Link to `strings.contains_any(text, chars)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>
+    参数：<code>text</code> 必须是 string；<code>chars</code> 是 Unicode code point 集合，而不是
+    substring。
+  </li>
+  <li>
+    返回：<code>text</code> 含 <code>chars</code> 中任一字符时为 boolean；空 chars 返回
+    <code>false</code>；类型错误返回 <code>null</code>。
+  </li>
+  <li>异常：不抛可捕获异常。</li>
+</ul>
+<pre><code class="language-javascript">return strings.contains_any(&quot;route-42&quot;, &quot;xyz2&quot;); // true，因为命中字符 &quot;2&quot;
+</code></pre>
+<h3 id="strings-index-text-value">
+  <code>strings.index(text, value)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#strings-index-text-value"
+    aria-label="Link to `strings.index(text, value)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>参数：两个必填 string；<code>value</code> 按完整 substring 查找。</li>
+  <li>
+    返回：首次匹配的 UTF-16 index；找不到返回 integer <code>-1</code>；类型错误返回
+    <code>null</code>。
+  </li>
+  <li>异常：不抛可捕获异常。</li>
+</ul>
+<pre><code class="language-javascript">return strings.index(&quot;😀-route&quot;, &quot;route&quot;); // 3：😀 占两个 UTF-16 code unit
+</code></pre>
+<h3 id="strings-indexany-text-chars">
+  <code>strings.indexAny(text, chars)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#strings-indexany-text-chars"
+    aria-label="Link to `strings.indexAny(text, chars)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>参数：两个必填 string；<code>chars</code> 中每个 Unicode code point 都是候选字符。</li>
+  <li>
+    返回：任何候选字符首次出现的 UTF-16 index；找不到返回 <code>-1</code>；类型错误返回
+    <code>null</code>。
+  </li>
+  <li>异常：不抛可捕获异常。</li>
+</ul>
+<pre><code class="language-javascript">return strings.indexAny(&quot;abc-123&quot;, &quot;93c&quot;); // 2，先命中 text 中的 &quot;c&quot;
+</code></pre>
+<h3 id="strings-lastindex-text-value">
+  <code>strings.lastIndex(text, value)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#strings-lastindex-text-value"
+    aria-label="Link to `strings.lastIndex(text, value)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>参数：两个必填 string；<code>value</code> 按完整 substring 查找。</li>
+  <li>
+    返回：最后一次匹配的 UTF-16 index；找不到返回 <code>-1</code>；空 value 返回
+    <code>length(text)</code>；类型错误返回 <code>null</code>。
+  </li>
+  <li>异常：不抛可捕获异常。</li>
+</ul>
+<pre><code class="language-javascript">return strings.lastIndex(&quot;a/b/a&quot;, &quot;a&quot;); // 4
+</code></pre>
+<h3 id="strings-lastindexany-text-chars">
+  <code>strings.lastIndexAny(text, chars)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#strings-lastindexany-text-chars"
+    aria-label="Link to `strings.lastIndexAny(text, chars)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>参数：两个必填 string；<code>chars</code> 按 Unicode code point 顺序遍历。</li>
+  <li>
+    返回：找到的<strong>第一个候选字符</strong>在 <code>text</code> 中的最后 UTF-16
+    index；只有该候选完全不存在时才检查 <code>chars</code> 的下一个字符。所有候选都不存在时返回
+    <code>-1</code>，类型错误返回 <code>null</code>。
+  </li>
+  <li>异常：不抛可捕获异常。</li>
+  <li>兼容提醒：结果不是所有候选字符最后位置的最大值。</li>
+</ul>
+<pre><code class="language-javascript">return strings.lastIndexAny(&quot;abca&quot;, &quot;bc&quot;);
+// 1：先检查 &quot;b&quot;，其最后位置为 1；不会再选择位置 2 的 &quot;c&quot;
+</code></pre>
+<h3 id="strings-repeat-text-count">
+  <code>strings.repeat(text, count)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#strings-repeat-text-count"
+    aria-label="Link to `strings.repeat(text, count)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>参数 <code>text</code>：必填 string；非 string 返回 <code>null</code>。</li>
+  <li>
+    参数 <code>count</code>：必须是 integer 或 float。float 向 0 截断并按兼容的 32-bit integer
+    语义处理；非数值 或负数返回 <code>null</code>。
+  </li>
+  <li>
+    返回：重复 <code>count</code> 次的新 string；0 或空 text 返回空 string；1 返回原 string value。
+  </li>
+  <li>异常：不抛可捕获异常。</li>
+  <li>
+    执行中止：结果超过 16 MiB 时以 <code>OutOfMemory</code> 中止，不能由 <code>catch</code> 捕获。
+  </li>
+</ul>
+<pre><code class="language-javascript">return strings.repeat(&quot;ab&quot;, 3.9); // &quot;ababab&quot;
+</code></pre>
+<h3 id="strings-substring-text-start-0-end-2147483647">
+  <code>strings.substring(text, start = 0, end = 2147483647)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#strings-substring-text-start-0-end-2147483647"
+    aria-label="Link to `strings.substring(text, start = 0, end = 2147483647)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>参数 <code>text</code>：必填 string；非 string 返回 <code>null</code>。</li>
+  <li>
+    参数 <code>start</code>/<code>end</code>：UTF-16 index。number 向 0 截断；boolean 转成
+    0/1；以合法 integer 开头的 string 读取该 integer 前缀（例如 <code>&quot;4x&quot;</code> 按
+    4）；<code>null</code>、<code>undefined</code> 和其他值按 0。<code>start &lt; 0</code> 归零。
+  </li>
+  <li>
+    返回：半开区间 <code>[start, end)</code> 的 string。<code>start &gt;= length(text)</code> 或
+    <code>end &lt;= start</code> 返回空 string； <code>end</code> 超过长度时截到末尾。
+  </li>
+  <li>异常：不抛可捕获异常。</li>
+</ul>
+<pre><code class="language-javascript">return {
+    normal: strings.substring(&quot;gateway&quot;, 0, 4), // &quot;gate&quot;
+    clamped: strings.substring(&quot;gateway&quot;, -5, 4), // &quot;gate&quot;
+    converted: strings.substring(&quot;gateway&quot;, &quot;4&quot;, 99) // &quot;way&quot;
+};
+</code></pre>
+<h3 id="strings-tostring-strings-tostring-value">
+  <code>strings.toString()</code> / <code>strings.toString(value)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#strings-tostring-strings-tostring-value"
+    aria-label="Link to `strings.toString()` / `strings.toString(value)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>参数：允许 0 或 1 个。无参数返回空 string。</li>
+  <li>
+    返回：string。<code>null</code>/<code>undefined</code> 为
+    <code>&quot;null&quot;</code>；string、number、boolean 使用文本值；Binary 使用原始 byte
+    的兼容文本；array/object 分别为字面量
+    <code>&quot;&lt;ArrayNode&gt;&quot;</code>/<code>&quot;&lt;ObjectNode&gt;&quot;</code>。
+  </li>
+  <li>异常：不抛可捕获异常。</li>
+  <li>
+    提醒：这不是 JSON encoder；object、array 或需要稳定 wire format 的数据必须使用
+    <code>JSON.stringify()</code>。
+  </li>
+</ul>
+<pre><code class="language-javascript">return {
+    empty: strings.toString(), // &quot;&quot;
+    missing: strings.toString(null), // &quot;null&quot;
+    object: strings.toString({ ok: true }), // &quot;&lt;ObjectNode&gt;&quot;
+    json: JSON.stringify({ ok: true }) // &quot;{\&quot;ok\&quot;:true}&quot;
+};
+</code></pre>
 <p><code>strings.match</code> 和 <code>strings.findAll</code> 未注册。</p>
 <h2 id="8-binary-函数">
   8. Binary 函数<a
@@ -534,26 +1080,112 @@ function includes(container: string | ScriptValue[], ...items: ScriptValue[]): b
     function getUtf8Bytes(value: ScriptValue): Binary;
 }
 </code></pre>
+<h3 id="binary-base64encode-value">
+  <code>binary.base64Encode(value)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#binary-base64encode-value"
+    aria-label="Link to `binary.base64Encode(value)`"
+    >#</a
+  >
+</h3>
 <ul>
-  <li><code>base64Encode</code> 只接受 Binary，其他类型返回 undefined；</li>
+  <li>参数 <code>value</code>：必填；只有 Binary 会被编码。</li>
   <li>
-    <code>base64Decode</code> 只接受 string，其他类型返回 undefined；非法字符、padding、非 4
-    倍数长度或 whitespace 抛 RangeError；
+    返回：标准 Base64 string，包含需要的 <code>=</code> padding；0-byte Binary 返回空 string。非
+    Binary 返回 <code>undefined</code>。
   </li>
-  <li><code>hex</code> 返回小写 hex，非 Binary 抛 TypeError；</li>
+  <li>异常：不抛可捕获异常；类型错误不是异常。</li>
+</ul>
+<pre><code class="language-javascript">let bytes = binary.fromHex(&quot;48656c6c6f&quot;);
+return binary.base64Encode(bytes); // &quot;SGVsbG8=&quot;
+</code></pre>
+<h3 id="binary-base64decode-value">
+  <code>binary.base64Decode(value)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#binary-base64decode-value"
+    aria-label="Link to `binary.base64Decode(value)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>参数 <code>value</code>：必填；只有 string 会被解码。</li>
+  <li>返回：Binary；空 string 返回 0-byte Binary。非 string 返回 <code>undefined</code>。</li>
   <li>
-    <code>fromHex</code> 严格要求偶数长度和合法 hex，非法内容抛 RangeError，非 string 抛 TypeError；
-  </li>
-  <li>
-    <code>getUtf8Bytes</code> 把兼容文本表示编码为 UTF-8。object/array 分别编码
-    <code>&lt;ObjectNode&gt;</code> 和 <code>&lt;ArrayNode&gt;</code>，它不是 JSON-to-bytes；需要
-    JSON byte 时先 <code>JSON.stringify()</code>，再传给该函数；
-  </li>
-  <li>
-    当前没有通用的 Binary-to-UTF-8-string decoder。需要解析 JSON body 时直接使用
-    <code>req.readJson()</code>。
+    异常：非法 Base64 字符、错误或多余 padding、非 4 倍数长度、夹杂 whitespace 时抛
+    <code>RangeError</code>。
   </li>
 </ul>
+<pre><code class="language-javascript">try {
+    return binary.hex(binary.base64Decode(&quot;AP8=&quot;)); // &quot;00ff&quot;
+} catch (e) {
+    return &quot;invalid base64&quot;;
+}
+</code></pre>
+<h3 id="binary-hex-value">
+  <code>binary.hex(value)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#binary-hex-value"
+    aria-label="Link to `binary.hex(value)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>参数 <code>value</code>：必填 Binary。</li>
+  <li>返回：每个 byte 两个字符的小写 hexadecimal string；0-byte Binary 返回空 string。</li>
+  <li>异常：非 Binary 抛 <code>TypeError</code>。</li>
+</ul>
+<pre><code class="language-javascript">return binary.hex(binary.base64Decode(&quot;AQID&quot;)); // &quot;010203&quot;
+</code></pre>
+<h3 id="binary-fromhex-value">
+  <code>binary.fromHex(value)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#binary-fromhex-value"
+    aria-label="Link to `binary.fromHex(value)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>参数 <code>value</code>：必填 string；大小写 hex digit 都接受。</li>
+  <li>返回：Binary；每两个 hex digit 生成一个 byte，空 string 返回 0-byte Binary。</li>
+  <li>
+    异常：非 string 抛 <code>TypeError</code>；长度为奇数或出现非 hex digit 时抛
+    <code>RangeError</code>。
+  </li>
+</ul>
+<pre><code class="language-javascript">return binary.base64Encode(binary.fromHex(&quot;48656C6C6F&quot;)); // &quot;SGVsbG8=&quot;
+</code></pre>
+<h3 id="binary-getutf8bytes-value">
+  <code>binary.getUtf8Bytes(value)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#binary-getutf8bytes-value"
+    aria-label="Link to `binary.getUtf8Bytes(value)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>参数 <code>value</code>：必填任意脚本值。</li>
+  <li>
+    返回：兼容文本表示的 byte：string 使用 UTF-8 byte；number、boolean、<code>null</code>
+    使用各自文本； <code>undefined</code> 使用空文本；Binary 保留原始 byte；array/object 使用
+    <code>&quot;&lt;ArrayNode&gt;&quot;</code>/<code>&quot;&lt;ObjectNode&gt;&quot;</code>。
+  </li>
+  <li>异常：不抛可捕获异常。</li>
+  <li>
+    提醒：它不是 JSON-to-bytes。JSON wire byte 应使用
+    <code>binary.getUtf8Bytes(JSON.stringify(value))</code>。当前没有通用 Binary-to-UTF-8-string
+    decoder；解析请求 JSON 应直接使用 <code>req.readJson()</code>。
+  </li>
+</ul>
+<pre><code class="language-javascript">return {
+    text: binary.hex(binary.getUtf8Bytes(&quot;Hi&quot;)), // &quot;4869&quot;
+    json: binary.hex(binary.getUtf8Bytes(JSON.stringify({ ok: true })))
+};
+</code></pre>
 <h2 id="9-hash-函数">
   9. Hash 函数<a
     class="documentation-heading-anchor"
@@ -569,14 +1201,91 @@ function includes(container: string | ScriptValue[], ...items: ScriptValue[]): b
     function sha256(value: string | Binary): string;
 }
 </code></pre>
+<h3 id="hash-crc32-value">
+  <code>hash.crc32(value)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#hash-crc32-value"
+    aria-label="Link to `hash.crc32(value)`"
+    >#</a
+  >
+</h3>
 <ul>
   <li>
-    <code>crc32</code> 对兼容文本表示计算 CRC-32，返回 <code>0..0xffffffff</code>；container 和
-    Binary 的兼容文本为空；
+    参数 <code>value</code>：必填任意值。string 按 UTF-8 byte；integer、float、boolean、<code
+      >null</code
+    >
+    按文本； <code>undefined</code>、array、object 和 Binary 按空文本。
   </li>
-  <li>md5/sha1/sha256 接受 UTF-8 string 或原始 Binary，返回小写 hex，其他类型抛 TypeError；</li>
-  <li>MD5 和 SHA-1 只用于旧系统互操作，不用于签名、密码或任何要求抗碰撞性的安全设计。</li>
+  <li>返回：integer，范围 <code>0..4294967295</code>。空文本返回 0。</li>
+  <li>异常：不抛可捕获异常。</li>
 </ul>
+<pre><code class="language-javascript">return hash.crc32(&quot;123456789&quot;); // 3421780262（0xcbf43926）
+</code></pre>
+<h3 id="hash-md5-value">
+  <code>hash.md5(value)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#hash-md5-value"
+    aria-label="Link to `hash.md5(value)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>参数 <code>value</code>：必填 UTF-8 string 或 Binary；Binary 直接使用原始 byte。</li>
+  <li>返回：32 个字符的小写 hexadecimal string。</li>
+  <li>
+    异常：其他参数类型抛 <code>TypeError</code>；底层摘要算法出现不可恢复故障时会以
+    <code>HostFault</code> 中止。
+  </li>
+  <li>安全：仅用于旧协议互操作，不能用于密码、签名或抗碰撞用途。</li>
+</ul>
+<pre><code class="language-javascript">return hash.md5(&quot;abc&quot;); // &quot;900150983cd24fb0d6963f7d28e17f72&quot;
+</code></pre>
+<h3 id="hash-sha1-value">
+  <code>hash.sha1(value)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#hash-sha1-value"
+    aria-label="Link to `hash.sha1(value)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>参数 <code>value</code>：必填 UTF-8 string 或 Binary。</li>
+  <li>返回：40 个字符的小写 hexadecimal string。</li>
+  <li>
+    异常：其他参数类型抛 <code>TypeError</code>；底层摘要算法出现不可恢复故障时会以
+    <code>HostFault</code> 中止。
+  </li>
+  <li>安全：仅用于旧协议互操作，不用于新的安全设计。</li>
+</ul>
+<pre><code class="language-javascript">return hash.sha1(&quot;abc&quot;); // &quot;a9993e364706816aba3e25717850c26c9cd0d89d&quot;
+</code></pre>
+<h3 id="hash-sha256-value">
+  <code>hash.sha256(value)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#hash-sha256-value"
+    aria-label="Link to `hash.sha256(value)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>参数 <code>value</code>：必填 UTF-8 string 或 Binary。</li>
+  <li>返回：64 个字符的小写 hexadecimal string。</li>
+  <li>
+    异常：其他参数类型抛 <code>TypeError</code>；底层摘要算法出现不可恢复故障时会以
+    <code>HostFault</code> 中止。
+  </li>
+  <li>
+    安全：这是无密钥摘要，不是 MAC。需要认证时不能用
+    <code>sha256(secret + data)</code> 替代经过审核的 HMAC。
+  </li>
+</ul>
+<pre><code class="language-javascript">return hash.sha256(&quot;abc&quot;);
+// &quot;ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad&quot;
+</code></pre>
 <h2 id="10-math-与随机函数">
   10. Math 与随机函数<a
     class="documentation-heading-anchor"
@@ -595,28 +1304,104 @@ namespace rand {
     function canary(ratio: number, ...keys: ScriptValue[]): boolean;
 }
 </code></pre>
+<h3 id="math-floor-value">
+  <code>math.floor(value)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#math-floor-value"
+    aria-label="Link to `math.floor(value)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>参数 <code>value</code>：必填 integer 或 float。</li>
+  <li>返回：integer 输入原样返回；有限 float 向负无穷取整并返回 integer。</li>
+  <li>异常：非 number 抛 <code>TypeError</code>。</li>
+</ul>
+<pre><code class="language-javascript">return { positive: math.floor(3.9), negative: math.floor(-1.2) };
+// {&quot;positive&quot;:3,&quot;negative&quot;:-2}
+</code></pre>
+<h3 id="math-abs-value">
+  <code>math.abs(value)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#math-abs-value"
+    aria-label="Link to `math.abs(value)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>参数 <code>value</code>：必填 integer 或 float。</li>
+  <li>
+    返回：与输入数值类别一致的绝对值。为 Java 兼容，最小 64-bit integer
+    <code>-9223372036854775808</code> 无可表示的正值，因此原样返回。
+  </li>
+  <li>异常：非 number 抛 <code>TypeError</code>。</li>
+</ul>
+<pre><code class="language-javascript">return { integer: math.abs(-7), floating: math.abs(-1.25) };
+// {&quot;integer&quot;:7,&quot;floating&quot;:1.25}
+</code></pre>
+<h3 id="rand-random-max-1000">
+  <code>rand.random(max = 1000)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#rand-random-max-1000"
+    aria-label="Link to `rand.random(max = 1000)`"
+    >#</a
+  >
+</h3>
 <ul>
   <li>
-    <code>math.floor</code> 对 integer 原样返回，对 floating 向负无穷取整；非 number 抛 TypeError；
+    参数 <code>max</code>：可选 integer 或 float，默认 1000。float 向 0 截断；极大 float 按 64-bit
+    边界饱和。
+  </li>
+  <li>返回：在半开区间 <code>[0, max)</code> 内均匀采样的 integer。</li>
+  <li>
+    异常：非 number 抛 <code>TypeError</code>；转换后的 <code>max &lt;= 0</code> 抛
+    <code>RangeError</code>。
+  </li>
+  <li>稳定性：每个 worker thread 独立、非确定性；不是密码学安全随机源。</li>
+</ul>
+<pre><code class="language-javascript">let shard = rand.random(16); // 0 到 15
+return shard;
+</code></pre>
+<h3 id="rand-canary-ratio-keys">
+  <code>rand.canary(ratio, ...keys)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#rand-canary-ratio-keys"
+    aria-label="Link to `rand.canary(ratio, ...keys)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>
+    参数 <code>ratio</code>：必填，目标百分比。integer/float 按 integer 使用，boolean 转成
+    1/0，其他类型按 0。
   </li>
   <li>
-    <code>math.abs</code> 返回绝对值；为 Java 兼容，<code>INT64_MIN</code> 保持原值；非 number 抛
-    TypeError；
+    参数 <code>keys</code>：零个或多个任意值。有 key 时按参数顺序把非空兼容文本累计输入
+    CRC-32；<code>null</code> 文本为
+    <code>&quot;null&quot;</code>，<code>undefined</code>/container/Binary 的文本为空并被跳过。key
+    之间不插入分隔符。
   </li>
   <li>
-    <code>rand.random(max)</code> 返回 <code>[0,max)</code> 均匀 integer，max 默认 1000，floating 向
-    0 截断；<code>max &lt;= 0</code> 抛 RangeError，非 number 抛 TypeError；
+    返回：<code>ratio &lt;= 0</code> 为 <code>false</code>，<code>ratio &gt;= 100</code> 为
+    <code>true</code>。中间比例无 key 时随机分桶；有 key 时稳定 映射到
+    <code>0..99</code>，同一参数序列在相同实现上得到相同结果。
   </li>
+  <li>异常：不抛可捕获异常。</li>
   <li>
-    <code>rand.canary(ratio, ...keys)</code>：ratio &lt;= 0 恒 false，&gt;= 100 恒 true；无 key
-    时随机分桶，有 key 时按 参数顺序累计 CRC-32 并稳定映射到 <code>[0,100)</code>；非数值 ratio 按
-    0；
-  </li>
-  <li>
-    <code>rand.*</code> 不是密码学随机源，也不能替代 data-plane 的 production gray/service
-    selection。
+    使用边界：适合脚本内非安全抽样，但不能替代 Access Gateway 的 production gray/service selection，
+    也不能用于安全授权、令牌或密码学随机。
   </li>
 </ul>
+<pre><code class="language-javascript">let selected = rand.canary(5, $header.x_user_id, $path.id);
+if (selected) {
+    resp.setHeader(&quot;X-Canary&quot;, &quot;1&quot;);
+}
+return selected;
+</code></pre>
 <h2 id="11-json-函数">
   11. JSON 函数<a
     class="documentation-heading-anchor"
@@ -630,22 +1415,67 @@ namespace rand {
     function stringify(value: ScriptValue): string | undefined;
 }
 </code></pre>
+<h3 id="json-parse-text">
+  <code>JSON.parse(text)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#json-parse-text"
+    aria-label="Link to `JSON.parse(text)`"
+    >#</a
+  >
+</h3>
 <ul>
   <li>
-    <code>JSON.parse</code> 只接受 string；非法 JSON 抛带解析 message 和 byte offset 的
-    SyntaxError，非 string 抛 TypeError；
+    参数 <code>text</code>：必填 string；不会先调用 <code>strings.toString()</code> 做隐式转换。
   </li>
+  <li>返回：JSON document 对应的 ScriptValue，可以是 object、array 或 scalar。</li>
   <li>
-    <code>JSON.stringify(undefined)</code> 返回 undefined；nested undefined 编码为 JSON null；
+    异常：非 string 抛 <code>TypeError</code>；空 string、尾随非法内容、格式错误或超过 decoder
+    限制时抛 <code>SyntaxError</code>。解析异常携带 decoder message 和失败 byte offset。
   </li>
-  <li>
-    顶层 NaN 和正负 infinity 编码为文本 <code>&quot;null&quot;</code>；其他非法 number 或不可编码
-    value 抛 TypeError；
-  </li>
-  <li>Binary 编码为 Base64 JSON string；</li>
-  <li>object property 按插入顺序输出；</li>
-  <li>发送 HTTP JSON 优先用 <code>resp.sendJson()</code>，避免手工设置 content type 和 body。</li>
+  <li>副作用：无。</li>
 </ul>
+<pre><code class="language-javascript">try {
+    let value = JSON.parse(&#39;{&quot;enabled&quot;:true,&quot;weight&quot;:10}&#39;);
+    return value.weight; // 10
+} catch (e) {
+    return null;
+}
+</code></pre>
+<h3 id="json-stringify-value">
+  <code>JSON.stringify(value)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#json-stringify-value"
+    aria-label="Link to `JSON.stringify(value)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>参数 <code>value</code>：必填任意脚本值。</li>
+  <li>
+    返回：JSON text string。顶层 <code>undefined</code> 返回脚本值 <code>undefined</code>，不是
+    string；object/array 内的 <code>undefined</code> 编码为 JSON <code>null</code>。顶层
+    <code>NaN</code> 和正负 infinity 返回 string <code>&quot;null&quot;</code>。Binary 编码为 Base64
+    JSON string；object property 保持插入顺序。
+  </li>
+  <li>
+    异常：无法编码的内部值、非法 string、超过最大嵌套深度，或嵌套的不可编码 number/value 抛
+    <code>TypeError</code>。
+  </li>
+  <li>
+    提醒：该函数只产生 string，不设置 HTTP header。直接发送 JSON 应使用
+    <code>resp.sendJson()</code>。
+  </li>
+</ul>
+<pre><code class="language-javascript">let encoded = JSON.stringify({
+    ok: true,
+    missing: undefined,
+    bytes: binary.fromHex(&quot;0102&quot;)
+});
+return encoded;
+// &quot;{\&quot;ok\&quot;:true,\&quot;missing\&quot;:null,\&quot;bytes\&quot;:\&quot;AQI=\&quot;}&quot;
+</code></pre>
 <h2 id="12-object-函数">
   12. Object 函数<a
     class="documentation-heading-anchor"
@@ -671,17 +1501,90 @@ namespace rand {
     ): ScriptObject;
 }
 </code></pre>
+<h3 id="object-assign-target-source-sources">
+  <code>Object.assign(target, source, ...sources)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#object-assign-target-source-sources"
+    aria-label="Link to `Object.assign(target, source, ...sources)`"
+    >#</a
+  >
+</h3>
 <ul>
+  <li>参数 <code>target</code>：必填 object，作为写入目标。</li>
   <li>
-    <code>Object.assign</code> 原地 merge object source 并返回 target；非 object source 静默跳过，非
-    object target 抛 TypeError；覆盖属性不改变插入位置；
+    参数 <code>source</code>/<code>sources</code>：至少提供一个 source；只有 object source
+    的自有属性会复制，非 object source 静默跳过。
   </li>
-  <li><code>Object.keys/values</code> 按插入顺序返回新 array，非 object 抛 TypeError；</li>
   <li>
-    <code>Object.deleteProperties</code> 原地删除所有 string key 并返回 target；非 string 和不存在的
-    key 静默跳过， 非 object target 抛 TypeError。
+    返回：被修改的 <code>target</code> 本身。相同 key 后值覆盖前值；覆盖已有 key
+    不改变其插入顺序，新 key 追加到末尾。复制的是 ScriptValue 引用语义，不做递归 deep merge。
   </li>
+  <li>异常：<code>target</code> 非 object 时抛 <code>TypeError</code>。</li>
+  <li>副作用：原地修改 <code>target</code>。</li>
 </ul>
+<pre><code class="language-javascript">let target = { a: 1, keep: true };
+let same = Object.assign(target, { a: 2 }, null, { b: 3 });
+return { value: target, sameObject: same === target };
+// {&quot;value&quot;:{&quot;a&quot;:2,&quot;keep&quot;:true,&quot;b&quot;:3},&quot;sameObject&quot;:true}
+</code></pre>
+<h3 id="object-keys-value">
+  <code>Object.keys(value)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#object-keys-value"
+    aria-label="Link to `Object.keys(value)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>参数 <code>value</code>：必填 object。</li>
+  <li>返回：包含所有自有 property name 的新 string array，顺序为属性插入顺序。</li>
+  <li>异常：非 object 抛 <code>TypeError</code>。</li>
+  <li>副作用：不修改 object。</li>
+</ul>
+<pre><code class="language-javascript">return Object.keys({ first: 1, second: 2 }); // [&quot;first&quot;, &quot;second&quot;]
+</code></pre>
+<h3 id="object-values-value">
+  <code>Object.values(value)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#object-values-value"
+    aria-label="Link to `Object.values(value)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>参数 <code>value</code>：必填 object。</li>
+  <li>返回：包含所有自有 property value 的新 array，顺序与 <code>Object.keys()</code> 一致。</li>
+  <li>异常：非 object 抛 <code>TypeError</code>。</li>
+  <li>副作用：不修改 object；返回 array 中的 container value 不是 deep copy。</li>
+</ul>
+<pre><code class="language-javascript">return Object.values({ first: 1, second: &quot;two&quot; }); // [1, &quot;two&quot;]
+</code></pre>
+<h3 id="object-deleteproperties-target-key-keys">
+  <code>Object.deleteProperties(target, key, ...keys)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#object-deleteproperties-target-key-keys"
+    aria-label="Link to `Object.deleteProperties(target, key, ...keys)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>参数 <code>target</code>：必填 object。</li>
+  <li>
+    参数 <code>key</code>/<code>keys</code>：至少一个待删除值；只有 string 被当作 property name，非
+    string 和不存在的 key 静默跳过。
+  </li>
+  <li>返回：被修改的 <code>target</code> 本身。</li>
+  <li>异常：<code>target</code> 非 object 时抛 <code>TypeError</code>。</li>
+  <li>副作用：按参数顺序原地删除属性。</li>
+</ul>
+<pre><code class="language-javascript">let value = { password: &quot;redact&quot;, visible: true, token: &quot;redact&quot; };
+Object.deleteProperties(value, &quot;password&quot;, 123, &quot;token&quot;, &quot;missing&quot;);
+return value; // {&quot;visible&quot;:true}
+</code></pre>
 <h2 id="13-url-表单函数">
   13. URL 表单函数<a
     class="documentation-heading-anchor"
@@ -707,25 +1610,105 @@ namespace rand {
     ): string | null | undefined;
 }
 </code></pre>
+<h3 id="url-encodecomponent-value">
+  <code>URL.encodeComponent(value)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#url-encodecomponent-value"
+    aria-label="Link to `URL.encodeComponent(value)`"
+    >#</a
+  >
+</h3>
 <ul>
+  <li>参数 <code>value</code>：必填 string；按 UTF-8 byte 编码。</li>
   <li>
-    <code>encodeComponent</code> 保留
-    alphanumeric、<code>-</code>、<code>_</code>、<code>.</code>、<code>*</code>，space 变
-    <code>+</code>，其余 UTF-8 byte 用大写 <code>%HH</code>；非 string 抛 TypeError；
+    返回：form-urlencoded component string。<code>A-Z a-z 0-9 - _ . *</code> 原样保留，ASCII space
+    变成 <code>+</code>，其余 byte 变成大写 <code>%HH</code>。
   </li>
+  <li>异常：非 string 抛 <code>TypeError</code>。</li>
   <li>
-    <code>decodeComponent</code> 解码 <code>+</code> 和 <code>%HH</code>；非法 percent escape 抛
-    RangeError，非 string 抛 TypeError；
-  </li>
-  <li>
-    <code>parseQuery</code> 返回 object；重复 key 从 string 提升为 array 并继续追加；无
-    <code>=</code> 的字段 value 为空 string；空段跳过；
-  </li>
-  <li>
-    <code>buildQuery</code> 按 object property 插入顺序生成 query；array 展开为重复 key，空 array
-    不生成字段； null/undefined 原样返回，其他非 object 抛 TypeError。
+    提醒：与 ECMAScript <code>encodeURIComponent</code> 不同，后者把 space 编码为 <code>%20</code>。
   </li>
 </ul>
+<pre><code class="language-javascript">return URL.encodeComponent(&quot;a b/中&quot;); // &quot;a+b%2F%E4%B8%AD&quot;
+</code></pre>
+<h3 id="url-decodecomponent-value">
+  <code>URL.decodeComponent(value)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#url-decodecomponent-value"
+    aria-label="Link to `URL.decodeComponent(value)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>参数 <code>value</code>：必填 string。</li>
+  <li>
+    返回：解码后的 string；<code>+</code> 变成 space，合法 <code>%HH</code> 变成对应
+    byte。解码后的非法 UTF-8 会以 U+FFFD replacement character 修复。
+  </li>
+  <li>
+    异常：非 string 抛 <code>TypeError</code>；不完整或非 hex 的 percent escape 抛
+    <code>RangeError</code>。
+  </li>
+</ul>
+<pre><code class="language-javascript">return URL.decodeComponent(&quot;a+b%2F%E4%B8%AD&quot;); // &quot;a b/中&quot;
+</code></pre>
+<h3 id="url-parsequery-value">
+  <code>URL.parseQuery(value)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#url-parsequery-value"
+    aria-label="Link to `URL.parseQuery(value)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>参数 <code>value</code>：必填、不带前导 <code>?</code> 的 query string。</li>
+  <li>
+    返回：新 object，所有 value 都是 string 或 string array。<code>&amp;</code> 分段，第一个
+    <code>=</code> 分隔 key/value； 无 <code>=</code> 的非空段得到空 string value；空段跳过。重复
+    key 首次是 string，第二次提升为 array，后续按 顺序追加。
+  </li>
+  <li>
+    异常：非 string 抛 <code>TypeError</code>；任意 key/value 含非法 percent escape 时抛
+    <code>RangeError</code>，不返回 partial object。
+  </li>
+</ul>
+<pre><code class="language-javascript">return URL.parseQuery(&quot;tag=a&amp;tag=b&amp;page=2&amp;flag&quot;);
+// {&quot;tag&quot;:[&quot;a&quot;,&quot;b&quot;],&quot;page&quot;:&quot;2&quot;,&quot;flag&quot;:&quot;&quot;}
+</code></pre>
+<h3 id="url-buildquery-value-undefined">
+  <code>URL.buildQuery(value = undefined)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#url-buildquery-value-undefined"
+    aria-label="Link to `URL.buildQuery(value = undefined)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>
+    参数 <code>value</code>：可选。object property name 成为 key；scalar value 用兼容文本；array
+    value 展开为 同名重复字段；空 array 不产生字段。
+  </li>
+  <li>
+    返回：按 property 插入顺序生成、不带前导 <code>?</code> 的 form-urlencoded string，每个字段都含
+    <code>=</code>。 空 object 返回空 string。顶层 <code>null</code>/<code>undefined</code>
+    原样返回，因此返回值不一定是 string。
+  </li>
+  <li>
+    异常：除 <code>null</code>/<code>undefined</code> 外的非 object 抛 <code>TypeError</code>。
+  </li>
+  <li>
+    转换：array element 为 object/array 时使用
+    <code>&quot;&lt;ObjectNode&gt;&quot;</code>/<code>&quot;&lt;ArrayNode&gt;&quot;</code>；需要
+    JSON value 时应先显式 <code>JSON.stringify()</code>。
+  </li>
+</ul>
+<pre><code class="language-javascript">return URL.buildQuery({ tag: [&quot;a&quot;, &quot;b&quot;], page: 2, empty: null });
+// &quot;tag=a&amp;tag=b&amp;page=2&amp;empty=null&quot;
+</code></pre>
 <h2 id="14-request-http-api-req">
   14. Request HTTP API：<code>req.*</code
   ><a
@@ -809,6 +1792,228 @@ namespace rand {
     async，会导致配置编译失败。
   </li>
 </ul>
+<h3 id="req-getheader-req-getheader-name">
+  <code>req.getHeader()</code> / <code>req.getHeader(name)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#req-getheader-req-getheader-name"
+    aria-label="Link to `req.getHeader()` / `req.getHeader(name)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>
+    无参数返回：本次请求的 header object，并在脚本上下文内缓存。同名字段折叠为一个 string
+    value；如需 稳定读取某一字段，优先使用单参数 overload。
+  </li>
+  <li>
+    参数 <code>name</code>：单参数 overload 要求非空 string，header name 按 HTTP
+    大小写不敏感规则查找。
+  </li>
+  <li>
+    单参数返回：存在时为 string，不存在时为 <code>undefined</code>；name 为空或非 string 时为
+    <code>null</code>。
+  </li>
+  <li>异常：正常输入不抛可捕获异常。</li>
+</ul>
+<pre><code class="language-javascript">let all = req.getHeader();
+return {
+    contentType: req.getHeader(&quot;Content-Type&quot;),
+    hostFromObject: all.host
+};
+</code></pre>
+<h3 id="req-getquery-req-getquery-name">
+  <code>req.getQuery()</code> / <code>req.getQuery(name)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#req-getquery-req-getquery-name"
+    aria-label="Link to `req.getQuery()` / `req.getQuery(name)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>
+    无参数返回：解析当前 raw query 得到并缓存的 object，value 为 string；重复 key 保留最后一个值。
+    解析使用 form-urlencoded 规则。错误 percent escape 不抛异常，而是保留错误发生前已解析的字段。
+  </li>
+  <li>参数 <code>name</code>：单参数 overload 要求非空 string，key 匹配大小写敏感。</li>
+  <li>
+    单参数返回：存在时为 string，不存在、空 name 或非 string name 时为 <code>undefined</code>。
+  </li>
+  <li>异常：不抛可捕获异常。</li>
+</ul>
+<pre><code class="language-javascript">// 对 /search?q=fiber&amp;page=2
+return {
+    query: req.getQuery(&quot;q&quot;), // &quot;fiber&quot;
+    page: req.getQuery().page, // &quot;2&quot;
+    missing: req.getQuery(&quot;missing&quot;) // undefined
+};
+</code></pre>
+<h3 id="req-getcookie-req-getcookie-name">
+  <code>req.getCookie()</code> / <code>req.getCookie(name)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#req-getcookie-req-getcookie-name"
+    aria-label="Link to `req.getCookie()` / `req.getCookie(name)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>
+    无参数返回：解析所有 <code>Cookie</code> header 后缓存的 object；cookie value 为 string，同名
+    cookie 后值覆盖 前值。parser 接受用 <code>;</code> 分隔的宽松 cookie pair。
+  </li>
+  <li>参数 <code>name</code>：单参数 overload 要求非空 string；cookie name 匹配大小写敏感。</li>
+  <li>
+    单参数返回：存在时为 string；不存在、空 name 或非 string name 时为 <code>undefined</code>。
+  </li>
+  <li>异常：不抛可捕获异常。</li>
+</ul>
+<pre><code class="language-javascript">let cookies = req.getCookie();
+return {
+    session: req.getCookie(&quot;session&quot;),
+    theme: cookies.theme
+};
+</code></pre>
+<h3 id="req-geturi">
+  <code>req.getUri()</code
+  ><a class="documentation-heading-anchor" href="#req-geturi" aria-label="Link to `req.getUri()`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>参数：无。</li>
+  <li>
+    返回：raw request target string，格式为 <code>path[?query]</code>；不含 scheme、authority/Host
+    或 fragment。
+  </li>
+  <li>异常：不抛可捕获异常。</li>
+</ul>
+<pre><code class="language-javascript">// 对 /orders/42?expand=items
+return req.getUri(); // &quot;/orders/42?expand=items&quot;
+</code></pre>
+<h3 id="req-getpath">
+  <code>req.getPath()</code
+  ><a class="documentation-heading-anchor" href="#req-getpath" aria-label="Link to `req.getPath()`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>参数：无。</li>
+  <li>返回：HTTP parser 得到的 path string，不含 <code>?</code> 和 query。</li>
+  <li>异常：不抛可捕获异常。</li>
+</ul>
+<pre><code class="language-javascript">return req.getPath(); // 例如 &quot;/orders/42&quot;
+</code></pre>
+<h3 id="req-getquerystr">
+  <code>req.getQueryStr()</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#req-getquerystr"
+    aria-label="Link to `req.getQueryStr()`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>参数：无。</li>
+  <li>
+    返回：不含前导 <code>?</code> 的 raw query string；请求没有 query 时返回空 string。它不会
+    form-decode。
+  </li>
+  <li>异常：不抛可捕获异常。</li>
+</ul>
+<pre><code class="language-javascript">return req.getQueryStr(); // 例如 &quot;expand=items&amp;lang=zh-CN&quot;
+</code></pre>
+<h3 id="req-getmethod">
+  <code>req.getMethod()</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#req-getmethod"
+    aria-label="Link to `req.getMethod()`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>参数：无。</li>
+  <li>
+    返回：当前请求 method token string，例如
+    <code>&quot;GET&quot;</code>、<code>&quot;POST&quot;</code>。
+  </li>
+  <li>异常：不抛可捕获异常。</li>
+</ul>
+<pre><code class="language-javascript">if (req.getMethod() !== &quot;POST&quot;) {
+    resp.sendJson(405, { error: &quot;METHOD_NOT_ALLOWED&quot; });
+    return;
+}
+</code></pre>
+<h3 id="req-readjson">
+  <code>req.readJson()</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#req-readjson"
+    aria-label="Link to `req.readJson()`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>参数：无；异步宿主函数，但脚本中直接调用，不使用 <code>await</code>。</li>
+  <li>返回：完整消费 request body 后解析出的任意 JSON ScriptValue。</li>
+  <li>
+    异常：body 读取失败抛 <code>Error(&quot;read request body failed&quot;)</code>；空 body 抛
+    <code>Error(&quot;client did not sent body&quot;)</code>；非法 JSON 抛
+    <code>Error(&quot;invalid json body&quot;)</code>。它不会暴露 <code>JSON.parse()</code> 那样的
+    <code>SyntaxError</code> 细节。
+  </li>
+  <li>副作用：一次性消费 request body。不要再调用任何 body reader 或依赖原 body 的操作。</li>
+</ul>
+<pre><code class="language-javascript">try {
+    let body = req.readJson();
+    return { name: body.name, accepted: true };
+} catch (e) {
+    resp.sendJson(400, { error: &quot;INVALID_JSON_BODY&quot; });
+    return;
+}
+</code></pre>
+<h3 id="req-readbinary">
+  <code>req.readBinary()</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#req-readbinary"
+    aria-label="Link to `req.readBinary()`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>参数：无；异步宿主函数。</li>
+  <li>返回：完整 request body 的 Binary；空 body 返回 0-byte Binary。</li>
+  <li>异常：body 读取失败抛 <code>Error(&quot;read request body failed&quot;)</code>。</li>
+  <li>副作用：一次性消费 request body，并把全部 byte 连续化到内存。</li>
+</ul>
+<pre><code class="language-javascript">let body = req.readBinary();
+return {
+    size: length(body),
+    sha256: hash.sha256(body)
+};
+</code></pre>
+<h3 id="req-discardbody">
+  <code>req.discardBody()</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#req-discardbody"
+    aria-label="Link to `req.discardBody()`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>参数：无；异步宿主函数。</li>
+  <li>返回：<code>null</code>。</li>
+  <li>异常：当前兼容实现忽略底层 drain error，不抛可捕获异常。</li>
+  <li>副作用：消费并丢弃剩余 request body；常用于提前返回前保持连接复用条件。</li>
+</ul>
+<pre><code class="language-javascript">req.discardBody();
+resp.send(204);
+return;
+</code></pre>
 <h2 id="15-response-http-api-resp">
   15. Response HTTP API：<code>resp.*</code
   ><a
@@ -877,6 +2082,217 @@ declare namespace resp {
   <li><code>send(status, other)</code> 走 JSON 并设置 <code>application/json</code>；</li>
   <li>send 函数提交 header 并结束 stream。正常脚本只调用一次，随后立即 <code>return;</code>。</li>
 </ul>
+<h3 id="resp-setheader-name-value">
+  <code>resp.setHeader(name, value)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#resp-setheader-name-value"
+    aria-label="Link to `resp.setHeader(name, value)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>参数 <code>name</code>：必填、非空 string。</li>
+  <li>
+    参数 <code>value</code>：必填。string、integer、float、boolean 和
+    <code>null</code> 按兼容文本写入；空 string、 <code>undefined</code>、array、object 或 Binary
+    会得到空文本并视为无效。
+  </li>
+  <li>返回：<code>null</code>。</li>
+  <li>
+    异常：name 非 string/空，或转换后的 value 为空时抛
+    <code>Error(&quot;set header require string key value&quot;)</code>。
+  </li>
+  <li>
+    副作用：替换 pending response header 的同名值。header 已提交后，合法调用静默不再修改响应。
+  </li>
+</ul>
+<pre><code class="language-javascript">resp.setHeader(&quot;Cache-Control&quot;, &quot;no-store&quot;);
+resp.setHeader(&quot;X-Route-Version&quot;, 7);
+return { ok: true };
+</code></pre>
+<h3 id="resp-addheader-name-value">
+  <code>resp.addHeader(name, value)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#resp-addheader-name-value"
+    aria-label="Link to `resp.addHeader(name, value)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>参数及文本转换与 <code>resp.setHeader()</code> 相同。</li>
+  <li>返回：<code>null</code>。</li>
+  <li>
+    异常：name/value 无效时抛 <code>Error(&quot;add header require string key value&quot;)</code>。
+  </li>
+  <li>
+    副作用：追加 header field，不替换已有同名字段；适合多个 <code>Set-Cookie</code> 或其他允许重复的
+    header。 header 已提交后，合法调用静默不再修改响应。
+  </li>
+</ul>
+<pre><code class="language-javascript">resp.addHeader(&quot;Vary&quot;, &quot;Accept-Encoding&quot;);
+resp.addHeader(&quot;Vary&quot;, &quot;Origin&quot;);
+return { ok: true };
+</code></pre>
+<h3 id="resp-addcookie-cookie">
+  <code>resp.addCookie(cookie)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#resp-addcookie-cookie"
+    aria-label="Link to `resp.addCookie(cookie)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>参数 <code>cookie</code>：必填 object。字段如下；未知字段忽略。</li>
+</ul>
+<table>
+  <thead>
+    <tr>
+      <th>字段</th>
+      <th>接受类型</th>
+      <th>默认/行为</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>name</code></td>
+      <td>非空 string，且必须是 RFC token char</td>
+      <td>必填；非法时整个函数返回 <code>false</code></td>
+    </tr>
+    <tr>
+      <td><code>value</code></td>
+      <td>任意 scalar</td>
+      <td>兼容文本；缺失/不可文本化时为空 string</td>
+    </tr>
+    <tr>
+      <td><code>domain</code></td>
+      <td>string</td>
+      <td>非 string 或空值时省略 <code>Domain</code></td>
+    </tr>
+    <tr>
+      <td><code>path</code></td>
+      <td>string</td>
+      <td>非 string 或空值时省略 <code>Path</code></td>
+    </tr>
+    <tr>
+      <td><code>maxAge</code></td>
+      <td>integer</td>
+      <td>非 integer 或负数时省略；<code>0</code> 生成 <code>Max-Age=0</code></td>
+    </tr>
+    <tr>
+      <td><code>secure</code></td>
+      <td>boolean</td>
+      <td>仅严格 boolean <code>true</code> 生成 <code>Secure</code></td>
+    </tr>
+    <tr>
+      <td><code>httpOnly</code></td>
+      <td>boolean</td>
+      <td>仅严格 boolean <code>true</code> 生成 <code>HttpOnly</code></td>
+    </tr>
+    <tr>
+      <td><code>sameSite</code></td>
+      <td>
+        <code>&quot;Lax&quot;</code>、<code>&quot;Strict&quot;</code> 或
+        <code>&quot;None&quot;</code>
+      </td>
+      <td>大小写敏感；其他值省略 <code>SameSite</code></td>
+    </tr>
+  </tbody>
+</table>
+<ul>
+  <li>
+    返回：成功编码并加入 pending <code>Set-Cookie</code> 时为 <code>true</code>；参数非 object、name
+    缺失/为空/含非法 token 字符时为 <code>false</code>。
+  </li>
+  <li>异常：无函数特有的可捕获异常；无效 cookie 用 <code>false</code> 表达。</li>
+  <li>
+    副作用：追加一个 <code>Set-Cookie</code>。header 已提交后无法再改变 wire response，因此必须在
+    <code>send*()</code> 前调用。
+  </li>
+</ul>
+<pre><code class="language-javascript">let added = resp.addCookie({
+    name: &quot;session&quot;,
+    value: &quot;abc123&quot;,
+    path: &quot;/&quot;,
+    maxAge: 3600,
+    secure: true,
+    httpOnly: true,
+    sameSite: &quot;Lax&quot;
+});
+return { cookieAdded: added };
+</code></pre>
+<h3 id="resp-sendjson-status-body">
+  <code>resp.sendJson(status, body)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#resp-sendjson-status-body"
+    aria-label="Link to `resp.sendJson(status, body)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>
+    参数 <code>status</code>：必填；只有 integer 被采用，其他类型回退为 200。该函数不预先限制 status
+    范围， 无效 HTTP status 最终表现为发送失败。
+  </li>
+  <li>
+    参数 <code>body</code>：任意 ScriptValue，使用 HTTP JSON encoder；顶层
+    <code>undefined</code> 编码为 JSON <code>null</code>，Binary 编码为 Base64 JSON string。
+  </li>
+  <li>返回：成功发送 header 和完整 body 后返回 <code>null</code>。</li>
+  <li>
+    异常：JSON 无法编码或 header/body 写入失败时抛 <code>Error(&quot;error send json&quot;)</code>。
+  </li>
+  <li>
+    副作用：把 <code>Content-Type</code> 设置为 <code>application/json</code>，发送固定
+    <code>Content-Length</code> 响应并结束 stream。
+  </li>
+</ul>
+<pre><code class="language-javascript">resp.sendJson(201, {
+    id: $path.id,
+    created: true
+});
+return;
+</code></pre>
+<h3 id="resp-send-status-resp-send-status-body">
+  <code>resp.send(status)</code> / <code>resp.send(status, body)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#resp-send-status-resp-send-status-body"
+    aria-label="Link to `resp.send(status)` / `resp.send(status, body)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>参数 <code>status</code>：必填；只有 integer 被采用，其他类型回退为 200。</li>
+  <li>
+    参数 <code>body</code>：可省略。省略时发送 0-byte body；Binary 原样发送且不自动设置
+    Content-Type；string 按 UTF-8 byte 发送并设置 <code>text/plain;charset=utf-8</code>；其他值按
+    JSON 发送并设置 <code>application/json</code>。
+  </li>
+  <li>返回：成功发送后为 <code>null</code>。</li>
+  <li>
+    异常：空响应发送失败抛 <code>Error(&quot;error send&quot;)</code>；Binary 写入失败抛
+    <code>Error(&quot;error write binary response&quot;)</code>；text 写入失败抛
+    <code>Error(&quot;error textual response&quot;)</code>；JSON 编码/写入失败抛
+    <code>Error(&quot;error send json&quot;)</code>。
+  </li>
+  <li>
+    副作用：提交 response header 并结束 stream。一次正常执行只调用一个
+    <code>send*()</code>，调用后立即 <code>return;</code>。
+  </li>
+</ul>
+<pre><code class="language-javascript">if (req.getMethod() === &quot;HEAD&quot;) {
+    resp.send(204);
+    return;
+}
+
+resp.setHeader(&quot;Content-Type&quot;, &quot;application/octet-stream&quot;);
+resp.send(200, binary.fromHex(&quot;89504e47&quot;));
+return;
+</code></pre>
 <h2 id="16-路由和连接常量">
   16. 路由和连接常量<a
     class="documentation-heading-anchor"
