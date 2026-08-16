@@ -246,6 +246,8 @@ listener 只在 Nacos client/config/naming、project/gray watcher、项目列表
 - `docs/migration-plan.md`：范围边界、C++ 模块划分、工作包和阶段门槛；
 - `docs/compatibility-contract.md`：配置字段、热更新和 HTTP 请求执行的 Java 契约；
 - `docs/config-resource-limits.md`：Project List、route、gray 的版本化资源上限和失败保旧语义；
+- `docs/config-compilation.md`：route/TLS 专用 compiler loop、generation 合并、owner-loop
+  发布和有序关闭契约；
 - `docs/script-corpus-differential.md`：现网 condition/template/rewrite 的脱敏统计、
   Java golden、C++ 差分结果和私有 corpus 复跑方式；
 - `docs/optimization-analysis.md`：代码职责、生命周期、性能、安全和可观测性优化分析，

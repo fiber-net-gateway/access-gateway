@@ -147,15 +147,17 @@ int main(int argc, char **argv) {
     fiber::event::EventLoop accept_loop;
     fiber::event::EventLoopGroup http_workers(cpu.effective_count);
     fiber::event::EventLoopGroup nacos_group(1);
+    fiber::event::EventLoopGroup compiler_group(1);
     fiber::event::EventLoopGroup cat_group(1);
-    auto created = fiber::access_server::AccessServerRuntime::create(accept_loop, nacos_group.at(0), cat_group.at(0),
-                                                                     http_workers, config);
+    auto created = fiber::access_server::AccessServerRuntime::create(
+            accept_loop, nacos_group.at(0), compiler_group.at(0), cat_group.at(0), http_workers, config);
     if (!created) {
         print_runtime_error(created.error());
         return 1;
     }
     std::unique_ptr<fiber::access_server::AccessServerRuntime> runtime = std::move(*created);
 
+    compiler_group.start(shutdown_signals);
     http_workers.start(shutdown_signals);
     nacos_group.start(shutdown_signals);
     cat_group.start(shutdown_signals);
@@ -250,8 +252,10 @@ int main(int argc, char **argv) {
     http_workers.stop();
     nacos_group.stop();
     cat_group.stop();
+    compiler_group.stop();
     http_workers.join();
     nacos_group.join();
     cat_group.join();
+    compiler_group.join();
     return exit_code;
 }

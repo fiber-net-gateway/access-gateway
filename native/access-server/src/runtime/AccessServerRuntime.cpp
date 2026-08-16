@@ -74,7 +74,8 @@ AccessServerRuntimeError AccessServerRuntime::make_io_error(AccessServerRuntimeE
 }
 
 std::expected<std::unique_ptr<AccessServerRuntime>, AccessServerRuntimeError>
-AccessServerRuntime::create(event::EventLoop &accept_loop, event::EventLoop &nacos_loop, event::EventLoop &cat_loop,
+AccessServerRuntime::create(event::EventLoop &accept_loop, event::EventLoop &nacos_loop,
+                            event::EventLoop &compiler_loop, event::EventLoop &cat_loop,
                             event::EventLoopGroup &http_workers, const AccessServerConfig &config,
                             const net::ListenOptions &listen_options) {
     auto client = nacos::NacosClient::create(nacos_loop, config.nacos_config());
@@ -105,12 +106,12 @@ AccessServerRuntime::create(event::EventLoop &accept_loop, event::EventLoop &nac
     }
 
     auto runtime = std::unique_ptr<AccessServerRuntime>(new (std::nothrow) AccessServerRuntime(
-            accept_loop, nacos_loop, cat_loop, http_workers, config.listen_address(), config.http_server_options(),
-            config.metrics_listen_address(), listen_options, config.initial_config_timeout(),
-            config.default_max_request_body_size(), config.test_mode(), config.client_metadata_options(),
-            config.access_log_options(), config.watcher_options(), config.gray_watcher_options(),
-            config.tls_certificate_watcher_options(), config.service_discovery_options(), std::move(cat_client),
-            std::move(*client), std::move(*config_service), std::move(*naming_service)));
+            accept_loop, nacos_loop, compiler_loop, cat_loop, http_workers, config.listen_address(),
+            config.http_server_options(), config.metrics_listen_address(), listen_options,
+            config.initial_config_timeout(), config.default_max_request_body_size(), config.test_mode(),
+            config.client_metadata_options(), config.access_log_options(), config.watcher_options(),
+            config.gray_watcher_options(), config.tls_certificate_watcher_options(), config.service_discovery_options(),
+            std::move(cat_client), std::move(*client), std::move(*config_service), std::move(*naming_service)));
     if (!runtime) {
         return std::unexpected(AccessServerRuntimeError{
                 .code = AccessServerRuntimeErrorCode::AllocateRuntime,
@@ -121,8 +122,8 @@ AccessServerRuntime::create(event::EventLoop &accept_loop, event::EventLoop &nac
 }
 
 AccessServerRuntime::AccessServerRuntime(
-        event::EventLoop &accept_loop, event::EventLoop &nacos_loop, event::EventLoop &cat_loop,
-        event::EventLoopGroup &http_workers, net::SocketAddress listen_address,
+        event::EventLoop &accept_loop, event::EventLoop &nacos_loop, event::EventLoop &compiler_loop,
+        event::EventLoop &cat_loop, event::EventLoopGroup &http_workers, net::SocketAddress listen_address,
         http::HttpServerOptions http_server_options, net::SocketAddress metrics_listen_address,
         net::ListenOptions listen_options, std::chrono::milliseconds initial_config_timeout,
         std::size_t default_max_request_body_size, bool test_mode,
@@ -132,27 +133,33 @@ AccessServerRuntime::AccessServerRuntime(
         std::unique_ptr<cat::CatClient> cat_client, std::unique_ptr<nacos::NacosClient> nacos_client,
         std::unique_ptr<nacos::ConfigService> config_service,
         std::unique_ptr<nacos::NamingService> naming_service) noexcept :
-    accept_loop_(&accept_loop), nacos_loop_(&nacos_loop), cat_loop_(&cat_loop), http_workers_(&http_workers),
-    listen_address_(std::move(listen_address)), metrics_listen_address_(std::move(metrics_listen_address)),
-    listen_options_(std::move(listen_options)), initial_config_timeout_(initial_config_timeout),
-    default_max_request_body_size_(default_max_request_body_size), test_mode_(test_mode),
-    client_metadata_options_(std::move(client_metadata_options)), access_log_options_(std::move(access_log_options)),
-    http_server_options_(std::move(http_server_options)), cat_client_(std::move(cat_client)),
-    nacos_client_(std::move(nacos_client)), config_service_(std::move(config_service)),
-    naming_service_(std::move(naming_service)),
+    accept_loop_(&accept_loop), nacos_loop_(&nacos_loop), compiler_loop_(&compiler_loop), cat_loop_(&cat_loop),
+    http_workers_(&http_workers), listen_address_(std::move(listen_address)),
+    metrics_listen_address_(std::move(metrics_listen_address)), listen_options_(std::move(listen_options)),
+    initial_config_timeout_(initial_config_timeout), default_max_request_body_size_(default_max_request_body_size),
+    test_mode_(test_mode), client_metadata_options_(std::move(client_metadata_options)),
+    access_log_options_(std::move(access_log_options)), http_server_options_(std::move(http_server_options)),
+    cat_client_(std::move(cat_client)), nacos_client_(std::move(nacos_client)),
+    config_service_(std::move(config_service)), naming_service_(std::move(naming_service)),
+    config_compiler_(compiler_loop),
     service_discovery_(nacos_loop, *naming_service_,
                        AccessServiceOps{.swrr_options = service_discovery_options.swrr_options,
                                         .zone = service_discovery_options.zone}),
-    route_store_(script_runtime_.compiler_adapter(), service_discovery_, std::move(service_discovery_options)),
-    config_watcher_(nacos_loop, *config_service_, route_store_, std::move(watcher_options)),
+    route_store_({}, service_discovery_, std::move(service_discovery_options)),
+    config_watcher_(nacos_loop, config_compiler_, *config_service_, route_store_, std::move(watcher_options)),
     gray_watcher_(nacos_loop, *config_service_, gray_store_, std::move(gray_options)),
     tls_certificate_store_(nacos_loop, http_workers, http_server_options_.http3.enabled),
-    tls_certificate_watcher_(nacos_loop, *config_service_, tls_certificate_store_, std::move(tls_certificate_options)) {
+    tls_certificate_watcher_(nacos_loop, config_compiler_, *config_service_, tls_certificate_store_,
+                             std::move(tls_certificate_options)) {
     FIBER_ASSERT(accept_loop_ != nacos_loop_);
+    FIBER_ASSERT(accept_loop_ != compiler_loop_);
     FIBER_ASSERT(accept_loop_ != cat_loop_);
+    FIBER_ASSERT(nacos_loop_ != compiler_loop_);
     FIBER_ASSERT(nacos_loop_ != cat_loop_);
+    FIBER_ASSERT(compiler_loop_ != cat_loop_);
     for (std::size_t i = 0; i < http_workers.size(); ++i) {
         FIBER_ASSERT(&http_workers.at(i) != nacos_loop_);
+        FIBER_ASSERT(&http_workers.at(i) != compiler_loop_);
         FIBER_ASSERT(&http_workers.at(i) != accept_loop_);
         FIBER_ASSERT(&http_workers.at(i) != cat_loop_);
     }
@@ -373,6 +380,8 @@ async::Task<std::expected<void, AccessServerRuntimeError>> AccessServerRuntime::
                 message.append(std::to_string(current->synchronized_projects));
                 message.append(", retrying=");
                 message.append(std::to_string(current->retrying_projects));
+                message.append(", processing=");
+                message.append(std::to_string(current->processing_projects));
                 message.append(", rejected=");
                 message.append(std::to_string(current->rejected_projects));
                 message.push_back(')');

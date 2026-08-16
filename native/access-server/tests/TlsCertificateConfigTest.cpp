@@ -1,10 +1,15 @@
 #include <gtest/gtest.h>
 
 #include "config/TlsCertificateConfig.h"
+#include "runtime/AccessConfigCompiler.h"
 #include "runtime/TlsCertificateStore.h"
+#include "runtime/TlsCertificateWatcher.h"
 
+#include <expected>
 #include <memory>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include <openssl/bio.h>
@@ -16,11 +21,102 @@
 #include <openssl/x509v3.h>
 
 #include <fiber/async/Spawn.h>
+#include <fiber/async/Watch.h>
 #include <fiber/event/EventLoop.h>
 #include <fiber/event/EventLoopGroup.h>
+#include <fiber/nacos/ConfigService.h>
+#include <fiber/nacos/Subscription.h>
+
+#include "NacosSnapshotTestBuilder.h"
+#include "NacosSubscriptionStub.h"
 
 namespace fiber::access_server {
 namespace {
+
+class FakeTlsConfigService final : public nacos::ConfigService {
+public:
+    using Result = nacos::SubscriptionResult<nacos::ConfigData>;
+
+    common::IoResult<void> start() noexcept override { return {}; }
+    async::Task<void> shutdown() noexcept override { co_return; }
+
+    async::Task<std::expected<std::shared_ptr<const nacos::ConfigData>, nacos::ConfigServiceError>>
+    get_config(std::string, std::string) noexcept override {
+        co_return tests::make_config_data(nacos::ConfigState::NotFound);
+    }
+
+    async::Task<std::expected<void, nacos::ConfigServiceError>>
+    publish(std::string, std::string, std::string, nacos::ConfigType, std::optional<std::string>) noexcept override {
+        co_return std::expected<void, nacos::ConfigServiceError>{};
+    }
+
+    async::Task<std::expected<void, nacos::ConfigServiceError>> remove_config(std::string,
+                                                                              std::string) noexcept override {
+        co_return std::expected<void, nacos::ConfigServiceError>{};
+    }
+
+    std::expected<nacos::Subscription<nacos::ConfigData>, nacos::ConfigServiceError>
+    subscribe(std::string_view data_id, std::string_view group,
+              nacos::Subscription<nacos::ConfigData>::NotifyCallback on_notify, void *context) override {
+        EXPECT_EQ(data_id, kTlsCertificatesDataId);
+        EXPECT_EQ(group, kTlsCertificatesGroup);
+        return subscriptions_.subscribe(on_notify, context);
+    }
+
+    void push(std::string content, std::string md5) {
+        subscriptions_.publish(Result{
+                .kind = nacos::ResultKind::Success,
+                .data = tests::make_config_data(nacos::ConfigState::Present, std::move(md5), std::move(content)),
+        });
+    }
+
+private:
+    tests::NacosSubscriptionStub<nacos::ConfigData> subscriptions_;
+};
+
+std::string json_string(std::string_view value) {
+    std::string result;
+    result.reserve(value.size() + 2);
+    result.push_back('"');
+    for (char ch: value) {
+        switch (ch) {
+            case '\\':
+                result.append("\\\\");
+                break;
+            case '"':
+                result.append("\\\"");
+                break;
+            case '\n':
+                result.append("\\n");
+                break;
+            case '\r':
+                result.append("\\r");
+                break;
+            case '\t':
+                result.append("\\t");
+                break;
+            default:
+                result.push_back(ch);
+                break;
+        }
+    }
+    result.push_back('"');
+    return result;
+}
+
+std::string tls_snapshot(std::uint64_t version, std::string_view certificate_pem, std::string_view private_key_pem) {
+    return std::string("{\"schemaVersion\":1,\"version\":") + std::to_string(version) +
+           ",\"defaultCertificate\":\"default\",\"certificates\":[{\"id\":\"default\",\"certificatePem\":" +
+           json_string(certificate_pem) + ",\"privateKeyPem\":" + json_string(private_key_pem) + "}]}";
+}
+
+async::Task<void> wait_for_bool(async::Watch<bool>::Subscriber &subscriber, async::Watch<bool>::Snapshot &snapshot,
+                                bool expected) {
+    snapshot = subscriber.current();
+    while (!snapshot.value || *snapshot.value != expected) {
+        snapshot = co_await subscriber.next(snapshot.version);
+    }
+}
 
 std::pair<std::string, std::string> make_test_identity() {
     using BioPtr = std::unique_ptr<BIO, decltype(&BIO_free)>;
@@ -180,6 +276,95 @@ TEST(TlsCertificateStoreTest, PublishesOnlyIncreasingValidSnapshotsAndKeepsNoPem
         owner_loop.stop();
     });
     owner_loop.run();
+    EXPECT_TRUE(completed);
+}
+
+TEST(TlsCertificateWatcherTest, CompilesOffLoopAndCoalescesLatestSnapshot) {
+    auto [certificate_pem, private_key_pem] = make_test_identity();
+    const std::string version_three = tls_snapshot(3, certificate_pem, private_key_pem);
+    event::EventLoop owner_loop;
+    event::EventLoopGroup compiler_group(1);
+    event::EventLoopGroup http_workers(1);
+    AccessConfigCompiler compiler(compiler_group.at(0));
+    FakeTlsConfigService service;
+    TlsCertificateStore store(owner_loop, http_workers, false);
+    TlsCertificateWatcher watcher(owner_loop, compiler, service, store);
+    bool owner_progressed = false;
+    bool compiler_started = false;
+    bool completed = false;
+
+    async::spawn(owner_loop, [&]() -> async::DetachedTask {
+        auto ready = watcher.subscribe_ready();
+        auto ready_snapshot = ready.current();
+        auto processing = watcher.subscribe_processing();
+        auto processing_snapshot = processing.current();
+        EXPECT_TRUE(watcher.start());
+
+        service.push(tls_snapshot(1, certificate_pem, private_key_pem), "v1");
+        service.push(tls_snapshot(2, certificate_pem, private_key_pem), "v2");
+        service.push(version_three, "v3");
+        processing_snapshot = processing.current();
+        EXPECT_TRUE(processing_snapshot.value);
+        if (processing_snapshot.value) {
+            EXPECT_TRUE(*processing_snapshot.value);
+        }
+        EXPECT_EQ(store.version(), 0u);
+        EXPECT_EQ(watcher.successful_updates(), 0u);
+        owner_progressed = true;
+
+        compiler_group.start();
+        compiler_started = true;
+        co_await wait_for_bool(processing, processing_snapshot, false);
+        ready_snapshot = ready.current();
+        EXPECT_TRUE(ready_snapshot.value);
+        if (ready_snapshot.value) {
+            EXPECT_TRUE(*ready_snapshot.value);
+        }
+        EXPECT_EQ(store.version(), 3u);
+        EXPECT_EQ(store.certificate_count(), 1u);
+        EXPECT_EQ(watcher.successful_updates(), 1u);
+        EXPECT_EQ(watcher.failed_updates(), 0u);
+
+        service.push(version_three, "same");
+        co_await wait_for_bool(processing, processing_snapshot, false);
+        EXPECT_EQ(watcher.successful_updates(), 1u);
+        EXPECT_EQ(watcher.failed_updates(), 0u);
+
+        service.push(version_three + "\n", "conflict");
+        co_await wait_for_bool(processing, processing_snapshot, false);
+        EXPECT_EQ(watcher.failed_updates(), 1u);
+        EXPECT_TRUE(watcher.last_failure());
+        if (watcher.last_failure()) {
+            EXPECT_EQ(watcher.last_failure()->error.code, TlsCertificateConfigErrorCode::VersionConflict);
+        }
+        EXPECT_EQ(store.version(), 3u);
+
+        service.push(tls_snapshot(2, certificate_pem, "not-a-private-key"), "older-invalid");
+        co_await wait_for_bool(processing, processing_snapshot, false);
+        EXPECT_EQ(watcher.failed_updates(), 1u);
+        EXPECT_EQ(store.version(), 3u);
+
+        service.push(tls_snapshot(4, certificate_pem, "not-a-private-key"), "new-invalid");
+        co_await wait_for_bool(processing, processing_snapshot, false);
+        EXPECT_EQ(watcher.failed_updates(), 2u);
+        EXPECT_TRUE(watcher.last_failure());
+        if (watcher.last_failure()) {
+            EXPECT_EQ(watcher.last_failure()->error.code, TlsCertificateConfigErrorCode::InvalidPrivateKey);
+        }
+        EXPECT_EQ(store.version(), 3u);
+
+        co_await watcher.shutdown();
+        co_await store.shutdown();
+        completed = true;
+        owner_loop.stop();
+    });
+
+    owner_loop.run();
+    if (compiler_started) {
+        compiler_group.stop();
+        compiler_group.join();
+    }
+    EXPECT_TRUE(owner_progressed);
     EXPECT_TRUE(completed);
 }
 

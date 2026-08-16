@@ -238,11 +238,23 @@ Validator 的 `--describe-config-limits` 输出 strict schema version 1 JSON。s
 
 **归属：本项目。初始实现不需要 Fiber 改动。**
 
-项目回调当前在 Nacos loop 上完成 JSON decode、关系校验、脚本和模板编译、CIDR/address
-编译以及静态 gzip；TLS watcher 也会在 owner loop 上解析 PEM 和创建 TLS context。大配置
-或复杂脚本会延迟同一 loop 上的其他配置和 NamingService 工作。
+**实施状态：已解决（2026-08-17）。** runtime 现在使用独立单线程 compiler EventLoop。
+Project route 的 JSON、关系、脚本/模板、CIDR/address、matcher 和静态 gzip，以及 TLS 的
+JSON、PEM/SAN、TCP/QUIC context 和 bootstrap identity 准备都在该 loop 完成。Nacos loop
+只检查原始字节上限、推进 generation、绑定 owner-loop-only NamingService lease、等待
+service ready 并发布完整候选。
 
-建议建立一个 access-server 专用、有界的 compiler worker 或 compiler loop：
+Project 队列对每个当前项目只保留 latest `ConfigData` shared pointer，实际投递任务为 1，
+总待处理项目受 L-03 的 1024 项目上限约束；TLS 使用 1 active + 1 latest pending。旧任务
+通过 cancel flag 和回投后的 generation 双重检查失效。shutdown 会先关闭订阅、取消候选并
+异步等待全部回执，再允许 compiler group 停止。完整线程、队列和生命周期契约见
+[`config-compilation.md`](config-compilation.md)。
+
+改造前，项目回调在 Nacos loop 上完成 JSON decode、关系校验、脚本和模板编译、
+CIDR/address 编译以及静态 gzip；TLS watcher 也会在 owner loop 上解析 PEM 和创建 TLS
+context。大配置或复杂脚本会延迟同一 loop 上的其他配置和 NamingService 工作。
+
+采用的执行模型是：
 
 ```text
 Nacos owner loop
@@ -253,9 +265,9 @@ Nacos owner loop
   -> 原子发布
 ```
 
-脚本 compiler、OpenSSL context 或其他组件如果具有 thread/loop 亲和性，应在 compiler
-worker 内构造独立实例。任务队列必须有容量、取消和“新 generation 替换旧任务”的明确
-策略。
+脚本 compiler 在 compiler loop 内拥有独立、长生命周期的 `AccessScriptRuntime`；OpenSSL
+context 也只在该 worker 构造。队列容量、取消和“新 generation 替换旧任务”均由 watcher
+显式管理。
 
 若未来需要通用 CPU work executor，可单独贡献到 Fiber；本项不应因等待通用抽象而阻塞
 本项目的专用实现。

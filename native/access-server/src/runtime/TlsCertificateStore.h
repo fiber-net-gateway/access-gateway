@@ -29,6 +29,17 @@ enum class TlsCertificateUpdateStatus : std::uint8_t {
     Published,
 };
 
+using TlsCertificateContentDigest = std::array<std::uint8_t, 32>;
+
+struct TlsCertificateVersionState {
+    bool active = false;
+    std::uint64_t version = 0;
+    TlsCertificateContentDigest content_digest{};
+};
+
+using TlsCertificateClassification =
+        std::optional<std::expected<TlsCertificateUpdateStatus, TlsCertificateConfigError>>;
+
 class TlsBootstrapIdentity final : public common::NonCopyable, public common::NonMovable {
 public:
     ~TlsBootstrapIdentity();
@@ -51,18 +62,45 @@ private:
 class TlsCertificateStore final : public common::NonCopyable, public common::NonMovable {
 public:
     class Snapshot;
+    class PreparedUpdate final {
+    public:
+        PreparedUpdate(const PreparedUpdate &) = delete;
+        PreparedUpdate &operator=(const PreparedUpdate &) = delete;
+        PreparedUpdate(PreparedUpdate &&other) noexcept;
+        PreparedUpdate &operator=(PreparedUpdate &&other) noexcept;
+        ~PreparedUpdate();
+
+    private:
+        friend class TlsCertificateStore;
+
+        PreparedUpdate() noexcept = default;
+
+        std::uint64_t version_ = 0;
+        TlsCertificateContentDigest content_digest_{};
+        std::unique_ptr<Snapshot> snapshot_;
+        std::shared_ptr<TlsBootstrapIdentity> bootstrap_;
+    };
 
     TlsCertificateStore(event::EventLoop &owner_loop, event::EventLoopGroup &workers, bool quic_enabled);
     ~TlsCertificateStore();
 
+    [[nodiscard]] static TlsCertificateContentDigest content_digest(std::string_view wire_content) noexcept;
+    [[nodiscard]] static std::expected<PreparedUpdate, TlsCertificateConfigError>
+    prepare(const TlsCertificateSnapshotConfig &config, TlsCertificateContentDigest digest, bool quic_enabled,
+            bool prepare_bootstrap);
     [[nodiscard]] std::expected<TlsCertificateUpdateStatus, TlsCertificateConfigError>
     apply(const TlsCertificateSnapshotConfig &config, std::string_view wire_content);
+    [[nodiscard]] std::expected<TlsCertificateUpdateStatus, TlsCertificateConfigError> commit(PreparedUpdate prepared);
     [[nodiscard]] async::Task<void> shutdown() noexcept;
 
     [[nodiscard]] net::TlsIdentitySelectorOps selector_ops() noexcept;
     [[nodiscard]] std::shared_ptr<TlsBootstrapIdentity> bootstrap_identity() const noexcept { return bootstrap_; }
     [[nodiscard]] std::uint64_t version() const noexcept { return version_; }
     [[nodiscard]] std::size_t certificate_count() const noexcept;
+    [[nodiscard]] bool quic_enabled() const noexcept { return quic_enabled_; }
+    [[nodiscard]] TlsCertificateVersionState version_state() const noexcept;
+    [[nodiscard]] TlsCertificateClassification classify(std::uint64_t version,
+                                                        const TlsCertificateContentDigest &digest) const;
 
 private:
     struct alignas(64) WorkerSlot {
@@ -85,7 +123,7 @@ private:
     std::unique_ptr<Snapshot> active_;
     std::vector<std::unique_ptr<Snapshot>> retired_;
     std::shared_ptr<TlsBootstrapIdentity> bootstrap_;
-    std::array<std::uint8_t, 32> content_digest_{};
+    TlsCertificateContentDigest content_digest_{};
     event::EventLoop::NotifyEntry reaper_entry_;
     std::atomic<bool> reaper_posted_{false};
     async::Watch<std::uint64_t> reclaim_epoch_{0};

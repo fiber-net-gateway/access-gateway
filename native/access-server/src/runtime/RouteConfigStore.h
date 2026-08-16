@@ -54,10 +54,15 @@ public:
 
     [[nodiscard]] PreparedConfigUpdateOutcome prepare(std::string_view project,
                                                       const std::optional<ProjectConfig> &config);
+    [[nodiscard]] PreparedConfigUpdateOutcome prepare_compiled(std::string_view project,
+                                                               std::optional<std::int32_t> version,
+                                                               std::optional<ProjectRouteSnapshot> project_snapshot);
     [[nodiscard]] ConfigUpdateOutcome apply(std::string_view project, const std::optional<ProjectConfig> &config);
     [[nodiscard]] ConfigUpdateOutcome commit(PreparedConfigUpdate prepared);
     [[nodiscard]] ConfigUpdateOutcome remove_project(std::string_view project);
     void clear() noexcept;
+
+    [[nodiscard]] std::optional<std::int32_t> current_version(std::string_view project) const noexcept;
 
     [[nodiscard]] std::shared_ptr<const AccessRouteSnapshot> pin() const noexcept {
 #if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
@@ -73,7 +78,6 @@ private:
         std::int32_t version = 0;
     };
 
-    [[nodiscard]] std::optional<std::int32_t> published_version(std::string_view project) const noexcept;
     void set_published_version(std::string_view project, std::int32_t version);
     void remove_published_version(std::string_view project);
     [[nodiscard]] ConfigUpdateOutcome
