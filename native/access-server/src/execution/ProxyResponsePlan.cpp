@@ -27,14 +27,17 @@ PreparedProxyResponseHeadersResult prepare_proxy_response_headers(const Compiled
         if (!value) {
             return std::unexpected(value.error());
         }
-        if (value->empty() || is_java_filtered_response_header(header.name())) {
+        const std::string_view value_view = value->view();
+        if (value_view.empty() || is_java_filtered_response_header(header.name())) {
             continue;
         }
-        if (!is_valid_http_header_name(header.name()) || !is_valid_http_header_value(*value)) {
+        if (!is_valid_http_header_name(header.name()) || !is_valid_http_header_value(value_view)) {
             return std::unexpected(Err::from_exception(Exception::unknown("invalid proxy response header")));
         }
         result.push_back(EvaluatedHeader{
-                .name = std::string(header.name()),
+                .name = header.name(),
+                .lowcase_name = header.lowcase_name(),
+                .name_hash = header.hash(),
                 .value = std::move(*value),
         });
     }

@@ -15,12 +15,14 @@ TEST(CompiledTemplateTest, KeepsPlainAndEmptyTemplatesStatic) {
     EXPECT_FALSE(plain->dynamic());
     EXPECT_EQ(plain->trailing_literal, "plain text");
     EXPECT_EQ(plain->literal_size, 10U);
+    EXPECT_EQ(plain->output_reserve_size, 10U);
 
     auto empty = parse_template("");
     ASSERT_TRUE(empty);
     EXPECT_FALSE(empty->dynamic());
     EXPECT_TRUE(empty->trailing_literal.empty());
     EXPECT_EQ(empty->literal_size, 0U);
+    EXPECT_EQ(empty->output_reserve_size, 0U);
 }
 
 TEST(CompiledTemplateTest, SplitsExpressionsAndKeepsTheirLeadingLiterals) {
@@ -36,6 +38,7 @@ TEST(CompiledTemplateTest, SplitsExpressionsAndKeepsTheirLeadingLiterals) {
     EXPECT_FALSE(compiled->expressions[1].program.valid());
     EXPECT_EQ(compiled->trailing_literal, ";tail");
     EXPECT_EQ(compiled->literal_size, 10U);
+    EXPECT_EQ(compiled->output_reserve_size, 138U);
 }
 
 TEST(CompiledTemplateTest, DecodesOnlyJavaTemplateEscapes) {

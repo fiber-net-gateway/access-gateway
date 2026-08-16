@@ -392,7 +392,7 @@ async::Task<Result<void>> AccessRequestHandler::handle_impl(http::HttpExchange &
                         : std::string_view{};
         co_return co_await proxy_adapter_.execute(proxy_adapter_.context, exchange, *route.proxy,
                                                   ProxyExecutionInput{
-                                                          .project = host_match.project->project(),
+                                                          .call_source = host_match.project->call_source(),
                                                           .initial_context_cluster = request_host.cluster,
                                                           .origin_host = origin_host,
                                                           .template_evaluator = template_evaluator,

@@ -313,6 +313,8 @@ TEST(ProjectRouteSnapshotTest, CompilesProxyFieldsAndJavaNarrowing) {
 
     auto result = compile_project_config("orders", project_with_routes({std::move(route)}), scripts.compiler_adapter());
     const ProjectRouteSnapshot &snapshot = require_snapshot(result);
+    EXPECT_EQ(snapshot.project(), "orders");
+    EXPECT_EQ(snapshot.call_source(), "orders.unifiedAccess");
     ASSERT_EQ(snapshot.routes().size(), 1U);
     const CompiledRoute &compiled = snapshot.routes()[0];
     ASSERT_TRUE(compiled.proxy);
@@ -514,6 +516,9 @@ TEST(ProjectRouteSnapshotTest, BindsPreparsedTemplateExpressionsAfterDiscovering
     EXPECT_TRUE(response.body_template->expressions[0].program.valid());
     EXPECT_TRUE(response.body_template->expressions[1].program.valid());
     ASSERT_EQ(response.response_headers.size(), 2U);
+    EXPECT_EQ(response.response_headers[0].name, "X-Item");
+    EXPECT_EQ(response.response_headers[0].lowcase_name, "x-item");
+    EXPECT_EQ(response.response_headers[0].name_hash, fiber::http::http_header_name_hash("x-item"));
     ASSERT_EQ(response.response_headers[0].value.expressions.size(), 1U);
     EXPECT_TRUE(response.response_headers[0].value.expressions[0].program.valid());
     EXPECT_FALSE(response.response_headers[1].value.dynamic());

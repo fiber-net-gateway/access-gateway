@@ -21,6 +21,7 @@ namespace {
 
 using fiber::access_server::apply_response_gzip;
 using fiber::access_server::CompiledHeaderTemplates;
+using fiber::access_server::CompiledResponseHeaderTemplate;
 using fiber::access_server::CompiledResponseRoute;
 using fiber::access_server::CompiledTemplate;
 using fiber::access_server::CompiledTemplateEntry;
@@ -59,11 +60,9 @@ Result<void> evaluate_expression(void *context, const fiber::script::Script &, s
         }));
     }
     if (expression == "$path.id") {
-        output = "42";
+        output.append("42");
     } else if (expression == "$request.method") {
-        output = "POST";
-    } else {
-        output.clear();
+        output.append("POST");
     }
     return {};
 }
@@ -86,6 +85,10 @@ CompiledTemplateEntry template_entry(std::string name, std::string_view source) 
             .name = std::move(name),
             .value = compiled_template(source),
     };
+}
+
+CompiledResponseHeaderTemplate response_header(std::string name, std::string_view source) {
+    return CompiledResponseHeaderTemplate(std::move(name), compiled_template(source));
 }
 
 CompiledHeaderTemplates compiled_headers(std::vector<CompiledTemplateEntry> entries) {
@@ -128,7 +131,7 @@ std::string_view find_header(const fiber::access_server::PreparedResponse &respo
     std::string_view matched;
     for (const auto &header: response.headers) {
         if (fiber::http::http_header_name_equals_ci(header.name, name)) {
-            matched = header.value;
+            matched = header.value.view();
         }
     }
     return matched;
@@ -189,8 +192,23 @@ TEST(TemplateEvaluatorTest, EvaluatesSegmentsAndJavaEscapes) {
     auto result = evaluate_template(value, evaluator(state));
 
     ASSERT_TRUE(result);
-    EXPECT_EQ(*result, "id=42;method=POST;literal=${}\\");
+    EXPECT_TRUE(result->owns_storage());
+    EXPECT_EQ(result->view(), "id=42;method=POST;literal=${}\\");
     EXPECT_EQ(state.expressions, (std::vector<std::string>{"$path.id", "$request.method"}));
+}
+
+TEST(TemplateEvaluatorTest, BorrowsStaticBytesAndMaterializesOnlyForMutation) {
+    const CompiledTemplate value = compiled_template("static-template-value-beyond-small-string-storage");
+
+    auto result = evaluate_template(value, {});
+
+    ASSERT_TRUE(result);
+    EXPECT_FALSE(result->owns_storage());
+    EXPECT_EQ(result->view().data(), value.trailing_literal.data());
+    result->materialize().append("-changed");
+    EXPECT_TRUE(result->owns_storage());
+    EXPECT_EQ(result->view(), "static-template-value-beyond-small-string-storage-changed");
+    EXPECT_EQ(value.trailing_literal, "static-template-value-beyond-small-string-storage");
 }
 
 TEST(TemplateEvaluatorTest, FailsClosedWithoutAdapter) {
@@ -212,9 +230,9 @@ TEST(ResponsePlanTest, EvaluatesEveryHeaderBeforeApplyingJavaHopHeaderFilter) {
             .body = "created",
             .response_headers =
                     {
-                            template_entry("X-Request", "${$request.method}"),
-                            template_entry("Content-Length", "${$path.id}"),
-                            template_entry("Host", "public.example.com"),
+                            response_header("X-Request", "${$request.method}"),
+                            response_header("Content-Length", "${$path.id}"),
+                            response_header("Host", "public.example.com"),
                     },
     };
     EvaluatorState state;
@@ -226,9 +244,13 @@ TEST(ResponsePlanTest, EvaluatesEveryHeaderBeforeApplyingJavaHopHeaderFilter) {
     EXPECT_EQ(result->body_view(), "created");
     ASSERT_EQ(result->headers.size(), 2U);
     EXPECT_EQ(result->headers[0].name, "X-Request");
-    EXPECT_EQ(result->headers[0].value, "POST");
+    EXPECT_EQ(result->headers[0].value.view(), "POST");
+    EXPECT_TRUE(result->headers[0].value.owns_storage());
     EXPECT_EQ(result->headers[1].name, "Host");
-    EXPECT_EQ(result->headers[1].value, "public.example.com");
+    EXPECT_EQ(result->headers[1].value.view(), "public.example.com");
+    EXPECT_FALSE(result->headers[1].value.owns_storage());
+    EXPECT_EQ(result->headers[1].name.data(), response.response_headers[2].name.data());
+    EXPECT_EQ(result->headers[1].value.view().data(), response.response_headers[2].value.trailing_literal.data());
     EXPECT_EQ(state.expressions, (std::vector<std::string>{"$request.method", "$path.id"}));
 }
 
@@ -259,7 +281,7 @@ TEST(ResponsePlanTest, EvaluatesTemplateBodyAfterHeaders) {
             .body_template = compiled_template("item-${$path.id}"),
             .response_headers =
                     {
-                            template_entry("X-Method", "${$request.method}"),
+                            response_header("X-Method", "${$request.method}"),
                     },
     };
     EvaluatorState state;
@@ -333,9 +355,9 @@ TEST(ResponsePlanTest, AppliesSelectedGzipVariantAndRepresentationHeaders) {
             .gzip_body = *encoded,
             .response_headers =
                     {
-                            template_entry("Vary", "Origin"),
-                            template_entry("vary", "Accept-Language"),
-                            template_entry("ETag", R"("version-1")"),
+                            response_header("Vary", "Origin"),
+                            response_header("vary", "Accept-Language"),
+                            response_header("ETag", R"("version-1")"),
                     },
     };
     auto prepared = prepare_response(response, {});
@@ -398,8 +420,8 @@ TEST(ResponsePlanTest, DiscardsAllConfiguredHeadersWhenAHeaderTemplateFails) {
             .body = "unreached",
             .response_headers =
                     {
-                            template_entry("X-First", "${$path.id}"),
-                            template_entry("X-Fail", "${broken}"),
+                            response_header("X-First", "${$path.id}"),
+                            response_header("X-Fail", "${broken}"),
                     },
     };
     EvaluatorState state{.failing_expression = "broken"};
@@ -418,8 +440,8 @@ TEST(ResponsePlanTest, DiscardsAllConfiguredHeadersWhenBodyTemplateFails) {
             .body_template = compiled_template("${broken}"),
             .response_headers =
                     {
-                            template_entry("X-First", "${$path.id}"),
-                            template_entry("Content-Type", "application/custom"),
+                            response_header("X-First", "${$path.id}"),
+                            response_header("Content-Type", "application/custom"),
                     },
     };
     EvaluatorState state{.failing_expression = "broken"};
@@ -438,9 +460,9 @@ TEST(ResponsePlanTest, DiscardsAllHeadersWhenOneHeaderIsInvalid) {
             .body = "unreached",
             .response_headers =
                     {
-                            template_entry("X-First", "one"),
-                            template_entry("Bad Header", "two"),
-                            template_entry("X-Last", "three"),
+                            response_header("X-First", "one"),
+                            response_header("Bad Header", "two"),
+                            response_header("X-Last", "three"),
                     },
     };
 
@@ -485,9 +507,11 @@ TEST(ProxyResponsePlanTest, EvaluatesAllHeadersBeforeFilteringEmptyAndProtectedV
     ASSERT_TRUE(result);
     ASSERT_EQ(result->size(), 2U);
     EXPECT_EQ((*result)[0].name, "X-First");
-    EXPECT_EQ((*result)[0].value, "42");
+    EXPECT_EQ((*result)[0].value.view(), "42");
+    EXPECT_TRUE((*result)[0].value.owns_storage());
     EXPECT_EQ((*result)[1].name, "X-Last");
-    EXPECT_EQ((*result)[1].value, "static");
+    EXPECT_EQ((*result)[1].value.view(), "static");
+    EXPECT_FALSE((*result)[1].value.owns_storage());
     EXPECT_EQ(state.expressions, (std::vector<std::string>{"$path.id", "$request.method", "empty"}));
     EXPECT_TRUE(headers.contains("content-length"));
     EXPECT_TRUE(headers.contains("x-empty"));

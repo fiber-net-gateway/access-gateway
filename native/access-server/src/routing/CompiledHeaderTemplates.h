@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <iterator>
 #include <limits>
 #include <span>
 #include <string>
@@ -22,7 +23,13 @@ struct CompiledTemplateEntry {
 };
 
 class CompiledHeaderTemplates {
-    using Storage = http::HeaderMap<CompiledTemplate>;
+    struct StoredValue {
+        CompiledTemplate value;
+        std::string lowcase_name;
+        std::uint64_t name_hash = 0;
+    };
+
+    using Storage = http::HeaderMap<StoredValue>;
 
 public:
     enum class InsertError : std::uint8_t {
@@ -30,8 +37,55 @@ public:
         TooLarge,
     };
 
-    using EntryView = Storage::EntryView;
-    using ConstIterator = Storage::ConstIterator;
+    class ConstIterator;
+
+    class EntryView {
+    public:
+        [[nodiscard]] std::string_view name() const noexcept { return entry_.name(); }
+        [[nodiscard]] std::string_view lowcase_name() const noexcept { return entry_.value().lowcase_name; }
+        [[nodiscard]] std::uint64_t hash() const noexcept { return entry_.value().name_hash; }
+        [[nodiscard]] const CompiledTemplate &value() const noexcept { return entry_.value().value; }
+
+    private:
+        friend class ConstIterator;
+
+        explicit EntryView(Storage::EntryView entry) noexcept : entry_(entry) {}
+
+        Storage::EntryView entry_;
+    };
+
+    class ConstIterator {
+    public:
+        using iterator_category = std::forward_iterator_tag;
+        using value_type = EntryView;
+        using difference_type = std::ptrdiff_t;
+        using pointer = void;
+        using reference = EntryView;
+
+        ConstIterator() noexcept = default;
+
+        [[nodiscard]] EntryView operator*() const noexcept { return EntryView(*iterator_); }
+        ConstIterator &operator++() noexcept {
+            ++iterator_;
+            return *this;
+        }
+        ConstIterator operator++(int) noexcept {
+            ConstIterator copy = *this;
+            ++(*this);
+            return copy;
+        }
+        [[nodiscard]] bool operator==(const ConstIterator &other) const noexcept {
+            return iterator_ == other.iterator_;
+        }
+        [[nodiscard]] bool operator!=(const ConstIterator &other) const noexcept { return !(*this == other); }
+
+    private:
+        friend class CompiledHeaderTemplates;
+
+        explicit ConstIterator(Storage::ConstIterator iterator) noexcept : iterator_(iterator) {}
+
+        Storage::ConstIterator iterator_;
+    };
 
     class Builder;
 
@@ -46,15 +100,18 @@ public:
     [[nodiscard]] bool contains(std::string_view lowcase_name, std::uint64_t hash) const noexcept;
 
     [[nodiscard]] std::size_t size() const noexcept;
+    [[nodiscard]] std::size_t dynamic_size() const noexcept { return dynamic_size_; }
     [[nodiscard]] bool empty() const noexcept { return size() == 0; }
 
     [[nodiscard]] ConstIterator begin() const noexcept;
     [[nodiscard]] ConstIterator end() const noexcept;
 
 private:
-    explicit CompiledHeaderTemplates(Storage storage) noexcept : storage_(std::move(storage)) {}
+    explicit CompiledHeaderTemplates(Storage storage, std::size_t dynamic_size) noexcept :
+        storage_(std::move(storage)), dynamic_size_(dynamic_size) {}
 
     Storage storage_;
+    std::size_t dynamic_size_ = 0;
 };
 
 class CompiledHeaderTemplates::Builder {

@@ -650,7 +650,7 @@ Fiber 的 TLS selector 已能提供 ClientHello 和 context 选择；当前问�
 
 **归属：本项目。**
 
-明确的请求级分配包括：
+**实施状态：已解决（2026-08-17）。** 改造前明确的请求级分配包括：
 
 - `evaluate_template()` 只按 literal 大小 reserve，并为每个 expression 创建临时 string；
 - 无 rewrite 时仍复制完整 request target；
@@ -665,16 +665,57 @@ Fiber 的 TLS selector 已能提供 ClientHello 和 context 选择；当前问�
 - [`ResponsePlan.cpp`](../src/execution/ResponsePlan.cpp#L247)；
 - [`ProxyResponsePlan.cpp`](../src/execution/ProxyResponsePlan.cpp#L21)。
 
-建议：
+实现采用以下边界：
 
-- script template 增加 append-to-sink/request-pool builder；
-- request target 使用 `string_view + optional owned buffer`；
-- call-source 在 project snapshot 编译时预计算；
-- 静态 header name 保留 view，动态 value 使用 request pool；
-- 用 allocation/request、bytes/request 和 p99 验证收益。
+- `EvaluatedTemplate` 显式区分 borrowed/owned：静态模板直接借用请求已 pin 的 compiled
+  snapshot，动态模板只持有一个输出 string；expression evaluator 改为向同一 buffer
+  append，不再为每段创建临时 string。编译时按 literal 加每个 expression 64 bytes 计算
+  bounded reserve；默认 256 expression 上限使推测性空间最多增加 16 KiB，不会按可能很长的
+  expression 源码无界 reserve；
+- request target 使用一个稳定 `string_view` 和可选 owned storage。存在 `unparsed_uri` 且无
+  rewrite 时直接借用 exchange 字节；只有 path/query 合成或 rewrite/escape 才写 storage，且
+  所有 retry 复用同一结果；
+- `ProjectRouteSnapshot` 编译时预计算 `<project>.unifiedAccess`，并把新增字节计入 snapshot
+  memory budget；请求只传递稳定 view；
+- compiled header 保存原始名称、ASCII lowercase 名称和完整 hash。prepared header 名称使用
+  view，静态值借用 snapshot，动态值由 prepared/request vector 持有。写入 Fiber
+  `HttpHeaders` 时使用 prehashed `set_view`/`add_view`，避免再次复制名称和值；
+- RESPONSE 配置仍按原顺序求值、在求值后过滤 hop-by-hop header，并保留大小写重复时最后
+  一个生效的语义。gzip 修改 borrowed `Vary`/`ETag` 前先 materialize；proxy header
+  大小写去重、空值过滤、错误结果和 retry 只求值一次的行为不变。
+
+生命周期依据是 `AccessRequestHandler` 在整个 coroutine 内 pin 全局 route snapshot；动态
+request header value vector 在构造前按上限 reserve，并存活到所有 upstream retry/发送结束；
+prepared response/proxy header 则存活到 downstream header 编码完成。没有 view 指向已移动的
+SSO string 或循环内临时对象。
+
+新增默认关闭的 `fiber_access_template_header_benchmark`。它在同一进程内覆盖静态/动态模板、
+8 个 RESPONSE header 和 8 个 proxy response header，分别输出 median、31 个 batch 的 p99、
+`operator new` 次数和申请字节数：
+
+```bash
+cmake -S native -B native/build -DACCESS_SERVER_BUILD_BENCHMARKS=ON
+cmake --build native/build \
+  --target fiber_access_template_header_benchmark --parallel
+native/build/access-server/fiber_access_template_header_benchmark 10000
+```
+
+2026-08-17 在 Release+ThinLTO、Clang 22、WSL 的同一构建树中，benchmark 源先在旧实现上运行
+一次，再在新实现上连续运行三次；下表的新延迟取三轮对应值的中位数，分配值三轮完全一致。
+未绑核且未隔离系统负载，因此延迟仅用于确认方向，不是生产容量或端到端 HTTP p99：
+
+| case | 旧 alloc/op | 新 alloc/op | 旧 bytes/op | 新 bytes/op | 旧 median/p99 ns | 新 median/p99 ns |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| static template | 1 | 0 | 71 | 0 | 11.2 / 14.4 | 1.9 / 2.8 |
+| dynamic template（4 expressions） | 8 | 1 | 950 | 268 | 124.5 / 138.0 | 24.3 / 55.2 |
+| static RESPONSE headers（8） | 17 | 1 | 1,072 | 640 | 498.1 / 532.7 | 384.4 / 492.4 |
+| dynamic RESPONSE headers（8） | 33 | 9 | 2,408 | 1,272 | 853.2 / 901.8 | 522.1 / 868.8 |
+| static proxy headers（8） | 17 | 1 | 1,072 | 640 | 490.0 / 569.9 | 386.2 / 448.7 |
+| dynamic proxy headers（8） | 33 | 9 | 2,408 | 1,272 | 888.2 / 1,372.9 | 575.8 / 611.0 |
 
 这些行为包含 Java 模板和 header 兼容逻辑，应留在 access-server；无需修改 Fiber 通用
-HTTP API，除非实际实现发现 request-pool header 接口缺少必要的安全生命周期能力。
+HTTP API。本次确认 Fiber 现有 prehashed view API 已具备所需生命周期能力，因此没有修改
+Fiber、没有新增 Fiber Issue，也没有更新 gitlink。
 
 ### 7.6 P-06：初始项目批量发布
 

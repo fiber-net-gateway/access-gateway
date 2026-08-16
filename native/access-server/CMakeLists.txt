@@ -82,6 +82,16 @@ if (ACCESS_SERVER_BUILD_BENCHMARKS)
     if (FIBER_ENABLE_LTO AND FIBER_IPO_SUPPORTED)
         set_property(TARGET fiber_access_service_selection_benchmark PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
     endif()
+
+    add_executable(fiber_access_template_header_benchmark
+        "${CMAKE_CURRENT_LIST_DIR}/benchmarks/TemplateHeaderBenchmark.cpp")
+    target_link_libraries(fiber_access_template_header_benchmark PRIVATE access_server_core)
+    set_target_properties(fiber_access_template_header_benchmark PROPERTIES FOLDER "native/access-server")
+    fiber_link_runtime_allocator(fiber_access_template_header_benchmark)
+
+    if (FIBER_ENABLE_LTO AND FIBER_IPO_SUPPORTED)
+        set_property(TARGET fiber_access_template_header_benchmark PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
+    endif()
 endif()
 
 if (FIBER_BUILD_TESTS AND (GTest_FOUND OR TARGET GTest::gtest_main))
