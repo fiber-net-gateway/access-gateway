@@ -1,4 +1,8 @@
 import type {
+  ActivationInstanceList,
+  ActivationInstanceView,
+  ActivationStatus,
+  ActivationSummary,
   CertificateView,
   CertificateVersionView,
   AccessConfigLimits,
@@ -61,6 +65,22 @@ export async function fetchHealth(signal?: AbortSignal): Promise<HealthResponse>
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function isActivationStatus(value: unknown): value is ActivationStatus {
+  return value === 'unknown' || value === 'pending' || value === 'active' || value === 'degraded'
+}
+
+function isActivationSummary(value: unknown): value is ActivationSummary {
+  return (
+    isRecord(value) &&
+    isActivationStatus(value.status) &&
+    ['targetCount', 'activeCount', 'pendingCount', 'degradedCount', 'unknownCount'].every(
+      (key) =>
+        typeof value[key] === 'number' && Number.isSafeInteger(value[key]) && value[key] >= 0,
+    ) &&
+    (value.evaluatedAt === null || typeof value.evaluatedAt === 'string')
+  )
 }
 
 function hasPositiveIntegers(value: Record<string, unknown>, keys: readonly string[]): boolean {
@@ -146,6 +166,7 @@ function isProject(value: unknown): value is ProjectView {
     typeof value.domain === 'string' &&
     typeof value.status === 'string' &&
     typeof value.lockVersion === 'string' &&
+    isActivationStatus(value.activationStatus) &&
     typeof value.createdAt === 'string' &&
     typeof value.updatedAt === 'string'
   )
@@ -390,7 +411,8 @@ function isProjectRelease(value: unknown): value is ProjectReleaseView {
         typeof value.sourceConfigurationVersion.number === 'number')) &&
     Array.isArray(value.resources) &&
     isRecord(value.publication) &&
-    value.activationStatus === 'unknown'
+    isActivationStatus(value.activationStatus) &&
+    isActivationSummary(value.activation)
   )
 }
 
@@ -468,7 +490,8 @@ function isTlsCertificateRelease(value: unknown): value is TlsCertificateRelease
     typeof value.resource.id === 'string' &&
     typeof value.resource.status === 'string' &&
     isRecord(value.publication) &&
-    value.activationStatus === 'unknown' &&
+    isActivationStatus(value.activationStatus) &&
+    isActivationSummary(value.activation) &&
     typeof value.createdAt === 'string'
   )
 }
@@ -694,6 +717,47 @@ export async function fetchProjectReleases(
       isRecord(value) && Array.isArray(value.items) && value.items.every(isProjectRelease),
   )
   return result.items
+}
+
+function isActivationInstance(value: unknown): value is ActivationInstanceView {
+  return (
+    isRecord(value) &&
+    typeof value.id === 'string' &&
+    typeof value.instanceKey === 'string' &&
+    isActivationStatus(value.status) &&
+    (value.buildVersion === null || typeof value.buildVersion === 'string') &&
+    (value.buildRevision === null || typeof value.buildRevision === 'string') &&
+    (value.evidenceRevision === null || typeof value.evidenceRevision === 'string') &&
+    (value.routeSnapshotGeneration === null || typeof value.routeSnapshotGeneration === 'string') &&
+    (value.routeSnapshotFingerprintSha256 === null ||
+      typeof value.routeSnapshotFingerprintSha256 === 'string') &&
+    (value.candidateStatus === null || typeof value.candidateStatus === 'string') &&
+    (value.candidateErrorCode === null || typeof value.candidateErrorCode === 'string') &&
+    (value.activeMd5 === null || typeof value.activeMd5 === 'string') &&
+    (value.activeVersion === null || typeof value.activeVersion === 'string') &&
+    (value.observedAt === null || typeof value.observedAt === 'string') &&
+    (value.expiresAt === null || typeof value.expiresAt === 'string')
+  )
+}
+
+export async function fetchReleaseActivation(
+  releaseId: string,
+  cursor: string | null = null,
+  signal?: AbortSignal,
+): Promise<ActivationInstanceList> {
+  const query = new URLSearchParams({ limit: '50' })
+  if (cursor) query.set('cursor', cursor)
+  return requestJson(
+    `/api/releases/${encodeURIComponent(releaseId)}/activation?${query.toString()}`,
+    { signal },
+    (value): value is ActivationInstanceList =>
+      isRecord(value) &&
+      value.releaseId === releaseId &&
+      isActivationSummary(value.summary) &&
+      Array.isArray(value.items) &&
+      value.items.every(isActivationInstance) &&
+      (value.nextCursor === null || typeof value.nextCursor === 'string'),
+  )
 }
 
 export async function fetchRelease(releaseId: string): Promise<ProjectReleaseView> {

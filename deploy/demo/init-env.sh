@@ -15,11 +15,17 @@ fi
 umask 077
 if [ -e "$environment_file" ]; then
     echo "Keeping existing local environment file: $environment_file"
+    if ! grep -q '^ACCESS_SERVER_ACTIVATION_TOKEN=' "$environment_file"; then
+        activation_token=$(openssl rand -hex 32)
+        echo "ACCESS_SERVER_ACTIVATION_TOKEN=$activation_token" >> "$environment_file"
+        echo "Added the access-server activation token to the local environment file"
+    fi
 else
     mysql_root_password=$(openssl rand -hex 24)
     mysql_password=$(openssl rand -hex 24)
     document_key=$(openssl rand -base64 32)
     rnacos_password=$(openssl rand -hex 24)
+    activation_token=$(openssl rand -hex 32)
 
     {
         echo "MYSQL_ROOT_PASSWORD=$mysql_root_password"
@@ -35,6 +41,7 @@ else
         echo "ACCESS_SERVER_PUBLISHED_HOST=0.0.0.0"
         echo "ACCESS_SERVER_HTTPS_PORT=16688"
         echo "ACCESS_SERVER_METRICS_PORT=16689"
+        echo "ACCESS_SERVER_ACTIVATION_TOKEN=$activation_token"
         echo "NATIVE_BUILD_JOBS=2"
     } > "$environment_file"
 

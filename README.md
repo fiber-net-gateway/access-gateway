@@ -28,8 +28,9 @@ The repository is under active development in two first-class areas:
   Project-level versioned HTTPS redirect and CIDR policies are available, together with an independent
   encrypted TLS inventory, immutable certificate versions, automatic DNS SAN-based ClientHello SNI
   selection, resolution preview, and TLS snapshot Releases with publication/readback evidence. Project
-  selection remains based on HTTP Host/`:authority` and is not coupled to SNI. OIDC, resource-level
-  publication retry/recovery, and per-instance activation collection remain to be implemented.
+  selection remains based on HTTP Host/`:authority` and is not coupled to SNI. Authenticated,
+  bounded per-instance activation evidence and a leased collector are implemented for Project and
+  TLS Releases. OIDC and resource-level publication retry/recovery remain to be implemented.
 
 The console therefore reports unavailable or unknown state where the supporting workflow does not
 exist. It does not fabricate publication or activation success.
@@ -42,8 +43,10 @@ flowchart LR
     Web --> API[Node.js / Fastify API]
     API --> DB[(Control-plane database)]
     Worker[Publication worker] <--> DB
+    Collector[Activation collector] <--> DB
     Worker --> Nacos[(Nacos / rnacos)]
     Nacos --> Access[Native Access Server]
+    Access --> Collector
     Discovery[Nacos NamingService] --> Access
     Client[Gateway client] --> Access
     Access --> Upstream[Upstream services]
@@ -155,6 +158,7 @@ The implemented control-plane endpoints include:
 - mixed YAML/JavaScript route validation and deterministic native-wire preview;
 - versioned Project HTTPS redirect and CIDR network-policy authoring;
 - Release creation from a current or historical version, publication queueing, and status detail;
+- per-instance activation aggregation and paginated evidence detail for each Release;
 - certificate inventory/version updates, DNS SAN-based SNI resolution preview, and TLS snapshot
   Release/publication APIs.
 
@@ -193,7 +197,7 @@ its Release through the Console worker, and starts Access Server only after both
 succeed.
 
 Fastify serves both the `/api/*` endpoints and the built React single-page application from one
-Console container. The complete stack therefore contains five long-running containers and three
+Console container. The complete stack therefore contains six long-running containers and three
 one-shot migration/bootstrap containers.
 
 Once all services are ready:
@@ -214,8 +218,9 @@ demo ports remain loopback-only. WSL2 NAT normally forwards TCP, but not UDP, fr
 should only be reachable inside WSL. Browsers negotiate QUIC only after trusting the demo
 certificate; never trust or reuse this local self-signed certificate in production.
 The bootstrap creates a Configuration Version and Release through the Console API; the publication
-worker performs the R-Nacos write and readback. Per-instance activation remains unknown because
-access-server activation evidence collection is not implemented.
+worker performs the R-Nacos write and readback. The dedicated collector then authenticates to the
+demo Access Server and reports its exact active route/TLS versions separately. Missing or expired
+evidence still renders as unknown.
 Use `npm run demo:ps`, `npm run demo:logs`, and `npm run demo:down` to operate the stack. Add
 `--volumes` to `docker compose down` only when you intentionally want to delete all demo data.
 

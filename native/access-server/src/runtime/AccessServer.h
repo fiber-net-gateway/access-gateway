@@ -6,6 +6,7 @@
 #include "../execution/ProxyExecutor.h"
 #include "../observability/AccessLogPolicy.h"
 #include "../observability/AccessServerMetrics.h"
+#include "AccessActivationEndpoint.h"
 #include "AccessDnsService.h"
 #include "RouteConfigStore.h"
 
@@ -40,6 +41,8 @@ struct AccessServerOptions {
     AccessRequestScriptAdapter script_adapter;
     ProxyExecutorOptions executor;
     const AccessRuntimeMetrics *runtime_metrics = nullptr;
+    const AccessActivationEvidenceStore *activation_evidence = nullptr;
+    AccessActivationEndpointOptions activation_endpoint;
     cat::CatClient *cat_client = nullptr;
     bool test_mode = false;
     http::HttpServerOptions http_server;
@@ -78,6 +81,7 @@ private:
     ProxyExecutor executor_;
     AccessRequestHandler handler_;
     AccessServerMetrics metrics_;
+    AccessActivationEndpoint activation_endpoint_;
     cat::CatClient *cat_client_ = nullptr;
     http::HttpServer server_;
     http::Http1Server metrics_server_;

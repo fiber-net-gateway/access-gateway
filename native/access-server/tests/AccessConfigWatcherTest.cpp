@@ -165,6 +165,35 @@ fiber::async::Task<void> wait_for_ready_to_publish(ReadinessWatch::Subscriber &r
     }
 }
 
+struct ActivationEvidenceCapture {
+    fiber::access_server::AccessRouteActivationEvidenceObserver downstream;
+    std::string target_project_list_md5;
+    std::string expected_remaining_project;
+    bool observed_premature_project_list_activation = false;
+
+    static void observe(void *context, const fiber::access_server::AccessRouteActivationEvidence &evidence) noexcept {
+        auto &capture = *static_cast<ActivationEvidenceCapture *>(context);
+        if (!capture.target_project_list_md5.empty() &&
+            evidence.project_list.active_md5 == capture.target_project_list_md5) {
+            for (const auto &project: evidence.projects) {
+                if (project.name != capture.expected_remaining_project) {
+                    capture.observed_premature_project_list_activation = true;
+                }
+            }
+        }
+        if (capture.downstream.on_update) {
+            capture.downstream.on_update(capture.downstream.context, evidence);
+        }
+    }
+
+    [[nodiscard]] fiber::access_server::AccessRouteActivationEvidenceObserver observer() noexcept {
+        return {
+                .context = this,
+                .on_update = &observe,
+        };
+    }
+};
+
 std::string route_config(std::int32_t version, std::string_view host, std::string_view service) {
     return std::string("{\"version\":") + std::to_string(version) + ",\"host\":{\"" + std::string(host) +
            "\":{}},\"routes\":[{\"path\":\"/\",\"service\":\"" + std::string(service) + "\"}]}";
@@ -172,7 +201,9 @@ std::string route_config(std::int32_t version, std::string_view host, std::strin
 
 std::string conditional_route_config(std::int32_t version, std::string_view host, std::string_view service) {
     return std::string("{\"version\":") + std::to_string(version) + ",\"host\":{\"" + std::string(host) +
-           "\":{}},\"routes\":[{\"path\":\"/\",\"condition\":\"true\",\"service\":\"" + std::string(service) + "\"}]}";
+           "\":{}},\"routes\":[{\"path\":\"/"
+           "\",\"condition\":\"true\",\"service\":\"" +
+           std::string(service) + "\"}]}";
 }
 
 TEST(AccessConfigWatcherTest, ReconcilesProjectsAndRetainsLastValidSnapshots) {
@@ -182,6 +213,11 @@ TEST(AccessConfigWatcherTest, ReconcilesProjectsAndRetainsLastValidSnapshots) {
     FakeConfigService service;
     fiber::access_server::RouteConfigStore store;
     fiber::access_server::AccessConfigMetrics config_metrics(loop);
+    fiber::access_server::AccessActivationEvidenceStore activation_evidence(
+            loop, fiber::access_server::AccessActivationEvidenceIdentity{});
+    ActivationEvidenceCapture activation_capture{
+            .downstream = activation_evidence.route_observer(),
+    };
     std::size_t observer_updates = 0;
     fiber::access_server::RouteSnapshotObserver observer{
             .context = &observer_updates,
@@ -191,7 +227,7 @@ TEST(AccessConfigWatcherTest, ReconcilesProjectsAndRetainsLastValidSnapshots) {
                     },
     };
     fiber::access_server::AccessConfigWatcher watcher(loop, compiler, service, store, {}, observer,
-                                                      config_metrics.observer());
+                                                      config_metrics.observer(), activation_capture.observer());
     bool completed = false;
 
     compiler_group.start();
@@ -231,6 +267,17 @@ TEST(AccessConfigWatcherTest, ReconcilesProjectsAndRetainsLastValidSnapshots) {
         EXPECT_TRUE(store.pin()->match_host("a.example.com"));
         EXPECT_TRUE(store.pin()->match_host("b.example.com"));
         const auto valid = store.pin();
+        auto evidence = activation_evidence.pin();
+        EXPECT_EQ(evidence->route.projects.size(), 2U);
+        EXPECT_EQ(evidence->route.snapshot_generation, 1U);
+        if (evidence->route.projects.size() == 2U) {
+            EXPECT_EQ(evidence->route.projects[0].name, "a");
+            EXPECT_EQ(evidence->route.projects[0].active_md5, "a1");
+            EXPECT_EQ(evidence->route.projects[0].active_version, 1);
+            EXPECT_TRUE(evidence->route.projects[0].active_loaded);
+            EXPECT_EQ(evidence->route.projects[1].name, "b");
+            EXPECT_EQ(evidence->route.projects[1].active_md5, "b1");
+        }
 
         service.push(fiber::access_server::kProjectListDataId,
                      std::string(fiber::access_server::kAccessConfigLimits.project_list.max_payload_bytes + 1U, 'x'),
@@ -273,6 +320,19 @@ TEST(AccessConfigWatcherTest, ReconcilesProjectsAndRetainsLastValidSnapshots) {
         EXPECT_TRUE(readiness_snapshot.value);
         EXPECT_EQ(readiness_snapshot.value->state, fiber::access_server::AccessConfigReadinessState::Ready);
         EXPECT_EQ(readiness_snapshot.value->rejected_projects, 1u);
+        evidence = activation_evidence.pin();
+        EXPECT_EQ(evidence->route.projects.size(), 2U);
+        if (evidence->route.projects.size() == 2U) {
+            EXPECT_EQ(evidence->route.projects[0].observed_md5, "same");
+            EXPECT_EQ(evidence->route.projects[0].active_md5, "a1");
+            EXPECT_EQ(evidence->route.projects[0].candidate_status,
+                      fiber::access_server::AccessActivationCandidateStatus::Accepted);
+            EXPECT_EQ(evidence->route.projects[1].observed_md5, "invalid");
+            EXPECT_EQ(evidence->route.projects[1].active_md5, "b1");
+            EXPECT_EQ(evidence->route.projects[1].candidate_status,
+                      fiber::access_server::AccessActivationCandidateStatus::Rejected);
+            EXPECT_TRUE(evidence->route.projects[1].failure);
+        }
 
         service.push("ploto.unified-access.route.a", "", "empty");
         co_await yield_updates();
@@ -292,11 +352,14 @@ TEST(AccessConfigWatcherTest, ReconcilesProjectsAndRetainsLastValidSnapshots) {
         EXPECT_TRUE(readiness_snapshot.value);
         EXPECT_EQ(readiness_snapshot.value->state, fiber::access_server::AccessConfigReadinessState::Ready);
 
-        service.push(fiber::access_server::kProjectListDataId, "b;c");
+        activation_capture.target_project_list_md5 = "only-c";
+        activation_capture.expected_remaining_project = "c";
+        service.push(fiber::access_server::kProjectListDataId, "c", "only-c");
         co_await yield_updates();
-        EXPECT_EQ(watcher.project_subscription_count(), 2u);
+        EXPECT_EQ(watcher.project_subscription_count(), 1u);
         EXPECT_FALSE(store.pin()->match_host("a.example.com"));
-        EXPECT_TRUE(store.pin()->match_host("b.example.com"));
+        EXPECT_FALSE(store.pin()->match_host("b.example.com"));
+        EXPECT_FALSE(activation_capture.observed_premature_project_list_activation);
 
         service.push_not_found(fiber::access_server::kProjectListDataId);
         co_await yield_updates();
@@ -307,6 +370,7 @@ TEST(AccessConfigWatcherTest, ReconcilesProjectsAndRetainsLastValidSnapshots) {
         EXPECT_TRUE(readiness_snapshot.value);
         EXPECT_EQ(readiness_snapshot.value->state, fiber::access_server::AccessConfigReadinessState::Ready);
         EXPECT_EQ(readiness_snapshot.value->desired_projects, 0u);
+        EXPECT_TRUE(activation_evidence.pin()->route.projects.empty());
 
         co_await watcher.shutdown();
         completed = true;
@@ -320,34 +384,45 @@ TEST(AccessConfigWatcherTest, ReconcilesProjectsAndRetainsLastValidSnapshots) {
     EXPECT_EQ(watcher.state(), fiber::access_server::AccessConfigWatcherState::Stopped);
     std::string metrics;
     config_metrics.append_prometheus(metrics, std::chrono::steady_clock::now());
-    EXPECT_NE(metrics.find("access_server_config_updates_total{resource=\"project_list\",result=\"success\",reason="
+    EXPECT_NE(metrics.find("access_server_config_updates_total{resource="
+                           "\"project_list\",result=\"success\",reason="
                            "\"accepted\"} 5"),
               std::string::npos);
-    EXPECT_NE(metrics.find("access_server_config_updates_total{resource=\"project_list\",result=\"failure\",reason="
+    EXPECT_NE(metrics.find("access_server_config_updates_total{resource="
+                           "\"project_list\",result=\"failure\",reason="
                            "\"decode\"} 1"),
               std::string::npos);
-    EXPECT_NE(metrics.find("access_server_config_updates_total{resource=\"project_route\",result=\"success\",reason="
+    EXPECT_NE(metrics.find("access_server_config_updates_total{resource="
+                           "\"project_route\",result=\"success\",reason="
                            "\"published\"} 2"),
               std::string::npos);
-    EXPECT_NE(metrics.find("access_server_config_updates_total{resource=\"project_route\",result=\"ignored\",reason="
+    EXPECT_NE(metrics.find("access_server_config_updates_total{resource="
+                           "\"project_route\",result=\"ignored\",reason="
                            "\"version_unchanged\"} 1"),
               std::string::npos);
-    EXPECT_NE(metrics.find("access_server_config_updates_total{resource=\"project_route\",result=\"ignored\",reason="
+    EXPECT_NE(metrics.find("access_server_config_updates_total{resource="
+                           "\"project_route\",result=\"ignored\",reason="
                            "\"empty\"} 2"),
               std::string::npos);
-    EXPECT_NE(metrics.find("access_server_config_updates_total{resource=\"project_route\",result=\"success\",reason="
+    EXPECT_NE(metrics.find("access_server_config_updates_total{resource="
+                           "\"project_route\",result=\"success\",reason="
                            "\"removed\"} 3"),
               std::string::npos);
-    EXPECT_NE(metrics.find("access_server_config_updates_total{resource=\"project_route\",result=\"failure\",reason="
+    EXPECT_NE(metrics.find("access_server_config_updates_total{resource="
+                           "\"project_route\",result=\"failure\",reason="
                            "\"decode\"} 1"),
               std::string::npos);
-    EXPECT_NE(metrics.find("access_server_config_stage_duration_observations_total{stage=\"project_compile\"} 4"),
+    EXPECT_NE(metrics.find("access_server_config_stage_duration_observations_"
+                           "total{stage=\"project_compile\"} 4"),
               std::string::npos);
-    EXPECT_NE(metrics.find("access_server_config_stage_duration_observations_total{stage=\"service_ready\"} 2"),
+    EXPECT_NE(metrics.find("access_server_config_stage_duration_observations_"
+                           "total{stage=\"service_ready\"} 2"),
               std::string::npos);
-    EXPECT_NE(metrics.find("access_server_config_stage_duration_observations_total{stage=\"global_build\"} 4"),
+    EXPECT_NE(metrics.find("access_server_config_stage_duration_observations_"
+                           "total{stage=\"global_build\"} 4"),
               std::string::npos);
-    EXPECT_NE(metrics.find("access_server_config_stage_duration_observations_total{stage=\"publish\"} 4"),
+    EXPECT_NE(metrics.find("access_server_config_stage_duration_observations_"
+                           "total{stage=\"publish\"} 4"),
               std::string::npos);
     EXPECT_NE(metrics.find("access_server_config_readiness{state=\"stopped\"} 1"), std::string::npos);
     EXPECT_NE(metrics.find("access_server_config_projects{state=\"ready_to_publish\"} 0"), std::string::npos);

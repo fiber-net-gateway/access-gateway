@@ -2,7 +2,7 @@ import type { RowDataPacket } from 'mysql2/promise'
 
 import type { DatabasePool } from './types.js'
 
-export const expectedSchemaVersion = '0010_project_decommission_releases'
+export const expectedSchemaVersion = '0011_instance_activation_evidence'
 
 export async function currentSchemaVersion(pool: DatabasePool): Promise<string | null> {
   const [rows] = await pool.execute<(RowDataPacket & { version: string })[]>(

@@ -1,3 +1,5 @@
+import type { ActivationStatus } from '../activation/model.js'
+
 export interface ProjectView {
   id: string
   domain: string
@@ -10,7 +12,7 @@ export interface ProjectView {
     lockVersion: string
   } | null
   publishedVersion: number | null
-  activationStatus: 'unknown'
+  activationStatus: ActivationStatus
   createdAt: string
   updatedAt: string
 }

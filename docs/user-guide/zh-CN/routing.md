@@ -38,6 +38,10 @@ Method、条件、CIDR、`RESPONSE`、`PROXY` 和发布语义。配置的最终�
 rnacos 写入成功或 readback 一致只证明“已发布”，不证明任何实例已经激活。当前没有实例级证据时，
 Console 必须显示“未知”，不能把 Published 渲染成 Active。
 
+对于已发布 Release，只有全部必需实例都提供未过期且 MD5/version 精确匹配的证据时才显示
+`active`；候选尚未进入 active snapshot 为 `pending`，明确拒绝或采集失败为 `degraded`，缺失或
+过期为 `unknown`。可在 Release 页面按需加载逐实例详情。
+
 ### 2.2 Console 编辑模型
 
 一个 Project 的 Route 列表可以混合两种编辑格式：

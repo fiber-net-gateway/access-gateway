@@ -68,6 +68,13 @@ public:
         });
     }
 
+    void close() {
+        const auto iterator = entries_.find(
+                make_key(fiber::access_server::kGrayConfigDataId, fiber::access_server::kDefaultNacosGroup));
+        ASSERT_NE(iterator, entries_.end());
+        iterator->second->subscriptions.publish(Result{.kind = fiber::nacos::ResultKind::Closed});
+    }
+
 private:
     struct Entry {
         fiber::tests::NacosSubscriptionStub<fiber::nacos::ConfigData> subscriptions;
@@ -227,7 +234,8 @@ TEST(GrayConfigTest, UsesDeterministicIndependentWorkerSnapshotsAndPrng) {
         const auto sampled = collect_worker_matches(workers, matcher, "custom", outside, sample_count);
         for (std::size_t worker = 0; worker < worker_count; ++worker) {
             std::uint64_t sequence = mix_expected_random(random_seed ^ (0x9e3779b97f4a7c15ULL * (worker + 1)));
-            (void) next_expected_sample(sequence); // The initial empty-snapshot request still consumes a sample.
+            (void) next_expected_sample(sequence); // The initial empty-snapshot
+                                                   // request still consumes a sample.
             for (std::size_t sample = 0; sample < sample_count; ++sample) {
                 EXPECT_EQ(sampled[worker][sample], next_expected_sample(sequence) < 5000U ? 1 : 0);
             }
@@ -258,7 +266,9 @@ TEST(GrayConfigTest, WatcherRetainsOnEmptyAndInvalidThenAcceptsClear) {
     fiber::event::EventLoop loop;
     FakeConfigService service;
     fiber::access_server::GrayMatchStore store;
-    fiber::access_server::GrayConfigWatcher watcher(loop, service, store);
+    fiber::access_server::AccessActivationEvidenceStore activation_evidence(
+            loop, fiber::access_server::AccessActivationEvidenceIdentity{});
+    fiber::access_server::GrayConfigWatcher watcher(loop, service, store, {}, activation_evidence.gray_observer());
     bool completed = false;
 
     fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
@@ -270,6 +280,8 @@ TEST(GrayConfigTest, WatcherRetainsOnEmptyAndInvalidThenAcceptsClear) {
                 "internet",
                 metadata_for(fiber::net::IpAddress::v6({0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1})),
                 9999));
+        EXPECT_EQ(activation_evidence.pin()->gray.resource.active_md5, "v1");
+        EXPECT_EQ(activation_evidence.pin()->gray.generation, 1U);
 
         std::string too_many_rules = "{";
         for (std::size_t index = 0; index <= fiber::access_server::kAccessConfigLimits.gray_rules.max_rules; ++index) {
@@ -288,6 +300,10 @@ TEST(GrayConfigTest, WatcherRetainsOnEmptyAndInvalidThenAcceptsClear) {
         if (watcher.last_failure()) {
             EXPECT_EQ(watcher.last_failure()->error.code, fiber::access_server::AccessConfigErrorCode::LimitExceeded);
         }
+        EXPECT_EQ(activation_evidence.pin()->gray.resource.observed_md5, "limited");
+        EXPECT_EQ(activation_evidence.pin()->gray.resource.active_md5, "v1");
+        EXPECT_EQ(activation_evidence.pin()->gray.resource.candidate_status,
+                  fiber::access_server::AccessActivationCandidateStatus::Rejected);
 
         service.push("", "empty");
         co_await yield_updates();
@@ -303,6 +319,19 @@ TEST(GrayConfigTest, WatcherRetainsOnEmptyAndInvalidThenAcceptsClear) {
         co_await yield_updates();
         EXPECT_EQ(store.rule_count(), 0u);
         EXPECT_EQ(watcher.successful_updates(), 2u);
+        EXPECT_EQ(activation_evidence.pin()->gray.resource.active_md5, "clear");
+        EXPECT_EQ(activation_evidence.pin()->gray.generation, 2U);
+
+        service.close();
+        co_await yield_updates();
+        EXPECT_EQ(watcher.state(), fiber::access_server::GrayConfigWatcherState::Failed);
+        const auto closed_evidence = activation_evidence.pin();
+        EXPECT_EQ(closed_evidence->gray.watcher_state, "failed");
+        EXPECT_TRUE(closed_evidence->gray.resource.failure);
+        if (closed_evidence->gray.resource.failure) {
+            EXPECT_EQ(closed_evidence->gray.resource.failure->code, "subscription_closed");
+        }
+        EXPECT_EQ(closed_evidence->gray.resource.active_md5, "clear");
 
         co_await watcher.shutdown();
         completed = true;

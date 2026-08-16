@@ -1,6 +1,7 @@
 #ifndef FIBER_ACCESS_SERVER_TLS_CERTIFICATE_WATCHER_H
 #define FIBER_ACCESS_SERVER_TLS_CERTIFICATE_WATCHER_H
 
+#include "../observability/AccessActivationEvidence.h"
 #include "AccessConfigCompiler.h"
 #include "TlsCertificateStore.h"
 
@@ -24,6 +25,7 @@ namespace fiber::access_server {
 enum class TlsCertificateWatcherState : std::uint8_t {
     Created,
     Running,
+    Failed,
     Stopping,
     Stopped,
 };
@@ -34,14 +36,18 @@ struct TlsCertificateWatcherOptions {
 };
 
 struct TlsCertificateWatcherFailure {
+    std::string stage;
+    std::string code;
     std::string md5;
     TlsCertificateConfigError error;
+    std::int64_t observed_at_unix_millis = 0;
 };
 
 class TlsCertificateWatcher final : public common::NonCopyable, public common::NonMovable {
 public:
     TlsCertificateWatcher(event::EventLoop &loop, AccessConfigCompiler &compiler, nacos::ConfigService &config_service,
-                          TlsCertificateStore &store, TlsCertificateWatcherOptions options = {});
+                          TlsCertificateStore &store, TlsCertificateWatcherOptions options = {},
+                          AccessTlsActivationEvidenceObserver observer = {});
     ~TlsCertificateWatcher();
 
     [[nodiscard]] std::expected<void, nacos::ConfigServiceError> start();
@@ -67,6 +73,7 @@ private:
     void dispatch_compile();
     void cancel_compile() noexcept;
     void publish_processing(bool processing);
+    void publish_evidence() const noexcept;
     void report_failure(std::string md5, TlsCertificateConfigError error);
     void apply_result(CompileJob &job);
     void request_stop() noexcept;
@@ -76,6 +83,7 @@ private:
     nacos::ConfigService *config_service_ = nullptr;
     TlsCertificateStore *store_ = nullptr;
     TlsCertificateWatcherOptions options_;
+    AccessTlsActivationEvidenceObserver observer_;
     std::optional<nacos::Subscription<nacos::ConfigData>> subscription_;
     std::optional<TlsCertificateWatcherFailure> last_failure_;
     std::shared_ptr<const nacos::ConfigData> pending_compile_data_;
@@ -86,6 +94,11 @@ private:
     std::optional<async::Watch<bool>::Publisher> processing_publisher_;
     async::WaitGroup compile_tasks_;
     TlsCertificateWatcherState state_ = TlsCertificateWatcherState::Created;
+    AccessActivationCandidateStatus candidate_status_ = AccessActivationCandidateStatus::Awaiting;
+    std::string observed_md5_;
+    std::string active_md5_;
+    std::int64_t observed_at_unix_millis_ = 0;
+    std::int64_t active_at_unix_millis_ = 0;
     std::uint64_t generation_ = 0;
     bool pending_force_compile_ = false;
     bool published_processing_ = false;

@@ -63,6 +63,14 @@ struct AccessDiscoveryServiceAggregate {
     std::uint64_t logical_clusters = 0;
 };
 
+struct AccessDiscoveryStatus {
+    std::array<AccessNacosLifecycleState, static_cast<std::size_t>(AccessNacosComponent::Count)> lifecycle{};
+    std::uint64_t ready_services = 0;
+    std::uint64_t selectable_endpoints = 0;
+    std::uint64_t logical_clusters = 0;
+    std::uint64_t selector_leases = 0;
+};
+
 struct AccessDiscoveryMetricsObserver {
     using EventFunction = void (*)(void *context, AccessDiscoveryMetricEvent event) noexcept;
     using ServiceTransitionFunction = void (*)(void *context, AccessDiscoveryMetricEvent event,
@@ -112,6 +120,7 @@ public:
     explicit AccessDiscoveryMetrics(event::EventLoop &owner) noexcept;
 
     [[nodiscard]] AccessDiscoveryMetricsObserver observer() noexcept;
+    [[nodiscard]] AccessDiscoveryStatus status() const noexcept;
     void append_prometheus(std::string &output) const;
 
 private:

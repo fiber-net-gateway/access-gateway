@@ -20,6 +20,9 @@ constexpr std::string_view kTlsCertificatesGroupSetting = "ACCESS_SERVER_TLS_CER
 constexpr std::string_view kHttp3Enabled = "ACCESS_SERVER_HTTP3_ENABLED";
 constexpr std::string_view kMetricsListenAddress = "ACCESS_SERVER_METRICS_LISTEN_ADDRESS";
 constexpr std::string_view kMetricsListenPort = "ACCESS_SERVER_METRICS_LISTEN_PORT";
+constexpr std::string_view kActivationEvidenceEnabled = "ACCESS_SERVER_ACTIVATION_EVIDENCE_ENABLED";
+constexpr std::string_view kActivationInstanceId = "ACCESS_SERVER_INSTANCE_ID";
+constexpr std::string_view kActivationToken = "ACCESS_SERVER_ACTIVATION_TOKEN";
 constexpr std::string_view kInitialConfigTimeout = "ACCESS_SERVER_INITIAL_CONFIG_TIMEOUT_MILLIS";
 constexpr std::string_view kMaxRequestBody = "ACCESS_SERVER_MAX_REQUEST_BODY_SIZE";
 constexpr std::string_view kTestMode = "ACCESS_SERVER_TEST_MODE";
@@ -53,6 +56,8 @@ constexpr std::string_view kCatIp = "CAT_IP";
 constexpr std::string_view kCatRouters = "CAT_ROUTER_ADDRESSES";
 constexpr std::string_view kCatCollectors = "CAT_COLLECTOR_ADDRESSES";
 constexpr std::size_t kMaxUpstreamTlsCaFileBytes = 4096;
+constexpr std::size_t kMinActivationTokenBytes = 32;
+constexpr std::size_t kMaxActivationTokenBytes = 512;
 
 struct Entry {
     std::string key;
@@ -152,6 +157,21 @@ bool valid_query_key(std::string_view value) noexcept {
                (character >= '0' && character <= '9') || character == '-' || character == '.' || character == '_' ||
                character == '~';
     });
+}
+
+bool valid_instance_id(std::string_view value) noexcept {
+    return !value.empty() && value.size() <= 255 &&
+           std::all_of(value.begin(), value.end(), [](unsigned char character) {
+               return (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') ||
+                      (character >= '0' && character <= '9') || character == '-' || character == '_' ||
+                      character == '.' || character == ':';
+           });
+}
+
+bool valid_activation_token(std::string_view value) noexcept {
+    return value.size() >= kMinActivationTokenBytes && value.size() <= kMaxActivationTokenBytes &&
+           std::all_of(value.begin(), value.end(),
+                       [](unsigned char character) { return character >= 0x21U && character <= 0x7eU; });
 }
 
 std::expected<std::vector<std::string>, AccessServerConfigError>
@@ -326,17 +346,19 @@ AccessServerConfigError nacos_error(const nacos::NacosConfigError &source) {
 
 AccessServerConfig::AccessServerConfig(
         net::SocketAddress listen_address, http::HttpServerOptions http_server_options,
-        net::SocketAddress metrics_listen_address, std::chrono::milliseconds initial_config_timeout,
-        std::size_t default_max_request_body_size, bool test_mode,
+        net::SocketAddress metrics_listen_address, AccessActivationEndpointOptions activation_endpoint_options,
+        std::chrono::milliseconds initial_config_timeout, std::size_t default_max_request_body_size, bool test_mode,
         ClientMetadataResolverOptions client_metadata_options, AccessLogOptions access_log_options,
         UpstreamTlsClientPolicy upstream_tls_client_policy, std::optional<cat::CatClientConfig> cat_config,
         nacos::NacosClientConfig nacos_config, AccessConfigWatcherOptions watcher_options,
         GrayConfigWatcherOptions gray_watcher_options, TlsCertificateWatcherOptions tls_certificate_watcher_options,
         AccessServiceDiscoveryOptions service_discovery_options) noexcept :
     listen_address_(std::move(listen_address)), http_server_options_(std::move(http_server_options)),
-    metrics_listen_address_(std::move(metrics_listen_address)), initial_config_timeout_(initial_config_timeout),
-    default_max_request_body_size_(default_max_request_body_size), test_mode_(test_mode),
-    client_metadata_options_(std::move(client_metadata_options)), access_log_options_(std::move(access_log_options)),
+    metrics_listen_address_(std::move(metrics_listen_address)),
+    activation_endpoint_options_(std::move(activation_endpoint_options)),
+    initial_config_timeout_(initial_config_timeout), default_max_request_body_size_(default_max_request_body_size),
+    test_mode_(test_mode), client_metadata_options_(std::move(client_metadata_options)),
+    access_log_options_(std::move(access_log_options)),
     upstream_tls_client_policy_(std::move(upstream_tls_client_policy)), cat_config_(std::move(cat_config)),
     nacos_config_(std::move(nacos_config)), watcher_options_(std::move(watcher_options)),
     gray_watcher_options_(std::move(gray_watcher_options)),
@@ -370,6 +392,7 @@ AccessServerConfig::load_from_string(std::string_view input) {
     bool http3_enabled = true;
     std::optional<net::IpAddress> metrics_ip;
     std::optional<std::uint16_t> metrics_port;
+    AccessActivationEndpointOptions activation_endpoint_options;
     std::uint64_t timeout_millis = 60000;
     std::size_t max_request_body = 400U << 20U;
     bool test_mode = false;
@@ -429,6 +452,15 @@ AccessServerConfig::load_from_string(std::string_view input) {
                                              "expected a port in range 1..65535"));
             }
             metrics_port = port;
+        } else if (entry.key == kActivationEvidenceEnabled) {
+            if (!parse_boolean(value, activation_endpoint_options.enabled)) {
+                return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, entry.line, entry.key,
+                                             "expected true or false"));
+            }
+        } else if (entry.key == kActivationInstanceId) {
+            activation_endpoint_options.instance_id = entry.value;
+        } else if (entry.key == kActivationToken) {
+            activation_endpoint_options.bearer_token = entry.value;
         } else if (entry.key == kInitialConfigTimeout) {
             if (!parse_unsigned(value, timeout_millis) ||
                 timeout_millis > static_cast<std::uint64_t>(std::chrono::milliseconds::max().count())) {
@@ -604,6 +636,23 @@ AccessServerConfig::load_from_string(std::string_view input) {
         return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, 0, kUpstreamTlsCaFile,
                                      "a CA file path is only valid in custom_ca mode"));
     }
+    if (activation_endpoint_options.enabled) {
+        if (!valid_instance_id(activation_endpoint_options.instance_id)) {
+            return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, 0, kActivationInstanceId,
+                                         "activation evidence requires a 1-255 byte instance ID using "
+                                         "[A-Za-z0-9._:-]"));
+        }
+        if (!valid_activation_token(activation_endpoint_options.bearer_token)) {
+            return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, 0, kActivationToken,
+                                         "activation evidence requires a 32-512 byte printable ASCII token"));
+        }
+    } else if (!activation_endpoint_options.instance_id.empty() || !activation_endpoint_options.bearer_token.empty()) {
+        const std::string_view setting =
+                activation_endpoint_options.instance_id.empty() ? kActivationToken : kActivationInstanceId;
+        return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, 0, setting,
+                                     "activation identity and token are only valid "
+                                     "when activation evidence is enabled"));
+    }
     client_metadata_options.connection_secure = tls_enabled;
     auto nacos_config = nacos::NacosClientConfig::create(std::move(nacos_params));
     if (!nacos_config) {
@@ -630,13 +679,13 @@ AccessServerConfig::load_from_string(std::string_view input) {
     http_options.tls.enabled = tls_enabled;
     http_options.tls.alpn = {"h2", "http/1.1"};
     http_options.http3.enabled = http3_enabled;
-    return AccessServerConfig(net::SocketAddress(listen_ip, listen_port), std::move(http_options),
-                              net::SocketAddress(metrics_ip.value_or(listen_ip), *metrics_port),
-                              std::chrono::milliseconds(timeout_millis), max_request_body, test_mode,
-                              std::move(client_metadata_options), std::move(access_log_options),
-                              std::move(upstream_tls_client_policy), std::move(cat_config), std::move(*nacos_config),
-                              std::move(watcher_options), std::move(gray_options), std::move(tls_certificate_options),
-                              std::move(service_discovery_options));
+    return AccessServerConfig(
+            net::SocketAddress(listen_ip, listen_port), std::move(http_options),
+            net::SocketAddress(metrics_ip.value_or(listen_ip), *metrics_port), std::move(activation_endpoint_options),
+            std::chrono::milliseconds(timeout_millis), max_request_body, test_mode, std::move(client_metadata_options),
+            std::move(access_log_options), std::move(upstream_tls_client_policy), std::move(cat_config),
+            std::move(*nacos_config), std::move(watcher_options), std::move(gray_options),
+            std::move(tls_certificate_options), std::move(service_discovery_options));
 }
 
 } // namespace fiber::access_server

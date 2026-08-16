@@ -4,6 +4,7 @@ import { Link, useNavigate } from 'react-router'
 import { createProject, fetchProjects } from '../api/client'
 import type { ProjectView } from '../api/types'
 import { useConsoleContext } from '../App'
+import { activationLabel } from '../components/ActivationEvidencePanel'
 import { CapabilityStrip } from '../components/CapabilityStrip'
 
 export function ProjectsIndexPage() {
@@ -119,7 +120,7 @@ export function ProjectsIndexPage() {
                         ? `已发布 V${project.publishedVersion}`
                         : '尚未发布'}
                     </span>
-                    <span>实例激活：未知</span>
+                    <span>实例激活：{activationLabel(project.activationStatus)}</span>
                   </span>
                 </span>
                 <span className="project-card-arrow" aria-hidden="true">

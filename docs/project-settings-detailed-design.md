@@ -178,7 +178,8 @@ archived。
 这些数据库更新位于同一事务。只有资源全部 verified 才执行。`publish_failed` 或
 `partially_published` 不改 archived_at。
 
-Project List 回读并不证明实例卸载。worker 不写 activation observations，也不改变
+Project List 回读并不证明实例卸载。publication worker 不写 activation observations；独立
+collector 只有收到目标实例精确 Project List active MD5 后才更新 activation，缺失或过期仍为
 `activationStatus=unknown`。
 
 ## 6. API schema
@@ -258,7 +259,7 @@ Release timeline 对 decommission Release 显示“下线 Project”，不显示
 前端：
 
 - Settings 不再显示 unavailable；
-- 只读身份和 activation unknown；
+- 只读身份和逐实例 activation 聚合；目标缺失或证据过期时显示 unknown；
 - 域名不匹配时按钮禁用；
 - 创建请求携带 If-Match，随后排队并导航 Releases；
 - ready 下线 Release 可以继续发布；

@@ -9,6 +9,9 @@ import { bufferToPublicId, createPublicId, publicIdToBuffer } from '../../shared
 import { canonicalJson, sha256 } from '../../shared/json.js'
 import { mysqlDateTimeToRfc3339 } from '../../shared/time.js'
 import { AuditRepository } from '../audit/repository.js'
+import type { ActivationSummary } from '../activation/model.js'
+import { unknownActivationSummary } from '../activation/model.js'
+import type { ActivationReadRepository } from '../activation/read-repository.js'
 import type { Actor } from '../auth/model.js'
 import type {
   QueueTlsCertificatePublicationResult,
@@ -93,11 +96,18 @@ export class TlsCertificateReleaseRepository {
   readonly #pool: DatabasePool
   readonly #documents: DocumentRepository
   readonly #audit: AuditRepository
+  readonly #activation: ActivationReadRepository | null
 
-  constructor(pool: DatabasePool, documents: DocumentRepository, audit = new AuditRepository()) {
+  constructor(
+    pool: DatabasePool,
+    documents: DocumentRepository,
+    audit = new AuditRepository(),
+    activation: ActivationReadRepository | null = null,
+  ) {
     this.#pool = pool
     this.#documents = documents
     this.#audit = audit
+    this.#activation = activation
   }
 
   async create(
@@ -343,7 +353,12 @@ export class TlsCertificateReleaseRepository {
        ORDER BY rel.id DESC LIMIT 100`,
       [environmentInternalId],
     )
-    return rows.map((row) => this.toView(row))
+    const summaries = this.#activation
+      ? await this.#activation.summariesForReleases(rows.map((row) => row.internal_id))
+      : new Map<string, ActivationSummary>()
+    return rows.map((row) =>
+      this.toView(row, summaries.get(row.internal_id) ?? unknownActivationSummary()),
+    )
   }
 
   async find(
@@ -359,7 +374,12 @@ export class TlsCertificateReleaseRepository {
         ? [publicIdToBuffer(publicId), environmentInternalId]
         : [publicIdToBuffer(publicId)],
     )
-    return rows[0] ? this.toView(rows[0]) : null
+    const row = rows[0]
+    if (!row) return null
+    const activation = this.#activation
+      ? await this.#activation.summaryForRelease(row.internal_id)
+      : unknownActivationSummary()
+    return this.toView(row, activation)
   }
 
   async queuePublication(
@@ -418,7 +438,10 @@ export class TlsCertificateReleaseRepository {
     return { jobId: jobPublicId, state: jobState, release }
   }
 
-  private toView(row: ReleaseRow): TlsCertificateReleaseView {
+  private toView(
+    row: ReleaseRow,
+    activation: ActivationSummary = unknownActivationSummary(),
+  ): TlsCertificateReleaseView {
     return {
       id: bufferToPublicId(row.public_id),
       sequence: row.sequence_no,
@@ -438,7 +461,8 @@ export class TlsCertificateReleaseRepository {
         jobId: row.job_public_id ? bufferToPublicId(row.job_public_id) : null,
         state: row.job_state,
       },
-      activationStatus: 'unknown',
+      activationStatus: activation.status,
+      activation,
       createdAt: mysqlDateTimeToRfc3339(row.created_at),
       publishedAt: row.published_at ? mysqlDateTimeToRfc3339(row.published_at) : null,
     }

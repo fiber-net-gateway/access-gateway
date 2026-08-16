@@ -365,24 +365,25 @@ TEMPLATE、空 body、1xx/204/205/206/304 和显式 `Content-Encoding` 组合。
 
 ### 7.4 证书管理
 
-| ID           | 优先级 | 需求                                                                              |
-| ------------ | ------ | --------------------------------------------------------------------------------- |
-| CON-CERT-001 | P0     | 支持上传 PEM 证书链和私钥，解析后展示 subject、issuer、SAN、指纹和有效期          |
-| CON-CERT-002 | P0     | 校验证书链格式、证书与私钥匹配、有效期和域名覆盖；失败时不建立可用版本            |
-| CON-CERT-003 | P0     | 首个版本建立稳定逻辑证书并从 DNS SAN 自动生成 selector；版本保持不可变            |
-| CON-CERT-004 | P0     | SAN selector 按 exact 优先、单层 wildcard 解析证书，不引用 Project                |
-| CON-CERT-005 | P0     | 更新创建新版本并原子替换 SAN selector；覆盖变化必须明确确认                       |
-| CON-CERT-006 | P0     | 同优先级多候选返回 conflict；不按上传时间、到期日或存储顺序任意选择               |
-| CON-CERT-007 | P0     | 私钥加密存储、永不回显、不可下载，不进入日志、trace、审计 diff 或 rnacos payload  |
-| CON-CERT-008 | P0     | TLS 页分别显示 matched/uncovered/conflict、版本事实状态和 activation unknown      |
-| CON-CERT-009 | P1     | 到期阈值支持 30/14/7 天提醒，提醒失败不影响证书事实状态                           |
-| CON-CERT-010 | P1     | 经专用安全交付通道把证书部署到支持 SNI 的 access-server，并收集逐实例证书指纹证据 |
-| CON-CERT-011 | P2     | 支持 ACME 或企业证书服务自动签发与续期，仍使用不可变版本和显式部署记录            |
-| CON-CERT-012 | P0     | 证书内容校验不做业务流量灰度；未来实例批次部署单独记录 rollout 与逐实例证据       |
+| ID           | 优先级 | 需求                                                                             |
+| ------------ | ------ | -------------------------------------------------------------------------------- |
+| CON-CERT-001 | P0     | 支持上传 PEM 证书链和私钥，解析后展示 subject、issuer、SAN、指纹和有效期         |
+| CON-CERT-002 | P0     | 校验证书链格式、证书与私钥匹配、有效期和域名覆盖；失败时不建立可用版本           |
+| CON-CERT-003 | P0     | 首个版本建立稳定逻辑证书并从 DNS SAN 自动生成 selector；版本保持不可变           |
+| CON-CERT-004 | P0     | SAN selector 按 exact 优先、单层 wildcard 解析证书，不引用 Project               |
+| CON-CERT-005 | P0     | 更新创建新版本并原子替换 SAN selector；覆盖变化必须明确确认                      |
+| CON-CERT-006 | P0     | 同优先级多候选返回 conflict；不按上传时间、到期日或存储顺序任意选择              |
+| CON-CERT-007 | P0     | 私钥加密存储、永不回显、不可下载，不进入日志、trace、审计 diff 或 rnacos payload |
+| CON-CERT-008 | P0     | TLS 页分别显示覆盖事实、Release 发布状态和逐实例 activation 聚合                 |
+| CON-CERT-009 | P1     | 到期阈值支持 30/14/7 天提醒，提醒失败不影响证书事实状态                          |
+| CON-CERT-010 | P0/P1  | 动态 SNI 和逐实例版本/摘要证据已完成；外部 TLS 终止器的受信证明仍为 P1           |
+| CON-CERT-011 | P2     | 支持 ACME 或企业证书服务自动签发与续期，仍使用不可变版本和显式部署记录           |
+| CON-CERT-012 | P0     | 证书内容校验不做业务流量灰度；未来实例批次部署单独记录 rollout 与逐实例证据      |
 
-当前 access-server 只支持启动时从文件加载一组监听器证书，尚不支持 Console 管理的逐域名 SNI
-证书。逻辑证书、版本更新、SNI 控制面解析和 TLS 快照发布已经完成；由于逐实例证据尚未实现，
-运行时状态必须显示 `activation_unknown`，不能从 Nacos readback 推断 `deployed`。
+access-server 已支持 Console 管理的逐域名 SNI 证书、完整 TLS 快照热更新和失败保留旧快照。
+控制面通过鉴权的逐实例接口收集精确 active MD5/version，只有全部必需实例的新鲜证据与 TLS
+Release 一致时才显示 `active`；目标缺失、证据尚未出现或已经过期时保持 `activation_unknown`，
+不能从 Nacos readback 推断 `deployed`。
 
 上传时的本地校验可以确定 PEM 结构、所提供链条的相邻签名关系、leaf/key 匹配、当前有效期和 DNS
 SAN，不需要业务流量验证。到期状态必须随时间持续计算；公共 CA 信任、吊销状态和企业私有信任策略
@@ -394,9 +395,9 @@ SAN，不需要业务流量验证。到期状态必须随时间持续计算；�
 
 如果 Project 开启 HTTPS redirect，发布前必须确认以下条件之一：已有覆盖该域名的运行时证书证据，
 或部署明确声明 TLS 由受信任的外部终止器负责。缺少两者时阻止发布，避免重定向到不可用 HTTPS。
-当前逐实例证书证据和外部终止器声明尚未实现，因此这一发布前置校验仍是明确缺口；Console 只能
-展示入口约束和 `activation_unknown`，不能从配置保存、rnacos readback 或 TLS 库存推断 HTTPS
-已经可达。
+逐实例证书证据已经实现，但它是发布后的生效证明，不能作为首次发布的前置条件。外部终止器声明
+以及把现有证据安全地纳入 HTTPS redirect 发布前置校验仍是明确缺口；Console 不能从配置保存、
+rnacos readback 或 TLS 库存推断 HTTPS 已经可达。
 
 ### 7.4.1 网络策略配置
 
@@ -660,7 +661,8 @@ Route 不能破坏历史 Release 和审计引用。
 7. **证书安全**：上传证书和匹配私钥后展示 SAN、指纹和有效期；不匹配私钥被拒绝，任何 API、
    日志、审计和 rnacos payload 都无法检索到私钥原文。
 8. **证书更新与诚实状态**：更新一个逻辑证书时原子切换版本及 SAN selector；范围变化需要确认。
-   数据面支持动态 SNI，但实例证据未接入时仍显示“Release 已发布 / 实例激活未知”，不显示“已生效”。
+   数据面支持动态 SNI；TLS Release 只有收到逐实例精确快照证据后才显示已激活，目标缺失或证据
+   过期时显示“Release 已发布 / 实例激活未知”。
 9. **保存版本**：用户基于 `V2` 修改 Route 并填写说明后保存为不可变 `V3`；`V2` 仍可只读查看，
    并发用户先保存 `V4` 时旧 base 保存返回冲突而不覆盖。
 10. **发布当前版本**：默认选择当前 `V4`；校验通过后，先写入并回读 project route，再按需更新
@@ -707,8 +709,8 @@ Route 不能破坏历史 Release 和审计引用。
   记录当前固定工作区、整份 JSON 编辑器和启动证书实现，仅作为现状说明；其中的 Console 产品
   交互被本文取代。
 - [`network-policy-and-certificate-design.md`](network-policy-and-certificate-design.md) 定义已实现的
-  Configuration Version v3 网络策略、可更新逻辑证书、SAN 自动 SNI 解析、安全边界和动态 SNI
-  交付；实例激活证据仍未实现。
+  Configuration Version v3 网络策略、可更新逻辑证书、SAN 自动 SNI 解析、安全边界、动态 SNI
+  交付和 TLS Release 实例激活证据。
 - [`project-settings-requirements.md`](project-settings-requirements.md) 和
   [`project-settings-detailed-design.md`](project-settings-detailed-design.md) 定义已实现的 Project
   Settings 下线 Release、Project List 回读证据和归档边界；route Data ID 清理仍是后续可选动作。

@@ -1,6 +1,7 @@
 #ifndef FIBER_ACCESS_SERVER_ACCESS_SERVER_RUNTIME_H
 #define FIBER_ACCESS_SERVER_ACCESS_SERVER_RUNTIME_H
 
+#include "../observability/AccessActivationEvidence.h"
 #include "../observability/AccessRuntimeMetrics.h"
 #include "AccessConfigCompiler.h"
 #include "AccessConfigWatcher.h"
@@ -107,6 +108,7 @@ private:
                         event::EventLoop &cat_loop, event::EventLoopGroup &http_workers,
                         net::SocketAddress listen_address, http::HttpServerOptions http_server_options,
                         net::SocketAddress metrics_listen_address, net::ListenOptions listen_options,
+                        AccessActivationEndpointOptions activation_endpoint_options,
                         std::chrono::milliseconds initial_config_timeout, std::size_t default_max_request_body_size,
                         bool test_mode, ClientMetadataResolverOptions client_metadata_options,
                         AccessLogOptions access_log_options, UpstreamTlsClientPolicy upstream_tls_client_policy,
@@ -144,6 +146,7 @@ private:
     ClientMetadataResolverOptions client_metadata_options_;
     AccessLogOptions access_log_options_;
     UpstreamTlsClientPolicy upstream_tls_client_policy_;
+    AccessActivationEndpointOptions activation_endpoint_options_;
     http::HttpServerOptions http_server_options_;
     std::unique_ptr<cat::CatClient> cat_client_;
     std::unique_ptr<nacos::NacosClient> nacos_client_;
@@ -152,6 +155,7 @@ private:
     AccessScriptRuntime script_runtime_;
     AccessConfigCompiler config_compiler_;
     AccessRuntimeMetrics runtime_metrics_;
+    AccessActivationEvidenceStore activation_evidence_;
     GrayMatchStore gray_store_;
     AccessServiceDiscovery service_discovery_;
     RouteConfigStore route_store_;

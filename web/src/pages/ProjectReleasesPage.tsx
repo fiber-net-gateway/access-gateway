@@ -2,6 +2,11 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 
 import { fetchProjectReleases } from '../api/client'
 import type { ProjectReleaseView } from '../api/types'
+import {
+  ActivationEvidencePanel,
+  activationChip,
+  activationLabel,
+} from '../components/ActivationEvidencePanel'
 import { useProjectContext } from './ProjectLayout'
 
 const terminalReleaseStatuses = new Set([
@@ -20,10 +25,17 @@ export function ProjectReleasesPage() {
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
-  const hasActiveRelease = useMemo(
-    () => releases.some((release) => !terminalReleaseStatuses.has(release.status)),
-    [releases],
-  )
+  const refreshDelay = useMemo(() => {
+    if (releases.some((release) => !terminalReleaseStatuses.has(release.status))) return 1_000
+    if (
+      releases.some(
+        (release) => release.status === 'published' && release.activation.targetCount > 0,
+      )
+    ) {
+      return 5_000
+    }
+    return null
+  }, [releases])
 
   const loadReleases = useCallback(
     async (signal?: AbortSignal, background = false): Promise<void> => {
@@ -51,14 +63,26 @@ export function ProjectReleasesPage() {
   }, [loadReleases])
 
   useEffect(() => {
-    if (!hasActiveRelease) return
-    const timer = window.setInterval(() => {
-      void loadReleases(undefined, true).catch((error: unknown) => {
-        setErrorMessage(error instanceof Error ? error.message : '刷新 Release 状态失败')
-      })
-    }, 1_000)
-    return () => window.clearInterval(timer)
-  }, [hasActiveRelease, loadReleases])
+    if (refreshDelay === null) return
+    const delay = refreshDelay
+    const controller = new AbortController()
+    let timer = window.setTimeout(refresh, delay)
+    async function refresh(): Promise<void> {
+      try {
+        await loadReleases(controller.signal, true)
+      } catch (error) {
+        if (!controller.signal.aborted) {
+          setErrorMessage(error instanceof Error ? error.message : '刷新 Release 状态失败')
+        }
+      } finally {
+        if (!controller.signal.aborted) timer = window.setTimeout(refresh, delay)
+      }
+    }
+    return () => {
+      controller.abort()
+      window.clearTimeout(timer)
+    }
+  }, [loadReleases, refreshDelay])
 
   return (
     <section className="project-subpage" aria-labelledby="releases-title">
@@ -89,10 +113,10 @@ export function ProjectReleasesPage() {
         </div>
       ) : null}
 
-      {hasActiveRelease ? (
+      {refreshDelay !== null ? (
         <div className="release-polling-state" role="status">
           <span className="connection-dot connection-dot-loading" aria-hidden="true" />
-          发布正在进行，页面会自动刷新
+          发布或实例激活正在推进，页面会自动刷新
         </div>
       ) : null}
 
@@ -124,7 +148,14 @@ export function ProjectReleasesPage() {
                 </div>
                 <div className="release-state-stack">
                   <span className="status-chip status-chip-unknown">{release.status}</span>
-                  <small>实例激活：未知</small>
+                  <span
+                    className={`status-chip status-chip-${activationChip(release.activationStatus)}`}
+                  >
+                    实例：{activationLabel(release.activationStatus)}
+                  </span>
+                  <small>
+                    {release.activation.activeCount}/{release.activation.targetCount} 已激活
+                  </small>
                 </div>
               </header>
               {release.description ? <p>{release.description}</p> : null}
@@ -144,6 +175,7 @@ export function ProjectReleasesPage() {
                   </div>
                 ))}
               </div>
+              <ActivationEvidencePanel releaseId={release.id} />
             </li>
           ))}
         </ol>

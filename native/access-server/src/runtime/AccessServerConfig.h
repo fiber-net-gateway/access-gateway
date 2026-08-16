@@ -4,6 +4,7 @@
 #include "../execution/ClientMetadata.h"
 #include "../execution/UpstreamTlsClientPolicy.h"
 #include "../observability/AccessLogPolicy.h"
+#include "AccessActivationEndpoint.h"
 #include "AccessConfigWatcher.h"
 #include "AccessServiceDiscovery.h"
 #include "GrayConfigWatcher.h"
@@ -52,6 +53,9 @@ public:
     [[nodiscard]] const net::SocketAddress &listen_address() const noexcept { return listen_address_; }
     [[nodiscard]] const http::HttpServerOptions &http_server_options() const noexcept { return http_server_options_; }
     [[nodiscard]] const net::SocketAddress &metrics_listen_address() const noexcept { return metrics_listen_address_; }
+    [[nodiscard]] const AccessActivationEndpointOptions &activation_endpoint_options() const noexcept {
+        return activation_endpoint_options_;
+    }
     [[nodiscard]] std::chrono::milliseconds initial_config_timeout() const noexcept { return initial_config_timeout_; }
     [[nodiscard]] std::size_t default_max_request_body_size() const noexcept { return default_max_request_body_size_; }
     [[nodiscard]] bool test_mode() const noexcept { return test_mode_; }
@@ -77,10 +81,11 @@ public:
 
 private:
     AccessServerConfig(net::SocketAddress listen_address, http::HttpServerOptions http_server_options,
-                       net::SocketAddress metrics_listen_address, std::chrono::milliseconds initial_config_timeout,
-                       std::size_t default_max_request_body_size, bool test_mode,
-                       ClientMetadataResolverOptions client_metadata_options, AccessLogOptions access_log_options,
-                       UpstreamTlsClientPolicy upstream_tls_client_policy,
+                       net::SocketAddress metrics_listen_address,
+                       AccessActivationEndpointOptions activation_endpoint_options,
+                       std::chrono::milliseconds initial_config_timeout, std::size_t default_max_request_body_size,
+                       bool test_mode, ClientMetadataResolverOptions client_metadata_options,
+                       AccessLogOptions access_log_options, UpstreamTlsClientPolicy upstream_tls_client_policy,
                        std::optional<cat::CatClientConfig> cat_config, nacos::NacosClientConfig nacos_config,
                        AccessConfigWatcherOptions watcher_options, GrayConfigWatcherOptions gray_watcher_options,
                        TlsCertificateWatcherOptions tls_certificate_watcher_options,
@@ -89,6 +94,7 @@ private:
     net::SocketAddress listen_address_;
     http::HttpServerOptions http_server_options_;
     net::SocketAddress metrics_listen_address_;
+    AccessActivationEndpointOptions activation_endpoint_options_;
     std::chrono::milliseconds initial_config_timeout_{60000};
     std::size_t default_max_request_body_size_ = 400U << 20U;
     bool test_mode_ = false;

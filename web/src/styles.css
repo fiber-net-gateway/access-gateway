@@ -660,6 +660,61 @@ button:disabled {
   white-space: nowrap;
 }
 
+.activation-evidence-control {
+  display: grid;
+  justify-items: start;
+}
+
+.activation-evidence-control > .button-link {
+  margin: 10px 17px;
+}
+
+.activation-evidence-panel {
+  display: grid;
+  gap: 12px;
+  padding: 14px 17px;
+  border-top: 1px solid #dce3da;
+  background: #fbfcfa;
+}
+
+.activation-evidence-error {
+  color: #812b28 !important;
+}
+
+.activation-evidence-panel > p {
+  margin: 0;
+  color: #647169;
+  font-size: 0.7rem;
+}
+
+.activation-evidence-panel ul {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.activation-evidence-panel li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 12px;
+  border: 1px solid #e0e6de;
+  border-radius: 10px;
+  background: #fff;
+}
+
+.activation-evidence-panel li > span {
+  display: grid;
+  gap: 4px;
+}
+
+.activation-evidence-panel li > span:last-child {
+  justify-items: end;
+}
+
 .page-header {
   display: flex;
   align-items: flex-start;
@@ -796,6 +851,11 @@ button:disabled {
 .status-chip-pending {
   background: #f5ddd5;
   color: #7e3526;
+}
+
+.status-chip-degraded {
+  background: #f3d4d0;
+  color: #812b28;
 }
 
 .status-chip-unknown {
@@ -2637,9 +2697,14 @@ button:disabled {
   }
 
   .release-card > header,
-  .release-resources > div {
+  .release-resources > div,
+  .activation-evidence-panel li {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .activation-evidence-panel li > span:last-child {
+    justify-items: start;
   }
 
   .release-state-stack {

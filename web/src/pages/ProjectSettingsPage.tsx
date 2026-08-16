@@ -7,6 +7,11 @@ import {
   queueReleasePublication,
 } from '../api/client'
 import type { ProjectReleaseView } from '../api/types'
+import {
+  ActivationEvidencePanel,
+  activationChip,
+  activationLabel,
+} from '../components/ActivationEvidencePanel'
 import { useProjectContext } from './ProjectLayout'
 
 const activeReleaseStatuses = new Set(['creating', 'validating', 'ready', 'queued', 'publishing'])
@@ -197,13 +202,20 @@ export function ProjectSettingsPage() {
           </div>
           <div className="settings-release-evidence">
             <span className="status-chip status-chip-unknown">{latestDecommission.status}</span>
-            <span>实例激活：未知</span>
+            <span
+              className={`status-chip status-chip-${activationChip(
+                latestDecommission.activationStatus,
+              )}`}
+            >
+              实例激活：{activationLabel(latestDecommission.activationStatus)}
+            </span>
             {latestDecommission.resources.map((resource) => (
               <span key={resource.id}>
                 Project List · {resourceOperation(resource.operation)} · {resource.status}
               </span>
             ))}
           </div>
+          <ActivationEvidencePanel releaseId={latestDecommission.id} />
           {latestDecommission.status === 'ready' ? (
             <button
               className="button-primary"
@@ -228,7 +240,7 @@ export function ProjectSettingsPage() {
           <ul>
             <li>不会发布浏览器中未保存的 Route 修改。</li>
             <li>不会用空 Route 或空 YAML 表达下线。</li>
-            <li>发布成功后仍只报告“实例激活未知”。</li>
+            <li>发布成功后仍等待每个必需实例的精确卸载证据；缺失或过期时显示“未知”。</li>
           </ul>
           {!publicationReady ? (
             <div className="capability-notice" role="note">
@@ -266,7 +278,8 @@ export function ProjectSettingsPage() {
             <p className="eyebrow">CREATE & PUBLISH DECOMMISSION RELEASE</p>
             <h2 id="decommission-title">确认下线 {project.domain}</h2>
             <div className="dialog-warning">
-              Project List 回读成功只证明 rnacos 已发布；在实例证据接入前，不代表所有实例已经下线。
+              Project List 回读成功只证明 rnacos 已发布；必须等待全部必需实例返回精确卸载证据，
+              才能证明此次下线已生效。
             </div>
             <label>
               下线原因

@@ -20,6 +20,7 @@ add_library(access_server_core STATIC
     "${CMAKE_CURRENT_LIST_DIR}/src/execution/TemplateEvaluator.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/execution/UpstreamTlsClientPolicy.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/observability/AccessLogPolicy.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/observability/AccessActivationEvidence.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/observability/AccessConfigMetrics.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/observability/AccessDiscoveryMetrics.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/observability/AccessRequestTelemetry.cpp"
@@ -34,6 +35,7 @@ add_library(access_server_core STATIC
     "${CMAKE_CURRENT_LIST_DIR}/src/routing/HostMatcher.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/routing/ProjectRouteSnapshot.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/routing/ProxyAddressSelector.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/runtime/AccessActivationEndpoint.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/runtime/AccessConfigCompiler.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/runtime/AccessConfigWatcher.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/runtime/AccessScriptRuntime.cpp"
@@ -52,6 +54,47 @@ target_include_directories(access_server_core PUBLIC "${CMAKE_CURRENT_LIST_DIR}/
 target_link_libraries(access_server_core
     PUBLIC fiber_lib fiber::nacos fiber::cat fiber::prometheus
     PRIVATE zlibstatic)
+
+set(ACCESS_GATEWAY_BUILD_REVISION "" CACHE STRING
+    "Source revision embedded in access-server activation evidence")
+set(ACCESS_GATEWAY_EFFECTIVE_BUILD_REVISION "${ACCESS_GATEWAY_BUILD_REVISION}")
+if (ACCESS_GATEWAY_EFFECTIVE_BUILD_REVISION STREQUAL "")
+    execute_process(
+        COMMAND git rev-parse --verify HEAD
+        WORKING_DIRECTORY "${CMAKE_CURRENT_LIST_DIR}/../.."
+        RESULT_VARIABLE ACCESS_GATEWAY_GIT_RESULT
+        OUTPUT_VARIABLE ACCESS_GATEWAY_EFFECTIVE_BUILD_REVISION
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET)
+    if (ACCESS_GATEWAY_GIT_RESULT EQUAL 0)
+        execute_process(
+            COMMAND git status --porcelain --untracked-files=normal
+            WORKING_DIRECTORY "${CMAKE_CURRENT_LIST_DIR}/../.."
+            OUTPUT_VARIABLE ACCESS_GATEWAY_GIT_STATUS
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET)
+        if (NOT ACCESS_GATEWAY_GIT_STATUS STREQUAL "")
+            string(APPEND ACCESS_GATEWAY_EFFECTIVE_BUILD_REVISION "-dirty")
+        endif()
+    else()
+        set(ACCESS_GATEWAY_EFFECTIVE_BUILD_REVISION "unknown")
+    endif()
+endif()
+
+string(REGEX REPLACE "-dirty$" "" ACCESS_GATEWAY_REVISION_DIGEST
+    "${ACCESS_GATEWAY_EFFECTIVE_BUILD_REVISION}")
+string(LENGTH "${ACCESS_GATEWAY_REVISION_DIGEST}" ACCESS_GATEWAY_REVISION_LENGTH)
+if (NOT ACCESS_GATEWAY_EFFECTIVE_BUILD_REVISION STREQUAL "unknown" AND
+    (NOT ACCESS_GATEWAY_REVISION_DIGEST MATCHES "^[0-9a-fA-F]+$" OR
+     (NOT ACCESS_GATEWAY_REVISION_LENGTH EQUAL 40 AND
+      NOT ACCESS_GATEWAY_REVISION_LENGTH EQUAL 64)))
+    message(FATAL_ERROR
+        "ACCESS_GATEWAY_BUILD_REVISION must be unknown or a 40/64-character hexadecimal revision, optionally suffixed by -dirty")
+endif()
+
+target_compile_definitions(access_server_core PRIVATE
+    FIBER_ACCESS_SERVER_BUILD_VERSION="0.1.0"
+    FIBER_ACCESS_SERVER_BUILD_REVISION="${ACCESS_GATEWAY_EFFECTIVE_BUILD_REVISION}")
 set_target_properties(access_server_core PROPERTIES FOLDER "native/access-server")
 
 if (FIBER_ENABLE_LTO AND FIBER_IPO_SUPPORTED)
@@ -118,6 +161,7 @@ if (FIBER_BUILD_TESTS AND (GTest_FOUND OR TARGET GTest::gtest_main))
     include(GoogleTest)
 
     add_executable(fiber_access_server_tests
+        "${CMAKE_CURRENT_LIST_DIR}/tests/AccessActivationEvidenceTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/AccessConfigCodecTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/AccessConfigLimitsTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/AccessConfigMetricsTest.cpp"

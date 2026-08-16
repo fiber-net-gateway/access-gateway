@@ -8,6 +8,9 @@ import { conflict, notFound } from '../../shared/errors.js'
 import { bufferToPublicId, createPublicId, publicIdToBuffer } from '../../shared/ids.js'
 import { mysqlDateTimeToRfc3339 } from '../../shared/time.js'
 import { AuditRepository } from '../audit/repository.js'
+import type { ActivationSummary } from '../activation/model.js'
+import { unknownActivationSummary } from '../activation/model.js'
+import type { ActivationReadRepository } from '../activation/read-repository.js'
 import type { Actor } from '../auth/model.js'
 import type { ProjectIdentityRow } from '../projects/repository.js'
 import type { StoredConfigurationVersion } from '../versions/repository.js'
@@ -170,11 +173,18 @@ export class ReleaseRepository {
   readonly #pool: DatabasePool
   readonly #documents: DocumentRepository
   readonly #audit: AuditRepository
+  readonly #activation: ActivationReadRepository | null
 
-  constructor(pool: DatabasePool, documents: DocumentRepository, audit = new AuditRepository()) {
+  constructor(
+    pool: DatabasePool,
+    documents: DocumentRepository,
+    audit = new AuditRepository(),
+    activation: ActivationReadRepository | null = null,
+  ) {
     this.#pool = pool
     this.#documents = documents
     this.#audit = audit
+    this.#activation = activation
   }
 
   async beginCreate(input: BeginReleaseInput): Promise<BeginReleaseResult> {
@@ -735,7 +745,12 @@ export class ReleaseRepository {
       `${selectRelease} WHERE rel.public_id = ? LIMIT 1`,
       [publicIdToBuffer(releasePublicId)],
     )
-    return rows[0] ? this.toView(rows[0]) : null
+    const row = rows[0]
+    if (!row) return null
+    const activation = this.#activation
+      ? await this.#activation.summaryForRelease(row.internal_id)
+      : unknownActivationSummary()
+    return this.toView(row, activation)
   }
 
   async listByProject(projectInternalId: string): Promise<readonly ProjectReleaseView[]> {
@@ -743,7 +758,14 @@ export class ReleaseRepository {
       `${selectRelease} WHERE p.id = ? ORDER BY rel.id DESC LIMIT 100`,
       [projectInternalId],
     )
-    return Promise.all(rows.map((row) => this.toView(row)))
+    const summaries = this.#activation
+      ? await this.#activation.summariesForReleases(rows.map((row) => row.internal_id))
+      : new Map<string, ActivationSummary>()
+    return Promise.all(
+      rows.map((row) =>
+        this.toView(row, summaries.get(row.internal_id) ?? unknownActivationSummary()),
+      ),
+    )
   }
 
   async queuePublication(
@@ -800,7 +822,10 @@ export class ReleaseRepository {
     return { jobId: jobPublicId, state: jobState, release }
   }
 
-  private async toView(row: ReleaseRow): Promise<ProjectReleaseView> {
+  private async toView(
+    row: ReleaseRow,
+    activation: ActivationSummary = unknownActivationSummary(),
+  ): Promise<ProjectReleaseView> {
     const [resourceRows] = await this.#pool.execute<ResourceRow[]>(
       `SELECT public_id, kind, data_id, group_name, operation, status,
               target_sha256, verified_sha256, verified_at
@@ -851,7 +876,8 @@ export class ReleaseRepository {
           : null,
         state: row.publication_job_state,
       },
-      activationStatus: 'unknown',
+      activationStatus: activation.status,
+      activation,
       createdAt: mysqlDateTimeToRfc3339(row.created_at),
       publishedAt: row.published_at ? mysqlDateTimeToRfc3339(row.published_at) : null,
     }
