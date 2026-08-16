@@ -3,6 +3,7 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cstring>
@@ -140,6 +141,58 @@ ProjectConfig response_config() {
     return config;
 }
 
+TEST(AccessDnsServiceTest, ShutdownDoesNotBlockTheCallingEventLoop) {
+    event::EventLoop control_loop;
+    event::EventLoopGroup workers(1);
+    AccessDnsService dns;
+    std::promise<bool> initialized_promise;
+    auto initialized = initialized_promise.get_future();
+    std::promise<void> marker_promise;
+    auto marker = marker_promise.get_future();
+    std::promise<void> stopped_promise;
+    auto stopped = stopped_promise.get_future();
+    std::atomic<bool> marker_seen = false;
+    bool marker_ready_before_worker_start = false;
+    bool marker_seen_before_shutdown_completed = false;
+
+    async::spawn(control_loop, [&]() -> async::DetachedTask {
+        const bool init_ok = co_await dns.init(workers);
+        initialized_promise.set_value(init_ok);
+        if (!init_ok) {
+            stopped_promise.set_value();
+            control_loop.stop();
+            co_return;
+        }
+
+        async::spawn([&]() -> async::DetachedTask {
+            marker_seen.store(true, std::memory_order_release);
+            marker_promise.set_value();
+            co_return;
+        });
+        co_await dns.shutdown();
+        co_await dns.shutdown();
+        marker_seen_before_shutdown_completed = marker_seen.load(std::memory_order_acquire);
+        stopped_promise.set_value();
+        control_loop.stop();
+    });
+
+    std::thread worker_starter([&]() {
+        marker_ready_before_worker_start = marker.wait_for(2s) == std::future_status::ready;
+        workers.start();
+    });
+
+    control_loop.run();
+    worker_starter.join();
+    workers.stop();
+    workers.join();
+
+    ASSERT_EQ(initialized.wait_for(0s), std::future_status::ready);
+    EXPECT_TRUE(initialized.get());
+    EXPECT_EQ(stopped.wait_for(0s), std::future_status::ready);
+    EXPECT_TRUE(marker_ready_before_worker_start);
+    EXPECT_TRUE(marker_seen_before_shutdown_completed);
+}
+
 TEST(AccessServerTest, ServesPublishedSnapshotAndShutsDownWorkerResources) {
     RouteConfigStore store;
     auto published = store.apply("demo", response_config());
@@ -156,7 +209,7 @@ TEST(AccessServerTest, ServesPublishedSnapshotAndShutsDownWorkerResources) {
 
     workers.start();
     async::spawn(accept_loop, [&]() -> async::DetachedTask {
-        auto initialized = server.initialize();
+        auto initialized = co_await server.initialize();
         if (!initialized) {
             port_promise.set_value({0, 0});
             accept_loop.stop();
@@ -288,7 +341,7 @@ TEST(AccessServerTest, ReturnsCatTraceIdFromTheUnifiedRequestContext) {
     ASSERT_TRUE(cat_started.get());
 
     async::spawn(accept_loop, [&]() -> async::DetachedTask {
-        auto initialized = server.initialize();
+        auto initialized = co_await server.initialize();
         if (!initialized) {
             port_promise.set_value(0);
             accept_loop.stop();
