@@ -33,6 +33,9 @@ using fiber::access_server::AccessRequestHandlerOptions;
 using fiber::access_server::AccessRequestScriptAdapter;
 using fiber::access_server::AccessScriptRuntime;
 using fiber::access_server::BodyType;
+using fiber::access_server::ClientMetadataMode;
+using fiber::access_server::ClientMetadataResolver;
+using fiber::access_server::ClientMetadataResolverOptions;
 using fiber::access_server::Err;
 using fiber::access_server::Exception;
 using fiber::access_server::HostConfigEntry;
@@ -136,12 +139,15 @@ private:
 fiber::async::DetachedTask run_request_on_loop(fiber::event::EventLoop *loop, const RouteConfigStore *store,
                                                AccessRequestScriptAdapter script_adapter,
                                                AccessRequestHandlerOptions options, AccessProxyAdapter proxy_adapter,
+                                               ClientMetadataResolverOptions client_metadata_options,
                                                std::string request, std::string *output, std::promise<void> *done) {
     auto transport = std::make_unique<RecordingTransport>(*loop, std::move(request), *output);
     AccessRequestHandler access_handler(*store, script_adapter, options, proxy_adapter);
-    fiber::http::HttpHandler handler =
-            [&access_handler](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
-        fiber::access_server::AccessRequestTelemetry telemetry(exchange, nullptr, nullptr);
+    ClientMetadataResolver client_metadata_resolver(std::move(client_metadata_options));
+    fiber::http::HttpHandler handler = [&access_handler, &client_metadata_resolver](
+                                               fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+        fiber::access_server::AccessRequestTelemetry telemetry(exchange, nullptr, nullptr, nullptr,
+                                                               &client_metadata_resolver);
         co_await access_handler.handle(exchange, telemetry);
     };
     fiber::http::Http1Connection connection(nullptr, std::move(transport), std::move(handler), {});
@@ -177,9 +183,16 @@ fiber::async::DetachedTask run_committed_response_on_loop(fiber::event::EventLoo
     co_return;
 }
 
+ClientMetadataResolverOptions legacy_client_metadata_options() {
+    return ClientMetadataResolverOptions{
+            .mode = ClientMetadataMode::LegacyHeaders,
+    };
+}
+
 std::string run_request(const RouteConfigStore &store, std::string request,
                         AccessRequestScriptAdapter script_adapter = {}, AccessRequestHandlerOptions options = {},
-                        AccessProxyAdapter proxy_adapter = {}) {
+                        AccessProxyAdapter proxy_adapter = {},
+                        ClientMetadataResolverOptions client_metadata_options = legacy_client_metadata_options()) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
@@ -187,8 +200,8 @@ std::string run_request(const RouteConfigStore &store, std::string request,
     std::promise<void> done;
     auto completed = done.get_future();
     fiber::async::spawn(group.at(0), [&]() {
-        return run_request_on_loop(&group.at(0), &store, script_adapter, options, proxy_adapter, std::move(request),
-                                   &output, &done);
+        return run_request_on_loop(&group.at(0), &store, script_adapter, options, proxy_adapter,
+                                   std::move(client_metadata_options), std::move(request), &output, &done);
     });
 
     EXPECT_EQ(completed.wait_for(2s), std::future_status::ready);
@@ -848,7 +861,7 @@ TEST(AccessRequestHandlerTest, RedirectsWithConfiguredStatusBeforePathMatching) 
     }
 }
 
-TEST(AccessRequestHandlerTest, DoesNotRedirectTrustedForwardedHttps) {
+TEST(AccessRequestHandlerTest, LegacyModeDoesNotRedirectForwardedHttps) {
     HostStrategyConfig strategy;
     strategy.https = HttpsStrategy::Redirect308;
     RouteConfigStore store;
@@ -861,6 +874,77 @@ TEST(AccessRequestHandlerTest, DoesNotRedirectTrustedForwardedHttps) {
 
     EXPECT_TRUE(response.starts_with("HTTP/1.1 200 "));
     EXPECT_EQ(response.find("Location:"), std::string::npos);
+    EXPECT_EQ(response_body(response), "ready");
+}
+
+TEST(AccessRequestHandlerTest, DirectModeIgnoresSpoofedClientIpAndScheme) {
+    HostStrategyConfig strategy;
+    strategy.https = HttpsStrategy::Redirect308;
+    RouteConfigStore redirect_store;
+    publish(redirect_store, project(strategy, {response_route("/ready", "ready")}));
+
+    const std::string redirected = run_request(redirect_store,
+                                               "GET /ready HTTP/1.1\r\n"
+                                               "Host: api.example.com\r\n"
+                                               "X-Forwarded-Proto: https\r\n"
+                                               "Connection: close\r\n\r\n",
+                                               {}, {}, {}, ClientMetadataResolverOptions{});
+    EXPECT_TRUE(redirected.starts_with("HTTP/1.1 308 "));
+
+    RouteConfig protected_route = response_route("/allowed", "allowed");
+    protected_route.allows = {std::optional<std::string>("10.0.0.0/8")};
+    RouteConfigStore cidr_store;
+    publish(cidr_store, project({}, {std::move(protected_route)}));
+    const std::string denied = run_request(cidr_store,
+                                           "GET /allowed HTTP/1.1\r\n"
+                                           "Host: api.example.com\r\n"
+                                           "X-Real-Ip: 10.1.2.3\r\n"
+                                           "Connection: close\r\n\r\n",
+                                           {}, {}, {}, ClientMetadataResolverOptions{});
+    EXPECT_TRUE(denied.starts_with("HTTP/1.1 403 Forbidden\r\n"));
+    EXPECT_EQ(response_body(denied), R"({"name":"NOT_ALLOW_IP","message":"source ip is not allowed","meta":null})");
+}
+
+TEST(AccessRequestHandlerTest, TrustedProxyModeUsesOneClientResultForHttpsAndCidr) {
+    auto trusted = fiber::access_server::Cidr::parse_strict("0.0.0.0/32", "trusted");
+    ASSERT_TRUE(trusted);
+    ClientMetadataResolverOptions metadata_options{
+            .mode = ClientMetadataMode::TrustedProxy,
+            .trusted_proxy_cidrs = {*trusted},
+    };
+    HostStrategyConfig strategy;
+    strategy.https = HttpsStrategy::Redirect308;
+    RouteConfig route = response_route("/allowed", "allowed");
+    route.allows = {std::optional<std::string>("10.0.0.0/8")};
+    RouteConfigStore store;
+    publish(store, project(strategy, {std::move(route)}));
+
+    const std::string response = run_request(store,
+                                             "GET /allowed HTTP/1.1\r\n"
+                                             "Host: api.example.com\r\n"
+                                             "X-Real-Ip: 10.1.2.3\r\n"
+                                             "X-Forwarded-Proto: https\r\n"
+                                             "Connection: close\r\n\r\n",
+                                             {}, {}, {}, std::move(metadata_options));
+    EXPECT_TRUE(response.starts_with("HTTP/1.1 200 "));
+    EXPECT_EQ(response_body(response), "allowed");
+}
+
+TEST(AccessRequestHandlerTest, DirectTlsListenerIsHttpsWithoutForwardingHeaders) {
+    HostStrategyConfig strategy;
+    strategy.https = HttpsStrategy::Redirect308;
+    RouteConfigStore store;
+    publish(store, project(strategy, {response_route("/ready", "ready")}));
+    ClientMetadataResolverOptions metadata_options{
+            .connection_secure = true,
+    };
+
+    const std::string response = run_request(store,
+                                             "GET /ready HTTP/1.1\r\n"
+                                             "Host: api.example.com\r\n"
+                                             "Connection: close\r\n\r\n",
+                                             {}, {}, {}, std::move(metadata_options));
+    EXPECT_TRUE(response.starts_with("HTTP/1.1 200 "));
     EXPECT_EQ(response_body(response), "ready");
 }
 

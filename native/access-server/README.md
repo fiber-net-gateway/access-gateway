@@ -152,6 +152,7 @@ cp native/access-server/access-server.env.example access-server.env
 - Prometheus 监听 `0.0.0.0:16689`；
 - HTTP worker 数在启动时根据进程 CPU affinity 和 cgroup v1/v2 CPU quota 自动确定；
 - 默认 request body 上限 400 MiB；
+- 客户端地址默认取 socket peer，忽略所有 forwarding header；
 - access log 默认只记录经安全编码的 path，不记录 query value；正常请求默认采样率为
   10000 bps（全量），失败请求始终保留；
 - 项目列表 `ploto.unified-access.projects`，route 前缀
@@ -171,6 +172,20 @@ cp native/access-server/access-server.env.example access-server.env
 CAT 默认关闭；任一 `CAT_*` 设置非空后必须给出完整 app key、hostname、IP，以及
 至少一个 router 或 bootstrap collector。CAT 不可用会在启动阶段 fail closed，不会
 静默退化为无 trace 的生产实例。
+
+`ACCESS_SERVER_CLIENT_METADATA_MODE` 控制请求来源信任边界：
+
+- `direct`（默认）：client IP 取 socket peer，scheme 取业务 listener 的真实 TLS 状态，忽略
+  `Forwarded`、`X-Forwarded-For`、`X-Real-Ip` 和 `X-Forwarded-Proto`；
+- `trusted_proxy`：仅当 socket peer 命中 `ACCESS_SERVER_TRUSTED_PROXY_CIDRS` 时解析转发头。
+  地址优先级为 `Forwarded`、`X-Forwarded-For`、`X-Real-Ip`，并从右向左剥离可信代理 hop；
+- `legacy_headers`：只用于明确的 Java 兼容迁移，保留旧的 header 全信任、非法/缺失
+  `X-Real-Ip` 跳过 CIDR 语义，不适用于可被非受信网络访问的 listener。
+
+`trusted_proxy` 必须提供至少一个严格 IPv4/IPv6 CIDR；其他模式配置该列表会启动失败。非法、重复
+参数、空 hop、超过 32 hop 或 XFF/XFP 数量错位不会降级读取较低优先级 header，而是回退 socket
+peer 和 listener scheme。路由 CIDR、gray、HTTPS redirect、Location/Refresh、CAT 与 access log
+共享同一次解析结果。
 
 Access log 的 query allowlist、附加敏感 key、HMAC、成功请求采样率和 path/query 字节上限
 分别由 `ACCESS_SERVER_ACCESS_LOG_*` 键配置。默认 allowlist 为空，因此 query value 不会写入

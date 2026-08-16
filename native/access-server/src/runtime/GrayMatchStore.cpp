@@ -50,10 +50,6 @@ GrayMatchStore::apply(const std::optional<GrayMatchConfig> &config) {
     return GrayMatchUpdateStatus::Published;
 }
 
-bool GrayMatchStore::matches(const http::HttpExchange &exchange) const noexcept {
-    return matches(exchange.header("X-Entry"), exchange.header("X-Real-Ip"), next_sample());
-}
-
 ProxyClusterMatcher GrayMatchStore::adapter() noexcept {
     return ProxyClusterMatcher{
             .context = this,
@@ -61,11 +57,12 @@ ProxyClusterMatcher GrayMatchStore::adapter() noexcept {
     };
 }
 
-bool GrayMatchStore::matches_request(void *context, const http::HttpExchange &exchange) noexcept {
-    return static_cast<GrayMatchStore *>(context)->matches(exchange);
+bool GrayMatchStore::matches_request(void *context, std::string_view entry, const ClientMetadata &metadata) noexcept {
+    auto &store = *static_cast<GrayMatchStore *>(context);
+    return store.matches(entry, metadata, store.next_sample());
 }
 
-bool GrayMatchStore::matches(std::string_view entry, std::string_view real_ip,
+bool GrayMatchStore::matches(std::string_view entry, const ClientMetadata &metadata,
                              std::uint32_t random_sample) const noexcept {
     std::shared_ptr<const Snapshot> snapshot = pin();
     const Rule *matched = nullptr;
@@ -78,21 +75,10 @@ bool GrayMatchStore::matches(std::string_view entry, std::string_view real_ip,
     if (!matched) {
         return false;
     }
-
-    net::IpAddress address;
-    if (net::IpAddress::parse(real_ip, address)) {
+    if (metadata.gray_target) {
         for (const Cidr &cidr: matched->cidrs) {
-            if (cidr.matches(address)) {
+            if (cidr.contains(*metadata.gray_target)) {
                 return true;
-            }
-        }
-    } else if (real_ip.find('/') != std::string_view::npos) {
-        auto target = Cidr::parse(real_ip, "X-Real-Ip");
-        if (target) {
-            for (const Cidr &cidr: matched->cidrs) {
-                if (cidr.contains(*target)) {
-                    return true;
-                }
             }
         }
     }

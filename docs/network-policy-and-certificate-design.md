@@ -1,6 +1,6 @@
 # 网络策略与证书配置需求及详细设计
 
-- 状态：Implemented v6（HTTPS redirect + 控制面发布 + native Nacos 热更新）
+- 状态：Implemented v7（含 native trusted proxy/client metadata）
 - 日期：2026-08-12
 - 适用范围：`server/`、`web/`、配置版本编译器和既有 native HostStrategy/`allows` 兼容能力
 - 明确未完成：逐实例证书/配置激活证据，以及生产脚本语料差分和最终切流门槛
@@ -43,10 +43,11 @@ Published 和实例 Active 继续是三个不同事实。
 | CON-NET-010 | P0     | Project 可关闭 HTTPS redirect，或选择 301、302、307、308；默认关闭         |
 | CON-NET-011 | P0     | HTTPS redirect 编译为 exact HostStrategy，并在 Route 匹配前执行            |
 
-`allows` 的运行时语义保持 Java 兼容：非空允许集合要求至少匹配一项，拒绝集合优先。当前 native
-从 `X-Real-Ip` 取得地址，并在该头缺失或不可解析时跳过 CIDR 检查。部署必须由受信任入口清洗并
-规范设置该头；在 CON-NET-009 完成前，Console 不应把该策略描述为不依赖部署前提的网络防火墙。
-本次不改变这一 wire/runtime 兼容行为。
+`allows` 的 wire 语义保持 Java 兼容：非空允许集合要求至少匹配一项，拒绝集合优先。native 默认
+`direct` 模式从 socket peer 取得客户端地址；`trusted_proxy` 仅在 peer 命中严格可信 CIDR 时解析
+`Forwarded`/XFF/XRI，非法输入回退 peer，不跳过检查。旧的缺失/非法 `X-Real-Ip` 跳过行为仅在
+显式 `legacy_headers` 模式保留。网络策略能否覆盖真实终端地址仍取决于 listener 暴露范围和可信
+代理 CIDR 是否与部署拓扑一致。
 
 ### 2.2 证书配置
 
@@ -179,11 +180,12 @@ body。跨 workspace 或无权对象继续返回 404，防止枚举。
 - ClientHello 热路径只做原子读、ASCII 无分配比较与有序数组二分查找；每 worker 预分配 hazard
   slot 延长旧快照到 Fiber 完成 `SSL_set_SSL_CTX`，不使用 mutex、shared_ptr refcount 或字符串分配。
 - 逐实例 fingerprint 回执仍未实现，因此 Release Published 后 activation 仍为 unknown。
-- 网络策略仍受当前 `X-Real-Ip` Java 兼容语义约束。可信代理边界、直接连接行为和 header
-  spoofing 防护必须作为后续跨组件安全增量处理。
-- HTTPS redirect 只在 scheme 不是 HTTPS 时执行，并兼容受信任代理设置的
-  `X-Forwarded-Proto: https`。当前 TLS 业务监听器不接收明文 HTTP，因此该策略需要前置可信
-  Ingress/LB 同时接收 HTTP/HTTPS 并清洗该头；新增直连明文监听器不在本增量范围内。
+- native 已实现 `direct`/`trusted_proxy`/`legacy_headers` 三种明确来源模式；Route CIDR、gray、
+  redirect、日志和 trace 共享同一解析结果。生产若使用 Ingress/LB，必须选择 `trusted_proxy` 并仅
+  列出实际代理 CIDR；`legacy_headers` 不得暴露给非受信网络。
+- HTTPS redirect 只在解析后的 scheme 不是 HTTPS 时执行。当前 TLS 业务 listener 不接收明文 HTTP；
+  由 Ingress/LB 终止 TLS 时，需要 `trusted_proxy` 模式让受信 peer 的 Forwarded/XFP 参与 scheme
+  解析。新增直连明文 listener 不在本增量范围内。
 
 ## 7. 验收与验证
 

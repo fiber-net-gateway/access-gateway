@@ -22,7 +22,12 @@ http::HttpServerOptions make_http_options(http::HttpServerOptions options = {}) 
 AccessServer::AccessServer(event::EventLoop &accept_loop, event::EventLoopGroup &workers,
                            const RouteConfigStore &config_store, ProxyClusterMatcher cluster_matcher,
                            AccessServerOptions options) :
-    accept_loop_(&accept_loop), workers_(&workers), access_log_policy_(std::move(options.access_log)), pool_(workers),
+    accept_loop_(&accept_loop), workers_(&workers), client_metadata_resolver_([&options]() {
+        ClientMetadataResolverOptions client_metadata = std::move(options.client_metadata);
+        client_metadata.connection_secure = options.http_server.tls.enabled;
+        return client_metadata;
+    }()),
+    access_log_policy_(std::move(options.access_log)), pool_(workers),
     executor_(pool_, cluster_matcher, dns_.adapter(), options.executor),
     handler_(config_store, options.script_adapter,
              AccessRequestHandlerOptions{
@@ -110,7 +115,7 @@ async::Task<void> AccessServer::shutdown_and_wait() noexcept {
 
 async::Task<void> AccessServer::handle(http::HttpExchange &exchange) noexcept {
     AccessServerMetrics::Worker &worker = metrics_.worker(event::EventLoop::current().group_index());
-    AccessRequestTelemetry telemetry(exchange, &worker, cat_client_, &access_log_policy_);
+    AccessRequestTelemetry telemetry(exchange, &worker, cat_client_, &access_log_policy_, &client_metadata_resolver_);
     if (!http3_alt_svc_.empty()) {
         (void) telemetry.response_headers().set("Alt-Svc", http3_alt_svc_);
     }

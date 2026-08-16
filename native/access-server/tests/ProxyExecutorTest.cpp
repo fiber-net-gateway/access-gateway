@@ -93,7 +93,7 @@ struct ServiceSelectorState {
     std::vector<std::pair<std::uint64_t, bool>> reports;
 };
 
-bool never_match_gray(void *context, const fiber::http::HttpExchange &) noexcept {
+bool never_match_gray(void *context, std::string_view, const fiber::access_server::ClientMetadata &) noexcept {
     ++static_cast<ServiceSelectorState *>(context)->cluster_match_count;
     return false;
 }
@@ -541,9 +541,14 @@ run_downstream(fiber::event::EventLoop *loop, const fiber::access_server::RouteC
         transport_ready->set_value(transport.get());
     }
     fiber::access_server::AccessRequestHandler handler(*store, script_adapter, handler_options, proxy_adapter);
-    fiber::http::HttpHandler http_handler =
-            [&handler, cat_client](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
-        fiber::access_server::AccessRequestTelemetry telemetry(exchange, nullptr, cat_client);
+    fiber::access_server::ClientMetadataResolver client_metadata_resolver(
+            fiber::access_server::ClientMetadataResolverOptions{
+                    .mode = fiber::access_server::ClientMetadataMode::LegacyHeaders,
+            });
+    fiber::http::HttpHandler http_handler = [&handler, cat_client, &client_metadata_resolver](
+                                                    fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+        fiber::access_server::AccessRequestTelemetry telemetry(exchange, nullptr, cat_client, nullptr,
+                                                               &client_metadata_resolver);
         co_await handler.handle(exchange, telemetry);
     };
     fiber::http::Http1Connection connection(nullptr, std::move(transport), std::move(http_handler), {});
@@ -898,6 +903,7 @@ TEST(ProxyExecutorTest, StreamsJavaCompatibleRequestsAndReusesTheUpstreamConnect
     EXPECT_TRUE(wait_for_cat_frame(cat_capture, "Access.Provider", "&reuse_count=0"));
     EXPECT_TRUE(wait_for_cat_frame(cat_capture, "Access.Provider", "&reuse_count=1"));
     EXPECT_TRUE(wait_for_cat_frame(cat_capture, "Access.Provider", "RemoteCall"));
+    EXPECT_TRUE(wait_for_cat_frame(cat_capture, "peerIp=0.0.0.0", "forwardingStatus=not_present"));
     EXPECT_FALSE(cat_capture.contains("connection_request_count="));
     EXPECT_FALSE(cat_capture.contains("connection_reuse_count="));
 

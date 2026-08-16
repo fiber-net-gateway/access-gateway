@@ -18,7 +18,7 @@ Method、条件、CIDR、`RESPONSE`、`PROXY` 和发布语义。配置的最终�
 2. 规范化 `Host`，在全局 Host 树中选择 Project；
 3. 执行 Host 级 `X-Entry` 和 HTTPS 策略；
 4. 按 Path 结构选择候选，再依次判断可选 `method` 和 `condition`；
-5. 对命中的 Route 检查请求体大小和 `X-Real-Ip` CIDR；
+5. 对命中的 Route 检查请求体大小和统一 client address CIDR；
 6. 执行 `RESPONSE`、`PROXY` 或 `SCRIPT`；
 7. 写入有界 metrics、trace 和结构化 access log。
 
@@ -81,8 +81,8 @@ Host 未命中返回 HTTP 404，错误名为 `ROUTER_NOT_FOUND`。只有 Host �
 
 ### 3.2 HTTPS 和入口策略
 
-Host 的 HTTPS 策略可为不强制，或使用 301、302、307、308 重定向。请求 scheme 或
-`X-Forwarded-Proto` 大小写不敏感地等于 `https` 时视为 HTTPS；否则返回：
+Host 的 HTTPS 策略可为不强制，或使用 301、302、307、308 重定向。统一解析出的 external scheme
+为 `https` 时视为 HTTPS；否则返回：
 
 ```text
 Location: https://<effective-host><original-uri>
@@ -92,6 +92,11 @@ Strict-Transport-Security: max-age=31536000
 Host 命中后，access-server 会为后续响应准备 HSTS header。Route 的有效
 `response_headers` 可以覆盖它。若配置了网络入口 mask，`X-Entry` 必须匹配 `vdi`、`desktop` 或
 `internet` 中允许的入口，否则返回 403 `ENTRY_ERROR`。
+
+默认 `ACCESS_SERVER_CLIENT_METADATA_MODE=direct`，scheme 取业务 listener 的真实 TLS 状态且忽略
+所有 forwarding header。仅在 `trusted_proxy` 模式且 socket peer 命中配置的可信代理 CIDR 时，
+才接受 `Forwarded: proto=` 或与地址链对齐的 `X-Forwarded-Proto`。旧的全信任行为只在显式
+`legacy_headers` 模式保留。
 
 ## 4. Path pattern
 
@@ -372,8 +377,11 @@ allows:
 2. 命中任一 deny 时拒绝；
 3. deny 优先于 allow 的最终结果。
 
-来源取自 `X-Real-Ip`。为保持 Java 行为，该 header 缺失或无法解析时会跳过 CIDR 检查，因此可信边界
-必须保证只有受信任的前置代理能写入/覆盖 `X-Real-Ip`。被拒绝返回 403 `NOT_ALLOW_IP`。
+来源取自统一的 client metadata。默认 `direct` 使用 socket peer；`trusted_proxy` 只有在 socket peer
+命中 `ACCESS_SERVER_TRUSTED_PROXY_CIDRS` 后，才按 `Forwarded`、`X-Forwarded-For`、
+`X-Real-Ip` 的顺序解析，并从右向左剥离可信代理 hop。非法或超限链回退 socket peer，因此安全模式
+不会因 header 缺失或不可解析而跳过 CIDR。只有显式 `legacy_headers` 模式保留 Java 的缺失/非法
+`X-Real-Ip` 跳过规则。被拒绝返回 403 `NOT_ALLOW_IP`。
 
 当 Console 的 Network Policy 选择 Project 级策略时，编译器会把统一 allow/deny 列表注入每条 wire
 Route；此时 Route YAML 不应再声明 `allows`，否则会报策略冲突。
@@ -466,7 +474,7 @@ Project JSON 的简化结构：
 | 404 `ROUTER_NOT_FOUND`     | Host 非法、未配置或未命中                          | 实际 `Host`、端口、Project domain、wildcard       |
 | 404 `URL_NOT_MATCHED`      | Path/method/condition 全部未命中                   | matcher 结构、大小写、候选顺序、condition 值      |
 | 403 `ENTRY_ERROR`          | `X-Entry` 不在 Host 策略中                         | 可信前置代理写入值和网络策略                      |
-| 403 `NOT_ALLOW_IP`         | `X-Real-Ip` 被 CIDR 拒绝                           | header 来源、allow/deny 交集、IPv4/IPv6 prefix    |
+| 403 `NOT_ALLOW_IP`         | 解析后的 client address 被 CIDR 拒绝               | metadata mode、可信代理链、allow/deny、IP family  |
 | 413 `REQ_BODY_TOO_LARGE`   | Route/global body limit，或 SCRIPT 的未知长度 body | Content-Length、传输编码、限制配置                |
 | 500 template/script error  | 表达式运行失败或脚本未处理异常                     | Native Validator 字段路径、函数参数、`$path` 名称 |
 | 503 no hosts/circuit break | 无健康 NamingService 实例或实例不可选              | service、cluster、实例 enabled/healthy/weight     |

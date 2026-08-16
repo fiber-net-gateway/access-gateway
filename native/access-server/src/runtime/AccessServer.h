@@ -2,6 +2,7 @@
 #define FIBER_ACCESS_SERVER_ACCESS_SERVER_H
 
 #include "../execution/AccessRequestHandler.h"
+#include "../execution/ClientMetadata.h"
 #include "../execution/ProxyExecutor.h"
 #include "../observability/AccessLogPolicy.h"
 #include "../observability/AccessServerMetrics.h"
@@ -32,6 +33,7 @@ namespace fiber::access_server {
 
 struct AccessServerOptions {
     std::size_t default_max_request_body_size = 400U << 20U;
+    ClientMetadataResolverOptions client_metadata;
     AccessLogOptions access_log;
     AccessRequestScriptAdapter script_adapter;
     ProxyExecutorOptions executor;
@@ -66,6 +68,7 @@ private:
 
     event::EventLoop *accept_loop_ = nullptr;
     event::EventLoopGroup *workers_ = nullptr;
+    ClientMetadataResolver client_metadata_resolver_;
     AccessLogPolicy access_log_policy_;
     AccessDnsService dns_;
     http::StealableHttp1ConnectionPoolSet pool_;

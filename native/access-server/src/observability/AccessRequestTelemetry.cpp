@@ -12,6 +12,7 @@
 #include <cstring>
 #include <limits>
 #include <span>
+#include <string>
 #include <string_view>
 
 #include <openssl/rand.h>
@@ -50,6 +51,11 @@ constexpr std::size_t kMaxUserAgentBytes = 1024;
 const AccessLogPolicy &default_access_log_policy() noexcept {
     static const AccessLogPolicy policy;
     return policy;
+}
+
+const ClientMetadataResolver &default_client_metadata_resolver() noexcept {
+    static const ClientMetadataResolver resolver;
+    return resolver;
 }
 
 std::uint32_t next_access_log_sample() noexcept {
@@ -228,11 +234,13 @@ void AccessProviderTransaction::cancel_pending() noexcept {
 }
 
 AccessRequestTelemetry::AccessRequestTelemetry(http::HttpExchange &exchange, AccessServerMetrics::Worker *metrics,
-                                               cat::CatClient *cat_client,
-                                               const AccessLogPolicy *access_log_policy) noexcept :
+                                               cat::CatClient *cat_client, const AccessLogPolicy *access_log_policy,
+                                               const ClientMetadataResolver *client_metadata_resolver) noexcept :
     script_heap_(exchange.pool()), script_context_(exchange, script_heap_), response_headers_(exchange.pool()),
-    trace_state_(exchange.pool()), metrics_(metrics),
-    access_log_policy_(access_log_policy ? access_log_policy : &default_access_log_policy()),
+    trace_state_(exchange.pool()),
+    client_metadata_((client_metadata_resolver ? *client_metadata_resolver : default_client_metadata_resolver())
+                             .resolve(exchange)),
+    metrics_(metrics), access_log_policy_(access_log_policy ? access_log_policy : &default_access_log_policy()),
     started_(event::EventLoop::current().now()) {
     if (metrics_) {
         metrics_->request_started();
@@ -278,7 +286,16 @@ AccessRequestTelemetry::AccessRequestTelemetry(http::HttpExchange &exchange, Acc
     add_root_data("host", exchange.header("Host"));
     add_root_data("path", exchange.uri().path);
     add_root_data("content_type", exchange.header("Content-Type"));
-    add_root_data("realIp", exchange.header("X-Real-Ip"));
+    const std::string peer_ip = client_metadata_.peer_address.to_string();
+    const std::string client_ip =
+            client_metadata_.has_client_address ? client_metadata_.client_address.to_string() : std::string{};
+    add_root_data("realIp", client_ip);
+    add_root_data("clientIp", client_ip);
+    add_root_data("peerIp", peer_ip);
+    add_root_data("clientScheme", client_metadata_.external_scheme);
+    add_root_data("clientAddressSource", client_address_source_name(client_metadata_.address_source));
+    add_root_data("clientSchemeSource", client_scheme_source_name(client_metadata_.scheme_source));
+    add_root_data("forwardingStatus", forwarding_status_name(client_metadata_.forwarding_status));
     add_root_data("traceparent", trace_parent_);
     const std::string_view user_agent = exchange.header("User-Agent");
     if (!user_agent.empty()) {
@@ -322,6 +339,9 @@ AccessRequestTelemetry::~AccessRequestTelemetry() {
                                          : next_access_log_sample();
     if (access_log_policy_->should_log(failed, sample) && LOG_ACCESS.get().enabled(log::LogLevel::Info)) {
         const AccessLogUri uri = access_log_policy_->render_uri(exchange.uri());
+        const std::string peer_ip = client_metadata_.peer_address.to_string();
+        const std::string client_ip =
+                client_metadata_.has_client_address ? client_metadata_.client_address.to_string() : std::string{};
         LOG(LOG_ACCESS, INFO) << "request completed"
                               << " trace_id=" << log::quoted(trace_id())
                               << " method=" << log::quoted(exchange.method_view())
@@ -330,6 +350,12 @@ AccessRequestTelemetry::~AccessRequestTelemetry() {
                               << " query_filtered=" << uri.query_filtered << " query_redacted=" << uri.query_redacted
                               << " path_truncated=" << uri.path_truncated << " query_truncated=" << uri.query_truncated
                               << " query_hash_failed=" << uri.query_hash_failed << " project=" << log::quoted(project_)
+                              << " client_ip=" << log::quoted(client_ip) << " peer_ip=" << log::quoted(peer_ip)
+                              << " client_scheme=" << log::quoted(client_metadata_.external_scheme)
+                              << " client_address_source="
+                              << client_address_source_name(client_metadata_.address_source)
+                              << " client_scheme_source=" << client_scheme_source_name(client_metadata_.scheme_source)
+                              << " forwarding_status=" << forwarding_status_name(client_metadata_.forwarding_status)
                               << " route=" << log::quoted(route_) << " cluster=" << log::quoted(cluster_)
                               << " upstream=" << log::quoted(upstream_)
                               << " response_compression=" << log::quoted(response_compression_)

@@ -23,6 +23,8 @@ constexpr std::string_view kMetricsListenPort = "ACCESS_SERVER_METRICS_LISTEN_PO
 constexpr std::string_view kInitialConfigTimeout = "ACCESS_SERVER_INITIAL_CONFIG_TIMEOUT_MILLIS";
 constexpr std::string_view kMaxRequestBody = "ACCESS_SERVER_MAX_REQUEST_BODY_SIZE";
 constexpr std::string_view kTestMode = "ACCESS_SERVER_TEST_MODE";
+constexpr std::string_view kClientMetadataMode = "ACCESS_SERVER_CLIENT_METADATA_MODE";
+constexpr std::string_view kTrustedProxyCidrs = "ACCESS_SERVER_TRUSTED_PROXY_CIDRS";
 constexpr std::string_view kAccessLogQueryAllowlist = "ACCESS_SERVER_ACCESS_LOG_QUERY_ALLOWLIST";
 constexpr std::string_view kAccessLogSensitiveQueryKeys = "ACCESS_SERVER_ACCESS_LOG_SENSITIVE_QUERY_KEYS";
 constexpr std::string_view kAccessLogQueryHashEnabled = "ACCESS_SERVER_ACCESS_LOG_QUERY_HASH_ENABLED";
@@ -191,6 +193,37 @@ parse_query_keys(std::string_view input, std::size_t line, std::string_view sett
     return output;
 }
 
+std::expected<std::vector<Cidr>, AccessServerConfigError> parse_trusted_proxy_cidrs(std::string_view input,
+                                                                                    std::size_t line) {
+    std::vector<Cidr> output;
+    if (input.empty()) {
+        return output;
+    }
+    while (true) {
+        const std::size_t comma = input.find(',');
+        const std::string_view item = trim(comma == std::string_view::npos ? input : input.substr(0, comma));
+        auto cidr = Cidr::parse_strict(item, kTrustedProxyCidrs);
+        if (!cidr) {
+            return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, line, kTrustedProxyCidrs,
+                                         "expected comma-separated strict IPv4 or IPv6 CIDRs"));
+        }
+        output.push_back(*cidr);
+        if (output.size() > kMaxTrustedProxyCidrs) {
+            return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, line, kTrustedProxyCidrs,
+                                         "trusted proxy CIDR list exceeds 64 entries"));
+        }
+        if (comma == std::string_view::npos) {
+            break;
+        }
+        input.remove_prefix(comma + 1);
+        if (input.empty()) {
+            return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, line, kTrustedProxyCidrs,
+                                         "trusted proxy CIDR list contains an empty entry"));
+        }
+    }
+    return output;
+}
+
 std::expected<std::pair<net::IpAddress, std::uint16_t>, AccessServerConfigError>
 parse_cat_endpoint(std::string_view text, std::size_t line, std::string_view key) {
     text = trim(text);
@@ -291,7 +324,8 @@ AccessServerConfigError nacos_error(const nacos::NacosConfigError &source) {
 AccessServerConfig::AccessServerConfig(
         net::SocketAddress listen_address, http::HttpServerOptions http_server_options,
         net::SocketAddress metrics_listen_address, std::chrono::milliseconds initial_config_timeout,
-        std::size_t default_max_request_body_size, bool test_mode, AccessLogOptions access_log_options,
+        std::size_t default_max_request_body_size, bool test_mode,
+        ClientMetadataResolverOptions client_metadata_options, AccessLogOptions access_log_options,
         std::optional<cat::CatClientConfig> cat_config, nacos::NacosClientConfig nacos_config,
         AccessConfigWatcherOptions watcher_options, GrayConfigWatcherOptions gray_watcher_options,
         TlsCertificateWatcherOptions tls_certificate_watcher_options,
@@ -299,9 +333,9 @@ AccessServerConfig::AccessServerConfig(
     listen_address_(std::move(listen_address)), http_server_options_(std::move(http_server_options)),
     metrics_listen_address_(std::move(metrics_listen_address)), initial_config_timeout_(initial_config_timeout),
     default_max_request_body_size_(default_max_request_body_size), test_mode_(test_mode),
-    access_log_options_(std::move(access_log_options)), cat_config_(std::move(cat_config)),
-    nacos_config_(std::move(nacos_config)), watcher_options_(std::move(watcher_options)),
-    gray_watcher_options_(std::move(gray_watcher_options)),
+    client_metadata_options_(std::move(client_metadata_options)), access_log_options_(std::move(access_log_options)),
+    cat_config_(std::move(cat_config)), nacos_config_(std::move(nacos_config)),
+    watcher_options_(std::move(watcher_options)), gray_watcher_options_(std::move(gray_watcher_options)),
     tls_certificate_watcher_options_(std::move(tls_certificate_watcher_options)),
     service_discovery_options_(std::move(service_discovery_options)) {}
 
@@ -335,6 +369,7 @@ AccessServerConfig::load_from_string(std::string_view input) {
     std::uint64_t timeout_millis = 60000;
     std::size_t max_request_body = 400U << 20U;
     bool test_mode = false;
+    ClientMetadataResolverOptions client_metadata_options;
     AccessLogOptions access_log_options;
     cat::CatClientConfigParams cat_params{
             .thread_group_name = "access-server-cat",
@@ -405,6 +440,23 @@ AccessServerConfig::load_from_string(std::string_view input) {
                 return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, entry.line, entry.key,
                                              "expected true or false"));
             }
+        } else if (entry.key == kClientMetadataMode) {
+            if (value == "direct") {
+                client_metadata_options.mode = ClientMetadataMode::Direct;
+            } else if (value == "trusted_proxy") {
+                client_metadata_options.mode = ClientMetadataMode::TrustedProxy;
+            } else if (value == "legacy_headers") {
+                client_metadata_options.mode = ClientMetadataMode::LegacyHeaders;
+            } else {
+                return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, entry.line, entry.key,
+                                             "expected direct, trusted_proxy, or legacy_headers"));
+            }
+        } else if (entry.key == kTrustedProxyCidrs) {
+            auto parsed = parse_trusted_proxy_cidrs(value, entry.line);
+            if (!parsed) {
+                return std::unexpected(std::move(parsed.error()));
+            }
+            client_metadata_options.trusted_proxy_cidrs = std::move(*parsed);
         } else if (entry.key == kAccessLogQueryAllowlist || entry.key == kAccessLogSensitiveQueryKeys) {
             const bool sensitive = entry.key == kAccessLogSensitiveQueryKeys;
             auto parsed = parse_query_keys(value, entry.line, entry.key, sensitive);
@@ -510,6 +562,17 @@ AccessServerConfig::load_from_string(std::string_view input) {
         return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, 0, kHttp3Enabled,
                                      "HTTP/3 requires ACCESS_SERVER_TLS_ENABLED=true"));
     }
+    if (client_metadata_options.mode == ClientMetadataMode::TrustedProxy &&
+        client_metadata_options.trusted_proxy_cidrs.empty()) {
+        return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, 0, kTrustedProxyCidrs,
+                                     "trusted_proxy mode requires at least one trusted proxy CIDR"));
+    }
+    if (client_metadata_options.mode != ClientMetadataMode::TrustedProxy &&
+        !client_metadata_options.trusted_proxy_cidrs.empty()) {
+        return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, 0, kTrustedProxyCidrs,
+                                     "trusted proxy CIDRs are only valid in trusted_proxy mode"));
+    }
+    client_metadata_options.connection_secure = tls_enabled;
     auto nacos_config = nacos::NacosClientConfig::create(std::move(nacos_params));
     if (!nacos_config) {
         return std::unexpected(nacos_error(nacos_config.error()));
@@ -538,9 +601,9 @@ AccessServerConfig::load_from_string(std::string_view input) {
     return AccessServerConfig(net::SocketAddress(listen_ip, listen_port), std::move(http_options),
                               net::SocketAddress(metrics_ip.value_or(listen_ip), *metrics_port),
                               std::chrono::milliseconds(timeout_millis), max_request_body, test_mode,
-                              std::move(access_log_options), std::move(cat_config), std::move(*nacos_config),
-                              std::move(watcher_options), std::move(gray_options), std::move(tls_certificate_options),
-                              std::move(service_discovery_options));
+                              std::move(client_metadata_options), std::move(access_log_options), std::move(cat_config),
+                              std::move(*nacos_config), std::move(watcher_options), std::move(gray_options),
+                              std::move(tls_certificate_options), std::move(service_discovery_options));
 }
 
 } // namespace fiber::access_server

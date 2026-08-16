@@ -1,6 +1,7 @@
 #ifndef FIBER_ACCESS_SERVER_ACCESS_REQUEST_TELEMETRY_H
 #define FIBER_ACCESS_SERVER_ACCESS_REQUEST_TELEMETRY_H
 
+#include "../execution/ClientMetadata.h"
 #include "AccessServerMetrics.h"
 #include "AccessTraceState.h"
 
@@ -37,6 +38,7 @@ struct Exception;
 struct CompiledRoute;
 struct ProxyUpstreamEndpoint;
 class AccessLogPolicy;
+class ClientMetadataResolver;
 
 class AccessProviderTransaction final : public common::NonCopyable {
 public:
@@ -66,7 +68,8 @@ private:
 class AccessRequestTelemetry final : public common::NonCopyable, public common::NonMovable {
 public:
     AccessRequestTelemetry(http::HttpExchange &exchange, AccessServerMetrics::Worker *metrics,
-                           cat::CatClient *cat_client, const AccessLogPolicy *access_log_policy = nullptr) noexcept;
+                           cat::CatClient *cat_client, const AccessLogPolicy *access_log_policy = nullptr,
+                           const ClientMetadataResolver *client_metadata_resolver = nullptr) noexcept;
     ~AccessRequestTelemetry();
 
     void set_project(std::string_view project, std::string_view effective_host,
@@ -91,6 +94,7 @@ public:
     [[nodiscard]] const http_script::ScriptExchangeCtx &script_context() const noexcept { return script_context_; }
     [[nodiscard]] http::HttpHeaders &response_headers() noexcept { return response_headers_; }
     [[nodiscard]] const http::HttpHeaders &response_headers() const noexcept { return response_headers_; }
+    [[nodiscard]] const ClientMetadata &client_metadata() const noexcept { return client_metadata_; }
     [[nodiscard]] bool finalize_response_headers() noexcept;
     [[nodiscard]] bool inject_upstream_headers(http::HttpHeaders &headers,
                                                AccessProviderTransaction &provider) noexcept;
@@ -105,6 +109,7 @@ private:
     http_script::ScriptExchangeCtx script_context_;
     http::HttpHeaders response_headers_;
     AccessTraceState trace_state_;
+    ClientMetadata client_metadata_;
     AccessServerMetrics::Worker *metrics_ = nullptr;
     const AccessLogPolicy *access_log_policy_ = nullptr;
     std::chrono::steady_clock::time_point started_{};
