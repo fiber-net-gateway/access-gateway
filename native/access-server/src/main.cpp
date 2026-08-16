@@ -71,7 +71,12 @@ void print_runtime_error(const fiber::access_server::AccessServerRuntimeError &e
     std::cerr << '\n';
 }
 
-fiber::log::LogConfigResult<fiber::log::LogConfig> make_log_config() {
+struct AccessLoggingConfig {
+    fiber::log::LogConfig config;
+    fiber::log::AppenderId primary_appender = fiber::log::kInvalidAppenderId;
+};
+
+fiber::log::LogConfigResult<AccessLoggingConfig> make_log_config() {
     fiber::log::LogConfigBuilder builder;
     auto console = builder.add_console_appender({
             .name = "access_server_stderr",
@@ -95,7 +100,14 @@ fiber::log::LogConfigResult<fiber::log::LogConfig> make_log_config() {
     if (!root) {
         return std::unexpected(std::move(root.error()));
     }
-    return builder.finish();
+    auto config = builder.finish();
+    if (!config) {
+        return std::unexpected(std::move(config.error()));
+    }
+    return AccessLoggingConfig{
+            .config = std::move(*config),
+            .primary_appender = *console,
+    };
 }
 
 class LoggingShutdownGuard {
@@ -136,7 +148,8 @@ int main(int argc, char **argv) {
         std::cerr << "failed to build access-server logging configuration: " << log_config.error().message << '\n';
         return 1;
     }
-    auto logging_started = fiber::log::LoggerManager::global().initialize(std::move(*log_config));
+    const fiber::log::AppenderId primary_log_appender = log_config->primary_appender;
+    auto logging_started = fiber::log::LoggerManager::global().initialize(std::move(log_config->config));
     if (!logging_started) {
         std::cerr << "failed to initialize access-server logging: " << logging_started.error().message << '\n';
         return 1;
@@ -149,8 +162,13 @@ int main(int argc, char **argv) {
     fiber::event::EventLoopGroup nacos_group(1);
     fiber::event::EventLoopGroup compiler_group(1);
     fiber::event::EventLoopGroup cat_group(1);
+    const fiber::access_server::AccessProcessMetricsSources process_metrics{
+            .logger = &fiber::log::LoggerManager::global(),
+            .log_appender = primary_log_appender,
+    };
     auto created = fiber::access_server::AccessServerRuntime::create(
-            accept_loop, nacos_group.at(0), compiler_group.at(0), cat_group.at(0), http_workers, config);
+            accept_loop, nacos_group.at(0), compiler_group.at(0), cat_group.at(0), http_workers, config,
+            fiber::net::ListenOptions{}, process_metrics);
     if (!created) {
         print_runtime_error(created.error());
         return 1;

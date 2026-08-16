@@ -72,6 +72,50 @@ are absent from every label. Recording performs direct integer increments and co
 POD observation; it adds no registration, string construction, lock, atomic shared ownership, or
 cross-loop post to the request path.
 
+## Asynchronous logging and CAT pipeline metrics
+
+`AccessProcessMetrics` reads the snapshots already maintained atomically by Fiber. The logging
+source and primary appender ID are passed explicitly from process startup; the appender ID is the
+value returned by `LogConfigBuilder`, not an assumed numeric constant. The logging schema is:
+
+- `access_server_log_metrics_available`, which is `1` only while the injected logger is running
+  and its primary appender ID is present;
+- `access_server_log_queue_records`, `access_server_log_queue_bytes`,
+  `access_server_log_queue_peak_records`, `access_server_log_queue_peak_bytes`, and
+  `access_server_log_queue_accepting`;
+- `access_server_log_queue_failures_total{reason}` with `queue_full`, `allocation`, or
+  `formatting`;
+- `access_server_log_appender_records_total{result}` with `written` or `dropped`, plus
+  `access_server_log_appender_written_bytes_total`;
+- `access_server_log_appender_failures_total{operation}` with `write`, `reopen`, `rotation`, or
+  `retention`, plus `access_server_log_appender_rotations_total` and
+  `access_server_log_appender_active_file_bytes`.
+
+The appender series describe the one process-owned primary sink. They intentionally have no
+appender-name or path label. A console appender reports zero for file-only rotation and active-size
+series; keeping the series stable allows a future reviewed file-appender configuration without a
+dashboard schema change.
+
+CAT exposes a fixed one-hot `access_server_cat_state{state}` across `disabled`, `created`,
+`running`, `stopping`, and `stopped`. A missing CAT configuration is `disabled`, not an apparently
+healthy collection of zero counters. Backlog and delivery series are:
+
+- `access_server_cat_queue_messages{kind}` and `access_server_cat_queue_bytes{kind}`, where `all`
+  includes every queued frame and `system` is the bounded system-priority subset;
+- `access_server_cat_messages_total{result}` with `submitted` or `sent`, and
+  `access_server_cat_sent_bytes_total`;
+- `access_server_cat_dropped_events_total{reason}` with the compile-time reasons `queue_full`,
+  `unavailable`, `sampled`, `partial_frame`, `encode`, `aggregation_overflow`,
+  `aggregate_dropped`, `aggregate_retry`, `aggregate_encode`, `metric_overflow`,
+  `metric_dropped`, `metric_retry`, `heartbeat_dropped`, `heartbeat_encode`, and
+  `heartbeat_provider`.
+
+Some CAT internal counters describe different stages of the same failed delivery. For example, an
+aggregate submission failure can also increment a queue loss. The reason series are independently
+actionable events and must not be summed as a count of unique messages. CAT app keys, hostnames,
+collector/router addresses, message types, trace IDs, and request values are never retained or
+rendered by this metric domain.
+
 ## Configuration update metrics
 
 `access_server_config_updates_total{resource,result,reason}` has only the following series:
@@ -208,14 +252,18 @@ allocation happen only on a Prometheus scrape.
 
 The Fiber registry continues to own request metric shards and their collection lifecycle. The
 application blocks are appended through `AccessRuntimeMetrics` after Fiber's text snapshot; no
-cross-EventLoop `CounterRef`/`GaugeRef` mutation is required.
+cross-EventLoop `CounterRef`/`GaugeRef` mutation is required. Logging and CAT stats are read only
+while rendering a scrape. Those APIs load Fiber-owned atomics; they do not lock, block their writer
+threads, post to an EventLoop, or modify the request/log/CAT submission paths. Shutdown closes the
+metrics listener and drains outstanding collections before detaching workers and stopping CAT;
+the process logger remains alive until the runtime and EventLoops have been destroyed.
 
 ## Remaining scope
 
 The implemented increments cover Project List/route outcomes, route readiness and snapshot
 size/age, application-owned Nacos lifecycle, service/endpoint/cluster/selector aggregates, TLS
-rotation/reclamation, and worker-sharded proxy/DNS/pool/WebSocket outcomes. Actual Nacos
-transport/reconnect state remains blocked on Fiber #27. Async logging and CAT drops remain the next
-O-02 increment. Typed, authenticated, per-instance activation evidence is implemented separately
-from these metrics; see
+rotation/reclamation, worker-sharded proxy/DNS/pool/WebSocket outcomes, and async logging/CAT
+backlog and loss. Actual Nacos transport/reconnect state is the only remaining O-02 gap and remains
+blocked on Fiber #27. Typed, authenticated, per-instance activation evidence is implemented
+separately from these metrics; see
 [`../../../docs/activation-evidence.md`](../../../docs/activation-evidence.md).

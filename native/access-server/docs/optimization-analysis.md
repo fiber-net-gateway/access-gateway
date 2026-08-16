@@ -1001,15 +1001,23 @@ phase 以及 WebSocket handshake/session outcome 仅使用编译期枚举。记�
 relay 返回的 `closed` 与协程取消的 `aborted`，不猜测 timeout 或 peer 原因。详见
 [`bounded-metrics.md`](bounded-metrics.md#proxy-transport-and-websocket-metrics)。
 
+第五阶段接入 Fiber 已提供的 LoggerManager queue/appender 和 CatClient 原子 stats。新建的
+`AccessProcessMetrics` 只在 scrape 时构造无标识快照：日志覆盖 queue backlog/peak/accepting、
+queue failure、主 appender 写入/丢弃/错误/rotation；CAT 覆盖 disabled/created/running/stopping/
+stopped、普通与 system backlog、submitted/sent 以及 15 个固定 loss reason。主 appender ID 由
+`LogConfigBuilder` 的实际返回值从 main 显式传入，不假定为 0；CAT 指针由 runtime 在构造时绑定。
+抓取只读取 Fiber atomics，不修改 request/log/CAT 提交热路径，也不暴露 appender 名、路径、CAT
+app key、host、collector/router 地址或 trace。内部阶段 loss 可能重叠，不能求和冒充唯一消息数。
+详见 [`bounded-metrics.md`](bounded-metrics.md#asynchronous-logging-and-cat-pipeline-metrics)。
+
 `start()` 成功只报告 `running`，绝不冒充 transport connected。真实连接、认证和 reconnect
 状态需要 Fiber 公共 typed snapshot/watch，已提交
-[fiber-gateway-cpp #27](https://github.com/fiber-net-gateway/fiber-gateway-cpp/issues/27)。本阶段尚未覆盖
-异步日志和 CAT drop；以下清单保留为后续独立提交：
+[fiber-gateway-cpp #27](https://github.com/fiber-net-gateway/fiber-gateway-cpp/issues/27)。O-02 当前唯一
+未覆盖项是该上游连接证据：
 
 建议增加：
 
 - Fiber #27 落地后接入 Nacos config/naming transport/reconnect state；
-- async log queue/appender drop 和 CAT drop。
 
 project、route、cluster、host、Data ID、service name、header 和用户数据不得成为无界 label。
 Fiber 的 pool lease、LoggerManager queue stats 等已有接口应直接消费；只有确实缺少通用、

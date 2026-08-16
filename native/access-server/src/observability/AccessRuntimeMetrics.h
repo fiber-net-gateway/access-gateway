@@ -3,6 +3,7 @@
 
 #include "AccessConfigMetrics.h"
 #include "AccessDiscoveryMetrics.h"
+#include "AccessProcessMetrics.h"
 #include "AccessTlsMetrics.h"
 
 #include <chrono>
@@ -17,7 +18,8 @@ namespace fiber::access_server {
 // Fiber Prometheus collector used by the HTTP request workers.
 class AccessRuntimeMetrics final : public common::NonCopyable, public common::NonMovable {
 public:
-    explicit AccessRuntimeMetrics(event::EventLoop &nacos_owner) noexcept;
+    explicit AccessRuntimeMetrics(event::EventLoop &nacos_owner,
+                                  AccessProcessMetricsSources process_sources = {}) noexcept;
 
     [[nodiscard]] AccessConfigMetrics &config() noexcept { return config_; }
     [[nodiscard]] AccessDiscoveryMetrics &discovery() noexcept { return discovery_; }
@@ -30,6 +32,7 @@ private:
     AccessConfigMetrics config_;
     AccessDiscoveryMetrics discovery_;
     AccessTlsMetrics tls_;
+    AccessProcessMetrics process_;
 };
 
 } // namespace fiber::access_server
