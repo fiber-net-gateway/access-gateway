@@ -957,9 +957,37 @@ Host retry rebind、body limit、selection report、response limit、取消和 W
 
 **归属：本项目。**
 
-保留一个 request-lifetime façade，内部拆成 `TracePropagation`、`RequestObservability` 和
-`ScriptExecutionContext`。这样可以分别测试 CAT 禁用/失败、W3C trace、header 注入、日志
-和指标，同时不分散请求状态的生命周期所有权。
+**实施状态：已解决（2026-08-17）。** `AccessRequestTelemetry` 保留为调用方唯一持有的
+request-lifetime façade，公共方法和调用点不变，内部改为按值组合 `ScriptExecutionContext`、
+`ClientMetadata`、`TracePropagation` 和 `RequestObservability`。`AccessProviderTransaction` 也已
+从 façade 中拆出为独立的 move-only CAT transaction guard。
+
+职责边界如下：
+
+- `ScriptExecutionContext` 独占 GC heap、`ScriptExchangeCtx` 和待发送 response headers，负责
+  request pool copy 及动态常量 bind/clear；
+- `TracePropagation` 独占 W3C `traceparent`/`tracestate`、CAT propagation context 和已绑定常量包，
+  负责 context 更新以及 downstream/upstream trace header；CAT transaction 只作为显式参数传入；
+- `RequestObservability` 独占 bounded metrics、CAT root/events、access-log 字段、采样及 terminal
+  accounting；它不持有 execution/metadata/trace 回指针；
+- façade 只编排跨职责操作，例如 project cluster 同时进入 CAT 字段和 trace context。
+
+构造顺序固定为 execution、client metadata、trace storage、observability。observability 先记录
+owner-loop start time 和 `request_started`，再初始化 trace，保持原先 duration 覆盖范围；façade
+析构体在成员逆序析构前显式完成 metrics、CAT 和 access log，因此 finish 时所有借用对象仍然存活。
+简单 façade 委托保持 header-inline，Release 调用点不会多经过一层 trampoline。
+
+新增 `AccessRequestTelemetryTest` 锁定 64-bit façade 的 864-byte 基线和非多态组件，分别覆盖 CAT
+禁用及 CAT wrong-loop 创建失败、W3C 常量 bind、context update/remove、tracestate upstream 注入、
+无 CAT 时的 header 行为和 request-pool storage。原 Handler/Proxy 集成测试继续覆盖真实 CAT root、
+`Access.Provider`、`RemoteCall`、`CALL_ERROR`、`FiberException`、`ResponseError`、指标、代理 header
+和脚本结果。
+
+Clang 22 `-O3` 布局复测中，四个成员分别为 432、112、184、136 bytes，总计仍为 864 bytes；没有
+新增堆包装、虚表、`std::function`、共享所有权、锁或 coroutine。相同 Release ThinLTO build tree
+的最终 access-server text 从 6,913,705 增至 6,914,941 bytes（+1,236，约 +0.018%），文件大小
+增加 1,744 bytes（约 +0.010%）；拆分后的五个无 LTO 实现对象 text 合计 19,309 bytes，低于拆分前
+单对象的 19,569 bytes。
 
 ### 8.8 C-01：`AccessConfigCodec`
 

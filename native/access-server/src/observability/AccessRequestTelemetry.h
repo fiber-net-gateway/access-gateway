@@ -2,23 +2,17 @@
 #define FIBER_ACCESS_SERVER_ACCESS_REQUEST_TELEMETRY_H
 
 #include "../execution/ClientMetadata.h"
-#include "AccessServerMetrics.h"
-#include "AccessTraceState.h"
+#include "AccessProviderTransaction.h"
+#include "RequestObservability.h"
+#include "ScriptExecutionContext.h"
+#include "TracePropagation.h"
 
-#include <chrono>
-#include <cstddef>
-#include <cstdint>
 #include <optional>
 #include <string_view>
-#include <utility>
 
-#include <fiber/cat/MessageTrace.h>
-#include <fiber/cat/Transaction.h>
 #include <fiber/common/IoError.h>
 #include <fiber/common/NonCopyable.h>
 #include <fiber/common/NonMovable.h>
-#include <fiber/http/HttpHeaders.h>
-#include <fiber/http_script/ScriptExchangeCtx.h>
 
 namespace fiber::cat {
 class CatClient;
@@ -26,7 +20,7 @@ class CatClient;
 
 namespace fiber::http {
 class HttpExchange;
-} // namespace fiber::http
+}
 
 namespace fiber::http_script {
 class ConstPackage;
@@ -41,101 +35,95 @@ struct ProxyConnectionObservation;
 class AccessLogPolicy;
 class ClientMetadataResolver;
 
-class AccessProviderTransaction final : public common::NonCopyable {
-public:
-    AccessProviderTransaction() noexcept = default;
-    AccessProviderTransaction(AccessProviderTransaction &&other) noexcept;
-    AccessProviderTransaction &operator=(AccessProviderTransaction &&other) noexcept;
-    ~AccessProviderTransaction();
-
-    [[nodiscard]] bool valid() const noexcept;
-
-    void add_upstream(std::string_view upstream, std::size_t attempt) noexcept;
-    void add_connection_reuse(std::uint64_t reuse_count) noexcept;
-    void fail(std::string_view phase, common::IoErr error) noexcept;
-    void call_error(const Exception &exception, std::string_view phase, common::IoErr error) noexcept;
-    void complete(int status_code) noexcept;
-
-private:
-    friend class AccessRequestTelemetry;
-
-    explicit AccessProviderTransaction(cat::Transaction transaction) noexcept : transaction_(std::move(transaction)) {}
-    void cancel_pending() noexcept;
-
-    cat::Transaction transaction_;
-};
-
-// Request-lifetime owner for access-server execution state and optional observability sinks.
+// Stable request-lifetime façade. By-value components keep request ownership in
+// one place while separating scripting, propagation, and observability policy.
 class AccessRequestTelemetry final : public common::NonCopyable, public common::NonMovable {
 public:
     AccessRequestTelemetry(http::HttpExchange &exchange, AccessServerMetrics::Worker *metrics,
                            cat::CatClient *cat_client, const AccessLogPolicy *access_log_policy = nullptr,
                            const ClientMetadataResolver *client_metadata_resolver = nullptr) noexcept;
-    ~AccessRequestTelemetry();
+    ~AccessRequestTelemetry() noexcept;
 
     void set_project(std::string_view project, std::string_view effective_host,
                      std::string_view context_cluster) noexcept;
-    void set_route(const CompiledRoute &route) noexcept;
-    void record_exception(const Exception &exception) noexcept;
-    void record_upstream_exception(const Exception &exception) noexcept;
-    void record_response_error(common::IoErr error) noexcept;
-    void record_response_compression(bool compressed) noexcept;
-    void record_response_compression_not_acceptable() noexcept;
-    void record_proxy_execution(AccessProxyExecutionResult result) noexcept;
-    void record_proxy_attempt_started() noexcept;
-    void record_proxy_attempt_finished(AccessProxyAttemptResult result) noexcept;
-    void record_proxy_failure(AccessProxyFailurePhase phase) noexcept;
-    void record_proxy_connection(const ProxyConnectionObservation &observation) noexcept;
-    void record_websocket_handshake(AccessWebSocketHandshakeResult result) noexcept;
-    void record_websocket_session_started() noexcept;
-    void record_websocket_session_finished(AccessWebSocketSessionResult result) noexcept;
-    void mark_io_error(common::IoErr error) noexcept;
-    void set_upstream(const ProxyUpstreamEndpoint &endpoint) noexcept;
-    [[nodiscard]] AccessProviderTransaction start_provider_transaction(std::string_view name) noexcept;
+    void set_route(const CompiledRoute &route) noexcept { observability_.set_route(execution_, route); }
+    void record_exception(const Exception &exception) noexcept {
+        observability_.record_exception(execution_, exception);
+    }
+    void record_upstream_exception(const Exception &exception) noexcept {
+        observability_.record_upstream_exception(execution_, exception);
+    }
+    void record_response_error(common::IoErr error) noexcept {
+        observability_.record_response_error(execution_, error);
+    }
+    void record_response_compression(bool compressed) noexcept {
+        observability_.record_response_compression(compressed);
+    }
+    void record_response_compression_not_acceptable() noexcept {
+        observability_.record_response_compression_not_acceptable();
+    }
+    void record_proxy_execution(AccessProxyExecutionResult result) noexcept {
+        observability_.record_proxy_execution(result);
+    }
+    void record_proxy_attempt_started() noexcept { observability_.record_proxy_attempt_started(); }
+    void record_proxy_attempt_finished(AccessProxyAttemptResult result) noexcept {
+        observability_.record_proxy_attempt_finished(result);
+    }
+    void record_proxy_failure(AccessProxyFailurePhase phase) noexcept { observability_.record_proxy_failure(phase); }
+    void record_proxy_connection(const ProxyConnectionObservation &observation) noexcept {
+        observability_.record_proxy_connection(observation);
+    }
+    void record_websocket_handshake(AccessWebSocketHandshakeResult result) noexcept {
+        observability_.record_websocket_handshake(result);
+    }
+    void record_websocket_session_started() noexcept { observability_.record_websocket_session_started(); }
+    void record_websocket_session_finished(AccessWebSocketSessionResult result) noexcept {
+        observability_.record_websocket_session_finished(result);
+    }
+    void mark_io_error(common::IoErr error) noexcept { observability_.mark_io_error(execution_, error); }
+    void set_upstream(const ProxyUpstreamEndpoint &endpoint) noexcept {
+        observability_.set_upstream(execution_, endpoint);
+    }
+    [[nodiscard]] AccessProviderTransaction start_provider_transaction(std::string_view name) noexcept {
+        return observability_.start_provider_transaction(name);
+    }
 
-    [[nodiscard]] std::string_view trace_id() const noexcept;
-    [[nodiscard]] std::string_view trace_parent() const noexcept { return trace_parent_; }
-    [[nodiscard]] std::optional<std::string_view> trace_context(std::string_view key) const noexcept;
-    [[nodiscard]] common::IoResult<void> bind_trace_context(const http_script::ConstPackage &constants) noexcept;
-    [[nodiscard]] common::IoResult<void> put_trace_context(std::string_view key, std::string_view value) noexcept;
-    void remove_trace_context(std::string_view key) noexcept;
-    [[nodiscard]] http_script::ScriptExchangeCtx &script_context() noexcept { return script_context_; }
-    [[nodiscard]] const http_script::ScriptExchangeCtx &script_context() const noexcept { return script_context_; }
-    [[nodiscard]] http::HttpHeaders &response_headers() noexcept { return response_headers_; }
-    [[nodiscard]] const http::HttpHeaders &response_headers() const noexcept { return response_headers_; }
+    [[nodiscard]] std::string_view trace_id() const noexcept { return trace_.trace_id(); }
+    [[nodiscard]] std::string_view trace_parent() const noexcept { return trace_.trace_parent(); }
+    [[nodiscard]] std::optional<std::string_view> trace_context(std::string_view key) const noexcept {
+        return trace_.trace_context(key);
+    }
+    [[nodiscard]] common::IoResult<void> bind_trace_context(const http_script::ConstPackage &constants) noexcept {
+        return trace_.bind_trace_context(execution_, constants);
+    }
+    [[nodiscard]] common::IoResult<void> put_trace_context(std::string_view key, std::string_view value) noexcept {
+        return trace_.put_trace_context(execution_, observability_.root_transaction(), key, value);
+    }
+    void remove_trace_context(std::string_view key) noexcept {
+        trace_.remove_trace_context(execution_, observability_.root_transaction(), key);
+    }
+    [[nodiscard]] http_script::ScriptExchangeCtx &script_context() noexcept { return execution_.script_context(); }
+    [[nodiscard]] const http_script::ScriptExchangeCtx &script_context() const noexcept {
+        return execution_.script_context();
+    }
+    [[nodiscard]] http::HttpHeaders &response_headers() noexcept { return execution_.response_headers(); }
+    [[nodiscard]] const http::HttpHeaders &response_headers() const noexcept { return execution_.response_headers(); }
     [[nodiscard]] const ClientMetadata &client_metadata() const noexcept { return client_metadata_; }
-    [[nodiscard]] bool finalize_response_headers() noexcept;
+    [[nodiscard]] bool finalize_response_headers() noexcept {
+        return trace_.finalize_response_headers(execution_.response_headers());
+    }
     [[nodiscard]] bool inject_upstream_headers(http::HttpHeaders &headers,
-                                               AccessProviderTransaction &provider) noexcept;
+                                               AccessProviderTransaction &provider) noexcept {
+        return trace_.inject_upstream_headers(headers, execution_, observability_.root_transaction(), provider);
+    }
 
 private:
-    [[nodiscard]] std::string_view copy_to_request_pool(std::string_view value) noexcept;
-    void add_root_data(std::string_view key, std::string_view value) noexcept;
-    void mark_failed(std::string_view error) noexcept;
-    void update_transaction_name() noexcept;
-
-    script::GcHeap script_heap_;
-    http_script::ScriptExchangeCtx script_context_;
-    http::HttpHeaders response_headers_;
-    AccessTraceState trace_state_;
+    // Construction order is a lifetime invariant: observability is destroyed
+    // before the trace, metadata, and exchange-backed execution state it reads.
+    ScriptExecutionContext execution_;
     ClientMetadata client_metadata_;
-    AccessServerMetrics::Worker *metrics_ = nullptr;
-    const AccessLogPolicy *access_log_policy_ = nullptr;
-    std::chrono::steady_clock::time_point started_{};
-    cat::Transaction root_;
-    std::optional<cat::MessageTraceContext> context_;
-    const http_script::ConstPackage *const_package_ = nullptr;
-    std::string_view trace_parent_;
-    std::string_view project_;
-    std::string_view route_;
-    std::string_view cluster_;
-    std::string_view upstream_;
-    std::string_view response_compression_;
-    std::string_view error_;
-    bool execution_failed_ = false;
-    bool failure_recorded_ = false;
-    bool exception_recorded_ = false;
-    bool response_error_recorded_ = false;
+    TracePropagation trace_;
+    RequestObservability observability_;
 };
 
 } // namespace fiber::access_server
