@@ -335,6 +335,19 @@ TEST(AccessConfigCodecTest, DistinguishesEmptyContentNullAndInvalidRoot) {
     EXPECT_EQ(array.error().code, AccessConfigErrorCode::InvalidRoot);
 }
 
+TEST(AccessConfigCodecTest, PreservesMalformedJsonOffsetAndNestedFieldPath) {
+    auto malformed = parse_project_config(R"({"routes":[})");
+    ASSERT_FALSE(malformed);
+    EXPECT_EQ(malformed.error().code, AccessConfigErrorCode::InvalidJson);
+    EXPECT_EQ(malformed.error().offset, 11U);
+    EXPECT_TRUE(malformed.error().field.empty());
+
+    auto nested = parse_project_config(R"({"routes":[{"proxy_headers":{"X":[1]}}]})");
+    ASSERT_FALSE(nested);
+    EXPECT_EQ(nested.error().code, AccessConfigErrorCode::InvalidField);
+    EXPECT_EQ(nested.error().field, "routes[0].proxy_headers.X");
+}
+
 TEST(AccessConfigCodecTest, MatchesJavaProjectListSplitSemantics) {
     const auto expect_projects = [](std::string_view input, std::vector<std::string> expected) {
         auto parsed = parse_project_list(input);

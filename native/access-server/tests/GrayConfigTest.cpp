@@ -181,6 +181,28 @@ TEST(GrayConfigTest, DecodesJavaMapAndAppliesRatioAndCidrRules) {
     EXPECT_EQ(store.generation(), 2u);
 }
 
+TEST(GrayConfigTest, PreservesDuplicateUnknownNullAndScalarCompatibility) {
+    auto decoded = fiber::access_server::parse_gray_match_config(
+            R"({"vdi":{"ratio":1,"future":true},"vdi":{"ratio":"2","cidrs":[1,null,1]}})");
+    ASSERT_TRUE(decoded) << decoded.error().message;
+    ASSERT_TRUE(*decoded);
+    ASSERT_EQ((*decoded)->size(), 1U);
+    EXPECT_EQ((*decoded)->front().entry, "vdi");
+    EXPECT_EQ((*decoded)->front().ratio, 2);
+    EXPECT_EQ((*decoded)->front().cidrs,
+              (fiber::access_server::NullableStringSet{std::optional<std::string>("1"), std::nullopt}));
+
+    auto invalid_first = fiber::access_server::parse_gray_match_config(R"({"vdi":{"ratio":"bad","ratio":2}})");
+    ASSERT_FALSE(invalid_first);
+    EXPECT_EQ(invalid_first.error().code, fiber::access_server::AccessConfigErrorCode::InvalidField);
+    EXPECT_EQ(invalid_first.error().field, "vdi.ratio");
+
+    auto null_entry = fiber::access_server::parse_gray_match_config(R"({"vdi":null})");
+    ASSERT_FALSE(null_entry);
+    EXPECT_EQ(null_entry.error().code, fiber::access_server::AccessConfigErrorCode::InvalidField);
+    EXPECT_EQ(null_entry.error().field, "vdi");
+}
+
 TEST(GrayConfigTest, AppliesEveryBasisPointRatioExactly) {
     auto decoded =
             fiber::access_server::parse_gray_match_config(R"({"vdi":{"ratio":1},"desktop":{"ratio":2500},)"
