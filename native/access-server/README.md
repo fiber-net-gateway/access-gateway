@@ -215,7 +215,9 @@ listener 只在 Nacos client/config/naming、project/gray watcher、项目列表
 - `docs/migration-plan.md`：范围边界、C++ 模块划分、工作包和阶段门槛；
 - `docs/compatibility-contract.md`：配置字段、热更新和 HTTP 请求执行的 Java 契约；
 - `docs/script-corpus-differential.md`：现网 condition/template/rewrite 的脱敏统计、
-  Java golden、C++ 差分结果和私有 corpus 复跑方式。
+  Java golden、C++ 差分结果和私有 corpus 复跑方式；
+- `docs/optimization-analysis.md`：代码职责、生命周期、性能、安全和可观测性优化分析，
+  以及 Access Gateway 与 Fiber 上游的改造归属。
 
 业务代码开始迁移后，按职责放入 `src/config/`、`src/routing/`、`src/execution/`、
 `src/runtime/` 和 `src/observability/`；对应测试放入 `tests/`，并在本目录的
