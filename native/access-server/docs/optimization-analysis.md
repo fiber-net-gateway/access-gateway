@@ -151,9 +151,20 @@ submodule 解决。
 
 **归属：本项目。**
 
-当前 `AccessConfigWatcher::apply_project_list()` 在完成项目列表 reconcile 后立即发布
-ready。单项目 `subscribe()` 失败时，`add_project()` 只删除 entry 并增加
-`failed_updates_`，既不 retry，也不记录包含 Data ID 和错误原因的 `last_failure_`。
+**实施状态：已解决（2026-08-16）。** Watcher 现在保留所有 desired project entry，按错误
+类型区分可重试和永久订阅失败，并以封顶指数退避重试暂态错误。每个 entry 显式记录订阅
+状态、当前订阅首值、配置处理结果、observed md5/version、published generation、失败阶段和
+下一次重试时间；删除项目和 shutdown 会取消等待中的 retry。启动门闩消费 typed readiness，
+只有 project-list 首值及全部当前项目订阅首值处理完成后才继续，而且总超时预算不会被中间
+状态更新重置。
+
+这里的 `Ready` 表示本实例已经完整观察并处理当前订阅图，不等同于配置 activation。首个
+非法候选会进入可观测的 `Rejected` 终态、保留旧快照或空快照，并计入 readiness 的 rejected
+数量；它不会被报告成 published/active。实例级 activation evidence 仍由 O-01 单独实现。
+
+改造前，`AccessConfigWatcher::apply_project_list()` 在完成项目列表 reconcile 后立即发布
+ready。单项目 `subscribe()` 失败时，`add_project()` 只删除 entry 并增加 `failed_updates_`，
+既不 retry，也不记录包含 Data ID 和错误原因的 `last_failure_`。
 
 代码位置：
 
@@ -164,25 +175,27 @@ ready。单项目 `subscribe()` 失败时，`add_project()` 只删除 entry 并�
 实例可能已经绑定 listener，但部分项目从未建立订阅。请求仍然 fail closed，但运维上
 会产生“实例已就绪”的错误判断。
 
-建议为每个项目持久维护以下状态：
+实施后的每项目状态包括：
 
 - `desired`；
-- `subscribing/subscribed/retrying/retiring`；
+- `subscribing/subscribed/retrying/failed/retiring`；
 - `first_value_received`；
 - `observed_md5` 和 route version；
-- `decode_result/compile_result/service_ready_result`；
+- 最新候选的 `awaiting/processing/accepted/rejected` 结果，以及失败发生在
+  `subscription/decode/compile/service-ready/publish` 的哪个阶段；
 - `published_generation`；
 - `last_error` 和 `next_retry_at`。
 
-初始订阅失败应采用有上限的指数退避，并区分：
+初始订阅失败采用延迟封顶的指数退避。typed readiness 同时为后续运维接口保留以下边界：
 
 - liveness：进程和 EventLoop 正常；
 - control-plane connected：Nacos config/naming 已连接；
 - readiness：要求的初始资源已经达到明确条件；
 - activation：本实例已经发布某个编译快照。
 
-是否在项目全部 ready 前绑定 socket 可以由产品决定，但 readiness 不能再等同于
-“看到了 project-list 首值”。
+本实现选择在全部 desired project 的当前订阅首值进入明确终态前不绑定 socket；Rejected
+也是明确但非激活的终态，因此不会阻塞其他合法项目提供服务。readiness 不再等同于“看到了
+project-list 首值”。
 
 ### 5.3 L-03：配置资源上限
 

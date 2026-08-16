@@ -569,9 +569,10 @@ production gray 原子快照在 selector 前覆盖 cluster，非空 context clus
 coroutine，并使 active upstream exchange 退出 pool 复用。RESPONSE、redirect 和错误响应
 直接等待 downstream IO，由相应读写操作返回 channel 关闭错误。上述组件已在
 `AccessServerRuntime` 完成进程级装配：每个 request worker 使用自己的 DNS resolver
-和 local pool shard，项目列表首值到达前不绑定 listener，关闭时先停止 listener 和
-active exchange，再关闭 pool/DNS 和 Nacos 控制面。本地脚本 adapter 和测试环境
-Host cluster 已装配。
+和 local pool shard；项目列表首值及每个 desired project 的当前订阅首值均处理完成前不绑定
+listener。订阅暂态失败采用封顶指数退避，非法首值被记录为 rejected 并保留旧快照或空快照，
+不冒充 activation。关闭时先停止 listener 和 active exchange，再关闭 pool/DNS 和 Nacos
+控制面。本地脚本 adapter 和测试环境 Host cluster 已装配。
 
 请求观测使用一个贯穿 handler、RESPONSE 和 PROXY 的上下文：
 

@@ -6,6 +6,7 @@
 #include <fiber/async/Sleep.h>
 #include <fiber/async/Spawn.h>
 #include <fiber/async/TaskSelect.h>
+#include <fiber/async/Timeout.h>
 #include <fiber/async/WhenAny.h>
 #include <fiber/common/Assert.h>
 
@@ -40,9 +41,9 @@ std::string_view access_server_runtime_stage_name(AccessServerRuntimeErrorCode c
         case AccessServerRuntimeErrorCode::StartAccessWatcher:
             return "subscribe access configuration";
         case AccessServerRuntimeErrorCode::InitialConfigUnavailable:
-            return "receive initial project list";
+            return "synchronize initial access configuration";
         case AccessServerRuntimeErrorCode::InitialConfigTimeout:
-            return "wait for initial project list";
+            return "wait for initial access configuration";
         case AccessServerRuntimeErrorCode::InitialTlsCertificateUnavailable:
             return "receive initial TLS certificate snapshot";
         case AccessServerRuntimeErrorCode::InitialTlsCertificateTimeout:
@@ -335,31 +336,61 @@ async::Task<std::expected<void, AccessServerRuntimeError>> AccessServerRuntime::
         co_return std::unexpected(std::move(error));
     }
 
-    auto ready = config_watcher_.subscribe_ready();
-    auto ready_snapshot = ready.current();
-    if ((!ready_snapshot.value || !*ready_snapshot.value) &&
-        initial_config_timeout_ > std::chrono::milliseconds::zero()) {
-        auto result =
-                co_await async::when_any([&ready, version = ready_snapshot.version]() { return ready.next(version); },
-                                         [timeout = initial_config_timeout_]() { return async::sleep(timeout); });
-        if (result.is<1>()) {
-            std::move(result).get<1>();
+    auto readiness = config_watcher_.subscribe_readiness();
+    auto readiness_snapshot = readiness.current();
+    const auto readiness_pending = [](const std::shared_ptr<const AccessConfigReadiness> &value) noexcept {
+        return !value || value->state == AccessConfigReadinessState::WaitingForProjectList ||
+               value->state == AccessConfigReadinessState::SynchronizingProjects;
+    };
+    const auto now = event::EventLoop::current().now();
+    const auto maximum_deadline = std::chrono::steady_clock::time_point::max();
+    const auto timeout = std::chrono::duration_cast<std::chrono::steady_clock::duration>(initial_config_timeout_);
+    const auto deadline = timeout <= std::chrono::steady_clock::duration::zero() ? maximum_deadline
+                          : timeout >= maximum_deadline - now                    ? maximum_deadline
+                                                                                 : now + timeout;
+    while (readiness_pending(readiness_snapshot.value)) {
+        if (deadline == maximum_deadline) {
+            readiness_snapshot = co_await readiness.next(readiness_snapshot.version);
+            continue;
+        }
+        const auto now = event::EventLoop::current().now();
+        const auto remaining = deadline > now ? deadline - now : std::chrono::steady_clock::duration::zero();
+        auto next = co_await async::timeout_for(
+                [&readiness, version = readiness_snapshot.version]() { return readiness.next(version); }, remaining);
+        if (!next) {
+            const AccessConfigReadiness *current = readiness_snapshot.value.get();
+            std::string message = "initial access configuration synchronization timed out";
+            if (current) {
+                message.append(" (desired=");
+                message.append(std::to_string(current->desired_projects));
+                message.append(", subscribed=");
+                message.append(std::to_string(current->subscribed_projects));
+                message.append(", synchronized=");
+                message.append(std::to_string(current->synchronized_projects));
+                message.append(", retrying=");
+                message.append(std::to_string(current->retrying_projects));
+                message.append(", rejected=");
+                message.append(std::to_string(current->rejected_projects));
+                message.push_back(')');
+            }
             co_await fail_start();
             co_return std::unexpected(make_io_error(AccessServerRuntimeErrorCode::InitialConfigTimeout,
-                                                    common::IoErr::TimedOut,
-                                                    "initial access project-list synchronization timed out"));
+                                                    common::IoErr::TimedOut, std::move(message)));
         }
-        ready_snapshot = std::move(result).get<0>();
-    } else if (!ready_snapshot.value || !*ready_snapshot.value) {
-        while (!ready_snapshot.value || !*ready_snapshot.value) {
-            ready_snapshot = co_await ready.next(ready_snapshot.version);
-        }
+        readiness_snapshot = std::move(*next);
     }
-    if (!ready_snapshot.value || !*ready_snapshot.value) {
+    if (!readiness_snapshot.value || readiness_snapshot.value->state != AccessConfigReadinessState::Ready) {
+        const common::IoErr io_error =
+                readiness_snapshot.value && readiness_snapshot.value->io_error != common::IoErr::None
+                        ? readiness_snapshot.value->io_error
+                        : common::IoErr::Canceled;
+        std::string message = readiness_snapshot.value ? readiness_snapshot.value->message : std::string{};
+        if (message.empty()) {
+            message = "access configuration synchronization stopped before readiness";
+        }
         co_await fail_start();
-        co_return std::unexpected(make_io_error(AccessServerRuntimeErrorCode::InitialConfigUnavailable,
-                                                common::IoErr::Canceled,
-                                                "access project-list subscription closed before synchronization"));
+        co_return std::unexpected(
+                make_io_error(AccessServerRuntimeErrorCode::InitialConfigUnavailable, io_error, std::move(message)));
     }
 
     std::shared_ptr<TlsBootstrapIdentity> bootstrap;
