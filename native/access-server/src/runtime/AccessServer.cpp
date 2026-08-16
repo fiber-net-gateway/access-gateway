@@ -22,7 +22,7 @@ http::HttpServerOptions make_http_options(http::HttpServerOptions options = {}) 
 AccessServer::AccessServer(event::EventLoop &accept_loop, event::EventLoopGroup &workers,
                            const RouteConfigStore &config_store, ProxyClusterMatcher cluster_matcher,
                            AccessServerOptions options) :
-    accept_loop_(&accept_loop), workers_(&workers), pool_(workers),
+    accept_loop_(&accept_loop), workers_(&workers), access_log_policy_(std::move(options.access_log)), pool_(workers),
     executor_(pool_, cluster_matcher, dns_.adapter(), options.executor),
     handler_(config_store, options.script_adapter,
              AccessRequestHandlerOptions{
@@ -54,6 +54,10 @@ async::Task<common::IoResult<void>> AccessServer::initialize() noexcept {
     }
     if (!metrics_.valid()) {
         co_return std::unexpected(common::IoErr::NoMem);
+    }
+    auto access_log_initialized = access_log_policy_.initialize();
+    if (!access_log_initialized) {
+        co_return std::unexpected(access_log_initialized.error());
     }
     if (!co_await dns_.init(*workers_)) {
         co_return std::unexpected(common::IoErr::NoMem);
@@ -106,7 +110,7 @@ async::Task<void> AccessServer::shutdown_and_wait() noexcept {
 
 async::Task<void> AccessServer::handle(http::HttpExchange &exchange) noexcept {
     AccessServerMetrics::Worker &worker = metrics_.worker(event::EventLoop::current().group_index());
-    AccessRequestTelemetry telemetry(exchange, &worker, cat_client_);
+    AccessRequestTelemetry telemetry(exchange, &worker, cat_client_, &access_log_policy_);
     if (!http3_alt_svc_.empty()) {
         (void) telemetry.response_headers().set("Alt-Svc", http3_alt_svc_);
     }

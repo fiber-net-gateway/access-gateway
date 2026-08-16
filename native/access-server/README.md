@@ -152,6 +152,8 @@ cp native/access-server/access-server.env.example access-server.env
 - Prometheus 监听 `0.0.0.0:16689`；
 - HTTP worker 数在启动时根据进程 CPU affinity 和 cgroup v1/v2 CPU quota 自动确定；
 - 默认 request body 上限 400 MiB；
+- access log 默认只记录经安全编码的 path，不记录 query value；正常请求默认采样率为
+  10000 bps（全量），失败请求始终保留；
 - 项目列表 `ploto.unified-access.projects`，route 前缀
   `ploto.unified-access.route.`，group `ACCESS-SERVER`；
 - gray data ID `ploto.unified-access.gray-match`；
@@ -169,6 +171,14 @@ cp native/access-server/access-server.env.example access-server.env
 CAT 默认关闭；任一 `CAT_*` 设置非空后必须给出完整 app key、hostname、IP，以及
 至少一个 router 或 bootstrap collector。CAT 不可用会在启动阶段 fail closed，不会
 静默退化为无 trace 的生产实例。
+
+Access log 的 query allowlist、附加敏感 key、HMAC、成功请求采样率和 path/query 字节上限
+分别由 `ACCESS_SERVER_ACCESS_LOG_*` 键配置。默认 allowlist 为空，因此 query value 不会写入
+日志。内置敏感 key 不可移除，即使被 allowlist 命中也只输出 `[REDACTED]`；可选 HMAC 使用
+实例生命周期内的随机密钥，只用于同一实例内关联，密钥不会进入配置或日志。4xx/5xx、执行
+失败、响应未完成和 IO 错误不受成功请求采样率影响。allowlist 对 form-decoded ASCII key
+执行大小写敏感的精确匹配，敏感 key 判断则不区分 ASCII 大小写；允许输出的 value 保留原始
+query 编码并再次执行日志安全编码，不做 percent decode。
 
 ### 同步测试环境 Nacos 配置
 

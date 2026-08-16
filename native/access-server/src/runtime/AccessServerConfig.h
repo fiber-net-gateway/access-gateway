@@ -1,6 +1,7 @@
 #ifndef FIBER_ACCESS_SERVER_ACCESS_SERVER_CONFIG_H
 #define FIBER_ACCESS_SERVER_ACCESS_SERVER_CONFIG_H
 
+#include "../observability/AccessLogPolicy.h"
 #include "AccessConfigWatcher.h"
 #include "AccessServiceDiscovery.h"
 #include "GrayConfigWatcher.h"
@@ -52,6 +53,7 @@ public:
     [[nodiscard]] std::chrono::milliseconds initial_config_timeout() const noexcept { return initial_config_timeout_; }
     [[nodiscard]] std::size_t default_max_request_body_size() const noexcept { return default_max_request_body_size_; }
     [[nodiscard]] bool test_mode() const noexcept { return test_mode_; }
+    [[nodiscard]] const AccessLogOptions &access_log_options() const noexcept { return access_log_options_; }
     [[nodiscard]] const std::optional<cat::CatClientConfig> &cat_config() const noexcept { return cat_config_; }
     [[nodiscard]] const nacos::NacosClientConfig &nacos_config() const noexcept { return nacos_config_; }
     [[nodiscard]] const AccessConfigWatcherOptions &watcher_options() const noexcept { return watcher_options_; }
@@ -68,7 +70,7 @@ public:
 private:
     AccessServerConfig(net::SocketAddress listen_address, http::HttpServerOptions http_server_options,
                        net::SocketAddress metrics_listen_address, std::chrono::milliseconds initial_config_timeout,
-                       std::size_t default_max_request_body_size, bool test_mode,
+                       std::size_t default_max_request_body_size, bool test_mode, AccessLogOptions access_log_options,
                        std::optional<cat::CatClientConfig> cat_config, nacos::NacosClientConfig nacos_config,
                        AccessConfigWatcherOptions watcher_options, GrayConfigWatcherOptions gray_watcher_options,
                        TlsCertificateWatcherOptions tls_certificate_watcher_options,
@@ -80,6 +82,7 @@ private:
     std::chrono::milliseconds initial_config_timeout_{60000};
     std::size_t default_max_request_body_size_ = 400U << 20U;
     bool test_mode_ = false;
+    AccessLogOptions access_log_options_;
     std::optional<cat::CatClientConfig> cat_config_;
     nacos::NacosClientConfig nacos_config_;
     AccessConfigWatcherOptions watcher_options_;

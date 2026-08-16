@@ -36,6 +36,7 @@ namespace fiber::access_server {
 struct Exception;
 struct CompiledRoute;
 struct ProxyUpstreamEndpoint;
+class AccessLogPolicy;
 
 class AccessProviderTransaction final : public common::NonCopyable {
 public:
@@ -65,7 +66,7 @@ private:
 class AccessRequestTelemetry final : public common::NonCopyable, public common::NonMovable {
 public:
     AccessRequestTelemetry(http::HttpExchange &exchange, AccessServerMetrics::Worker *metrics,
-                           cat::CatClient *cat_client) noexcept;
+                           cat::CatClient *cat_client, const AccessLogPolicy *access_log_policy = nullptr) noexcept;
     ~AccessRequestTelemetry();
 
     void set_project(std::string_view project, std::string_view effective_host,
@@ -105,6 +106,7 @@ private:
     http::HttpHeaders response_headers_;
     AccessTraceState trace_state_;
     AccessServerMetrics::Worker *metrics_ = nullptr;
+    const AccessLogPolicy *access_log_policy_ = nullptr;
     std::chrono::steady_clock::time_point started_{};
     cat::Transaction root_;
     std::optional<cat::MessageTraceContext> context_;

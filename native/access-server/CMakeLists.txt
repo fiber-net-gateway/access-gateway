@@ -16,6 +16,7 @@ add_library(access_server_core STATIC
     "${CMAKE_CURRENT_LIST_DIR}/src/execution/ResponseExecutor.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/execution/ResponsePlan.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/execution/TemplateEvaluator.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/observability/AccessLogPolicy.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/observability/AccessRequestTelemetry.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/observability/AccessServerMetrics.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/observability/AccessTraceState.cpp"
@@ -69,6 +70,7 @@ if (FIBER_BUILD_TESTS AND (GTest_FOUND OR TARGET GTest::gtest_main))
     add_executable(fiber_access_server_tests
         "${CMAKE_CURRENT_LIST_DIR}/tests/AccessConfigCodecTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/AccessConfigWatcherTest.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/tests/AccessLogPolicyTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/AccessRequestHandlerTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/AccessServerTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/AccessServerConfigTest.cpp"

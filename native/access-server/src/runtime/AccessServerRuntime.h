@@ -104,7 +104,7 @@ private:
                         event::EventLoopGroup &http_workers, net::SocketAddress listen_address,
                         http::HttpServerOptions http_server_options, net::SocketAddress metrics_listen_address,
                         net::ListenOptions listen_options, std::chrono::milliseconds initial_config_timeout,
-                        std::size_t default_max_request_body_size, bool test_mode,
+                        std::size_t default_max_request_body_size, bool test_mode, AccessLogOptions access_log_options,
                         AccessConfigWatcherOptions watcher_options, GrayConfigWatcherOptions gray_options,
                         TlsCertificateWatcherOptions tls_certificate_options,
                         AccessServiceDiscoveryOptions service_discovery_options,
@@ -135,6 +135,7 @@ private:
     std::chrono::milliseconds initial_config_timeout_{0};
     std::size_t default_max_request_body_size_ = 0;
     bool test_mode_ = false;
+    AccessLogOptions access_log_options_;
     http::HttpServerOptions http_server_options_;
     std::unique_ptr<cat::CatClient> cat_client_;
     std::unique_ptr<nacos::NacosClient> nacos_client_;

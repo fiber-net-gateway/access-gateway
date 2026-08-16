@@ -307,12 +307,23 @@ Fiber 上游应负责：
 
 **归属：本项目。Fiber 日志库无须修改。**
 
-`AccessRequestTelemetry` 在 INFO 级记录 `unparsed_uri`，其中通常包含 query string，可能
-泄露 token、签名 URL、session id 和业务敏感参数。
+**实施状态：已解决（2026-08-16）。** `AccessRequestTelemetry` 不再把 `unparsed_uri`
+写入 INFO 日志，而是消费独立 `AccessLogPolicy` 生成的有界安全字段。默认 query allowlist
+为空，只记录 path；内置敏感 key 不可被配置移除，命中 allowlist 时固定替换为
+`[REDACTED]`。配置还支持附加敏感 key、实例随机密钥 HMAC-SHA256、成功请求 bps 采样及
+path/query 字节上限。4xx/5xx、执行失败、未完成响应和 IO 错误始终保留。
+
+所有 path/query 输出只包含安全 ASCII，控制字符、非 ASCII 和非法 UTF-8 字节按 `%XX`
+编码，截断不会切断编码单元；日志显式给出 filtered/redacted/truncated/hash-failed 状态。
+HMAC 只对最终保留的日志计算，采样使用 worker-local 无锁序列，不在请求热路径引入共享
+计数器竞争。启用 HMAC 后安全随机密钥初始化失败会使 server 初始化失败。
+
+改造前，`AccessRequestTelemetry` 在 INFO 级记录 `unparsed_uri`，其中通常包含 query
+string，可能泄露 token、签名 URL、session id 和业务敏感参数。
 
 代码位置：[`AccessRequestTelemetry.cpp`](../src/observability/AccessRequestTelemetry.cpp#L269)。
 
-建议默认只记录 path，并支持：
+实现现在默认只记录 path，并支持：
 
 - query key allowlist；
 - 敏感 key 固定替换；

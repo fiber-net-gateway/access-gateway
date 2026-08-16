@@ -39,7 +39,8 @@ std::uint16_t listener_port(int fd) {
     return ntohs(address.sin_port);
 }
 
-std::string request(std::uint16_t port, std::string_view extra_headers = {}, std::string_view method = "GET") {
+std::string request(std::uint16_t port, std::string_view extra_headers = {}, std::string_view method = "GET",
+                    std::string_view target = "/") {
     const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
         return {};
@@ -54,7 +55,9 @@ std::string request(std::uint16_t port, std::string_view extra_headers = {}, std
     }
 
     std::string payload(method);
-    payload.append(" / HTTP/1.1\r\nHost: api.example.com\r\n");
+    payload.push_back(' ');
+    payload.append(target);
+    payload.append(" HTTP/1.1\r\nHost: api.example.com\r\n");
     payload.append(extra_headers);
     payload.append("Connection: close\r\n\r\n");
     std::size_t sent = 0;
@@ -200,13 +203,17 @@ TEST(AccessServerTest, ServesPublishedSnapshotAndShutsDownWorkerResources) {
 
     event::EventLoop accept_loop;
     event::EventLoopGroup workers(1);
-    AccessServer server(accept_loop, workers, store, {});
+    AccessServer server(accept_loop, workers, store, {},
+                        AccessServerOptions{
+                                .access_log = AccessLogOptions{.query_hash_enabled = true},
+                        });
     std::promise<std::pair<std::uint16_t, std::uint16_t>> port_promise;
     auto port = port_promise.get_future();
     std::promise<void> stopped_promise;
     auto stopped = stopped_promise.get_future();
     bool startup_ok = false;
 
+    testing::internal::CaptureStderr();
     workers.start();
     async::spawn(accept_loop, [&]() -> async::DetachedTask {
         auto initialized = co_await server.initialize();
@@ -244,7 +251,7 @@ TEST(AccessServerTest, ServesPublishedSnapshotAndShutsDownWorkerResources) {
     std::thread client([&]() {
         const auto [bound_port, metrics_port] = port.get();
         if (bound_port != 0 && metrics_port != 0) {
-            response = request(bound_port);
+            response = request(bound_port, {}, "GET", "/?token=integration-secret");
             gzip_response = request(bound_port, "Accept-Encoding: gzip\r\n");
             gzip_head_response = request(bound_port, "Accept-Encoding: gzip\r\n", "HEAD");
             unacceptable_response = request(bound_port, "Accept-Encoding: gzip;q=0, identity;q=0\r\n");
@@ -264,6 +271,7 @@ TEST(AccessServerTest, ServesPublishedSnapshotAndShutsDownWorkerResources) {
     EXPECT_EQ(stopped.wait_for(2s), std::future_status::ready);
     workers.stop();
     workers.join();
+    const std::string access_logs = testing::internal::GetCapturedStderr();
 
     ASSERT_TRUE(startup_ok);
     EXPECT_NE(response.find("HTTP/1.1 200"), std::string::npos);
@@ -288,6 +296,10 @@ TEST(AccessServerTest, ServesPublishedSnapshotAndShutsDownWorkerResources) {
               std::string::npos);
     EXPECT_NE(metrics_response.find("access_server_response_compression_total{result=\"not_acceptable\"} 1"),
               std::string::npos);
+    EXPECT_EQ(access_logs.find("integration-secret"), std::string::npos);
+    EXPECT_NE(access_logs.find("path=\"/\" query=\"\""), std::string::npos);
+    EXPECT_NE(access_logs.find("query_hash=\"hmac-sha256:"), std::string::npos);
+    EXPECT_NE(access_logs.find("query_filtered=true"), std::string::npos);
 }
 
 TEST(AccessServerTest, ReturnsCatTraceIdFromTheUnifiedRequestContext) {
