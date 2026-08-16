@@ -477,8 +477,8 @@ Fiber 上游负责：
 ```text
 atomic route snapshot pin
   -> Host/Path matcher
-  -> gray snapshot + shared sample sequence
-  -> service directory mutex + SWRR mutex + endpoint scan
+  -> per-worker gray snapshot + loop-local sample sequence
+  -> atomic service directory pin + SWRR mutex + endpoint scan
   -> connection pool / DNS / connect
   -> template and header materialization
   -> CAT / metrics / access log
@@ -585,7 +585,23 @@ lock-free，并带来共享控制块引用计数流量，但它目前提供了�
 
 **归属：本项目。**
 
-gray 判断每次 atomic load 共享 snapshot，并通过全局 atomic sequence 产生采样值。gray
+**实施状态：已解决（2026-08-17）。** `GrayMatchStore` 在 access-server runtime 中显式绑定
+HTTP worker group。每次更新只编译一份带单调 generation 的不可变规则，再为每个 worker
+创建独立的小型 snapshot wrapper 并同步 release-store 到 cache-line 对齐的槽位。wrapper
+共享只读规则，但它们各自拥有独立的 `shared_ptr` 控制块；请求通过当前 EventLoop 的
+`group_index()` O(1) 取得槽位，只修改本 worker 的引用计数和采样状态，不再访问全局 sample
+sequence。配置 validator 继续使用不绑定 worker 的 canonical snapshot，不承担请求匹配职责。
+
+采样改为每 worker 的 SplitMix64 状态，初始状态由固定 seed 和 worker index 分别混合；状态是
+普通 `uint64_t`，因为只有所属 EventLoop 会访问它。错误 loop/group 会 fail closed。worker 数
+在 `EventLoopGroup` 和 store 构造时固定；改变 worker 数需要重建 runtime，不支持运行中 resize。
+
+本实现刻意没有使用异步 fan-out：`apply()` 先完成全部 wrapper 分配，再逐 worker 原子发布，
+返回时所有槽位均已更新；并发请求只会在单次匹配中看到完整旧 generation 或完整新
+generation。内部 generation 仅用于验证 gray 配置发布，不是 rnacos 发布状态或实例 activation
+证据，也未作为控制面证据暴露。
+
+改造前，gray 判断每次 atomic load 共享 snapshot，并通过全局 atomic sequence 产生采样值。gray
 随机序列不是外部精确兼容契约，可以改为每 worker snapshot 和 PRNG，消除共享 cache
 line。
 
@@ -593,6 +609,10 @@ line。
 
 需要验证 ratio 分布、更新 generation、固定 seed 测试和 worker 数变化，不得改变未知
 entry、无效 CIDR、ratio 边界等既有兼容行为。
+
+测试现已覆盖 10,000 个 basis-point 输入的精确 ratio 计数、固定 seed 的逐项采样结果、
+1/2/4 worker 的独立序列、初始空快照、更新、clear 和 generation；原有未知 entry、无效 CIDR
+及 Java 兼容 ratio 行为保持不变。本项未修改 Fiber gitlink。
 
 ### 7.4 P-04：TLS hazard 回收调度
 

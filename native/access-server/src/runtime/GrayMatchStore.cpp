@@ -2,16 +2,56 @@
 
 #include "../config/AccessConfigLimits.h"
 
+#include <limits>
 #include <utility>
 
-namespace fiber::access_server {
+#include <fiber/common/Assert.h>
+#include <fiber/event/EventLoop.h>
+#include <fiber/event/EventLoopGroup.h>
 
-GrayMatchStore::GrayMatchStore() {
-#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
-    published_.store(std::make_shared<const Snapshot>(), std::memory_order_relaxed);
-#else
-    std::atomic_store_explicit(&published_, std::make_shared<const Snapshot>(), std::memory_order_relaxed);
-#endif
+namespace fiber::access_server {
+namespace {
+
+constexpr std::uint64_t kRandomSequenceIncrement = 0x9e3779b97f4a7c15ULL;
+
+std::uint64_t mix_random(std::uint64_t value) noexcept {
+    value ^= value >> 30U;
+    value *= 0xbf58476d1ce4e5b9ULL;
+    value ^= value >> 27U;
+    value *= 0x94d049bb133111ebULL;
+    value ^= value >> 31U;
+    return value;
+}
+
+std::uint64_t worker_random_sequence(std::uint64_t seed, std::size_t worker_index) noexcept {
+    return mix_random(seed ^ (kRandomSequenceIncrement * (worker_index + 1)));
+}
+
+} // namespace
+
+GrayMatchStore::WorkerSlot::WorkerSlot(std::shared_ptr<const WorkerSnapshot> initial, std::uint64_t sequence) noexcept :
+    published(std::move(initial)), random_sequence(sequence) {}
+
+GrayMatchStore::GrayMatchStore() { initialize({}); }
+
+GrayMatchStore::GrayMatchStore(event::EventLoopGroup &workers, GrayMatchStoreOptions options) : workers_(&workers) {
+    FIBER_ASSERT(workers.size() > 0);
+    initialize(options);
+}
+
+void GrayMatchStore::initialize(GrayMatchStoreOptions options) {
+    auto initial = std::make_shared<const Snapshot>();
+    published_.store(initial, std::memory_order_relaxed);
+    if (workers_ == nullptr) {
+        return;
+    }
+
+    worker_slots_.reserve(workers_->size());
+    for (std::size_t index = 0; index < workers_->size(); ++index) {
+        auto worker_snapshot = std::make_shared<const WorkerSnapshot>(initial);
+        worker_slots_.push_back(std::make_unique<WorkerSlot>(std::move(worker_snapshot),
+                                                             worker_random_sequence(options.random_seed, index)));
+    }
 }
 
 std::expected<GrayMatchUpdateStatus, AccessConfigError>
@@ -24,7 +64,9 @@ GrayMatchStore::apply(const std::optional<GrayMatchConfig> &config) {
         return std::unexpected(std::move(within_limits.error()));
     }
 
+    FIBER_ASSERT(next_generation_ != std::numeric_limits<std::uint64_t>::max());
     auto candidate = std::make_shared<Snapshot>();
+    candidate->generation = next_generation_ + 1;
     candidate->rules.reserve(config->size());
     for (const GrayMatchConfigEntry &entry: *config) {
         if (!recognized_entry(entry.entry) || entry.ratio < 0 || (entry.ratio == 0 && entry.cidrs.empty())) {
@@ -47,16 +89,24 @@ GrayMatchStore::apply(const std::optional<GrayMatchConfig> &config) {
         }
         candidate->rules.push_back(std::move(rule));
     }
-#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
-    published_.store(std::move(candidate), std::memory_order_release);
-#else
+
     std::shared_ptr<const Snapshot> published = std::move(candidate);
-    std::atomic_store_explicit(&published_, std::move(published), std::memory_order_release);
-#endif
+    std::vector<std::shared_ptr<const WorkerSnapshot>> worker_snapshots;
+    worker_snapshots.reserve(worker_slots_.size());
+    for (std::size_t index = 0; index < worker_slots_.size(); ++index) {
+        worker_snapshots.push_back(std::make_shared<const WorkerSnapshot>(published));
+    }
+    for (std::size_t index = 0; index < worker_slots_.size(); ++index) {
+        worker_slots_[index]->published.store(std::move(worker_snapshots[index]), std::memory_order_release);
+    }
+    published_.store(std::move(published), std::memory_order_release);
+    ++next_generation_;
     return GrayMatchUpdateStatus::Published;
 }
 
 ProxyClusterMatcher GrayMatchStore::adapter() noexcept {
+    FIBER_ASSERT(workers_ != nullptr);
+    FIBER_ASSERT(worker_slots_.size() == workers_->size());
     return ProxyClusterMatcher{
             .context = this,
             .matches = &GrayMatchStore::matches_request,
@@ -65,14 +115,27 @@ ProxyClusterMatcher GrayMatchStore::adapter() noexcept {
 
 bool GrayMatchStore::matches_request(void *context, std::string_view entry, const ClientMetadata &metadata) noexcept {
     auto &store = *static_cast<GrayMatchStore *>(context);
-    return store.matches(entry, metadata, store.next_sample());
+    event::EventLoop *loop = event::EventLoop::current_or_null();
+    if (loop == nullptr || !loop->has_group_index() || loop->group() != store.workers_) {
+        return false;
+    }
+    FIBER_ASSERT(loop->group_index() < store.worker_slots_.size());
+    WorkerSlot &slot = *store.worker_slots_[loop->group_index()];
+    const std::shared_ptr<const WorkerSnapshot> worker_snapshot = slot.published.load(std::memory_order_acquire);
+    FIBER_ASSERT(worker_snapshot != nullptr);
+    FIBER_ASSERT(worker_snapshot->snapshot != nullptr);
+    return matches_snapshot(*worker_snapshot->snapshot, entry, metadata, next_sample(slot));
 }
 
 bool GrayMatchStore::matches(std::string_view entry, const ClientMetadata &metadata,
                              std::uint32_t random_sample) const noexcept {
-    std::shared_ptr<const Snapshot> snapshot = pin();
+    return matches_snapshot(*pin(), entry, metadata, random_sample);
+}
+
+bool GrayMatchStore::matches_snapshot(const Snapshot &snapshot, std::string_view entry, const ClientMetadata &metadata,
+                                      std::uint32_t random_sample) noexcept {
     const Rule *matched = nullptr;
-    for (const Rule &rule: snapshot->rules) {
+    for (const Rule &rule: snapshot.rules) {
         if (rule.entry == entry) {
             matched = &rule;
             break;
@@ -93,26 +156,19 @@ bool GrayMatchStore::matches(std::string_view entry, const ClientMetadata &metad
 
 std::size_t GrayMatchStore::rule_count() const noexcept { return pin()->rules.size(); }
 
+std::uint64_t GrayMatchStore::generation() const noexcept { return pin()->generation; }
+
 std::shared_ptr<const GrayMatchStore::Snapshot> GrayMatchStore::pin() const noexcept {
-#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
     return published_.load(std::memory_order_acquire);
-#else
-    return std::atomic_load_explicit(&published_, std::memory_order_acquire);
-#endif
 }
 
 bool GrayMatchStore::recognized_entry(std::string_view entry) noexcept {
     return entry == "vdi" || entry == "desktop" || entry == "internet" || entry == "custom";
 }
 
-std::uint32_t GrayMatchStore::next_sample() const noexcept {
-    std::uint64_t value = random_sequence_.fetch_add(1, std::memory_order_relaxed) + 1;
-    value ^= value >> 30U;
-    value *= 0xbf58476d1ce4e5b9ULL;
-    value ^= value >> 27U;
-    value *= 0x94d049bb133111ebULL;
-    value ^= value >> 31U;
-    return static_cast<std::uint32_t>(value % 10000U);
+std::uint32_t GrayMatchStore::next_sample(WorkerSlot &slot) noexcept {
+    slot.random_sequence += kRandomSequenceIncrement;
+    return static_cast<std::uint32_t>(mix_random(slot.random_sequence) % 10000U);
 }
 
 } // namespace fiber::access_server

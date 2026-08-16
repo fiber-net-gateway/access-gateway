@@ -152,6 +152,7 @@ AccessServerRuntime::AccessServerRuntime(
     http_server_options_(std::move(http_server_options)), cat_client_(std::move(cat_client)),
     nacos_client_(std::move(nacos_client)), config_service_(std::move(config_service)),
     naming_service_(std::move(naming_service)), config_compiler_(compiler_loop), runtime_metrics_(nacos_loop),
+    gray_store_(http_workers),
     service_discovery_(nacos_loop, *naming_service_,
                        AccessServiceOps{.swrr_options = service_discovery_options.swrr_options,
                                         .zone = service_discovery_options.zone,
