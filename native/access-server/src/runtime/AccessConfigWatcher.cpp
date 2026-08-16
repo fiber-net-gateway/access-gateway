@@ -137,22 +137,31 @@ AccessActivationFailure activation_failure(const AccessConfigWatcherFailure &fai
     };
 }
 
-template<typename Entry>
-void request_stop(Entry &entry) noexcept {
-    if (!entry.stopping) {
-        entry.stopping = true;
-        entry.subscription.close();
+AccessProjectSubscriptionState project_subscription_state(SubscriptionLifecycleState state) noexcept {
+    switch (state) {
+        case SubscriptionLifecycleState::Created:
+        case SubscriptionLifecycleState::Subscribing:
+            return AccessProjectSubscriptionState::Subscribing;
+        case SubscriptionLifecycleState::Subscribed:
+            return AccessProjectSubscriptionState::Subscribed;
+        case SubscriptionLifecycleState::Retrying:
+            return AccessProjectSubscriptionState::Retrying;
+        case SubscriptionLifecycleState::Failed:
+            return AccessProjectSubscriptionState::Failed;
+        case SubscriptionLifecycleState::Stopped:
+            return AccessProjectSubscriptionState::Retiring;
     }
+    return AccessProjectSubscriptionState::Subscribing;
 }
 
 } // namespace
 
 struct AccessConfigWatcher::ProjectListEntry final : public common::NonCopyable, public common::NonMovable {
-    explicit ProjectListEntry(AccessConfigWatcher &value_owner) : owner(&value_owner) {}
+    explicit ProjectListEntry(AccessConfigWatcher &value_owner) :
+        owner(&value_owner), subscription(*value_owner.loop_) {}
 
     AccessConfigWatcher *owner = nullptr;
-    nacos::Subscription<nacos::ConfigData> subscription;
-    bool stopping = false;
+    SubscriptionLifecycle subscription;
 };
 
 struct AccessConfigWatcher::InitialProjectUpdate final : public common::NonCopyable, public common::NonMovable {
@@ -169,23 +178,11 @@ struct AccessConfigWatcher::InitialProjectUpdate final : public common::NonCopya
 
 struct AccessConfigWatcher::ProjectEntry final : public common::NonCopyable, public common::NonMovable {
     ProjectEntry(AccessConfigWatcher &value_owner, std::string value_project) :
-        owner(&value_owner), project(std::move(value_project)), revisions(0),
-        revision_publisher(revisions.acquire_publisher()) {
-        FIBER_ASSERT(revision_publisher.has_value());
-    }
-
-    void advance() noexcept {
-        FIBER_ASSERT(generation != std::numeric_limits<std::uint64_t>::max());
-        initial_update.reset();
-        revision_publisher->publish(++generation);
-    }
+        owner(&value_owner), project(std::move(value_project)), subscription(*value_owner.loop_) {}
 
     AccessConfigWatcher *owner = nullptr;
     std::string project;
-    nacos::Subscription<nacos::ConfigData> subscription;
-    async::Watch<std::uint64_t> revisions;
-    std::optional<async::Watch<std::uint64_t>::Publisher> revision_publisher;
-    AccessProjectSubscriptionState subscription_state = AccessProjectSubscriptionState::Subscribing;
+    SubscriptionLifecycle subscription;
     AccessProjectConfigState config_state = AccessProjectConfigState::AwaitingValue;
     std::optional<AccessConfigWatcherFailure> last_failure;
     std::string observed_md5;
@@ -195,19 +192,13 @@ struct AccessConfigWatcher::ProjectEntry final : public common::NonCopyable, pub
     std::uint64_t active_snapshot_generation = 0;
     std::int64_t observed_at_unix_millis = 0;
     std::int64_t active_at_unix_millis = 0;
-    std::chrono::steady_clock::time_point next_retry_at{};
-    std::uint64_t generation = 0;
     std::uint64_t published_generation = 0;
-    std::uint32_t retry_attempt = 0;
     std::shared_ptr<const nacos::ConfigData> pending_compile_data;
     std::unique_ptr<InitialProjectUpdate> initial_update;
     ProjectCompileJob *active_compile_job = nullptr;
-    bool first_value_received = false;
     bool synchronized = false;
-    bool retry_scheduled = false;
     bool compile_queued = false;
     bool pending_force_compile = false;
-    bool stopping = false;
 };
 
 struct AccessConfigWatcher::ProjectCompileJob final : public common::NonCopyable, public common::NonMovable {
@@ -237,7 +228,7 @@ AccessConfigWatcher::AccessConfigWatcher(event::EventLoop &loop, AccessConfigCom
     FIBER_ASSERT(readiness_publisher_.has_value());
 }
 
-AccessConfigWatcher::~AccessConfigWatcher() {
+AccessConfigWatcher::~AccessConfigWatcher() noexcept {
     FIBER_ASSERT(state_ == AccessConfigWatcherState::Created || state_ == AccessConfigWatcherState::Stopped);
     FIBER_ASSERT(project_list_ == nullptr);
     FIBER_ASSERT(projects_.empty());
@@ -267,16 +258,17 @@ std::expected<void, nacos::ConfigServiceError> AccessConfigWatcher::start() {
     state_ = AccessConfigWatcherState::Running;
     initial_batch_active_ = store_->pin()->projects().empty();
     project_list_ = std::make_unique<ProjectListEntry>(*this);
-    auto subscription = config_service_->subscribe(options_.project_list_data_id, options_.project_route_group,
-                                                   &project_list_notify, project_list_.get());
-    if (!subscription) {
+    auto subscribed = project_list_->subscription.subscribe(*config_service_, options_.project_list_data_id,
+                                                            options_.project_route_group, &project_list_notify,
+                                                            project_list_.get());
+    if (!subscribed) {
         observe_metric_event(AccessConfigMetricEvent::ProjectListSubscriptionFailed);
+        project_list_->subscription.reset_start_failure();
         project_list_.reset();
         initial_batch_active_ = false;
         state_ = AccessConfigWatcherState::Created;
-        return std::unexpected(std::move(subscription.error()));
+        return std::unexpected(std::move(subscribed.error()));
     }
-    project_list_->subscription = std::move(*subscription);
     publish_readiness();
     return {};
 }
@@ -295,14 +287,13 @@ async::Task<void> AccessConfigWatcher::shutdown() noexcept {
         state_ = AccessConfigWatcherState::Stopping;
     }
     if (project_list_) {
-        request_stop(*project_list_);
+        project_list_->subscription.stop();
     }
     for (auto &[project, entry]: projects_) {
         (void) project;
-        entry->advance();
+        entry->initial_update.reset();
+        entry->subscription.stop();
         cancel_project_compile(entry);
-        entry->subscription_state = AccessProjectSubscriptionState::Retiring;
-        request_stop(*entry);
     }
     compile_queue_.clear();
     co_await background_tasks_.join();
@@ -319,14 +310,19 @@ void AccessConfigWatcher::project_list_notify(void *context,
     auto &entry = *static_cast<ProjectListEntry *>(context);
     AccessConfigWatcher &owner = *entry.owner;
     if (result.kind == nacos::ResultKind::Closed) {
-        request_stop(entry);
         if (owner.state_ == AccessConfigWatcherState::Running) {
+            entry.subscription.fail(nacos::ConfigServiceError{
+                    .code = nacos::ConfigServiceErrorCode::Shutdown,
+                    .io_error = common::IoErr::NotConnected,
+                    .message = "project-list subscription closed before shutdown",
+            });
             owner.set_unavailable(owner.options_.project_list_data_id, common::IoErr::NotConnected,
                                   "project-list subscription closed before shutdown");
         }
         return;
     }
     if (result.data && owner.state_ == AccessConfigWatcherState::Running) {
+        (void) entry.subscription.observe_value();
         owner.apply_project_list(*result.data);
     }
 }
@@ -341,10 +337,8 @@ void AccessConfigWatcher::project_notify(void *context,
     }
     std::shared_ptr<ProjectEntry> hold = found->second;
     if (result.kind == nacos::ResultKind::Closed) {
-        hold->advance();
+        hold->initial_update.reset();
         owner.cancel_project_compile(hold);
-        request_stop(*hold);
-        hold->first_value_received = false;
         hold->synchronized = false;
         owner.handle_subscription_failure(
                 hold, owner.options_.project_route_data_id_prefix + hold->project,
@@ -355,7 +349,9 @@ void AccessConfigWatcher::project_notify(void *context,
                 });
         return;
     }
-    if (result.data && !hold->stopping && owner.state_ == AccessConfigWatcherState::Running) {
+    if (result.data && owner.state_ == AccessConfigWatcherState::Running &&
+        (hold->subscription.state() == SubscriptionLifecycleState::Subscribing ||
+         hold->subscription.state() == SubscriptionLifecycleState::Subscribed)) {
         owner.apply_project(hold, result.data);
     }
 }
@@ -391,9 +387,9 @@ void AccessConfigWatcher::apply_project(const std::shared_ptr<ProjectEntry> &ent
                                         std::shared_ptr<const nacos::ConfigData> data) {
     FIBER_ASSERT(loop_->in_loop());
     FIBER_ASSERT(data);
-    entry->advance();
+    entry->initial_update.reset();
+    (void) entry->subscription.observe_value();
     cancel_project_compile(entry);
-    entry->first_value_received = true;
     entry->observed_md5 = std::string(data->md5);
     entry->observed_version.reset();
     entry->observed_at_unix_millis = access_activation_unix_millis(*loop_);
@@ -451,8 +447,8 @@ void AccessConfigWatcher::dispatch_project_compile() {
         compile_queue_.pop_front();
         entry->compile_queued = false;
         const auto found = projects_.find(entry->project);
-        if (found == projects_.end() || found->second.get() != entry.get() || entry->stopping ||
-            !entry->pending_compile_data) {
+        if (found == projects_.end() || found->second.get() != entry.get() ||
+            entry->subscription.state() == SubscriptionLifecycleState::Stopped || !entry->pending_compile_data) {
             entry->pending_compile_data.reset();
             entry->pending_force_compile = false;
             continue;
@@ -477,7 +473,7 @@ void AccessConfigWatcher::dispatch_project_compile() {
         job->entry = entry;
         job->data = std::move(data);
         job->published_version = store_->current_version(entry->project);
-        job->generation = entry->generation;
+        job->generation = entry->subscription.generation();
         job->force_compile = force_compile;
         entry->active_compile_job = job;
         ++active_compiler_jobs_;
@@ -521,7 +517,7 @@ void AccessConfigWatcher::complete_project_compile(ProjectCompileJob *job) noexc
 
     const auto found = owner.projects_.find(entry->project);
     const bool current = owner.state_ == AccessConfigWatcherState::Running && found != owner.projects_.end() &&
-                         found->second.get() == entry.get() && entry->generation == job->generation;
+                         found->second.get() == entry.get() && entry->subscription.is_current(job->generation);
     if (current && !job->canceled.load(std::memory_order_acquire) && job->result) {
         owner.apply_compiled_project(*job);
     }
@@ -584,7 +580,7 @@ void AccessConfigWatcher::apply_compiled_project(ProjectCompileJob &job) {
         settle_project(entry, AccessProjectConfigState::Rejected);
         return;
     }
-    apply_prepared_project(entry, std::move(*prepared), job.generation, entry->revisions.current().version,
+    apply_prepared_project(entry, std::move(*prepared), job.generation, entry->subscription.revision_version(),
                            options_.project_route_data_id_prefix + entry->project, std::string(job.data->md5));
 }
 
@@ -772,7 +768,7 @@ async::DetachedTask AccessConfigWatcher::await_ready_project(std::shared_ptr<Pro
                                                              std::uint64_t revision_version, std::string data_id,
                                                              std::string md5,
                                                              std::chrono::steady_clock::time_point started) noexcept {
-    auto revisions = entry->revisions.subscribe();
+    auto revisions = entry->subscription.subscribe_revisions();
     auto ready_or_replaced =
             co_await async::when_any([&prepared]() { return std::move(prepared).wait_ready().select(); },
                                      [&revisions, revision_version]() { return revisions.next(revision_version); });
@@ -784,7 +780,7 @@ async::DetachedTask AccessConfigWatcher::await_ready_project(std::shared_ptr<Pro
         auto ready = std::move(ready_or_replaced).get<0>();
         const auto found = projects_.find(entry->project);
         const bool current = state_ == AccessConfigWatcherState::Running && found != projects_.end() &&
-                             found->second.get() == entry.get() && entry->generation == generation;
+                             found->second.get() == entry.get() && entry->subscription.is_current(generation);
         if (current && !ready) {
             const common::IoErr io_error = ready.error().io_error;
             report_failure(entry, AccessConfigWatcherFailureStage::ServiceReady, std::move(data_id), std::move(md5),
@@ -805,25 +801,23 @@ async::DetachedTask AccessConfigWatcher::await_ready_project(std::shared_ptr<Pro
 }
 
 async::DetachedTask AccessConfigWatcher::retry_project_subscription(std::shared_ptr<ProjectEntry> entry,
-                                                                    std::uint64_t revision_version,
-                                                                    std::chrono::milliseconds delay) noexcept {
-    auto revisions = entry->revisions.subscribe();
-    auto delay_or_canceled =
-            co_await async::when_any([delay]() { return async::sleep(delay); },
-                                     [&revisions, revision_version]() { return revisions.next(revision_version); });
+                                                                    SubscriptionRetryPlan plan) noexcept {
+    auto revisions = entry->subscription.subscribe_revisions();
+    auto delay_or_canceled = co_await async::when_any(
+            [delay = plan.delay]() { return async::sleep(delay); },
+            [&revisions, revision_version = plan.revision_version]() { return revisions.next(revision_version); });
 
     if (delay_or_canceled.is<0>()) {
         std::move(delay_or_canceled).get<0>();
         const auto found = projects_.find(entry->project);
         const bool current = state_ == AccessConfigWatcherState::Running && found != projects_.end() &&
-                             found->second.get() == entry.get() && !entry->stopping && entry->retry_scheduled;
-        entry->retry_scheduled = false;
+                             found->second.get() == entry.get() &&
+                             entry->subscription.state() == SubscriptionLifecycleState::Retrying;
         if (current) {
             subscribe_project(entry);
         }
     } else {
         std::move(delay_or_canceled).get<1>();
-        entry->retry_scheduled = false;
     }
     background_tasks_.done();
 }
@@ -871,10 +865,9 @@ void AccessConfigWatcher::remove_project(std::string_view project) {
     }
     std::shared_ptr<ProjectEntry> retiring = std::move(iterator->second);
     projects_.erase(iterator);
-    retiring->advance();
+    retiring->initial_update.reset();
+    retiring->subscription.stop();
     cancel_project_compile(retiring);
-    retiring->subscription_state = AccessProjectSubscriptionState::Retiring;
-    request_stop(*retiring);
 
     if (initial_batch_active_) {
         publish_readiness();
@@ -893,34 +886,28 @@ void AccessConfigWatcher::remove_project(std::string_view project) {
 void AccessConfigWatcher::subscribe_project(const std::shared_ptr<ProjectEntry> &entry) {
     FIBER_ASSERT(loop_->in_loop());
     FIBER_ASSERT(entry);
-    if (state_ != AccessConfigWatcherState::Running || entry->stopping) {
+    if (state_ != AccessConfigWatcherState::Running ||
+        entry->subscription.state() == SubscriptionLifecycleState::Stopped) {
         return;
     }
 
     cancel_project_compile(entry);
-    entry->subscription.close();
-    entry->subscription_state = AccessProjectSubscriptionState::Subscribing;
     entry->config_state = AccessProjectConfigState::AwaitingValue;
-    entry->first_value_received = false;
     entry->synchronized = false;
     entry->observed_md5.clear();
     entry->observed_version.reset();
     entry->observed_at_unix_millis = 0;
-    entry->next_retry_at = {};
     publish_readiness();
 
     std::string data_id = options_.project_route_data_id_prefix;
     data_id.append(entry->project);
-    auto subscription = config_service_->subscribe(data_id, options_.project_route_group, &project_notify, entry.get());
-    if (!subscription) {
-        handle_subscription_failure(entry, std::move(data_id), std::move(subscription.error()));
+    auto subscribed = entry->subscription.subscribe(*config_service_, data_id, options_.project_route_group,
+                                                    &project_notify, entry.get());
+    if (!subscribed) {
+        handle_subscription_failure(entry, std::move(data_id), std::move(subscribed.error()));
         return;
     }
 
-    entry->subscription = std::move(*subscription);
-    entry->subscription_state = AccessProjectSubscriptionState::Subscribed;
-    entry->retry_attempt = 0;
-    entry->next_retry_at = {};
     publish_readiness();
 }
 
@@ -928,8 +915,10 @@ void AccessConfigWatcher::handle_subscription_failure(const std::shared_ptr<Proj
                                                       nacos::ConfigServiceError error) {
     FIBER_ASSERT(loop_->in_loop());
     FIBER_ASSERT(entry);
-    const nacos::ConfigServiceErrorCode code = error.code;
     const common::IoErr io_error = error.io_error;
+    if (entry->subscription.state() != SubscriptionLifecycleState::Failed) {
+        entry->subscription.fail(error);
+    }
     std::string message =
             error.message.empty() ? "failed to subscribe to project route configuration" : std::move(error.message);
     report_failure(entry, AccessConfigWatcherFailureStage::Subscription, std::move(data_id), {}, io_error,
@@ -939,29 +928,26 @@ void AccessConfigWatcher::handle_subscription_failure(const std::shared_ptr<Proj
                            .message = std::move(message),
                    });
 
+    entry->initial_update.reset();
     cancel_project_compile(entry);
-    entry->subscription.close();
     entry->synchronized = false;
-    entry->first_value_received = false;
     entry->config_state = AccessProjectConfigState::AwaitingValue;
-    entry->next_retry_at = {};
-    if (state_ != AccessConfigWatcherState::Running || entry->stopping || !retryable_subscription_error(code)) {
-        entry->subscription_state = AccessProjectSubscriptionState::Failed;
+    if (state_ != AccessConfigWatcherState::Running ||
+        entry->subscription.state() == SubscriptionLifecycleState::Stopped) {
         publish_readiness();
         return;
     }
 
-    FIBER_ASSERT(!entry->retry_scheduled);
-    FIBER_ASSERT(entry->retry_attempt != std::numeric_limits<std::uint32_t>::max());
-    const std::chrono::milliseconds delay = retry_delay(++entry->retry_attempt);
-    entry->subscription_state = AccessProjectSubscriptionState::Retrying;
-    entry->next_retry_at = event::EventLoop::current().now() + delay;
-    entry->retry_scheduled = true;
-    const std::uint64_t revision_version = entry->revisions.current().version;
-    background_tasks_.add();
-    async::spawn([this, entry, revision_version, delay]() {
-        return retry_project_subscription(entry, revision_version, delay);
+    auto retry = entry->subscription.schedule_retry(SubscriptionRetryPolicy{
+            .initial_delay = options_.subscription_retry_initial_delay,
+            .maximum_delay = options_.subscription_retry_max_delay,
     });
+    if (!retry) {
+        publish_readiness();
+        return;
+    }
+    background_tasks_.add();
+    async::spawn([this, entry, plan = *retry]() { return retry_project_subscription(entry, plan); });
     publish_readiness();
 }
 
@@ -981,8 +967,7 @@ std::size_t AccessConfigWatcher::active_project_subscription_count() const noexc
     std::size_t count = 0;
     for (const auto &[project, entry]: projects_) {
         (void) project;
-        if (entry->subscription_state == AccessProjectSubscriptionState::Subscribed && entry->subscription &&
-            !entry->subscription.closed()) {
+        if (entry->subscription.subscribed()) {
             ++count;
         }
     }
@@ -997,15 +982,15 @@ std::optional<AccessProjectConfigStatus> AccessConfigWatcher::project_status(std
     }
     const ProjectEntry &entry = *iterator->second;
     return AccessProjectConfigStatus{
-            .subscription_state = entry.subscription_state,
+            .subscription_state = project_subscription_state(entry.subscription.state()),
             .config_state = entry.config_state,
-            .first_value_received = entry.first_value_received,
+            .first_value_received = entry.subscription.first_value_received(),
             .synchronized = entry.synchronized,
-            .retry_attempt = entry.retry_attempt,
-            .next_retry_at = entry.next_retry_at,
+            .retry_attempt = entry.subscription.retry_attempt(),
+            .next_retry_at = entry.subscription.next_retry_at(),
             .observed_md5 = entry.observed_md5,
             .observed_version = entry.observed_version,
-            .generation = entry.generation,
+            .generation = entry.subscription.generation(),
             .published_generation = entry.published_generation,
             .last_failure = entry.last_failure,
     };
@@ -1036,14 +1021,13 @@ void AccessConfigWatcher::publish_readiness() {
     for (const auto &[project, entry]: projects_) {
         (void) project;
         ++next.desired_projects;
-        if (entry->subscription_state == AccessProjectSubscriptionState::Subscribed && entry->subscription &&
-            !entry->subscription.closed()) {
+        if (entry->subscription.subscribed()) {
             ++next.subscribed_projects;
         }
         if (entry->synchronized) {
             ++next.synchronized_projects;
         }
-        if (entry->subscription_state == AccessProjectSubscriptionState::Retrying) {
+        if (entry->subscription.state() == SubscriptionLifecycleState::Retrying) {
             ++next.retrying_projects;
         }
         if (entry->config_state == AccessProjectConfigState::Processing) {
@@ -1133,7 +1117,8 @@ void AccessConfigWatcher::publish_activation_evidence(const AccessConfigReadines
                 .name = project,
                 .data_id = options_.project_route_data_id_prefix + project,
                 .group = options_.project_route_group,
-                .subscription_state = std::string(subscription_state_name(entry->subscription_state)),
+                .subscription_state =
+                        std::string(subscription_state_name(project_subscription_state(entry->subscription.state()))),
                 .candidate_status = candidate_status(entry->config_state),
                 .observed_md5 = entry->observed_md5,
                 .observed_version = entry->observed_version,
@@ -1235,34 +1220,6 @@ void AccessConfigWatcher::report_failure(const std::shared_ptr<ProjectEntry> &en
         entry->last_failure = failure;
     }
     last_failure_ = std::move(failure);
-}
-
-std::chrono::milliseconds AccessConfigWatcher::retry_delay(std::uint32_t attempt) const noexcept {
-    std::chrono::milliseconds delay = options_.subscription_retry_initial_delay;
-    const std::chrono::milliseconds maximum = options_.subscription_retry_max_delay;
-    for (std::uint32_t current = 1; current < attempt && delay < maximum; ++current) {
-        if (delay.count() > maximum.count() / 2) {
-            return maximum;
-        }
-        delay *= 2;
-    }
-    return std::min(delay, maximum);
-}
-
-bool AccessConfigWatcher::retryable_subscription_error(nacos::ConfigServiceErrorCode code) noexcept {
-    switch (code) {
-        case nacos::ConfigServiceErrorCode::AuthenticationUnavailable:
-        case nacos::ConfigServiceErrorCode::Transport:
-        case nacos::ConfigServiceErrorCode::GrpcStatus:
-        case nacos::ConfigServiceErrorCode::Protocol:
-        case nacos::ConfigServiceErrorCode::Server:
-            return true;
-        case nacos::ConfigServiceErrorCode::InvalidArgument:
-        case nacos::ConfigServiceErrorCode::Shutdown:
-        case nacos::ConfigServiceErrorCode::ContentTooLarge:
-            return false;
-    }
-    return false;
 }
 
 } // namespace fiber::access_server

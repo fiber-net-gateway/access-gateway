@@ -1,7 +1,6 @@
 #include "TlsCertificateWatcher.h"
 
 #include <atomic>
-#include <limits>
 #include <memory>
 #include <new>
 #include <utility>
@@ -78,7 +77,7 @@ TlsCertificateWatcher::TlsCertificateWatcher(event::EventLoop &loop, AccessConfi
                                              TlsCertificateWatcherOptions options,
                                              AccessTlsActivationEvidenceObserver observer) :
     loop_(&loop), compiler_(&compiler), config_service_(&config_service), store_(&store), options_(std::move(options)),
-    observer_(observer) {
+    observer_(observer), subscription_(loop) {
     FIBER_ASSERT(loop_ != &compiler_->loop());
     ready_publisher_ = ready_.acquire_publisher();
     FIBER_ASSERT(ready_publisher_.has_value());
@@ -86,9 +85,8 @@ TlsCertificateWatcher::TlsCertificateWatcher(event::EventLoop &loop, AccessConfi
     FIBER_ASSERT(processing_publisher_.has_value());
 }
 
-TlsCertificateWatcher::~TlsCertificateWatcher() {
+TlsCertificateWatcher::~TlsCertificateWatcher() noexcept {
     FIBER_ASSERT(state_ == TlsCertificateWatcherState::Created || state_ == TlsCertificateWatcherState::Stopped);
-    FIBER_ASSERT(!subscription_);
     FIBER_ASSERT(!pending_compile_data_);
     FIBER_ASSERT(active_compile_job_ == nullptr);
     FIBER_ASSERT(compile_tasks_.empty());
@@ -104,12 +102,12 @@ std::expected<void, nacos::ConfigServiceError> TlsCertificateWatcher::start() {
         });
     }
     state_ = TlsCertificateWatcherState::Running;
-    auto subscription = config_service_->subscribe(options_.data_id, options_.group, &on_notify, this);
-    if (!subscription) {
+    auto subscribed = subscription_.subscribe(*config_service_, options_.data_id, options_.group, &on_notify, this);
+    if (!subscribed) {
         state_ = TlsCertificateWatcherState::Created;
-        return std::unexpected(std::move(subscription.error()));
+        subscription_.reset_start_failure();
+        return std::unexpected(std::move(subscribed.error()));
     }
-    subscription_.emplace(std::move(*subscription));
     publish_evidence();
     return {};
 }
@@ -120,18 +118,16 @@ async::Task<void> TlsCertificateWatcher::shutdown() noexcept {
         co_return;
     }
     if (state_ == TlsCertificateWatcherState::Created) {
+        subscription_.stop();
         state_ = TlsCertificateWatcherState::Stopped;
         publish_evidence();
         co_return;
     }
     state_ = TlsCertificateWatcherState::Stopping;
-    FIBER_ASSERT(generation_ != std::numeric_limits<std::uint64_t>::max());
-    ++generation_;
+    subscription_.stop();
     cancel_compile();
-    request_stop();
     co_await compile_tasks_.join();
     publish_processing(false);
-    subscription_.reset();
     state_ = TlsCertificateWatcherState::Stopped;
     publish_evidence();
 }
@@ -141,8 +137,11 @@ void TlsCertificateWatcher::on_notify(void *context,
     auto &owner = *static_cast<TlsCertificateWatcher *>(context);
     if (result.kind == nacos::ResultKind::Closed) {
         if (owner.state_ == TlsCertificateWatcherState::Running) {
-            FIBER_ASSERT(owner.generation_ != std::numeric_limits<std::uint64_t>::max());
-            ++owner.generation_;
+            owner.subscription_.fail(nacos::ConfigServiceError{
+                    .code = nacos::ConfigServiceErrorCode::Shutdown,
+                    .io_error = common::IoErr::NotConnected,
+                    .message = "TLS certificate subscription closed before shutdown",
+            });
             owner.cancel_compile();
             owner.state_ = TlsCertificateWatcherState::Failed;
             ++owner.failed_updates_;
@@ -160,10 +159,10 @@ void TlsCertificateWatcher::on_notify(void *context,
             };
             owner.publish_evidence();
         }
-        owner.request_stop();
         return;
     }
     if (result.data && owner.state_ == TlsCertificateWatcherState::Running) {
+        (void) owner.subscription_.observe_value();
         owner.apply(result.data);
     }
 }
@@ -171,8 +170,6 @@ void TlsCertificateWatcher::on_notify(void *context,
 void TlsCertificateWatcher::apply(std::shared_ptr<const nacos::ConfigData> data) {
     FIBER_ASSERT(loop_->in_loop());
     FIBER_ASSERT(data);
-    FIBER_ASSERT(generation_ != std::numeric_limits<std::uint64_t>::max());
-    ++generation_;
     cancel_compile();
     observed_md5_ = std::string(data->md5);
     observed_at_unix_millis_ = access_activation_unix_millis(*loop_);
@@ -227,7 +224,7 @@ void TlsCertificateWatcher::dispatch_compile() {
     job->owner = this;
     job->data = std::move(data);
     job->published_state = store_->version_state();
-    job->generation = generation_;
+    job->generation = subscription_.generation();
     job->quic_enabled = store_->quic_enabled();
     job->prepare_bootstrap = !store_->bootstrap_identity();
     job->force_compile = force_compile;
@@ -258,7 +255,8 @@ void TlsCertificateWatcher::complete_compile(CompileJob *job) noexcept {
     FIBER_ASSERT(owner.loop_->in_loop());
     FIBER_ASSERT(owner.active_compile_job_ == job);
     owner.active_compile_job_ = nullptr;
-    const bool current = owner.state_ == TlsCertificateWatcherState::Running && owner.generation_ == job->generation &&
+    const bool current = owner.state_ == TlsCertificateWatcherState::Running &&
+                         owner.subscription_.is_current(job->generation) &&
                          !job->canceled.load(std::memory_order_acquire) && job->result;
     if (current) {
         owner.apply_result(*job);
@@ -394,12 +392,6 @@ void TlsCertificateWatcher::publish_evidence() const noexcept {
         };
     }
     observer_.on_update(observer_.context, evidence);
-}
-
-void TlsCertificateWatcher::request_stop() noexcept {
-    if (subscription_) {
-        subscription_->close();
-    }
 }
 
 } // namespace fiber::access_server

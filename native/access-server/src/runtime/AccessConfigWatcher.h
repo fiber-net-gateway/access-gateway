@@ -5,8 +5,8 @@
 #include "../observability/AccessConfigMetrics.h"
 #include "AccessConfigCompiler.h"
 #include "RouteConfigStore.h"
+#include "SubscriptionLifecycle.h"
 
-#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -136,7 +136,7 @@ public:
                         RouteConfigStore &store, AccessConfigWatcherOptions options = {},
                         RouteSnapshotObserver observer = {}, AccessConfigMetricsObserver metrics_observer = {},
                         AccessRouteActivationEvidenceObserver activation_observer = {});
-    ~AccessConfigWatcher();
+    ~AccessConfigWatcher() noexcept;
 
     [[nodiscard]] std::expected<void, nacos::ConfigServiceError> start();
     [[nodiscard]] async::Task<void> shutdown() noexcept;
@@ -185,8 +185,7 @@ private:
                                                           std::string md5,
                                                           std::chrono::steady_clock::time_point started) noexcept;
     [[nodiscard]] async::DetachedTask retry_project_subscription(std::shared_ptr<ProjectEntry> entry,
-                                                                 std::uint64_t revision_version,
-                                                                 std::chrono::milliseconds delay) noexcept;
+                                                                 SubscriptionRetryPlan plan) noexcept;
     void reconcile_projects(std::vector<std::string> requested);
     void add_project(std::string project);
     void remove_project(std::string_view project);
@@ -204,8 +203,6 @@ private:
     void publish_observer(const std::shared_ptr<const AccessRouteSnapshot> &snapshot) noexcept;
     void report_failure(const std::shared_ptr<ProjectEntry> &entry, AccessConfigWatcherFailureStage stage,
                         std::string data_id, std::string md5, common::IoErr io_error, AccessConfigError error);
-    [[nodiscard]] std::chrono::milliseconds retry_delay(std::uint32_t attempt) const noexcept;
-    [[nodiscard]] static bool retryable_subscription_error(nacos::ConfigServiceErrorCode code) noexcept;
 
     event::EventLoop *loop_ = nullptr;
     AccessConfigCompiler *compiler_ = nullptr;

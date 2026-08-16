@@ -3,9 +3,9 @@
 
 #include "../observability/AccessActivationEvidence.h"
 #include "AccessConfigCompiler.h"
+#include "SubscriptionLifecycle.h"
 #include "TlsCertificateStore.h"
 
-#include <atomic>
 #include <cstdint>
 #include <expected>
 #include <memory>
@@ -48,7 +48,7 @@ public:
     TlsCertificateWatcher(event::EventLoop &loop, AccessConfigCompiler &compiler, nacos::ConfigService &config_service,
                           TlsCertificateStore &store, TlsCertificateWatcherOptions options = {},
                           AccessTlsActivationEvidenceObserver observer = {});
-    ~TlsCertificateWatcher();
+    ~TlsCertificateWatcher() noexcept;
 
     [[nodiscard]] std::expected<void, nacos::ConfigServiceError> start();
     [[nodiscard]] async::Task<void> shutdown() noexcept;
@@ -76,7 +76,6 @@ private:
     void publish_evidence() const noexcept;
     void report_failure(std::string md5, TlsCertificateConfigError error);
     void apply_result(CompileJob &job);
-    void request_stop() noexcept;
 
     event::EventLoop *loop_ = nullptr;
     AccessConfigCompiler *compiler_ = nullptr;
@@ -84,7 +83,7 @@ private:
     TlsCertificateStore *store_ = nullptr;
     TlsCertificateWatcherOptions options_;
     AccessTlsActivationEvidenceObserver observer_;
-    std::optional<nacos::Subscription<nacos::ConfigData>> subscription_;
+    SubscriptionLifecycle subscription_;
     std::optional<TlsCertificateWatcherFailure> last_failure_;
     std::shared_ptr<const nacos::ConfigData> pending_compile_data_;
     CompileJob *active_compile_job_ = nullptr;
@@ -99,7 +98,6 @@ private:
     std::string active_md5_;
     std::int64_t observed_at_unix_millis_ = 0;
     std::int64_t active_at_unix_millis_ = 0;
-    std::uint64_t generation_ = 0;
     bool pending_force_compile_ = false;
     bool published_processing_ = false;
     std::uint64_t successful_updates_ = 0;

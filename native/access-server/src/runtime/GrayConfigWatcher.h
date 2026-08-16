@@ -3,6 +3,7 @@
 
 #include "../observability/AccessActivationEvidence.h"
 #include "GrayMatchStore.h"
+#include "SubscriptionLifecycle.h"
 
 #include <cstdint>
 #include <expected>
@@ -42,7 +43,7 @@ class GrayConfigWatcher final : public common::NonCopyable, public common::NonMo
 public:
     GrayConfigWatcher(event::EventLoop &loop, nacos::ConfigService &config_service, GrayMatchStore &store,
                       GrayConfigWatcherOptions options = {}, AccessGrayActivationEvidenceObserver observer = {});
-    ~GrayConfigWatcher();
+    ~GrayConfigWatcher() noexcept;
 
     [[nodiscard]] std::expected<void, nacos::ConfigServiceError> start();
     [[nodiscard]] async::Task<void> shutdown() noexcept;
@@ -56,14 +57,13 @@ private:
     static void on_notify(void *context, const nacos::SubscriptionResult<nacos::ConfigData> &result) noexcept;
     void apply(const nacos::ConfigData &data);
     void publish_evidence() const noexcept;
-    void request_stop() noexcept;
 
     event::EventLoop *loop_ = nullptr;
     nacos::ConfigService *config_service_ = nullptr;
     GrayMatchStore *store_ = nullptr;
     GrayConfigWatcherOptions options_;
     AccessGrayActivationEvidenceObserver observer_;
-    std::optional<nacos::Subscription<nacos::ConfigData>> subscription_;
+    SubscriptionLifecycle subscription_;
     std::optional<GrayConfigWatcherFailure> last_failure_;
     GrayConfigWatcherState state_ = GrayConfigWatcherState::Created;
     AccessActivationCandidateStatus candidate_status_ = AccessActivationCandidateStatus::Awaiting;

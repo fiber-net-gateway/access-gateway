@@ -920,10 +920,37 @@ metrics、activation、CAT 和关闭行为。
 
 **归属：本项目。**
 
-三个 watcher 重复维护订阅状态、initial ready、closed、stop、update counters 和最后
-失败。建议用组合式 `SubscriptionLifecycle` 统一 generation、stale callback、retry、
-ready 和 failure event；资源特有的 decode/prepare/commit 仍放在各 watcher，避免复杂
-继承树。
+**实施状态：已解决（2026-08-17）。** 新增 owner-loop-only 的 concrete
+`SubscriptionLifecycle`，按值组合进 project-list、每个 project route、gray 和 TLS watcher。
+它统一拥有单条 Nacos `Subscription<ConfigData>` handle，并集中维护：
+
+- `Created/Subscribing/Subscribed/Retrying/Failed/Stopped` 状态；
+- 单调 generation 和 revision watch，供 retry、off-loop compile 及 service-ready await 丢弃旧结果；
+- 当前订阅是否收到首值；
+- retry attempt、`next_retry_at`、暂态错误分类及封顶指数退避；
+- 仅含 typed error code/`IoErr` 的紧凑订阅失败，不重复持有可能敏感的错误消息；
+- 同步 cached replay：`ConfigService::subscribe()` 返回 handle 前发生的 Success/Closed callback 不会
+  被随后安装 handle 覆盖；
+- 幂等 stop、owner-loop handle close 和析构时无活动订阅的不变量。
+
+资源职责没有进入公共 lifecycle：`AccessConfigWatcher` 继续独占两级订阅图、project reconcile、
+compile queue、initial batch、service readiness、route publish、typed readiness、metrics 和 activation
+evidence；Gray 继续负责兼容 decode 与 per-worker snapshot；TLS 继续负责 coalesced off-loop compile、
+证书 prepare/commit、bootstrap readiness 和 processing watch。三个 watcher 的公开 state、失败类型、
+计数器和 API 不变，没有形成继承树。
+
+行为也保持原契约：Gray/TLS 意外关闭仍是 terminal `Failed`，project-list 关闭仍发布
+`Unavailable`，仅 project route 的暂态首次订阅错误按原配置 retry，永久错误仍为 `Failed`；项目删除、
+新值和 shutdown 都推进 generation，从而取消旧 retry/compile/service-ready 结果。每个 project 原有的
+revision watch 被 lifecycle 直接替换，没有叠加；只有 project-list、gray 和 TLS 三个 control-plane
+根订阅各新增一个 watch shared state。
+
+新增单元测试覆盖 104-byte 非多态 lifecycle、同步 cached replay、Closed generation 失效、三档退避
+封顶、永久失败、启动失败回滚和重复 stop。既有 access/gray/TLS watcher 测试继续覆盖 typed
+readiness、retry 取消、旧快照保留、initial batch 及 off-loop compile。实现没有新增虚调用、
+`std::function`、锁或请求路径逻辑；相同 Release ThinLTO build 中 access-server text 从
+6,931,001 增至 6,933,273 bytes（+2,272，约 +0.033%），文件大小增加 3,528 bytes（约
++0.020%）。
 
 ### 8.4 C-01：`RouteConfigStore` 和 `ProjectRouteSnapshot`
 
