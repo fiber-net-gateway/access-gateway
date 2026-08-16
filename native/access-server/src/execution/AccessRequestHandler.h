@@ -7,6 +7,7 @@
 #include "AccessResult.h"
 #include "ErrorResponder.h"
 #include "ResponseExecutor.h"
+#include "RoutePolicyEvaluator.h"
 #include "TemplateEvaluator.h"
 
 #include <cstddef>
@@ -85,6 +86,7 @@ private:
     AccessRequestScriptAdapter script_adapter_;
     AccessRequestHandlerOptions options_;
     AccessProxyAdapter proxy_adapter_;
+    RoutePolicyEvaluator policy_evaluator_;
     ResponseExecutor response_executor_;
     ErrorResponder error_responder_;
 };

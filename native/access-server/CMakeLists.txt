@@ -17,6 +17,7 @@ add_library(access_server_core STATIC
     "${CMAKE_CURRENT_LIST_DIR}/src/execution/ProxyUpstreamConnection.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/execution/ResponseExecutor.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/execution/ResponsePlan.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/execution/RoutePolicyEvaluator.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/execution/TemplateEvaluator.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/execution/UpstreamTlsClientPolicy.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/observability/AccessLogPolicy.cpp"
@@ -189,6 +190,7 @@ if (FIBER_BUILD_TESTS AND (GTest_FOUND OR TARGET GTest::gtest_main))
         "${CMAKE_CURRENT_LIST_DIR}/tests/ProxyExecutorTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/ProxyUpstreamConnectionTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/ResponseExecutionTest.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/tests/RoutePolicyEvaluatorTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/RouteConfigStoreTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/SmoothWeightedRoundRobinTest.cpp")
     target_sources(fiber_access_server_tests PRIVATE

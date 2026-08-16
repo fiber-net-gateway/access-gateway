@@ -6,8 +6,6 @@
 #include <fiber/http/HttpHeaderHash.h>
 #include <fiber/http/HttpHeaders.h>
 
-#include <cstdint>
-#include <limits>
 #include <utility>
 
 namespace fiber::access_server {
@@ -155,56 +153,6 @@ RequestHostContext resolve_request_host(const http::HttpExchange &exchange, bool
     return result;
 }
 
-std::uint8_t entry_bit(std::string_view entry) noexcept {
-    if (entry == "vdi") {
-        return kNetVdi;
-    }
-    if (entry == "desktop") {
-        return kNetOffice;
-    }
-    if (entry == "internet") {
-        return kNetInternet;
-    }
-    return 0;
-}
-
-bool cidr_matches_any(std::span<const Cidr> cidrs, const Cidr &target) noexcept {
-    for (const Cidr &cidr: cidrs) {
-        if (cidr.matches(target)) {
-            return true;
-        }
-    }
-    return false;
-}
-
-bool source_ip_allowed(const CompiledRoute &route, const ClientMetadata &metadata) noexcept {
-    if (!metadata.route_policy_target) {
-        // Only the explicit legacy mode can omit this target. It preserves the
-        // Java behavior of skipping CIDR policy for a missing or invalid header.
-        return true;
-    }
-    if (!route.allow_cidrs.empty() && !cidr_matches_any(route.allow_cidrs, *metadata.route_policy_target)) {
-        return false;
-    }
-    return route.deny_cidrs.empty() || !cidr_matches_any(route.deny_cidrs, *metadata.route_policy_target);
-}
-
-std::size_t request_body_limit(const CompiledRoute &route, std::size_t default_limit) noexcept {
-    if (!route.max_client_body_size || *route.max_client_body_size == 0) {
-        return default_limit;
-    }
-    if (*route.max_client_body_size < 0) {
-        // AbstractRouteExecution clamps an explicit negative value to zero;
-        // ReqHandler treats zero as unlimited.
-        return 0;
-    }
-    const auto value = static_cast<std::uint64_t>(*route.max_client_body_size);
-    if (value > std::numeric_limits<std::size_t>::max()) {
-        return std::numeric_limits<std::size_t>::max();
-    }
-    return static_cast<std::size_t>(value);
-}
-
 async::Task<Result<void>> send_redirect(http::HttpExchange &exchange, int status, std::string_view host,
                                         std::chrono::milliseconds timeout, AccessRequestTelemetry &telemetry) noexcept {
     std::string location = "https://";
@@ -232,8 +180,6 @@ async::Task<Result<void>> send_redirect(http::HttpExchange &exchange, int status
     co_return Result<void>{};
 }
 
-int redirect_status(HttpsStrategy strategy) noexcept { return static_cast<int>(strategy); }
-
 } // namespace
 
 AccessRequestHandler::AccessRequestHandler(const RouteConfigStore &config_store,
@@ -241,7 +187,7 @@ AccessRequestHandler::AccessRequestHandler(const RouteConfigStore &config_store,
                                            AccessRequestHandlerOptions options,
                                            AccessProxyAdapter proxy_adapter) noexcept :
     config_store_(config_store), script_adapter_(script_adapter), options_(options), proxy_adapter_(proxy_adapter),
-    response_executor_(options.response),
+    policy_evaluator_(options.default_max_request_body_size), response_executor_(options.response),
     error_responder_(ErrorResponderOptions{.write_timeout = options.response.write_timeout}) {}
 
 async::Task<void> AccessRequestHandler::handle(http::HttpExchange &exchange,
@@ -316,19 +262,18 @@ async::Task<Result<void>> AccessRequestHandler::handle_impl(http::HttpExchange &
         co_return std::unexpected(Err::from_error(common::IoErr::NoMem));
     }
 
-    const HostStrategyConfig &strategy = host_match.host->strategy;
-    if (strategy.net_mask != 0 && (strategy.net_mask & entry_bit(exchange.header("X-Entry"))) == 0) {
-        co_return std::unexpected(Err::from_exception(Exception::entry_error()));
-    }
-
-    const bool request_is_https = telemetry.client_metadata().secure;
-    if (!strategy.https) {
-        if (!request_is_https) {
+    const HostPolicyDecision host_policy = policy_evaluator_.evaluate_host(
+            host_match.host->strategy, exchange.header("X-Entry"), telemetry.client_metadata().secure);
+    switch (host_policy.action) {
+        case HostPolicyAction::Allow:
+            break;
+        case HostPolicyAction::EntryRejected:
+            co_return std::unexpected(Err::from_exception(Exception::entry_error()));
+        case HostPolicyAction::InvalidHttps:
             co_return std::unexpected(Err::from_exception(Exception::unknown("invalid HTTPS strategy")));
-        }
-    } else if (*strategy.https != HttpsStrategy::NotRequired && !request_is_https) {
-        co_return co_await send_redirect(exchange, redirect_status(*strategy.https), request_host.effective_host,
-                                         options_.response.write_timeout, telemetry);
+        case HostPolicyAction::Redirect:
+            co_return co_await send_redirect(exchange, host_policy.redirect_status, request_host.effective_host,
+                                             options_.response.write_timeout, telemetry);
     }
 
     auto constants_ready = telemetry.script_context().prepare_constants(host_match.project->const_package());
@@ -366,14 +311,18 @@ async::Task<Result<void>> AccessRequestHandler::handle_impl(http::HttpExchange &
 
     const CompiledRoute &route = *route_match.route;
     telemetry.set_route(route);
-    const std::size_t body_limit = request_body_limit(route, options_.default_max_request_body_size);
     const http::HttpBodySpec body_spec = exchange.request_body_spec();
-    if (body_limit != 0 && body_spec.is_content_length() && body_spec.content_length() > body_limit) {
-        co_return std::unexpected(Err::from_exception(Exception::request_body_too_large()));
+    const RoutePolicyDecision route_policy =
+            policy_evaluator_.evaluate_route(route, telemetry.client_metadata(), body_spec);
+    switch (route_policy.action) {
+        case RoutePolicyAction::Allow:
+            break;
+        case RoutePolicyAction::BodyTooLarge:
+            co_return std::unexpected(Err::from_exception(Exception::request_body_too_large()));
+        case RoutePolicyAction::SourceIpNotAllowed:
+            co_return std::unexpected(Err::from_exception(Exception::source_ip_not_allowed()));
     }
-    if (!source_ip_allowed(route, telemetry.client_metadata())) {
-        co_return std::unexpected(Err::from_exception(Exception::source_ip_not_allowed()));
-    }
+    const std::size_t body_limit = route_policy.body_limit;
     TemplateEvaluator template_evaluator;
     if (script_adapter_.evaluate_template) {
         template_evaluator = TemplateEvaluator{
@@ -402,7 +351,7 @@ async::Task<Result<void>> AccessRequestHandler::handle_impl(http::HttpExchange &
     }
 
     if (route.type == RouteType::Script) {
-        if (!body_spec.is_none() && !body_spec.is_content_length()) {
+        if (!RoutePolicyEvaluator::script_body_supported(body_spec)) {
             co_return std::unexpected(Err::from_exception(Exception::request_body_too_large()));
         }
         if (!route.script_program || !script_adapter_.execute_route_script) {

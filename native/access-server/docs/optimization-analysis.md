@@ -919,12 +919,17 @@ result，方便异步编译、重入和测试。
 
 **归属：本项目。**
 
-Handler 当前直线式 pipeline 比较清晰，不建议过度拆分。只抽出：
+**实施状态：已解决（2026-08-17）。** Handler 保留直线式 pipeline，只抽出了：
 
 - `ClientMetadataResolver`：peer/trusted proxy/scheme/source address；
 - `RoutePolicyEvaluator`：entry、HTTPS、body、CIDR 纯策略。
 
-Handler 继续负责 pin、匹配、准备 request context 和选择 executor。
+`RoutePolicyEvaluator` 是无虚函数、无锁、无分配的小型 concrete object，返回 host/route
+typed decision；Handler 继续负责 snapshot pin、Host/Path 匹配、request context、异常映射、
+redirect I/O 和 executor 选择。拆分保留了 Java 兼容的判断顺序：entry 先于 HTTPS，已知
+`Content-Length` 先于 CIDR，allow 先于 deny，legacy 缺失源地址跳过 CIDR，route 负数 body
+limit 表示 unlimited。纯单元测试同时覆盖 IPv4/IPv6、全部 redirect status 和 script
+unknown-length 限制，原 Handler 集成测试继续验证相同 wire error 和执行顺序。
 
 ### 8.6 C-01：`ProxyExecutor`
 
