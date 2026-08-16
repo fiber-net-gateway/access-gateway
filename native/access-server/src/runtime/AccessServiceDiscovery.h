@@ -28,6 +28,9 @@ public:
     AccessServiceState() noexcept;
     ~AccessServiceState() noexcept;
 
+    // Lifecycle callbacks run only on ServiceDiscovery's owner EventLoop.
+    // select() is the sole cross-loop operation and reads a published immutable
+    // cluster directory before entering the selected balancer.
     void initialize(AccessUpstreamSwrr::Options options, std::string_view zone,
                     AccessDiscoveryMetricsObserver metrics_observer = {}) noexcept;
     void update(const nacos::ServiceInfo &snapshot) noexcept;

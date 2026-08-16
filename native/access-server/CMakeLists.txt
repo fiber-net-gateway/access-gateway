@@ -72,6 +72,18 @@ fiber_add_app(access_gateway_validator
     LIBRARIES
         access_server_core)
 
+if (ACCESS_SERVER_BUILD_BENCHMARKS)
+    add_executable(fiber_access_service_selection_benchmark
+        "${CMAKE_CURRENT_LIST_DIR}/benchmarks/AccessServiceSelectionBenchmark.cpp")
+    target_link_libraries(fiber_access_service_selection_benchmark PRIVATE access_server_core)
+    set_target_properties(fiber_access_service_selection_benchmark PROPERTIES FOLDER "native/access-server")
+    fiber_link_runtime_allocator(fiber_access_service_selection_benchmark)
+
+    if (FIBER_ENABLE_LTO AND FIBER_IPO_SUPPORTED)
+        set_property(TARGET fiber_access_service_selection_benchmark PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
+    endif()
+endif()
+
 if (FIBER_BUILD_TESTS AND (GTest_FOUND OR TARGET GTest::gtest_main))
     include(GoogleTest)
 

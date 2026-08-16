@@ -488,7 +488,19 @@ atomic route snapshot pin
 
 **归属：双方。**
 
-`AccessServiceState::Impl::select()` 在 service mutex 内查找 cluster，再调用带独立 mutex 的
+**实施状态：第一阶段已解决（2026-08-17）。** service/cluster 映射现在由 Nacos owner
+EventLoop 构建为按 cluster 名排序的不可变目录，并通过 atomic `shared_ptr` release/acquire
+发布。请求选择只 pin 一次目录、二分查找 cluster，再进入该 cluster 的 SWRR；不再持有
+service mutex，也不会把目录锁带入 endpoint 扫描。更新继续复用同名 cluster 的 SWRR，因而
+保留 selection token、权重进度和 circuit state；删除或 retire 先发布新目录/空目录，旧目录
+由已经开始的 `select()` 固定并自然回收。更新 bookkeeping 和 discovery metrics 保持 owner-loop
+私有。
+
+本阶段没有修改 Fiber，也没有把 SWRR 算法迁移到上游。atomic `shared_ptr` 的引用计数并不
+保证 lock-free，而全局 SWRR 的 mutex 和 O(N) endpoint 扫描仍然存在；是否开展第二阶段必须
+由下面的 benchmark 和生产 profile 决定。
+
+改造前，`AccessServiceState::Impl::select()` 在 service mutex 内查找 cluster，再调用带独立 mutex 的
 `SmoothWeightedRoundRobin::select()`；完成或失败报告会再次获取 SWRR mutex。所有 HTTP
 worker 访问同一 service 时会共享这些 cache line，选择本身还需要 O(N) 扫描 endpoint。
 
@@ -504,6 +516,37 @@ worker 访问同一 service 时会共享这些 cache line，选择本身还需�
 - selection 不再持有目录 mutex；
 - 保留当前全局 SWRR 状态和锁，先消除双层锁；
 - 建立 endpoint 数 1/8/32/128、worker 数 1 到 CPU 数的 contention benchmark。
+
+已增加默认关闭的 `fiber_access_service_selection_benchmark`。它对每个 endpoint 数执行
+worker `1..max-workers` 的固定总 selection 次数，输出 CSV；测量包含 atomic directory pin、
+cluster 查找和 SWRR selection，不包含请求执行与 completion/report。构建和运行方式：
+
+```bash
+cmake -S native -B native/build-benchmark -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release -DFIBER_BUILD_TESTS=OFF \
+  -DACCESS_SERVER_BUILD_BENCHMARKS=ON
+cmake --build native/build-benchmark \
+  --target fiber_access_service_selection_benchmark --parallel
+native/build-benchmark/access-server/fiber_access_service_selection_benchmark \
+  100000 "$(nproc)"
+```
+
+2026-08-17 在 20 vCPU、13th Gen Intel Core i7-13700H、WSL 虚拟化环境，以每个 case
+100,000 次 selection 单次运行得到以下方向性结果；未绑定 CPU、未隔离系统负载，也未做多轮
+统计，因此只能用于确认热点趋势，不能作为生产容量结论：
+
+| endpoint 数 | 1 worker ops/s | 20 worker ops/s | 20/1 吞吐比 |
+| ---: | ---: | ---: | ---: |
+| 1 | 17,534,569 | 2,169,046 | 0.12 |
+| 8 | 17,079,046 | 2,291,947 | 0.13 |
+| 32 | 9,529,716 | 1,385,815 | 0.15 |
+| 128 | 4,210,610 | 726,212 | 0.17 |
+
+结果确认剩余的共享 selection 路径在同一 service 高并发下呈负扩展，且 endpoint 增长带来
+预期的 O(N) 扫描成本。当前 benchmark 尚不能把 atomic directory pin 与全局 SWRR mutex 的
+成本完全分离，而且没有计入 completion/report 的再次加锁。第二阶段应先补组件分解、多轮、
+绑核和生产分布 profile，再比较 sharded/per-loop 方案的流量分布与故障状态一致性，不能仅凭
+这次微基准直接改变负载均衡语义。
 
 第二阶段由双方协同：
 

@@ -2,10 +2,10 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <charconv>
 #include <cmath>
 #include <limits>
-#include <mutex>
 #include <new>
 #include <utility>
 #include <vector>
@@ -227,7 +227,6 @@ public:
                             }),
                 next_definitions.end());
 
-        std::lock_guard guard(mutex_);
         if (initialized_) {
             if (!checksum_.empty() || !snapshot.checksum.empty()) {
                 if (!checksum_.empty() && checksum_ == snapshot.checksum) {
@@ -256,7 +255,8 @@ public:
         std::vector<Cluster> next_clusters;
         next_clusters.reserve(pending_clusters.size());
         for (PendingCluster &pending: pending_clusters) {
-            const auto current = find_cluster(pending.name);
+            const Cluster *current =
+                    active_directory_ == nullptr ? nullptr : find_cluster(*active_directory_, pending.name);
             Cluster cluster{
                     .name = std::move(pending.name),
                     .preferred = current ? current->preferred : std::make_shared<AccessUpstreamSwrr>(options_),
@@ -266,23 +266,17 @@ public:
             (void) cluster.fallback->update(std::move(pending.fallback));
             next_clusters.push_back(std::move(cluster));
         }
-        for (const Cluster &cluster: clusters_) {
-            const auto iterator =
-                    std::lower_bound(next_clusters.begin(), next_clusters.end(), cluster.name,
-                                     [](const Cluster &item, std::string_view name) { return item.name < name; });
-            if (iterator == next_clusters.end() || iterator->name != cluster.name) {
-                (void) cluster.preferred->update({});
-                (void) cluster.fallback->update({});
-            }
-        }
+
+        auto next_directory = std::make_shared<const ClusterDirectory>(std::move(next_clusters));
+        active_directory_ = next_directory;
+        published_directory_.store(std::move(next_directory), std::memory_order_release);
 
         checksum_ = snapshot.checksum;
         definitions_ = std::move(next_definitions);
-        clusters_ = std::move(next_clusters);
         const AccessDiscoveryServiceAggregate next_aggregate{
                 .ready = true,
                 .selectable_endpoints = definitions_.size(),
-                .logical_clusters = clusters_.size(),
+                .logical_clusters = active_directory_->clusters.size(),
         };
         metrics_observer_.transition_service(AccessDiscoveryMetricEvent::ServiceUpdateChanged, aggregate_,
                                              next_aggregate);
@@ -292,25 +286,25 @@ public:
     }
 
     void retire(nacos::ServiceRetireReason reason) noexcept {
-        std::lock_guard guard(mutex_);
         FIBER_ASSERT(initialized_);
         FIBER_ASSERT(aggregate_.ready);
-        for (const Cluster &cluster: clusters_) {
-            (void) cluster.preferred->update({});
-            (void) cluster.fallback->update({});
-        }
+        FIBER_ASSERT(active_directory_ != nullptr);
+        published_directory_.store({}, std::memory_order_release);
+        active_directory_.reset();
         metrics_observer_.transition_service(retire_event(reason), aggregate_, {});
         aggregate_ = {};
         checksum_.clear();
         definitions_.clear();
-        clusters_.clear();
         initialized_ = false;
     }
 
     [[nodiscard]] std::expected<Selection, SwrrSelectError>
     select(std::string_view cluster, std::span<const std::uint64_t> excluded_selection_tokens) noexcept {
-        std::lock_guard guard(mutex_);
-        const Cluster *selected_cluster = find_cluster(cluster);
+        const std::shared_ptr<const ClusterDirectory> directory = published_directory_.load(std::memory_order_acquire);
+        if (directory == nullptr) {
+            return std::unexpected(SwrrSelectError::NoConfiguredInstance);
+        }
+        const Cluster *selected_cluster = find_cluster(*directory, cluster);
         if (selected_cluster == nullptr) {
             return std::unexpected(SwrrSelectError::NoConfiguredInstance);
         }
@@ -342,6 +336,14 @@ private:
         std::shared_ptr<AccessUpstreamSwrr> fallback;
     };
 
+    struct ClusterDirectory {
+        explicit ClusterDirectory(std::vector<Cluster> value) noexcept : clusters(std::move(value)) {}
+
+        // The mapping is immutable after publication. Each balancer deliberately
+        // retains its own synchronized SWRR and circuit state across directories.
+        const std::vector<Cluster> clusters;
+    };
+
     void assign_selection_tokens(std::vector<AccessEndpointDefinition> &next) noexcept {
         std::size_t old_index = 0;
         std::size_t new_index = 0;
@@ -367,20 +369,23 @@ private:
         definition.endpoint.selection_token = ++next_selection_token_;
     }
 
-    [[nodiscard]] const Cluster *find_cluster(std::string_view name) const noexcept {
+    [[nodiscard]] static const Cluster *find_cluster(const ClusterDirectory &directory,
+                                                     std::string_view name) noexcept {
         const auto iterator =
-                std::lower_bound(clusters_.begin(), clusters_.end(), name,
+                std::lower_bound(directory.clusters.begin(), directory.clusters.end(), name,
                                  [](const Cluster &cluster, std::string_view value) { return cluster.name < value; });
-        return iterator == clusters_.end() || iterator->name != name ? nullptr : &*iterator;
+        return iterator == directory.clusters.end() || iterator->name != name ? nullptr : &*iterator;
     }
 
     AccessUpstreamSwrr::Options options_;
     std::string zone_;
     AccessDiscoveryMetricsObserver metrics_observer_;
-    std::mutex mutex_;
+    // Only this pointer crosses the owner-loop boundary. The remaining fields
+    // are single-writer bookkeeping used while compiling the next directory.
+    std::atomic<std::shared_ptr<const ClusterDirectory>> published_directory_;
+    std::shared_ptr<const ClusterDirectory> active_directory_;
     std::string checksum_;
     std::vector<AccessEndpointDefinition> definitions_;
-    std::vector<Cluster> clusters_;
     AccessDiscoveryServiceAggregate aggregate_;
     std::uint64_t next_selection_token_ = 0;
     bool initialized_ = false;
