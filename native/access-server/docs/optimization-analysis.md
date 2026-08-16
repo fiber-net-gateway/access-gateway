@@ -120,16 +120,22 @@ P0 表示应在性能重构前处理的正确性、安全或生命周期问题�
 
 **归属：本项目。Fiber 无前置改动。**
 
-`AccessDnsService::shutdown()` 向 HTTP worker 投递 resolver 释放任务后，两次调用
-`std::future::wait()`。它由 accept EventLoop 上的 `AccessServer::shutdown_and_wait()`
-调用，因此会阻塞 EventLoop；当目标 worker 已停止处理任务时还可能永久等待。
+**实施状态：已解决（2026-08-16）。** DNS 初始化和关闭已纳入同一协程状态机，resolver
+释放任务在各自 owner loop 执行并通过 `async::WaitGroup` 异步汇合，随后在 cache owner loop
+关闭共享 cache。正常关闭、初始化回滚和重复关闭不再阻塞 control EventLoop；worker group
+仍须遵守“DNS 关闭完成后才能停止 worker”的生命周期契约。回归测试会在 worker 暂停处理
+任务时验证 control loop 仍能继续调度。
+
+改造前，`AccessDnsService::shutdown()` 向 HTTP worker 投递 resolver 释放任务后，两次调用
+`std::future::wait()`。它由 accept EventLoop 上的 `AccessServer::shutdown_and_wait()` 调用，
+因此会阻塞 EventLoop；当目标 worker 已停止处理任务时还可能永久等待。
 
 代码位置：
 
 - [`AccessDnsService.cpp`](../src/runtime/AccessDnsService.cpp#L88)；
 - [`AccessServer.cpp`](../src/runtime/AccessServer.cpp#L90)。
 
-建议：
+实施方案：
 
 1. 将 `AccessDnsService::shutdown()` 改为 `async::Task<void>`；
 2. 使用 `async::WaitGroup`、`Watch` 或等价 coroutine join；

@@ -414,7 +414,7 @@ async::Task<std::expected<void, AccessServerRuntimeError>> AccessServerRuntime::
         co_return std::unexpected(make_io_error(AccessServerRuntimeErrorCode::InitializeWorkers, common::IoErr::NoMem,
                                                 "failed to allocate access server"));
     }
-    auto initialized = server_->initialize();
+    auto initialized = co_await server_->initialize();
     if (!initialized) {
         AccessServerRuntimeError error =
                 make_io_error(AccessServerRuntimeErrorCode::InitializeWorkers, initialized.error());

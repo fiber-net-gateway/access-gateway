@@ -45,7 +45,7 @@ public:
                  ProxyClusterMatcher cluster_matcher, AccessServerOptions options = {});
     ~AccessServer();
 
-    [[nodiscard]] common::IoResult<void> initialize() noexcept;
+    [[nodiscard]] async::Task<common::IoResult<void>> initialize() noexcept;
     [[nodiscard]] common::IoResult<void> bind(const net::SocketAddress &address,
                                               const net::ListenOptions &options = {});
     [[nodiscard]] common::IoResult<void> bind_metrics(const net::SocketAddress &address,

@@ -47,23 +47,23 @@ AccessServer::~AccessServer() {
     FIBER_ASSERT(cat_detach_tasks_.empty());
 }
 
-common::IoResult<void> AccessServer::initialize() noexcept {
+async::Task<common::IoResult<void>> AccessServer::initialize() noexcept {
     FIBER_ASSERT(accept_loop_->in_loop());
     if (initialized_) {
-        return std::unexpected(common::IoErr::Already);
+        co_return std::unexpected(common::IoErr::Already);
     }
     if (!metrics_.valid()) {
-        return std::unexpected(common::IoErr::NoMem);
+        co_return std::unexpected(common::IoErr::NoMem);
     }
-    if (!dns_.init(*workers_)) {
-        return std::unexpected(common::IoErr::NoMem);
+    if (!co_await dns_.init(*workers_)) {
+        co_return std::unexpected(common::IoErr::NoMem);
     }
     if (!pool_.init()) {
-        dns_.shutdown();
-        return std::unexpected(common::IoErr::NoMem);
+        co_await dns_.shutdown();
+        co_return std::unexpected(common::IoErr::NoMem);
     }
     initialized_ = true;
-    return {};
+    co_return common::IoResult<void>{};
 }
 
 common::IoResult<void> AccessServer::bind(const net::SocketAddress &address, const net::ListenOptions &options) {
@@ -99,7 +99,7 @@ async::Task<void> AccessServer::shutdown_and_wait() noexcept {
     co_await detach_cat_workers();
     co_await pool_.shutdown_async();
     if (initialized_) {
-        dns_.shutdown();
+        co_await dns_.shutdown();
     }
     initialized_ = false;
 }

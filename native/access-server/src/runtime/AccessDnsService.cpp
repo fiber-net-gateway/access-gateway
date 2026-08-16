@@ -1,9 +1,7 @@
 #include "AccessDnsService.h"
 
-#include <atomic>
 #include <chrono>
 #include <fstream>
-#include <future>
 #include <string>
 #include <utility>
 
@@ -44,21 +42,27 @@ net::SocketAddress read_nameserver() noexcept {
 
 } // namespace
 
-AccessDnsService::~AccessDnsService() { FIBER_ASSERT(!initialized_); }
+AccessDnsService::~AccessDnsService() { FIBER_ASSERT(state_ == State::Stopped); }
 
-bool AccessDnsService::init(event::EventLoopGroup &group) noexcept {
-    if (initialized_) {
-        return true;
+async::Task<bool> AccessDnsService::init(event::EventLoopGroup &group) noexcept {
+    event::EventLoop *current_loop = event::EventLoop::current_or_null();
+    FIBER_ASSERT(current_loop != nullptr);
+    if (state_ == State::Running) {
+        FIBER_ASSERT(control_loop_ == current_loop);
+        co_return true;
     }
+    FIBER_ASSERT(state_ == State::Stopped);
     if (group.size() == 0) {
-        return false;
+        co_return false;
     }
+    control_loop_ = current_loop;
     cache_loop_ = &group.at(0);
     if (!cache_.init(*cache_loop_)) {
+        control_loop_ = nullptr;
         cache_loop_ = nullptr;
-        return false;
+        co_return false;
     }
-    initialized_ = true;
+    state_ = State::Starting;
 
     const net::SocketAddress nameserver = read_nameserver();
     entries_.reserve(group.size());
@@ -71,59 +75,72 @@ bool AccessDnsService::init(event::EventLoopGroup &group) noexcept {
         client_options.timeout = std::chrono::milliseconds(2000);
         client_options.attempts = 2;
         if (!entry.local->init(*entry.loop, cache_, client_options)) {
-            shutdown();
-            return false;
+            co_await shutdown();
+            co_return false;
         }
         entry.resolver = std::make_unique<dns::DnsResolver>();
         if (!entry.resolver->init(*entry.local)) {
             entries_.push_back(std::move(entry));
-            shutdown();
-            return false;
+            co_await shutdown();
+            co_return false;
         }
         entries_.push_back(std::move(entry));
     }
-    return true;
+    state_ = State::Running;
+    co_return true;
 }
 
-void AccessDnsService::shutdown() noexcept {
-    if (!initialized_) {
-        return;
+async::Task<void> AccessDnsService::shutdown() noexcept {
+    if (state_ == State::Stopped) {
+        co_return;
     }
+    FIBER_ASSERT(control_loop_ != nullptr);
+    FIBER_ASSERT(control_loop_->in_loop());
+    FIBER_ASSERT(state_ == State::Starting || state_ == State::Running);
+    state_ = State::Stopping;
+
     if (!entries_.empty()) {
-        auto done = std::make_shared<std::promise<void>>();
-        auto future = done->get_future();
-        auto remaining = std::make_shared<std::atomic<std::size_t>>(entries_.size());
+        release_tasks_.add(entries_.size());
         for (LoopEntry &entry: entries_) {
-            async::spawn(*entry.loop, [&entry, remaining, done]() -> async::DetachedTask {
-                if (entry.resolver) {
-                    entry.resolver->release();
-                    entry.resolver.reset();
-                }
-                if (entry.local) {
-                    entry.local->release();
-                    entry.local.reset();
-                }
-                if (remaining->fetch_sub(1, std::memory_order_acq_rel) == 1) {
-                    done->set_value();
-                }
-                co_return;
-            });
+            LoopEntry *current = &entry;
+            async::spawn(*entry.loop, [this, current]() -> async::DetachedTask { co_await release_entry(current); });
         }
-        future.wait();
+        co_await release_tasks_.join();
     }
     entries_.clear();
+
     if (cache_loop_) {
-        auto done = std::make_shared<std::promise<void>>();
-        auto future = done->get_future();
-        async::spawn(*cache_loop_, [this, done]() -> async::DetachedTask {
-            cache_.shutdown();
-            done->set_value();
-            co_return;
-        });
-        future.wait();
+        release_tasks_.add();
+        async::spawn(*cache_loop_, [this]() -> async::DetachedTask { co_await shutdown_cache(); });
+        co_await release_tasks_.join();
     }
     cache_loop_ = nullptr;
-    initialized_ = false;
+    control_loop_ = nullptr;
+    state_ = State::Stopped;
+}
+
+async::Task<void> AccessDnsService::release_entry(LoopEntry *entry) noexcept {
+    FIBER_ASSERT(entry != nullptr);
+    FIBER_ASSERT(entry->loop != nullptr);
+    FIBER_ASSERT(entry->loop->in_loop());
+    if (entry->resolver) {
+        entry->resolver->release();
+        entry->resolver.reset();
+    }
+    if (entry->local) {
+        entry->local->release();
+        entry->local.reset();
+    }
+    release_tasks_.done();
+    co_return;
+}
+
+async::Task<void> AccessDnsService::shutdown_cache() noexcept {
+    FIBER_ASSERT(cache_loop_ != nullptr);
+    FIBER_ASSERT(cache_loop_->in_loop());
+    cache_.shutdown();
+    release_tasks_.done();
+    co_return;
 }
 
 ProxyDnsResolver AccessDnsService::adapter() noexcept {
