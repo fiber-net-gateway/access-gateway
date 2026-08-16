@@ -3,6 +3,7 @@
 
 #include "../config/AccessConfigError.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <optional>
@@ -17,6 +18,11 @@ struct HostPattern {
     std::string_view pattern;
     std::uint32_t handler = 0;
 };
+
+// Hash/equality for the Java-compatible case-folded identity used to detect
+// exact or wildcard pattern duplicates across project snapshots.
+[[nodiscard]] std::size_t host_pattern_identity_hash(std::string_view pattern) noexcept;
+[[nodiscard]] bool host_pattern_identity_equals(std::string_view left, std::string_view right) noexcept;
 
 class HostMatcher {
 public:

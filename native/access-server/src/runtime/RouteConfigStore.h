@@ -5,8 +5,10 @@
 #include "AccessServiceDiscovery.h"
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <expected>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -29,9 +31,26 @@ enum class ConfigUpdateStatus : std::uint8_t {
 struct ConfigUpdateResult {
     ConfigUpdateStatus status = ConfigUpdateStatus::IgnoredEmpty;
     std::shared_ptr<const AccessRouteSnapshot> snapshot;
+    std::chrono::nanoseconds global_build_duration{};
+    std::chrono::nanoseconds publish_duration{};
 };
 
 using ConfigUpdateOutcome = std::expected<ConfigUpdateResult, AccessConfigError>;
+
+struct ConfigBatchProjectResult {
+    std::string project;
+    std::expected<ConfigUpdateStatus, AccessConfigError> outcome;
+};
+
+struct ConfigBatchUpdateResult {
+    std::vector<ConfigBatchProjectResult> projects;
+    std::shared_ptr<const AccessRouteSnapshot> snapshot;
+    std::chrono::nanoseconds global_build_duration{};
+    std::chrono::nanoseconds publish_duration{};
+    bool published = false;
+};
+
+using ConfigBatchUpdateOutcome = std::expected<ConfigBatchUpdateResult, AccessConfigError>;
 
 class PreparedProjectUpdate;
 
@@ -114,6 +133,10 @@ public:
                                                                 std::optional<ProjectRouteSnapshot> project_snapshot);
     [[nodiscard]] ConfigUpdateOutcome apply(std::string_view project, const std::optional<ProjectConfig> &config);
     [[nodiscard]] ConfigUpdateOutcome commit(ReadyProjectUpdate ready);
+    // Applies one deterministic project-name-ordered transaction. A candidate
+    // rejected by cross-project validation retains that project's old record;
+    // accepted siblings are assembled and atomically published once.
+    [[nodiscard]] ConfigBatchUpdateOutcome commit_batch(std::vector<ReadyProjectUpdate> ready);
     [[nodiscard]] ConfigUpdateOutcome remove_project(std::string_view project);
     void clear() noexcept;
 
@@ -128,18 +151,17 @@ public:
     }
 
 private:
-    struct PublishedVersion {
-        std::string project;
-        std::int32_t version = 0;
+    struct ProjectRecord {
+        std::optional<std::int32_t> version;
+        std::shared_ptr<const ProjectRouteSnapshot> snapshot;
     };
 
-    void set_published_version(std::string_view project, std::int32_t version);
-    void remove_published_version(std::string_view project);
-    [[nodiscard]] ConfigUpdateOutcome
-    publish_candidate(std::vector<std::shared_ptr<const ProjectRouteSnapshot>> candidate, ConfigUpdateStatus status);
+    [[nodiscard]] std::vector<std::shared_ptr<const ProjectRouteSnapshot>> current_projects() const;
+    static void apply_to_candidate(std::vector<std::shared_ptr<const ProjectRouteSnapshot>> &candidate,
+                                   const ReadyProjectUpdate &ready);
+    void publish_snapshot(std::shared_ptr<const AccessRouteSnapshot> snapshot) noexcept;
 
-    std::vector<std::shared_ptr<const ProjectRouteSnapshot>> projects_;
-    std::vector<PublishedVersion> published_versions_;
+    std::map<std::string, ProjectRecord, std::less<>> projects_;
     ScriptCompilerAdapter script_compiler_;
     AccessServiceSelectorFactory service_selector_factory_;
     ProxyAddressSelectorFactory selector_factory_;

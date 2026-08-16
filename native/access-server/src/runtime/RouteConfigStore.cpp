@@ -1,11 +1,65 @@
 #include "RouteConfigStore.h"
 
+#include <algorithm>
+#include <chrono>
 #include <cstddef>
+#include <numeric>
+#include <unordered_set>
 #include <utility>
 
 #include <fiber/common/Assert.h>
 
 namespace fiber::access_server {
+namespace {
+
+using SteadyClock = std::chrono::steady_clock;
+
+std::expected<AccessRouteSnapshot, AccessConfigError>
+build_candidate(std::span<const std::shared_ptr<const ProjectRouteSnapshot>> candidate,
+                std::chrono::nanoseconds &elapsed) {
+    const SteadyClock::time_point started = SteadyClock::now();
+    auto snapshot = AccessRouteSnapshot::build(candidate);
+    elapsed += std::chrono::duration_cast<std::chrono::nanoseconds>(SteadyClock::now() - started);
+    return snapshot;
+}
+
+AccessConfigError duplicate_batch_project_error() {
+    return AccessConfigError{
+            .code = AccessConfigErrorCode::Conflict,
+            .field = "projects",
+            .message = "batch contains duplicate project updates",
+    };
+}
+
+struct HostPatternIdentityHash {
+    [[nodiscard]] std::size_t operator()(std::string_view pattern) const noexcept {
+        return host_pattern_identity_hash(pattern);
+    }
+};
+
+struct HostPatternIdentityEqual {
+    [[nodiscard]] bool operator()(std::string_view left, std::string_view right) const noexcept {
+        return host_pattern_identity_equals(left, right);
+    }
+};
+
+AccessConfigError duplicate_host_error(std::string_view pattern) {
+    return AccessConfigError{
+            .code = AccessConfigErrorCode::InvalidField,
+            .field = "host",
+            .message = pattern.starts_with('*') ? "wildcard is duplicate" : "host is duplicate",
+    };
+}
+
+AccessConfigError project_count_error() {
+    return AccessConfigError{
+            .code = AccessConfigErrorCode::LimitExceeded,
+            .field = "projects",
+            .message = "project count exceeds the configured limit",
+    };
+}
+
+} // namespace
 
 ReadyProjectUpdate::ReadyProjectUpdate(ReadyProjectUpdate &&other) noexcept :
     status_(other.status_), project_(std::move(other.project_)), version_(other.version_),
@@ -182,6 +236,7 @@ ConfigUpdateOutcome RouteConfigStore::apply(std::string_view project, const std:
 ConfigUpdateOutcome RouteConfigStore::commit(ReadyProjectUpdate ready) {
     FIBER_ASSERT(ready.valid_);
     if (ready.status_ == ConfigUpdateStatus::IgnoredEmpty || ready.status_ == ConfigUpdateStatus::VersionUnchanged) {
+        ready.valid_ = false;
         return ConfigUpdateResult{
                 .status = ready.status_,
                 .snapshot = pin(),
@@ -189,115 +244,293 @@ ConfigUpdateOutcome RouteConfigStore::commit(ReadyProjectUpdate ready) {
     }
     FIBER_ASSERT(ready.status_ == ConfigUpdateStatus::Published || ready.status_ == ConfigUpdateStatus::Unloaded);
 
-    std::vector<std::shared_ptr<const ProjectRouteSnapshot>> candidate = projects_;
-    std::size_t existing = candidate.size();
-    for (std::size_t i = 0; i < candidate.size(); ++i) {
-        if (candidate[i]->project() == ready.project_) {
-            existing = i;
-            break;
-        }
+    std::vector<std::shared_ptr<const ProjectRouteSnapshot>> candidate = current_projects();
+    apply_to_candidate(candidate, ready);
+    std::chrono::nanoseconds global_build_duration{};
+    auto snapshot = build_candidate(candidate, global_build_duration);
+    if (!snapshot) {
+        ready.valid_ = false;
+        return std::unexpected(std::move(snapshot.error()));
     }
 
-    if (ready.status_ == ConfigUpdateStatus::Unloaded) {
-        if (existing != candidate.size()) {
-            candidate.erase(candidate.begin() + static_cast<std::ptrdiff_t>(existing));
-        }
-        // Java ListenerWrap leaves its last successful non-empty ProjectConf
-        // version unchanged when an empty Host map unloads a project.
-        return publish_candidate(std::move(candidate), ConfigUpdateStatus::Unloaded);
-    }
-
-    FIBER_ASSERT(ready.project_snapshot_ != nullptr);
-    if (existing == candidate.size()) {
-        candidate.push_back(std::move(ready.project_snapshot_));
+    const SteadyClock::time_point publish_started = SteadyClock::now();
+    auto published = std::make_shared<const AccessRouteSnapshot>(std::move(*snapshot));
+    if (ready.status_ == ConfigUpdateStatus::Published) {
+        FIBER_ASSERT(ready.project_snapshot_ != nullptr);
+        ProjectRecord &record = projects_[ready.project_];
+        record.version = ready.version_;
+        record.snapshot = std::move(ready.project_snapshot_);
     } else {
-        candidate[existing] = std::move(ready.project_snapshot_);
+        const auto existing = projects_.find(ready.project_);
+        if (existing != projects_.end()) {
+            // Java ListenerWrap leaves its last successful non-empty ProjectConf
+            // version unchanged when an empty Host map unloads a project.
+            existing->second.snapshot.reset();
+        }
+    }
+    ready.valid_ = false;
+    publish_snapshot(published);
+    const std::chrono::nanoseconds publish_duration =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(SteadyClock::now() - publish_started);
+    return ConfigUpdateResult{
+            .status = ready.status_,
+            .snapshot = std::move(published),
+            .global_build_duration = global_build_duration,
+            .publish_duration = publish_duration,
+    };
+}
+
+ConfigBatchUpdateOutcome RouteConfigStore::commit_batch(std::vector<ReadyProjectUpdate> ready) {
+    std::vector<std::size_t> order(ready.size());
+    std::iota(order.begin(), order.end(), 0U);
+    std::sort(order.begin(), order.end(), [&](std::size_t left, std::size_t right) {
+        FIBER_ASSERT(ready[left].valid_);
+        FIBER_ASSERT(ready[right].valid_);
+        return ready[left].project_ < ready[right].project_;
+    });
+    for (std::size_t index = 1; index < order.size(); ++index) {
+        if (ready[order[index - 1]].project_ == ready[order[index]].project_) {
+            return std::unexpected(duplicate_batch_project_error());
+        }
+    }
+    std::vector<ReadyProjectUpdate> sorted;
+    sorted.reserve(ready.size());
+    for (const std::size_t index: order) {
+        sorted.push_back(std::move(ready[index]));
+    }
+    ready = std::move(sorted);
+
+    ConfigBatchUpdateResult result;
+    result.projects.reserve(ready.size());
+    if (ready.empty()) {
+        result.snapshot = pin();
+        return result;
     }
 
-    auto published = publish_candidate(std::move(candidate), ConfigUpdateStatus::Published);
-    if (published) {
-        set_published_version(ready.project_, ready.version_);
+    std::vector<bool> accepted(ready.size(), true);
+    std::vector<std::optional<AccessConfigError>> failures(ready.size());
+    std::vector<std::shared_ptr<const ProjectRouteSnapshot>> candidate = current_projects();
+    std::size_t loaded_projects = candidate.size();
+    std::size_t host_capacity = 0;
+    for (const std::shared_ptr<const ProjectRouteSnapshot> &project: candidate) {
+        host_capacity += project->hosts().size();
     }
-    return published;
+    for (const ReadyProjectUpdate &update: ready) {
+        if (update.project_snapshot_) {
+            host_capacity += update.project_snapshot_->hosts().size();
+        }
+    }
+    std::unordered_set<std::string_view, HostPatternIdentityHash, HostPatternIdentityEqual> hosts;
+    hosts.reserve(host_capacity);
+    for (const std::shared_ptr<const ProjectRouteSnapshot> &project: candidate) {
+        for (const CompiledHost &host: project->hosts()) {
+            const bool inserted = hosts.insert(host.pattern).second;
+            FIBER_ASSERT(inserted);
+        }
+    }
+
+    bool has_mutation = false;
+    for (std::size_t index = 0; index < ready.size(); ++index) {
+        const ReadyProjectUpdate &update = ready[index];
+        FIBER_ASSERT(update.valid_);
+        if (update.status_ != ConfigUpdateStatus::Published && update.status_ != ConfigUpdateStatus::Unloaded) {
+            continue;
+        }
+
+        const auto existing = projects_.find(update.project_);
+        const std::shared_ptr<const ProjectRouteSnapshot> previous =
+                existing == projects_.end() ? nullptr : existing->second.snapshot;
+        if (previous) {
+            FIBER_ASSERT(loaded_projects != 0);
+            --loaded_projects;
+            for (const CompiledHost &host: previous->hosts()) {
+                const std::size_t removed = hosts.erase(host.pattern);
+                FIBER_ASSERT(removed == 1);
+            }
+        }
+
+        if (update.status_ == ConfigUpdateStatus::Unloaded) {
+            apply_to_candidate(candidate, update);
+            has_mutation = true;
+            continue;
+        }
+
+        FIBER_ASSERT(update.project_snapshot_ != nullptr);
+        if (loaded_projects >= kAccessConfigLimits.project_list.max_projects) {
+            accepted[index] = false;
+            failures[index].emplace(project_count_error());
+        } else {
+            for (const CompiledHost &host: update.project_snapshot_->hosts()) {
+                if (hosts.contains(host.pattern)) {
+                    accepted[index] = false;
+                    failures[index].emplace(duplicate_host_error(host.pattern));
+                    break;
+                }
+            }
+        }
+
+        if (!accepted[index]) {
+            if (previous) {
+                ++loaded_projects;
+                for (const CompiledHost &host: previous->hosts()) {
+                    const bool inserted = hosts.insert(host.pattern).second;
+                    FIBER_ASSERT(inserted);
+                }
+            }
+            continue;
+        }
+
+        ++loaded_projects;
+        for (const CompiledHost &host: update.project_snapshot_->hosts()) {
+            const bool inserted = hosts.insert(host.pattern).second;
+            FIBER_ASSERT(inserted);
+        }
+        apply_to_candidate(candidate, update);
+        has_mutation = true;
+    }
+
+    std::optional<AccessRouteSnapshot> final_snapshot;
+    if (has_mutation) {
+        auto built = build_candidate(candidate, result.global_build_duration);
+        if (!built) {
+            return std::unexpected(std::move(built.error()));
+        }
+        final_snapshot.emplace(std::move(*built));
+    }
+
+    std::shared_ptr<const AccessRouteSnapshot> published;
+    if (has_mutation) {
+        FIBER_ASSERT(final_snapshot.has_value());
+        const SteadyClock::time_point publish_started = SteadyClock::now();
+        published = std::make_shared<const AccessRouteSnapshot>(std::move(*final_snapshot));
+        for (std::size_t index = 0; index < ready.size(); ++index) {
+            ReadyProjectUpdate &update = ready[index];
+            if (!accepted[index]) {
+                continue;
+            }
+            if (update.status_ == ConfigUpdateStatus::Published) {
+                FIBER_ASSERT(update.project_snapshot_ != nullptr);
+                ProjectRecord &record = projects_[update.project_];
+                record.version = update.version_;
+                record.snapshot = std::move(update.project_snapshot_);
+            } else if (update.status_ == ConfigUpdateStatus::Unloaded) {
+                const auto existing = projects_.find(update.project_);
+                if (existing != projects_.end()) {
+                    existing->second.snapshot.reset();
+                }
+            }
+        }
+        publish_snapshot(published);
+        result.publish_duration =
+                std::chrono::duration_cast<std::chrono::nanoseconds>(SteadyClock::now() - publish_started);
+        result.published = true;
+    } else {
+        published = pin();
+    }
+
+    result.snapshot = std::move(published);
+    for (std::size_t index = 0; index < ready.size(); ++index) {
+        ReadyProjectUpdate &update = ready[index];
+        update.valid_ = false;
+        if (accepted[index]) {
+            result.projects.push_back(ConfigBatchProjectResult{
+                    .project = std::move(update.project_),
+                    .outcome = update.status_,
+            });
+        } else {
+            FIBER_ASSERT(failures[index].has_value());
+            result.projects.push_back(ConfigBatchProjectResult{
+                    .project = std::move(update.project_),
+                    .outcome = std::unexpected(std::move(*failures[index])),
+            });
+        }
+    }
+    return result;
 }
 
 ConfigUpdateOutcome RouteConfigStore::remove_project(std::string_view project) {
-    std::vector<std::shared_ptr<const ProjectRouteSnapshot>> candidate = projects_;
-    for (auto iterator = candidate.begin(); iterator != candidate.end(); ++iterator) {
-        if ((*iterator)->project() == project) {
-            candidate.erase(iterator);
-            break;
-        }
+    std::vector<std::shared_ptr<const ProjectRouteSnapshot>> candidate = current_projects();
+    const auto existing = std::lower_bound(candidate.begin(), candidate.end(), project,
+                                           [](const std::shared_ptr<const ProjectRouteSnapshot> &entry,
+                                              std::string_view name) { return entry->project() < name; });
+    if (existing != candidate.end() && (*existing)->project() == project) {
+        candidate.erase(existing);
     }
 
-    auto published = publish_candidate(std::move(candidate), ConfigUpdateStatus::ProjectRemoved);
-    if (published) {
-        remove_published_version(project);
-    }
-    return published;
-}
-
-void RouteConfigStore::clear() noexcept {
-    projects_.clear();
-    published_versions_.clear();
-    auto empty = std::make_shared<const AccessRouteSnapshot>();
-#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
-    published_.store(std::move(empty), std::memory_order_release);
-#else
-    std::atomic_store_explicit(&published_, std::move(empty), std::memory_order_release);
-#endif
-}
-
-std::optional<std::int32_t> RouteConfigStore::current_version(std::string_view project) const noexcept {
-    for (const PublishedVersion &entry: published_versions_) {
-        if (entry.project == project) {
-            return entry.version;
-        }
-    }
-    return std::nullopt;
-}
-
-void RouteConfigStore::set_published_version(std::string_view project, std::int32_t version) {
-    for (PublishedVersion &entry: published_versions_) {
-        if (entry.project == project) {
-            entry.version = version;
-            return;
-        }
-    }
-    published_versions_.push_back(PublishedVersion{
-            .project = std::string(project),
-            .version = version,
-    });
-}
-
-void RouteConfigStore::remove_published_version(std::string_view project) {
-    for (auto iterator = published_versions_.begin(); iterator != published_versions_.end(); ++iterator) {
-        if (iterator->project == project) {
-            published_versions_.erase(iterator);
-            return;
-        }
-    }
-}
-
-ConfigUpdateOutcome
-RouteConfigStore::publish_candidate(std::vector<std::shared_ptr<const ProjectRouteSnapshot>> candidate,
-                                    ConfigUpdateStatus status) {
-    auto snapshot = AccessRouteSnapshot::build(candidate);
+    std::chrono::nanoseconds global_build_duration{};
+    auto snapshot = build_candidate(candidate, global_build_duration);
     if (!snapshot) {
         return std::unexpected(std::move(snapshot.error()));
     }
 
+    const SteadyClock::time_point publish_started = SteadyClock::now();
     auto published = std::make_shared<const AccessRouteSnapshot>(std::move(*snapshot));
-    projects_ = std::move(candidate);
-#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
-    published_.store(published, std::memory_order_release);
-#else
-    std::atomic_store_explicit(&published_, published, std::memory_order_release);
-#endif
+    const auto record = projects_.find(project);
+    if (record != projects_.end()) {
+        projects_.erase(record);
+    }
+    publish_snapshot(published);
+    const std::chrono::nanoseconds publish_duration =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(SteadyClock::now() - publish_started);
     return ConfigUpdateResult{
-            .status = status,
+            .status = ConfigUpdateStatus::ProjectRemoved,
             .snapshot = std::move(published),
+            .global_build_duration = global_build_duration,
+            .publish_duration = publish_duration,
     };
+}
+
+void RouteConfigStore::clear() noexcept {
+    projects_.clear();
+    publish_snapshot(std::make_shared<const AccessRouteSnapshot>());
+}
+
+std::optional<std::int32_t> RouteConfigStore::current_version(std::string_view project) const noexcept {
+    const auto existing = projects_.find(project);
+    return existing == projects_.end() ? std::nullopt : existing->second.version;
+}
+
+std::vector<std::shared_ptr<const ProjectRouteSnapshot>> RouteConfigStore::current_projects() const {
+    std::vector<std::shared_ptr<const ProjectRouteSnapshot>> result;
+    result.reserve(projects_.size());
+    for (const auto &[project, record]: projects_) {
+        (void) project;
+        if (record.snapshot) {
+            result.push_back(record.snapshot);
+        }
+    }
+    return result;
+}
+
+void RouteConfigStore::apply_to_candidate(std::vector<std::shared_ptr<const ProjectRouteSnapshot>> &candidate,
+                                          const ReadyProjectUpdate &ready) {
+    const auto existing = std::lower_bound(candidate.begin(), candidate.end(), ready.project_,
+                                           [](const std::shared_ptr<const ProjectRouteSnapshot> &entry,
+                                              std::string_view project) { return entry->project() < project; });
+    const bool found = existing != candidate.end() && (*existing)->project() == ready.project_;
+    if (ready.status_ == ConfigUpdateStatus::Unloaded) {
+        if (found) {
+            candidate.erase(existing);
+        }
+        return;
+    }
+    if (ready.status_ != ConfigUpdateStatus::Published) {
+        return;
+    }
+    FIBER_ASSERT(ready.project_snapshot_ != nullptr);
+    if (found) {
+        *existing = ready.project_snapshot_;
+    } else {
+        candidate.insert(existing, ready.project_snapshot_);
+    }
+}
+
+void RouteConfigStore::publish_snapshot(std::shared_ptr<const AccessRouteSnapshot> snapshot) noexcept {
+#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
+    published_.store(std::move(snapshot), std::memory_order_release);
+#else
+    std::atomic_store_explicit(&published_, std::move(snapshot), std::memory_order_release);
+#endif
 }
 
 } // namespace fiber::access_server

@@ -216,6 +216,13 @@ TEST(HostMatcherTest, DoesNotFallbackFromAnExistingExactBranch) {
 }
 
 TEST(HostMatcherTest, RejectsDuplicateAndUnsupportedWildcardPatterns) {
+    EXPECT_TRUE(fiber::access_server::host_pattern_identity_equals("API.example.com", "api.EXAMPLE.com"));
+    EXPECT_EQ(fiber::access_server::host_pattern_identity_hash("API.example.com"),
+              fiber::access_server::host_pattern_identity_hash("api.EXAMPLE.com"));
+    EXPECT_TRUE(fiber::access_server::host_pattern_identity_equals("@.example.com", "`.example.com"));
+    EXPECT_EQ(fiber::access_server::host_pattern_identity_hash("@.example.com"),
+              fiber::access_server::host_pattern_identity_hash("`.example.com"));
+
     auto duplicate = HostMatcher::build(std::array{
             HostPattern{.pattern = "API.example.com", .handler = 1},
             HostPattern{.pattern = "api.EXAMPLE.com", .handler = 2},

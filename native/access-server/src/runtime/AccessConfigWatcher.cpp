@@ -37,6 +37,18 @@ struct AccessConfigWatcher::ProjectListEntry final : public common::NonCopyable,
     bool stopping = false;
 };
 
+struct AccessConfigWatcher::InitialProjectUpdate final : public common::NonCopyable, public common::NonMovable {
+    InitialProjectUpdate(ReadyProjectUpdate value_ready, std::uint64_t value_generation, std::string value_data_id,
+                         std::string value_md5) :
+        ready(std::move(value_ready)), generation(value_generation), data_id(std::move(value_data_id)),
+        md5(std::move(value_md5)) {}
+
+    ReadyProjectUpdate ready;
+    std::uint64_t generation = 0;
+    std::string data_id;
+    std::string md5;
+};
+
 struct AccessConfigWatcher::ProjectEntry final : public common::NonCopyable, public common::NonMovable {
     ProjectEntry(AccessConfigWatcher &value_owner, std::string value_project) :
         owner(&value_owner), project(std::move(value_project)), revisions(0),
@@ -46,6 +58,7 @@ struct AccessConfigWatcher::ProjectEntry final : public common::NonCopyable, pub
 
     void advance() noexcept {
         FIBER_ASSERT(generation != std::numeric_limits<std::uint64_t>::max());
+        initial_update.reset();
         revision_publisher->publish(++generation);
     }
 
@@ -64,6 +77,7 @@ struct AccessConfigWatcher::ProjectEntry final : public common::NonCopyable, pub
     std::uint64_t published_generation = 0;
     std::uint32_t retry_attempt = 0;
     std::shared_ptr<const nacos::ConfigData> pending_compile_data;
+    std::unique_ptr<InitialProjectUpdate> initial_update;
     ProjectCompileJob *active_compile_job = nullptr;
     bool first_value_received = false;
     bool synchronized = false;
@@ -80,8 +94,10 @@ struct AccessConfigWatcher::ProjectCompileJob final : public common::NonCopyable
     std::optional<std::int32_t> published_version;
     std::optional<CompiledProjectConfigResult> result;
     std::atomic<bool> canceled{false};
+    std::chrono::nanoseconds compile_duration{};
     std::uint64_t generation = 0;
     bool force_compile = false;
+    bool compile_observed = false;
     event::EventLoop::NotifyEntry compile_entry;
     event::EventLoop::NotifyEntry completion_entry;
 };
@@ -125,12 +141,14 @@ std::expected<void, nacos::ConfigServiceError> AccessConfigWatcher::start() {
     }
 
     state_ = AccessConfigWatcherState::Running;
+    initial_batch_active_ = store_->pin()->projects().empty();
     project_list_ = std::make_unique<ProjectListEntry>(*this);
     auto subscription = config_service_->subscribe(options_.project_list_data_id, options_.project_route_group,
                                                    &project_list_notify, project_list_.get());
     if (!subscription) {
         observe_metric_event(AccessConfigMetricEvent::ProjectListSubscriptionFailed);
         project_list_.reset();
+        initial_batch_active_ = false;
         state_ = AccessConfigWatcherState::Created;
         return std::unexpected(std::move(subscription.error()));
     }
@@ -165,6 +183,7 @@ async::Task<void> AccessConfigWatcher::shutdown() noexcept {
     compile_queue_.clear();
     co_await background_tasks_.join();
     FIBER_ASSERT(active_compiler_jobs_ == 0);
+    initial_batch_active_ = false;
     projects_.clear();
     project_list_.reset();
     state_ = AccessConfigWatcherState::Stopped;
@@ -341,8 +360,12 @@ void AccessConfigWatcher::run_project_compile(ProjectCompileJob *job) noexcept {
     AccessConfigWatcher &owner = *job->owner;
     FIBER_ASSERT(owner.compiler_->loop().in_loop());
     if (!job->canceled.load(std::memory_order_acquire)) {
+        const auto started = std::chrono::steady_clock::now();
         CompiledProjectConfigResult result = owner.compiler_->compile_project(
                 job->entry->project, job->data->content, job->published_version, job->force_compile);
+        job->compile_duration =
+                std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started);
+        job->compile_observed = true;
         if (!job->canceled.load(std::memory_order_acquire)) {
             job->result.emplace(std::move(result));
         }
@@ -360,6 +383,9 @@ void AccessConfigWatcher::complete_project_compile(ProjectCompileJob *job) noexc
     entry->active_compile_job = nullptr;
     FIBER_ASSERT(owner.active_compiler_jobs_ == 1);
     --owner.active_compiler_jobs_;
+    if (job->compile_observed) {
+        owner.observe_metric_duration(AccessConfigMetricStage::ProjectCompile, job->compile_duration);
+    }
 
     const auto found = owner.projects_.find(entry->project);
     const bool current = owner.state_ == AccessConfigWatcherState::Running && found != owner.projects_.end() &&
@@ -433,21 +459,34 @@ void AccessConfigWatcher::apply_compiled_project(ProjectCompileJob &job) {
 void AccessConfigWatcher::apply_prepared_project(const std::shared_ptr<ProjectEntry> &entry,
                                                  PreparedProjectUpdate prepared, std::uint64_t generation,
                                                  std::uint64_t revision_version, std::string data_id, std::string md5) {
+    const auto started = std::chrono::steady_clock::now();
     auto ready = std::move(prepared).try_ready();
     if (ready) {
+        observe_metric_duration(
+                AccessConfigMetricStage::ServiceReady,
+                std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started));
         commit_ready_project(entry, std::move(*ready), generation, std::move(data_id), std::move(md5));
         return;
     }
     background_tasks_.add();
     async::spawn([this, entry, prepared = std::move(prepared), generation, revision_version,
-                  data_id = std::move(data_id), md5 = std::move(md5)]() mutable {
+                  data_id = std::move(data_id), md5 = std::move(md5), started]() mutable {
         return await_ready_project(std::move(entry), std::move(prepared), generation, revision_version,
-                                   std::move(data_id), std::move(md5));
+                                   std::move(data_id), std::move(md5), started);
     });
 }
 
 void AccessConfigWatcher::commit_ready_project(const std::shared_ptr<ProjectEntry> &entry, ReadyProjectUpdate ready,
                                                std::uint64_t generation, std::string data_id, std::string md5) {
+    if (initial_batch_active_) {
+        entry->initial_update = std::make_unique<InitialProjectUpdate>(std::move(ready), generation, std::move(data_id),
+                                                                       std::move(md5));
+        entry->config_state = AccessProjectConfigState::ReadyToPublish;
+        publish_readiness();
+        commit_initial_batch_if_ready();
+        return;
+    }
+
     auto updated = store_->commit(std::move(ready));
     if (!updated) {
         report_failure(entry, AccessConfigWatcherFailureStage::Publish, std::move(data_id), std::move(md5),
@@ -455,6 +494,7 @@ void AccessConfigWatcher::commit_ready_project(const std::shared_ptr<ProjectEntr
         settle_project(entry, AccessProjectConfigState::Rejected);
         return;
     }
+    observe_publication_timing(updated->global_build_duration, updated->publish_duration);
     if (updated->status == ConfigUpdateStatus::Published || updated->status == ConfigUpdateStatus::Unloaded) {
         ++successful_updates_;
         entry->published_generation = generation;
@@ -480,16 +520,127 @@ void AccessConfigWatcher::commit_ready_project(const std::shared_ptr<ProjectEntr
     settle_project(entry, AccessProjectConfigState::Accepted);
 }
 
+void AccessConfigWatcher::commit_initial_batch_if_ready() {
+    FIBER_ASSERT(loop_->in_loop());
+    if (!initial_batch_active_ || defer_readiness_updates_ || state_ != AccessConfigWatcherState::Running) {
+        return;
+    }
+    for (const auto &[project, entry]: projects_) {
+        (void) project;
+        if (entry->initial_update) {
+            continue;
+        }
+        if (entry->synchronized && (entry->config_state == AccessProjectConfigState::Accepted ||
+                                    entry->config_state == AccessProjectConfigState::Rejected)) {
+            continue;
+        }
+        return;
+    }
+
+    struct PendingResult {
+        std::shared_ptr<ProjectEntry> entry;
+        std::uint64_t generation = 0;
+        std::string data_id;
+        std::string md5;
+    };
+
+    initial_batch_active_ = false;
+    std::vector<ReadyProjectUpdate> ready;
+    std::vector<PendingResult> pending;
+    ready.reserve(projects_.size());
+    pending.reserve(projects_.size());
+    for (auto &[project, entry]: projects_) {
+        (void) project;
+        if (!entry->initial_update) {
+            continue;
+        }
+        InitialProjectUpdate &staged = *entry->initial_update;
+        pending.push_back(PendingResult{
+                .entry = entry,
+                .generation = staged.generation,
+                .data_id = std::move(staged.data_id),
+                .md5 = std::move(staged.md5),
+        });
+        ready.push_back(std::move(staged.ready));
+        entry->initial_update.reset();
+    }
+
+    if (ready.empty()) {
+        publish_readiness();
+        return;
+    }
+
+    auto updated = store_->commit_batch(std::move(ready));
+    defer_readiness_updates_ = true;
+    if (!updated) {
+        for (PendingResult &item: pending) {
+            report_failure(item.entry, AccessConfigWatcherFailureStage::Publish, std::move(item.data_id),
+                           std::move(item.md5), common::IoErr::Invalid, updated.error());
+            item.entry->config_state = AccessProjectConfigState::Rejected;
+            item.entry->synchronized = true;
+        }
+    } else {
+        observe_publication_timing(updated->global_build_duration, updated->publish_duration, updated->published);
+        FIBER_ASSERT(updated->projects.size() == pending.size());
+        for (std::size_t index = 0; index < pending.size(); ++index) {
+            PendingResult &item = pending[index];
+            ConfigBatchProjectResult &project_result = updated->projects[index];
+            FIBER_ASSERT(project_result.project == item.entry->project);
+            if (!project_result.outcome) {
+                report_failure(item.entry, AccessConfigWatcherFailureStage::Publish, std::move(item.data_id),
+                               std::move(item.md5), common::IoErr::Invalid, project_result.outcome.error());
+                item.entry->config_state = AccessProjectConfigState::Rejected;
+                item.entry->synchronized = true;
+                continue;
+            }
+
+            const ConfigUpdateStatus status = *project_result.outcome;
+            if (status == ConfigUpdateStatus::Published || status == ConfigUpdateStatus::Unloaded) {
+                ++successful_updates_;
+                item.entry->published_generation = item.generation;
+            }
+            switch (status) {
+                case ConfigUpdateStatus::IgnoredEmpty:
+                    observe_metric_event(AccessConfigMetricEvent::ProjectRouteIgnoredEmpty);
+                    break;
+                case ConfigUpdateStatus::VersionUnchanged:
+                    observe_metric_event(AccessConfigMetricEvent::ProjectRouteVersionUnchanged);
+                    break;
+                case ConfigUpdateStatus::Published:
+                    observe_metric_event(AccessConfigMetricEvent::ProjectRoutePublished);
+                    break;
+                case ConfigUpdateStatus::Unloaded:
+                    observe_metric_event(AccessConfigMetricEvent::ProjectRouteUnloaded);
+                    break;
+                case ConfigUpdateStatus::ProjectRemoved:
+                    FIBER_ASSERT(false);
+                    break;
+            }
+            item.entry->config_state = AccessProjectConfigState::Accepted;
+            item.entry->synchronized = true;
+        }
+        if (updated->published) {
+            publish_observer(updated->snapshot);
+        }
+    }
+    defer_readiness_updates_ = false;
+    publish_readiness();
+}
+
 async::DetachedTask AccessConfigWatcher::await_ready_project(std::shared_ptr<ProjectEntry> entry,
                                                              PreparedProjectUpdate prepared, std::uint64_t generation,
                                                              std::uint64_t revision_version, std::string data_id,
-                                                             std::string md5) noexcept {
+                                                             std::string md5,
+                                                             std::chrono::steady_clock::time_point started) noexcept {
     auto revisions = entry->revisions.subscribe();
     auto ready_or_replaced =
             co_await async::when_any([&prepared]() { return std::move(prepared).wait_ready().select(); },
                                      [&revisions, revision_version]() { return revisions.next(revision_version); });
 
     if (ready_or_replaced.is<0>()) {
+        observe_metric_duration(
+                AccessConfigMetricStage::ServiceReady,
+                std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started));
         auto ready = std::move(ready_or_replaced).get<0>();
         const auto found = projects_.find(entry->project);
         const bool current = state_ == AccessConfigWatcherState::Running && found != projects_.end() &&
@@ -560,6 +711,7 @@ void AccessConfigWatcher::reconcile_projects(std::vector<std::string> requested)
         remove_project(project);
     }
     defer_readiness_updates_ = false;
+    commit_initial_batch_if_ready();
 }
 
 void AccessConfigWatcher::add_project(std::string project) {
@@ -584,8 +736,14 @@ void AccessConfigWatcher::remove_project(std::string_view project) {
     retiring->subscription_state = AccessProjectSubscriptionState::Retiring;
     request_stop(*retiring);
 
+    if (initial_batch_active_) {
+        publish_readiness();
+        return;
+    }
+
     auto removed = store_->remove_project(project);
     FIBER_ASSERT(removed.has_value());
+    observe_publication_timing(removed->global_build_duration, removed->publish_duration);
     ++successful_updates_;
     observe_metric_event(AccessConfigMetricEvent::ProjectRouteRemoved);
     publish_observer(removed->snapshot);
@@ -674,6 +832,7 @@ void AccessConfigWatcher::settle_project(const std::shared_ptr<ProjectEntry> &en
     entry->config_state = state;
     entry->synchronized = true;
     publish_readiness();
+    commit_initial_batch_if_ready();
 }
 
 std::size_t AccessConfigWatcher::active_project_subscription_count() const noexcept {
@@ -749,6 +908,9 @@ void AccessConfigWatcher::publish_readiness() {
         if (entry->config_state == AccessProjectConfigState::Processing) {
             ++next.processing_projects;
         }
+        if (entry->config_state == AccessProjectConfigState::ReadyToPublish) {
+            ++next.ready_to_publish_projects;
+        }
         if (entry->config_state == AccessProjectConfigState::Rejected) {
             ++next.rejected_projects;
         }
@@ -789,6 +951,7 @@ void AccessConfigWatcher::publish_readiness() {
                                                .synchronized_projects = next.synchronized_projects,
                                                .retrying_projects = next.retrying_projects,
                                                .processing_projects = next.processing_projects,
+                                               .ready_to_publish_projects = next.ready_to_publish_projects,
                                                .rejected_projects = next.rejected_projects,
                                        });
     }
@@ -810,6 +973,21 @@ void AccessConfigWatcher::set_unavailable(std::string data_id, common::IoErr io_
 void AccessConfigWatcher::observe_metric_event(AccessConfigMetricEvent event) const noexcept {
     if (metrics_observer_.on_event) {
         metrics_observer_.on_event(metrics_observer_.context, event);
+    }
+}
+
+void AccessConfigWatcher::observe_metric_duration(AccessConfigMetricStage stage,
+                                                  std::chrono::nanoseconds duration) const noexcept {
+    if (metrics_observer_.on_duration) {
+        metrics_observer_.on_duration(metrics_observer_.context, stage, duration);
+    }
+}
+
+void AccessConfigWatcher::observe_publication_timing(std::chrono::nanoseconds global_build,
+                                                     std::chrono::nanoseconds publish, bool published) const noexcept {
+    observe_metric_duration(AccessConfigMetricStage::GlobalBuild, global_build);
+    if (published) {
+        observe_metric_duration(AccessConfigMetricStage::Publish, publish);
     }
 }
 

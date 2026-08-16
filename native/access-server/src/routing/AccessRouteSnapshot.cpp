@@ -1,6 +1,7 @@
 #include "AccessRouteSnapshot.h"
 
 #include <string>
+#include <unordered_set>
 
 namespace fiber::access_server {
 namespace {
@@ -24,16 +25,16 @@ AccessRouteSnapshot::build(std::span<const std::shared_ptr<const ProjectRouteSna
     }
     AccessRouteSnapshot snapshot;
     snapshot.projects_.reserve(projects.size());
+    std::unordered_set<std::string_view> project_names;
+    project_names.reserve(projects.size());
 
     std::size_t host_count = 0;
     for (const std::shared_ptr<const ProjectRouteSnapshot> &project: projects) {
         if (!project) {
             return std::unexpected(snapshot_error("projects", "project snapshot is null"));
         }
-        for (const std::shared_ptr<const ProjectRouteSnapshot> &existing: snapshot.projects_) {
-            if (existing->project() == project->project()) {
-                return std::unexpected(snapshot_error("projects", "project name is duplicate"));
-            }
+        if (!project_names.insert(project->project()).second) {
+            return std::unexpected(snapshot_error("projects", "project name is duplicate"));
         }
         host_count += project->hosts().size();
         snapshot.route_count_ += project->routes().size();

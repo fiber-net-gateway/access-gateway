@@ -71,6 +71,7 @@ enum class AccessProjectSubscriptionState : std::uint8_t {
 enum class AccessProjectConfigState : std::uint8_t {
     AwaitingValue,
     Processing,
+    ReadyToPublish,
     Accepted,
     Rejected,
 };
@@ -92,6 +93,7 @@ struct AccessConfigReadiness {
     std::size_t synchronized_projects = 0;
     std::size_t retrying_projects = 0;
     std::size_t processing_projects = 0;
+    std::size_t ready_to_publish_projects = 0;
     std::size_t rejected_projects = 0;
     common::IoErr io_error = common::IoErr::None;
     std::string message;
@@ -153,6 +155,7 @@ private:
     struct ProjectListEntry;
     struct ProjectEntry;
     struct ProjectCompileJob;
+    struct InitialProjectUpdate;
 
     static void project_list_notify(void *context, const nacos::SubscriptionResult<nacos::ConfigData> &result) noexcept;
     static void project_notify(void *context, const nacos::SubscriptionResult<nacos::ConfigData> &result) noexcept;
@@ -171,10 +174,12 @@ private:
                                 std::string md5);
     void commit_ready_project(const std::shared_ptr<ProjectEntry> &entry, ReadyProjectUpdate ready,
                               std::uint64_t generation, std::string data_id, std::string md5);
+    void commit_initial_batch_if_ready();
     [[nodiscard]] async::DetachedTask await_ready_project(std::shared_ptr<ProjectEntry> entry,
                                                           PreparedProjectUpdate prepared, std::uint64_t generation,
                                                           std::uint64_t revision_version, std::string data_id,
-                                                          std::string md5) noexcept;
+                                                          std::string md5,
+                                                          std::chrono::steady_clock::time_point started) noexcept;
     [[nodiscard]] async::DetachedTask retry_project_subscription(std::shared_ptr<ProjectEntry> entry,
                                                                  std::uint64_t revision_version,
                                                                  std::chrono::milliseconds delay) noexcept;
@@ -188,6 +193,9 @@ private:
     void publish_readiness();
     void set_unavailable(std::string data_id, common::IoErr io_error, std::string message);
     void observe_metric_event(AccessConfigMetricEvent event) const noexcept;
+    void observe_metric_duration(AccessConfigMetricStage stage, std::chrono::nanoseconds duration) const noexcept;
+    void observe_publication_timing(std::chrono::nanoseconds global_build, std::chrono::nanoseconds publish,
+                                    bool published = true) const noexcept;
     void publish_observer(const std::shared_ptr<const AccessRouteSnapshot> &snapshot) const noexcept;
     void report_failure(const std::shared_ptr<ProjectEntry> &entry, AccessConfigWatcherFailureStage stage,
                         std::string data_id, std::string md5, common::IoErr io_error, AccessConfigError error);
@@ -213,6 +221,7 @@ private:
     async::WaitGroup background_tasks_;
     AccessConfigWatcherState state_ = AccessConfigWatcherState::Created;
     bool initial_project_list_received_ = false;
+    bool initial_batch_active_ = false;
     bool defer_readiness_updates_ = false;
     std::size_t active_compiler_jobs_ = 0;
     std::uint64_t successful_updates_ = 0;

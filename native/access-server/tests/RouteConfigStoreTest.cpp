@@ -67,6 +67,160 @@ TEST(RouteConfigStoreTest, CommitsAfterCheckedReadyTransition) {
     EXPECT_TRUE(store.pin()->match_host("one.example.com"));
 }
 
+TEST(RouteConfigStoreTest, BatchCommitsReadyProjectsWithOneAtomicSnapshot) {
+    RouteConfigStore store;
+    auto before = store.pin();
+    std::vector<ReadyProjectUpdate> ready;
+    for (const auto &[project, host]: std::vector<std::pair<std::string, std::string>>{
+                 {"charlie", "charlie.example.com"},
+                 {"alpha", "alpha.example.com"},
+                 {"bravo", "bravo.example.com"},
+         }) {
+        auto prepared = store.prepare(project, project_config(1, host, "/"));
+        ASSERT_TRUE(prepared);
+        auto candidate = std::move(*prepared).try_ready();
+        ASSERT_TRUE(candidate);
+        ready.push_back(std::move(*candidate));
+    }
+
+    auto committed = store.commit_batch(std::move(ready));
+
+    ASSERT_TRUE(committed);
+    EXPECT_TRUE(committed->published);
+    ASSERT_EQ(committed->projects.size(), 3U);
+    EXPECT_EQ(committed->projects[0].project, "alpha");
+    EXPECT_EQ(committed->projects[1].project, "bravo");
+    EXPECT_EQ(committed->projects[2].project, "charlie");
+    for (const auto &project: committed->projects) {
+        ASSERT_TRUE(project.outcome);
+        EXPECT_EQ(*project.outcome, ConfigUpdateStatus::Published);
+    }
+    EXPECT_EQ(store.pin(), committed->snapshot);
+    EXPECT_EQ(store.pin()->projects().size(), 3U);
+    EXPECT_TRUE(store.pin()->match_host("alpha.example.com"));
+    EXPECT_TRUE(store.pin()->match_host("bravo.example.com"));
+    EXPECT_TRUE(store.pin()->match_host("charlie.example.com"));
+    EXPECT_TRUE(before->projects().empty());
+}
+
+TEST(RouteConfigStoreTest, BatchRejectsDuplicateProjectTokensWithoutPublishing) {
+    RouteConfigStore store;
+    auto before = store.pin();
+    std::vector<ReadyProjectUpdate> ready;
+    for (const std::int32_t version: {1, 2}) {
+        auto prepared = store.prepare("duplicate", project_config(version, "duplicate.example.com", "/"));
+        ASSERT_TRUE(prepared);
+        auto candidate = std::move(*prepared).try_ready();
+        ASSERT_TRUE(candidate);
+        ready.push_back(std::move(*candidate));
+    }
+
+    auto committed = store.commit_batch(std::move(ready));
+
+    ASSERT_FALSE(committed);
+    EXPECT_EQ(committed.error().field, "projects");
+    EXPECT_EQ(store.pin(), before);
+    EXPECT_TRUE(store.pin()->projects().empty());
+    EXPECT_FALSE(store.current_version("duplicate"));
+}
+
+TEST(RouteConfigStoreTest, BatchIsolatesConflictingProjectsAndPublishesValidCandidatesOnce) {
+    RouteConfigStore store;
+    std::vector<ReadyProjectUpdate> ready;
+    for (const auto &[project, host]: std::vector<std::pair<std::string, std::string>>{
+                 {"right", "shared.example.com"},
+                 {"left", "SHARED.EXAMPLE.COM"},
+                 {"valid", "valid.example.com"},
+         }) {
+        auto prepared = store.prepare(project, project_config(1, host, "/"));
+        ASSERT_TRUE(prepared);
+        auto candidate = std::move(*prepared).try_ready();
+        ASSERT_TRUE(candidate);
+        ready.push_back(std::move(*candidate));
+    }
+
+    auto committed = store.commit_batch(std::move(ready));
+
+    ASSERT_TRUE(committed);
+    EXPECT_TRUE(committed->published);
+    ASSERT_EQ(committed->projects.size(), 3U);
+    ASSERT_TRUE(committed->projects[0].outcome);
+    EXPECT_EQ(committed->projects[0].project, "left");
+    EXPECT_EQ(*committed->projects[0].outcome, ConfigUpdateStatus::Published);
+    EXPECT_EQ(committed->projects[1].project, "right");
+    ASSERT_FALSE(committed->projects[1].outcome);
+    EXPECT_EQ(committed->projects[1].outcome.error().field, "host");
+    ASSERT_TRUE(committed->projects[2].outcome);
+    EXPECT_EQ(committed->projects[2].project, "valid");
+    EXPECT_EQ(store.pin()->projects().size(), 2U);
+    ASSERT_TRUE(store.pin()->match_host("shared.example.com"));
+    EXPECT_EQ(store.pin()->match_host("shared.example.com").project->project(), "left");
+    EXPECT_TRUE(store.pin()->match_host("valid.example.com"));
+    EXPECT_FALSE(store.current_version("right"));
+}
+
+TEST(RouteConfigStoreTest, BatchConflictRetainsTheProjectsPreviousSnapshot) {
+    RouteConfigStore store;
+    ASSERT_TRUE(store.apply("alpha", project_config(1, "alpha.example.com", "/alpha")));
+    ASSERT_TRUE(store.apply("beta", project_config(1, "beta.example.com", "/beta")));
+    const auto before = store.pin();
+    std::vector<ReadyProjectUpdate> ready;
+    for (const auto &[project, config]: std::vector<std::pair<std::string, ProjectConfig>>{
+                 {"alpha", project_config(2, "BETA.example.com", "/replacement")},
+                 {"gamma", project_config(1, "gamma.example.com", "/gamma")},
+         }) {
+        auto prepared = store.prepare(project, config);
+        ASSERT_TRUE(prepared);
+        auto candidate = std::move(*prepared).try_ready();
+        ASSERT_TRUE(candidate);
+        ready.push_back(std::move(*candidate));
+    }
+
+    auto committed = store.commit_batch(std::move(ready));
+
+    ASSERT_TRUE(committed);
+    EXPECT_TRUE(committed->published);
+    ASSERT_EQ(committed->projects.size(), 2U);
+    EXPECT_EQ(committed->projects[0].project, "alpha");
+    EXPECT_FALSE(committed->projects[0].outcome);
+    EXPECT_EQ(committed->projects[1].project, "gamma");
+    EXPECT_TRUE(committed->projects[1].outcome);
+    EXPECT_EQ(store.current_version("alpha"), 1);
+    EXPECT_TRUE(store.pin()->match_host("alpha.example.com"));
+    ASSERT_TRUE(store.pin()->match_host("beta.example.com"));
+    EXPECT_EQ(store.pin()->match_host("beta.example.com").project->project(), "beta");
+    EXPECT_TRUE(store.pin()->match_host("gamma.example.com"));
+    EXPECT_EQ(before->projects().size(), 2U);
+    EXPECT_FALSE(before->match_host("gamma.example.com"));
+}
+
+TEST(RouteConfigStoreTest, BatchUnloadRetainsLastSuccessfulVersion) {
+    RouteConfigStore store;
+    ASSERT_TRUE(store.apply("demo", project_config(7, "api.example.com", "/one")));
+    ProjectConfig unload;
+    unload.version = 8;
+    unload.hosts = std::vector<HostConfigEntry>{};
+    auto prepared = store.prepare("demo", unload);
+    ASSERT_TRUE(prepared);
+    auto candidate = std::move(*prepared).try_ready();
+    ASSERT_TRUE(candidate);
+    std::vector<ReadyProjectUpdate> ready;
+    ready.push_back(std::move(*candidate));
+
+    auto committed = store.commit_batch(std::move(ready));
+
+    ASSERT_TRUE(committed);
+    EXPECT_TRUE(committed->published);
+    ASSERT_EQ(committed->projects.size(), 1U);
+    ASSERT_TRUE(committed->projects[0].outcome);
+    EXPECT_EQ(*committed->projects[0].outcome, ConfigUpdateStatus::Unloaded);
+    EXPECT_TRUE(store.pin()->projects().empty());
+    EXPECT_EQ(store.current_version("demo"), 7);
+    auto same = store.apply("demo", project_config(7, "new.example.com", "/two"));
+    ASSERT_TRUE(same);
+    EXPECT_EQ(same->status, ConfigUpdateStatus::VersionUnchanged);
+}
+
 TEST(RouteConfigStoreTest, RejectsMismatchedCompiledCandidateBeforeTypestateTransition) {
     RouteConfigStore store;
     ProjectConfig config = project_config(7, "one.example.com", "/one");
