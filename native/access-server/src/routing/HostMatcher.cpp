@@ -7,8 +7,29 @@ namespace fiber::access_server {
 namespace {
 
 constexpr std::uint32_t kNoNode = std::numeric_limits<std::uint32_t>::max();
+// Release microbenchmarks keep linear lookup ahead through 16 children; the
+// sorted lookup wins from 32 and scales substantially better thereafter.
+constexpr std::size_t kLinearSearchMaxChildren = 16;
 
 char java_host_fold(char value) noexcept { return static_cast<char>(static_cast<unsigned char>(value) | 0x20U); }
+
+int compare_folded_labels(std::string_view left, std::string_view right) noexcept {
+    const std::size_t common = std::min(left.size(), right.size());
+    for (std::size_t index = 0; index < common; ++index) {
+        const auto left_byte = static_cast<unsigned char>(java_host_fold(left[index]));
+        const auto right_byte = static_cast<unsigned char>(java_host_fold(right[index]));
+        if (left_byte < right_byte) {
+            return -1;
+        }
+        if (left_byte > right_byte) {
+            return 1;
+        }
+    }
+    if (left.size() < right.size()) {
+        return -1;
+    }
+    return left.size() > right.size() ? 1 : 0;
+}
 
 bool label_equals(std::string_view left_lower, std::string_view right) noexcept {
     if (left_lower.size() != right.size()) {
@@ -166,6 +187,15 @@ std::expected<HostMatcher, AccessConfigError> HostMatcher::build(std::span<const
         }
     }
 
+    for (Node &node: matcher.nodes_) {
+        if (node.children.size() <= kLinearSearchMaxChildren) {
+            continue;
+        }
+        std::sort(node.children.begin(), node.children.end(), [](const Child &left, const Child &right) {
+            return compare_folded_labels(left.label, right.label) < 0;
+        });
+    }
+
     return matcher;
 }
 
@@ -187,10 +217,22 @@ bool HostMatcher::empty() const noexcept {
 }
 
 std::uint32_t HostMatcher::find_child(std::uint32_t node, std::string_view label) const noexcept {
-    for (const Child &child: nodes_[node].children) {
-        if (label_equals(child.label, label)) {
-            return child.node;
+    const std::vector<Child> &children = nodes_[node].children;
+    if (children.size() <= kLinearSearchMaxChildren) {
+        for (const Child &child: children) {
+            if (label_equals(child.label, label)) {
+                return child.node;
+            }
         }
+        return kNoNode;
+    }
+
+    const auto child = std::lower_bound(children.begin(), children.end(), label,
+                                        [](const Child &candidate, std::string_view expected) {
+                                            return compare_folded_labels(candidate.label, expected) < 0;
+                                        });
+    if (child != children.end() && label_equals(child->label, label)) {
+        return child->node;
     }
     return kNoNode;
 }

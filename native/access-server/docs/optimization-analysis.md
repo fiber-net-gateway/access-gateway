@@ -780,15 +780,55 @@ native/build/access-server/fiber_access_route_publication_benchmark
 
 ### 7.7 P-07：Host matcher 高 fan-out
 
-**归属：本项目，profile 驱动。**
+**归属：本项目。**
 
-`HostMatcher::find_child()` 对当前节点的 children 做线性扫描。通常域名层数和同级 label
-数量都很小，因此优先级低于 service lock 和分配。
+**实施状态：已解决（2026-08-17）。** 改造前 `HostMatcher::find_child()` 对当前节点的
+children 全量线性扫描。通常域名层数和同级 label 数量都很小，但大量租户共享同一域名后缀时，
+每个请求都要扫描高 fan-out 节点。
 
 代码位置：[`HostMatcher.cpp`](../src/routing/HostMatcher.cpp#L165)。
 
-若真实配置显示高 sibling fan-out，可在 build 完成后排序并使用二分查找，或采用紧凑
-哈希索引。必须保留 exact child 阻止祖先 wildcard fallback 等 Java 特殊语义。
+实现采用紧凑的混合索引，不给每个 trie node 增加 hash table：
+
+- `HostMatcher::build()` 仍以原顺序完成重复检测、exact/wildcard handler 组装；构建完成后，
+  只对超过 16 个 child 的节点按 Java-fold 后的 label 排序。child 引用的是稳定 node index，
+  因此边重排不会改变 handler 或节点生命周期；
+- `find_child()` 在 16 个及以下 child 时保留 cache-friendly 线性扫描，超过 16 个时使用
+  `lower_bound`。比较器逐字节执行现有 `byte | 0x20` fold，不生成 lowercase request string，
+  请求路径仍然零分配；
+- 排序和查找共用同一 unsigned-byte fold 顺序，保留 Java 的非标准 ASCII 标点等价关系；Host
+  语法校验、尾点/端口处理、wildcard 匹配，以及 exact child 阻止祖先 wildcard fallback 的行为
+  均未改变；
+- `AccessRouteSnapshot` 继续只负责拥有和调用全局 matcher，不感知索引实现；没有增加请求 worker
+  状态、共享锁或高基数指标。
+
+新增默认关闭的 `fiber_access_host_matcher_benchmark`。它在计时外用逆序 pattern 构建共享后缀
+trie，执行固定的 75% hit / 25% miss 查询（hit 使用大写以覆盖 fold），每个 sample 65,536 次
+lookup：
+
+```bash
+cmake -S native -B native/build -DACCESS_SERVER_BUILD_BENCHMARKS=ON
+cmake --build native/build --target fiber_access_host_matcher_benchmark --parallel
+native/build/access-server/fiber_access_host_matcher_benchmark
+```
+
+2026-08-17 在 Release+ThinLTO、Clang 22、WSL 的同一构建树中，旧实现和最终实现各连续运行
+三轮；每轮结果是 7 个 sample 的中位数，下表再取三轮中位数。未绑核且未隔离系统负载，结果
+只说明 matcher 扩展趋势，不代表完整请求延迟：
+
+| sibling fan-out | 旧 linear ns/lookup | 新 hybrid ns/lookup | 约加速 |
+| ---: | ---: | ---: | ---: |
+| 1 | 53.23 | 52.84 | 1.0x |
+| 4 | 51.43 | 51.49 | 1.0x |
+| 8 | 56.71 | 53.76 | 1.1x |
+| 16 | 63.35 | 59.96 | 1.1x |
+| 64 | 107.49 | 74.43 | 1.4x |
+| 256 | 211.66 | 91.96 | 2.3x |
+| 1024 | 767.96 | 132.82 | 5.8x |
+
+额外 crossover 对照中，16 child 的线性路径优于二分，32 child 的二分约 68 ns、线性约
+77 ns，因此最终阈值取 16。该策略属于 access-server 的 Java Host 兼容与路由数据结构，完全
+由本项目实现；没有修改 Fiber、没有新增 Fiber Issue，也没有更新 gitlink。
 
 ### 7.8 P-08：Happy Eyeballs
 
