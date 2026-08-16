@@ -11,7 +11,7 @@
 #include <vector>
 
 #include "config/AccessConfig.h"
-#include "routing/ProjectRouteSnapshot.h"
+#include "routing/ProjectConfigCompiler.h"
 #include "runtime/RouteConfigStore.h"
 
 namespace {

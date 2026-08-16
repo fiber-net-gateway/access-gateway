@@ -956,15 +956,42 @@ readiness、retry 取消、旧快照保留、initial batch 及 off-loop compile�
 
 **归属：本项目。**
 
-建议拆分为：
+**实施状态：已解决（2026-08-17）。** 现在按以下边界组合 concrete component：
 
-- `ProjectConfigCompiler`；
-- `ProjectSnapshotRegistry`；
-- `RouteSnapshotPublisher`；
-- 只包含不可变数据和查询方法的 `ProjectRouteSnapshot`。
+- `ProjectConfigCompiler` 只负责 `ProjectConfig -> ProjectRouteSnapshot`：资源预算、Host/Path、
+  method、CIDR/address、脚本/模板、静态 gzip、常量包和 matcher；它借用 compiler adapter 与固定
+  limits，不持有 Nacos、版本 registry 或发布状态。既有 `compile_project_config()` 作为 validator、
+  benchmark 和测试的兼容入口保留，但实际 runtime 编译直接使用该类；
+- `ProjectSnapshotRegistry` 是 owner-loop-only 的有序 registry，一条 record 只含最后成功非空版本
+  和可选 loaded snapshot。`replace/unload/remove` 分别表达替换、保留版本的卸载、删除版本；
+- `RouteSnapshotPublisher` 是唯一跨线程边界，独占 atomic `shared_ptr` 的 acquire pin 与 release
+  publish；`RouteConfigStore::pin()` 是 inline delegate，ThinLTO 最终二进制中没有额外 pin symbol；
+- `RouteConfigStore` 只编排 Prepared/Ready typestate、单项及批量事务、跨项目 Host 校验、完整候选
+  build 和阶段耗时。registry 只在完整 `AccessRouteSnapshot` 构建成功后变更，然后执行一次 release
+  publish；
+- `ProjectRouteSnapshot.cpp` 从 1,194 行降为 57 行，只实现 immutable snapshot 的 header 元数据构造、
+  Host 查询、selector readiness 查询/等待；1,176 行有界构建逻辑移入独立 compiler translation unit。
 
-`AccessServiceSelectorFactory::begin_compile()/take_error()` 的隐式错误侧信道应改为明确的
-result，方便异步编译、重入和测试。
+`ProxyAddressSelectorFactory` 的回调现在返回显式 `expected<shared_ptr, Error>`。
+`AccessServiceSelectorFactory` 不再保存 `acquire_error_`，也不再要求调用方配对
+`begin_compile()/take_error()`；每次 NamingService acquire 的错误直接属于该次调用。selector binding
+仍遍历全部 service route、局部保留第一个错误后返回，因此继续为两条失败 route 记录两次 bounded
+metric，同时不存在跨编译粘连、重入覆盖或忘记清空错误的状态。
+
+兼容语义保持不变：同版本忽略；空 Host unload 但保留最后成功版本；project-list remove 才删除
+version；批量重复 project 整批拒绝，Host 冲突只拒绝对应 project；失败候选不替换旧 snapshot；旧请求
+pin 在热更新后继续有效。请求路径仍只有一次 atomic shared ownership acquire，没有新增锁、分配、
+虚调用或 `std::function`。
+
+组件测试锁定三个类均为非多态，64-bit 布局分别为 compiler 32 bytes、registry 48 bytes、publisher
+16 bytes；另覆盖 registry 排序/unload/remove、旧 pin 生命周期，以及两 route acquire 失败后下一次
+prepare 可恢复且无 sticky error。相同 Release ThinLTO build 中 access-server text 从 6,933,273 增至
+6,934,609 bytes（+1,336，约 +0.019%），data/bss 不变，文件大小增加 1,520 bytes（约 +0.009%）。
+
+同一未绑核 WSL 会话的 publication benchmark 在改造前单轮为 10/100/500 projects 的 sequential
+`15.1/1580.0/82668.6 us`、batch `5.7/72.7/693.7 us`；改造后三轮中位数为 sequential
+`11.6/1345.6/72420.2 us`、batch `4.7/67.9/647.6 us`。该数据只用于排除明显回退，不宣称吞吐提升；
+批量仍保持一次原子发布和随项目数增长的原有加速方向。
 
 ### 8.5 C-01：`AccessRequestHandler`
 

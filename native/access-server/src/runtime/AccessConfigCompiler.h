@@ -2,7 +2,7 @@
 #define FIBER_ACCESS_SERVER_ACCESS_CONFIG_COMPILER_H
 
 #include "../config/AccessConfigError.h"
-#include "../routing/ProjectRouteSnapshot.h"
+#include "../routing/ProjectConfigCompiler.h"
 #include "AccessScriptRuntime.h"
 #include "TlsCertificateStore.h"
 

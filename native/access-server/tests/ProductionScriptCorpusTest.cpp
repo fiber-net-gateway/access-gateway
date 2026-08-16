@@ -10,7 +10,7 @@
 #include <vector>
 
 #include "config/AccessConfigCodec.h"
-#include "routing/ProjectRouteSnapshot.h"
+#include "routing/ProjectConfigCompiler.h"
 #include "runtime/AccessScriptRuntime.h"
 
 namespace {

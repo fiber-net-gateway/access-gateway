@@ -20,8 +20,9 @@ rnacos ConfigData
   -> ConfigUpdateResult + immutable AccessRouteSnapshot
 ```
 
-`ProjectConfig` is the decoded compatibility model. `CompiledProjectConfig` is produced on the
-compiler EventLoop and contains a complete Project candidate without owner-loop service leases.
+`ProjectConfig` is the decoded compatibility model. `CompiledProjectConfig` is produced by the
+concrete `ProjectConfigCompiler` on the compiler EventLoop and contains a complete Project candidate
+without owner-loop service leases.
 `RouteConfigStore::prepare_compiled()` binds those leases on the Nacos owner loop and returns a
 `PreparedProjectUpdate`. For a new-version candidate that could be published, it first verifies
 that the compiled snapshot's embedded Project and version match the requested update. Empty and
@@ -81,6 +82,11 @@ observer, and final Project state. A stale generation never reaches it.
 `RouteConfigStore::apply()` remains a synchronous convenience for unit tests and offline/local
 callers. It internally uses `try_ready()` and rejects a candidate that requires asynchronous
 service readiness. It does not bypass the Ready type.
+
+`ProjectSnapshotRegistry` separately owns last-successful versions and loaded Project snapshots on
+the owner loop. `RouteSnapshotPublisher` separately owns the atomic global snapshot. A commit first
+builds the complete candidate, then mutates the registry, then performs one release publication;
+request workers retain the same one-acquire pin and old pins remain immutable and valid.
 
 ## Compatibility status semantics
 

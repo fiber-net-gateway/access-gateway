@@ -76,6 +76,7 @@ public:
     }
 
     void set_subscribe_error(fiber::nacos::NamingServiceError error) { subscribe_error_ = std::move(error); }
+    void clear_subscribe_error() noexcept { subscribe_error_.reset(); }
 
 private:
     struct Entry {
@@ -550,7 +551,7 @@ TEST(AccessServiceDiscoveryTest, ClosedBeforeInitialUpdateRejectsCandidate) {
     EXPECT_TRUE(completed);
 }
 
-TEST(AccessServiceDiscoveryTest, RecordsBoundedSelectorAcquireFailure) {
+TEST(AccessServiceDiscoveryTest, ReturnsExplicitBoundedAcquireFailureWithoutStickyFactoryState) {
     fiber::event::EventLoop loop;
     FakeNamingService naming;
     naming.set_subscribe_error(fiber::nacos::NamingServiceError{
@@ -567,6 +568,18 @@ TEST(AccessServiceDiscoveryTest, RecordsBoundedSelectorAcquireFailure) {
     fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
         auto prepared = store.prepare("demo", project_config("orders-secret"));
         EXPECT_FALSE(prepared);
+        if (!prepared) {
+            EXPECT_EQ(prepared.error().field, "service");
+        }
+        EXPECT_TRUE(discovery.empty());
+
+        naming.clear_subscribe_error();
+        {
+            auto recovered = store.prepare("recovered", project_config("orders"));
+            EXPECT_TRUE(recovered);
+            EXPECT_EQ(discovery.size(), 1U);
+        }
+        co_await yield_updates();
         EXPECT_TRUE(discovery.empty());
 
         std::string metrics_text;

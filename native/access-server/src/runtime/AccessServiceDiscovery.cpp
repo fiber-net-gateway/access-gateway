@@ -511,20 +511,21 @@ ProxyAddressSelectorFactory AccessServiceSelectorFactory::adapter() noexcept {
     };
 }
 
-std::shared_ptr<ProxyAddressSelector>
+ProxyAddressSelectorFactory::Result
 AccessServiceSelectorFactory::create_address_selector(void *context, std::string service, std::string cluster) {
     auto &self = *static_cast<AccessServiceSelectorFactory *>(context);
     FIBER_ASSERT(self.discovery_ != nullptr);
     auto acquired = self.discovery_->acquire(service, self.options_.group);
     if (!acquired) {
         self.metrics_observer_.record_event(acquire_failure_event(acquired.error().code));
-        if (!self.acquire_error_) {
-            self.acquire_error_ = std::move(acquired.error());
-        }
-        return make_unavailable_service_address_selector(std::move(service), std::move(cluster));
+        return std::unexpected(ProxyAddressSelectorFactory::Error{
+                .field = "service",
+                .message = std::move(acquired.error().message),
+        });
     }
-    return std::make_shared<NacosProxyAddressSelector>(std::move(*acquired), std::move(cluster),
-                                                       self.metrics_observer_);
+    std::shared_ptr<ProxyAddressSelector> selector = std::make_shared<NacosProxyAddressSelector>(
+            std::move(*acquired), std::move(cluster), self.metrics_observer_);
+    return selector;
 }
 
 } // namespace fiber::access_server

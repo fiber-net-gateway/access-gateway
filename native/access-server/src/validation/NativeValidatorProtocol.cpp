@@ -2,7 +2,7 @@
 
 #include "config/AccessConfigCodec.h"
 #include "routing/Cidr.h"
-#include "routing/ProjectRouteSnapshot.h"
+#include "routing/ProjectConfigCompiler.h"
 #include "runtime/AccessScriptRuntime.h"
 #include "runtime/GrayMatchStore.h"
 

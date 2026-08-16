@@ -33,7 +33,8 @@ CompiledProjectConfigResult AccessConfigCompiler::compile_project(std::string_vi
     if (!script_runtime_) {
         script_runtime_.emplace();
     }
-    auto compiled = compile_project_config(project, **parsed, script_runtime_->compiler_adapter());
+    const ProjectConfigCompiler compiler(script_runtime_->compiler_adapter());
+    auto compiled = compiler.compile(project, **parsed);
     if (!compiled) {
         return std::unexpected(AccessProjectCompileFailure{
                 .stage = AccessProjectCompileFailureStage::Compile,
