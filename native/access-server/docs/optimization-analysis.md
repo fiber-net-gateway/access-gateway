@@ -935,16 +935,23 @@ unknown-length 限制，原 Handler 集成测试继续验证相同 wire error �
 
 **归属：本项目。**
 
-当前单个大 coroutine 同时处理 request plan、gray、选址、retry、pool/DNS/connect、CAT、
-body、response rewrite 和 WebSocket。建议分为：
+**实施状态：已解决（2026-08-17）。** `ProxyExecutor::execute_impl` 现在只编排 context/gray、
+选址、失败 token、最多四次连接尝试和最终 attempt；同步 request target/header/template/body
+framing 由独立 `ProxyRequestPlan` 一次性准备，连接重试只重绑未被配置覆盖的 Host。连接成功
+后的 header 注入、request body、最终 response header、response rewrite/body pipe 和 WebSocket
+tunnel 由 concrete `UpstreamAttempt` 负责。
 
-- `ProxyRequestPlan`；
-- `UpstreamAttempt`；
-- `HttpResponseBridge`；
-- `WebSocketBridge`。
+没有再包装新的 `HttpResponseBridge`/`WebSocketBridge` coroutine：普通 body 继续直接使用 Fiber
+`pipe_http_body`，WebSocket 继续直接使用 `relay_websocket_tunnel`。`UpstreamAttempt` 刻意留在
+`ProxyExecutor.cpp` 同一 translation unit，使 Release 编译器能够 elide 嵌套 Task allocation；
+同时 `execute_adapter` 改为直接返回 Task，不再创建转发 coroutine。
 
-优先拆纯同步规划和独立 bridge，不用 `std::function` 或虚调用把每一步插件化。拆分前后
-比较 coroutine frame、二进制 text、吞吐和 p99，防止只改善文件大小而损害热路径。
+Clang 22、`-O3`、关闭 LTO 的可重复对象级检查中，应用层 active coroutine frame 从
+`648 + 440 + 2568 = 3656` bytes 降到 `440 + 2272 = 2712` bytes（约 -25.8%），frame 数从
+三个降到两个；拆分前单对象 text 为 46522 bytes，拆分后 Executor 与 RequestPlan 合计
+42547 bytes（约 -8.5%）。检查未发现 `UpstreamAttempt` 的额外 `operator new`。实现没有增加
+`std::function`、虚调用、共享所有权、锁或请求期容器分配；聚焦测试继续覆盖模板只求值一次、
+Host retry rebind、body limit、selection report、response limit、取消和 WebSocket 双向 relay。
 
 ### 8.7 C-01：`AccessRequestTelemetry`
 

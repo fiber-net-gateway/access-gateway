@@ -10,10 +10,10 @@
 #include <fiber/http/HttpBodyPipe.h>
 #include <fiber/http/HttpBodySpec.h>
 #include <fiber/http/HttpExchange.h>
-#include <fiber/http/HttpHeaderHash.h>
 #include <fiber/http/HttpHeaders.h>
 #include <fiber/http/HttpProxyCore.h>
 #include <fiber/http/HttpWebSocketProxy.h>
+#include "ProxyRequestPlan.h"
 #include "ProxyResponsePlan.h"
 
 #include <algorithm>
@@ -23,24 +23,12 @@
 #include <optional>
 #include <string>
 #include <utility>
-#include <vector>
 
 namespace fiber::access_server {
 namespace {
 
 constexpr std::string_view kTraceCluster = "HI-TRACE-CLUSTER";
-constexpr std::string_view kTraceParentHeader = "traceparent";
-constexpr std::uint64_t kTraceParentHeaderHash = http::http_header_name_hash(kTraceParentHeader);
-constexpr std::string_view kCallSourceHeader = "x-ploto-source-app";
-constexpr std::uint64_t kCallSourceHeaderHash = http::http_header_name_hash(kCallSourceHeader);
-constexpr std::string_view kOriginHostHeader = "ploto-origin-host";
-constexpr std::uint64_t kOriginHostHeaderHash = http::http_header_name_hash(kOriginHostHeader);
 constexpr std::size_t kMaxJavaAttempts = 4;
-
-enum class ProxyHostBinding : std::uint8_t {
-    SelectedEndpoint,
-    Configured,
-};
 
 enum class ProxyFailurePhase : std::uint8_t {
     NoUpstreamHosts,
@@ -347,78 +335,6 @@ void record_provider_failure(AccessProviderTransaction &provider, AccessRequestT
     }
 }
 
-bool is_header(std::string_view actual, std::string_view expected) noexcept {
-    return http::http_header_name_equals_ci(actual, expected);
-}
-
-bool is_java_filtered_proxy_request_header(std::string_view name) noexcept {
-    return is_header(name, "host") || is_java_filtered_response_header(name);
-}
-
-std::string_view preserved_request_target(const http::HttpExchange &exchange, std::string &storage) {
-    if (!exchange.uri().unparsed_uri.empty()) {
-        return exchange.uri().unparsed_uri;
-    }
-    storage.clear();
-    storage.reserve(exchange.uri().path.size() + (exchange.uri().query.empty() ? 0U : exchange.uri().query.size() + 1));
-    storage.assign(exchange.uri().path);
-    if (!exchange.uri().query.empty()) {
-        storage.push_back('?');
-        storage.append(exchange.uri().query);
-    }
-    return std::string_view(storage);
-}
-
-void java_escape_uri(std::string_view value, std::string &result) {
-    constexpr std::array<std::uint32_t, 8> kEscape{
-            0xFFFF'FFFFU, 0xD000'002DU, 0x5000'0000U, 0xB800'0001U,
-            0xFFFF'FFFFU, 0xFFFF'FFFFU, 0xFFFF'FFFFU, 0xFFFF'FFFFU,
-    };
-    constexpr char kHex[] = "0123456789ABCDEF";
-
-    std::size_t escaped_size = value.size();
-    for (const unsigned char byte: value) {
-        if ((kEscape[byte >> 5U] & (1U << (byte & 0x1FU))) != 0) {
-            escaped_size += 2;
-        }
-    }
-    result.clear();
-    result.reserve(escaped_size);
-    for (const unsigned char byte: value) {
-        if ((kEscape[byte >> 5U] & (1U << (byte & 0x1FU))) == 0) {
-            result.push_back(static_cast<char>(byte));
-            continue;
-        }
-        result.push_back('%');
-        result.push_back(kHex[byte >> 4U]);
-        result.push_back(kHex[byte & 0x0FU]);
-    }
-}
-
-Result<std::string_view> resolve_request_target(const http::HttpExchange &exchange, const CompiledProxyRoute &proxy,
-                                                TemplateEvaluator evaluator, std::string &storage) {
-    if (!proxy.rewrite) {
-        return preserved_request_target(exchange, storage);
-    }
-
-    auto rewritten = evaluate_template(*proxy.rewrite, evaluator);
-    if (!rewritten) {
-        return std::unexpected(rewritten.error());
-    }
-    const std::string_view rewritten_view = rewritten->view();
-    if (rewritten_view.empty()) {
-        storage.assign("/");
-    } else {
-        java_escape_uri(rewritten_view, storage);
-    }
-    if (!exchange.uri().query.empty()) {
-        storage.reserve(storage.size() + exchange.uri().query.size() + 1);
-        storage.push_back('?');
-        storage.append(exchange.uri().query);
-    }
-    return std::string_view(storage);
-}
-
 Result<std::optional<std::string>> evaluate_proxy_context(std::span<const CompiledTemplateEntry> context,
                                                           TemplateEvaluator evaluator,
                                                           std::string_view initial_context_cluster,
@@ -453,101 +369,6 @@ Result<std::optional<std::string>> evaluate_proxy_context(std::span<const Compil
         }
     }
     return cluster;
-}
-
-bool is_websocket_request(const http::HttpExchange &exchange, const CompiledProxyRoute &proxy) noexcept {
-    if (!proxy.websocket_timeout_millis || *proxy.websocket_timeout_millis <= 0) {
-        return false;
-    }
-    return is_header(exchange.header("Upgrade"), "websocket") && is_header(exchange.header("Connection"), "upgrade");
-}
-
-http::HttpBodySpec request_body_spec(const http::HttpExchange &exchange, bool websocket) noexcept {
-    if (websocket) {
-        return http::HttpBodySpec::None();
-    }
-    const http::HttpBodySpec inbound = exchange.request_body_spec();
-    if (!exchange.header("Content-Length").empty() && inbound.is_content_length()) {
-        return http::HttpBodySpec::ContentLength(inbound.content_length());
-    }
-    return http::HttpBodySpec::Chunked();
-}
-
-std::optional<std::uint64_t> normalized_max_response_body(const CompiledProxyRoute &proxy) noexcept {
-    if (!proxy.max_response_body_size || *proxy.max_response_body_size == 0) {
-        return std::nullopt;
-    }
-    if (*proxy.max_response_body_size < 0) {
-        return 0;
-    }
-    return static_cast<std::uint64_t>(*proxy.max_response_body_size);
-}
-
-Err request_head_build_error() noexcept { return Err::from_error(common::IoErr::NoMem); }
-
-Result<ProxyHostBinding> build_request_headers(const ProxyUpstreamEndpoint &endpoint,
-                                               const http::HttpExchange &exchange, const CompiledProxyRoute &proxy,
-                                               const ProxyExecutionInput &input, bool websocket,
-                                               const AccessRequestTelemetry &telemetry, http::HttpHeaders &headers,
-                                               std::vector<EvaluatedTemplate> &evaluated_values) {
-    if (!headers.set("Host", endpoint.host_header)) {
-        return std::unexpected(request_head_build_error());
-    }
-    ProxyHostBinding host_binding = ProxyHostBinding::SelectedEndpoint;
-
-    if (websocket && (!headers.set("Connection", "upgrade") || !headers.set("Upgrade", "websocket"))) {
-        return std::unexpected(request_head_build_error());
-    }
-
-    for (const CompiledHeaderTemplates::EntryView header: proxy.proxy_headers) {
-        auto value = evaluate_template(header.value(), input.template_evaluator);
-        if (!value) {
-            return std::unexpected(value.error());
-        }
-        std::string_view value_view = value->view();
-        if (value_view.empty() || is_java_filtered_response_header(header.name())) {
-            continue;
-        }
-        if (!is_valid_http_header_name(header.name()) || !is_valid_http_header_value(value_view)) {
-            return std::unexpected(Err::from_exception(Exception::unknown("invalid proxy request header")));
-        }
-        if (value->owns_storage()) {
-            evaluated_values.push_back(std::move(*value));
-            value_view = evaluated_values.back().view();
-        }
-        if (!headers.set_view(header.name(), value_view, header.lowcase_name().data(), header.hash())) {
-            return std::unexpected(request_head_build_error());
-        }
-        if (is_header(header.name(), "Host")) {
-            host_binding = ProxyHostBinding::Configured;
-        }
-    }
-
-    for (const http::HttpHeaders::HeaderField &header: exchange.request_headers()) {
-        if (header.name_len == 0 || is_java_filtered_proxy_request_header(header.name_view()) ||
-            proxy.proxy_headers.contains(header.lowcase_view(), header.name_hash)) {
-            continue;
-        }
-        if (!headers.add_view(header.name_view(), header.value_view(), header.lowcase_name, header.name_hash)) {
-            return std::unexpected(request_head_build_error());
-        }
-    }
-    if (exchange.header(kTraceParentHeader).empty() &&
-        !proxy.proxy_headers.contains(kTraceParentHeader, kTraceParentHeaderHash) &&
-        !telemetry.trace_parent().empty() &&
-        !headers.set_view(kTraceParentHeader, telemetry.trace_parent(), kTraceParentHeader.data(),
-                          kTraceParentHeaderHash)) {
-        return std::unexpected(request_head_build_error());
-    }
-
-    if (!headers.set_view(kCallSourceHeader, input.call_source, kCallSourceHeader.data(), kCallSourceHeaderHash)) {
-        return std::unexpected(request_head_build_error());
-    }
-    if (!input.origin_host.empty() &&
-        !headers.set_view(kOriginHostHeader, input.origin_host, kOriginHostHeader.data(), kOriginHostHeaderHash)) {
-        return std::unexpected(request_head_build_error());
-    }
-    return host_binding;
 }
 
 std::chrono::milliseconds response_header_timeout(std::int32_t timeout_millis) noexcept {
@@ -678,6 +499,354 @@ private:
     bool response_limit_exceeded_ = false;
 };
 
+// Keep the connected attempt in this translation unit: Release builds can
+// embed its directly-awaited Task frame in execute_impl instead of allocating
+// another request-path coroutine.
+class UpstreamAttempt final : public common::NonCopyable, public common::NonMovable {
+public:
+    UpstreamAttempt(http::HttpExchange &exchange, const CompiledProxyRoute &proxy, const ProxyExecutionInput &input,
+                    AccessRequestTelemetry &telemetry, ProxyRequestPlan &request_plan, ProxyUpstreamEndpoint &endpoint,
+                    ProxyUpstreamConnection &connection, ProxyAddressSelector &selector,
+                    const ProxyExecutorOptions &options, AccessProviderTransaction &provider,
+                    ProxyAttemptMetricScope &attempt_metrics, WebSocketMetricScope &websocket_metrics) noexcept :
+        exchange_(exchange), proxy_(proxy), input_(input), telemetry_(telemetry), request_plan_(request_plan),
+        endpoint_(endpoint), connection_(connection), selector_(selector), options_(options), provider_(provider),
+        attempt_metrics_(attempt_metrics), websocket_metrics_(websocket_metrics) {}
+
+    [[nodiscard]] async::Task<Result<void>> run() noexcept;
+
+private:
+    void report_selection(bool success) noexcept {
+        if (selection_reported_) {
+            return;
+        }
+        selector_.report_address(endpoint_, success);
+        selection_reported_ = true;
+    }
+
+    http::HttpExchange &exchange_;
+    const CompiledProxyRoute &proxy_;
+    const ProxyExecutionInput &input_;
+    AccessRequestTelemetry &telemetry_;
+    ProxyRequestPlan &request_plan_;
+    ProxyUpstreamEndpoint &endpoint_;
+    ProxyUpstreamConnection &connection_;
+    ProxyAddressSelector &selector_;
+    const ProxyExecutorOptions &options_;
+    AccessProviderTransaction &provider_;
+    ProxyAttemptMetricScope &attempt_metrics_;
+    WebSocketMetricScope &websocket_metrics_;
+    bool selection_reported_ = false;
+};
+
+async::Task<Result<void>> UpstreamAttempt::run() noexcept {
+    FIBER_ASSERT(connection_.connection != nullptr);
+    provider_.add_connection_reuse(connection_.connection->request_count());
+    telemetry_.set_upstream(endpoint_);
+
+    http::HttpHeaders &request_headers = request_plan_.headers();
+    if (!telemetry_.inject_upstream_headers(request_headers, provider_)) {
+        telemetry_.record_proxy_failure(AccessProxyFailurePhase::BuildHeaders);
+        attempt_metrics_.aborted();
+        provider_.fail("build_headers", common::IoErr::NoMem);
+        co_return std::unexpected(Err::from_error(common::IoErr::NoMem));
+    }
+
+    http::ClientHttp1Exchange upstream(*connection_.connection, exchange_.pool());
+    if (!upstream.valid()) {
+        const ProxyFailure exchange_failure =
+                failure(ProxyFailurePhase::Connect, "failed to create upstream HTTP exchange", common::IoErr::Busy);
+        record_provider_failure(provider_, telemetry_, attempt_metrics_, exchange_failure);
+        co_return proxy_failure_result(exchange_failure);
+    }
+
+    const http::Http1RequestHead request_head = request_plan_.request_head(exchange_.method());
+    auto sent_request_header = co_await upstream.send_header(request_head, request_plan_.request_end_stream());
+    if (!sent_request_header) {
+        const ProxyFailure send_failure = failure(
+                ProxyFailurePhase::SendHeader, "failed to send upstream request header", sent_request_header.error());
+        record_provider_failure(provider_, telemetry_, attempt_metrics_, send_failure);
+        report_selection(false);
+        co_return proxy_failure_result(send_failure);
+    }
+
+    const http::HttpBodySpec &request_body = request_plan_.body_spec();
+    if (!request_plan_.request_end_stream()) {
+        http::proxy_core::RequestBodyForwardState forward_state(request_body);
+        std::size_t received_request_body = 0;
+        for (;;) {
+            auto body = co_await exchange_.read_body(options_.request_body_chunk_size);
+            if (!body) {
+                (void) upstream.abort(body.error());
+                const ProxyFailure read_failure = failure(ProxyFailurePhase::ReadRequestBody,
+                                                          "failed to read downstream request body", body.error());
+                record_provider_failure(provider_, telemetry_, attempt_metrics_, read_failure);
+                co_return proxy_failure_result(read_failure);
+            }
+            const bool complete = body->complete();
+            const std::size_t body_bytes = body->readable_bytes();
+            if (!forward_state.accepts(body_bytes)) {
+                (void) upstream.abort(common::IoErr::Invalid);
+                const ProxyFailure read_failure =
+                        failure(ProxyFailurePhase::ReadRequestBody,
+                                "downstream request body does not match Content-Length", common::IoErr::Invalid);
+                record_provider_failure(provider_, telemetry_, attempt_metrics_, read_failure);
+                co_return proxy_failure_result(read_failure);
+            }
+            if (input_.max_request_body_size != 0 &&
+                body_bytes >
+                        input_.max_request_body_size - std::min(received_request_body, input_.max_request_body_size)) {
+                (void) upstream.abort(common::IoErr::MessageTooLarge);
+                const ProxyFailure limit_failure =
+                        failure(ProxyFailurePhase::RequestBodyTooLarge, "downstream request body exceeds route limit",
+                                common::IoErr::MessageTooLarge);
+                record_provider_failure(provider_, telemetry_, attempt_metrics_, limit_failure);
+                co_return proxy_failure_result(limit_failure);
+            }
+            received_request_body += body_bytes;
+            if (forward_state.should_write(body_bytes)) {
+                auto written = co_await upstream.write_all(std::move(*body));
+                if (!written) {
+                    const ProxyFailure send_failure = failure(ProxyFailurePhase::SendRequestBody,
+                                                              "failed to send upstream request body", written.error());
+                    record_provider_failure(provider_, telemetry_, attempt_metrics_, send_failure);
+                    report_selection(false);
+                    co_return proxy_failure_result(send_failure);
+                }
+                if (*written != body_bytes) {
+                    (void) upstream.abort(common::IoErr::Invalid);
+                    const ProxyFailure send_failure =
+                            failure(ProxyFailurePhase::SendRequestBody, "upstream request body write was incomplete",
+                                    common::IoErr::Invalid);
+                    record_provider_failure(provider_, telemetry_, attempt_metrics_, send_failure);
+                    report_selection(false);
+                    co_return proxy_failure_result(send_failure);
+                }
+                forward_state.record_write(*written);
+            }
+            if (complete) {
+                if (request_body.is_content_length() && !forward_state.complete()) {
+                    (void) upstream.abort(common::IoErr::Invalid);
+                    const ProxyFailure read_failure =
+                            failure(ProxyFailurePhase::ReadRequestBody,
+                                    "downstream request body ended before Content-Length", common::IoErr::Invalid);
+                    record_provider_failure(provider_, telemetry_, attempt_metrics_, read_failure);
+                    co_return proxy_failure_result(read_failure);
+                }
+                break;
+            }
+        }
+    }
+
+    const http::Http1ResponseHead *upstream_head = nullptr;
+    for (;;) {
+        auto received = co_await upstream.read_header(response_header_timeout(proxy_.timeout_millis));
+        if (!received) {
+            const ProxyFailure response_failure = failure(ProxyFailurePhase::ReadResponseHeader,
+                                                          "failed to read upstream response header", received.error());
+            record_provider_failure(provider_, telemetry_, attempt_metrics_, response_failure);
+            report_selection(false);
+            co_return proxy_failure_result(response_failure);
+        }
+        if ((*received)->status_code == 101 || !(*received)->is_informational()) {
+            upstream_head = *received;
+            break;
+        }
+    }
+
+    if (upstream_head->status_code >= 500) {
+        report_selection(false);
+    }
+    const bool websocket_response = request_plan_.websocket_upgrade() && upstream_head->status_code == 101;
+    if (request_plan_.websocket_upgrade() && !websocket_response) {
+        websocket_metrics_.rejected();
+    }
+
+    auto custom_headers = prepare_proxy_response_headers(proxy_.response_headers, input_.template_evaluator);
+    if (!custom_headers) {
+        telemetry_.record_proxy_failure(AccessProxyFailurePhase::BuildResponseHeaders);
+        if (websocket_response) {
+            (void) upstream.abort(common::IoErr::Canceled);
+            attempt_metrics_.aborted();
+            provider_.fail("aborted", common::IoErr::Canceled);
+        } else {
+            auto discarded = co_await upstream.discard_response_body();
+            if (!discarded) {
+                report_selection(false);
+                record_provider_failure(provider_, telemetry_, attempt_metrics_,
+                                        failure(ProxyFailurePhase::ReadResponseBody,
+                                                "failed to discard upstream response body", discarded.error()));
+                (void) upstream.abort(discarded.error());
+            } else {
+                report_selection(true);
+                attempt_metrics_.completed();
+                provider_.complete(upstream_head->status_code);
+            }
+        }
+        co_return std::unexpected(custom_headers.error());
+    }
+
+    const std::string_view content_length_text = upstream_head->headers.get("Content-Length");
+    std::size_t content_length = 0;
+    const bool has_content_length = parse_content_length(content_length_text, content_length);
+    if (!websocket_response && has_content_length &&
+        response_limit_exceeded(request_plan_.max_response_body_size(), content_length)) {
+        (void) upstream.abort(common::IoErr::MessageTooLarge);
+        telemetry_.record_proxy_failure(AccessProxyFailurePhase::ResponseBodyTooLarge);
+        attempt_metrics_.aborted();
+        provider_.fail("aborted", common::IoErr::MessageTooLarge);
+        auto exception = response_body_too_large(exchange_.pool(), content_length);
+        if (!exception) {
+            co_return std::unexpected(Err::from_error(exception.error()));
+        }
+        co_return std::unexpected(Err::from_exception(*exception));
+    }
+
+    const bool no_body = http::proxy_core::response_has_no_body(exchange_.method(), upstream_head->status_code);
+    if (websocket_response) {
+        auto switched = upstream.switch_to_raw_stream();
+        if (!switched) {
+            report_selection(false);
+            const Exception exception = Exception::unknown("failed to upgrade websocket");
+            telemetry_.record_proxy_failure(AccessProxyFailurePhase::SwitchWebSocket);
+            attempt_metrics_.failed();
+            provider_.call_error(exception, "switch_to_raw_stream", switched.error());
+            (void) upstream.abort(switched.error());
+            co_return std::unexpected(Err::from_upstream_exception(exception));
+        }
+    }
+
+    http::HttpHeaders &response_headers = telemetry_.response_headers();
+    if (!build_downstream_headers(exchange_, proxy_, endpoint_, *upstream_head, *custom_headers, websocket_response,
+                                  telemetry_.client_metadata(), response_headers) ||
+        !telemetry_.finalize_response_headers()) {
+        (void) upstream.abort(common::IoErr::NoMem);
+        telemetry_.record_proxy_failure(AccessProxyFailurePhase::BuildResponseHeaders);
+        attempt_metrics_.aborted();
+        provider_.fail("aborted", common::IoErr::NoMem);
+        co_return std::unexpected(Err::from_error(common::IoErr::NoMem));
+    }
+
+    if (websocket_response) {
+        report_selection(true);
+
+        auto sent_header = co_await exchange_.send_header(
+                {
+                        .kind = http::OutgoingHeaderKind::Final,
+                        .status_code = 101,
+                        .reason = upstream_head->reason,
+                        .headers = &response_headers,
+                        .body = http::HttpBodySpec::Stream(),
+                        .connection_mode = http::ResponseConnectionMode::Auto,
+                        .end_stream = false,
+                },
+                options_.downstream_write_timeout);
+        if (!sent_header) {
+            (void) upstream.abort(sent_header.error());
+            telemetry_.record_proxy_failure(AccessProxyFailurePhase::SendResponseHeader);
+            attempt_metrics_.aborted();
+            provider_.fail("aborted", sent_header.error());
+            telemetry_.record_response_error(sent_header.error());
+            co_return std::unexpected(Err::from_error(sent_header.error()));
+        }
+
+        websocket_metrics_.accepted();
+        const std::chrono::milliseconds websocket_timeout(request_plan_.websocket_timeout_millis());
+        co_await http::proxy_core::relay_websocket_tunnel(exchange_, upstream, websocket_timeout, websocket_timeout);
+        websocket_metrics_.closed();
+        attempt_metrics_.completed();
+        provider_.complete(upstream_head->status_code);
+        co_return Result<void>{};
+    }
+
+    const http::HttpBodySpec response_body =
+            no_body ? http::HttpBodySpec::None()
+                    : (has_content_length ? http::HttpBodySpec::ContentLength(content_length)
+                                          : http::HttpBodySpec::Auto());
+    const bool response_end_stream = no_body || (has_content_length && content_length == 0);
+    auto sent_response_header = co_await exchange_.send_header(
+            {
+                    .kind = http::OutgoingHeaderKind::Final,
+                    .status_code = upstream_head->status_code,
+                    .reason = upstream_head->reason,
+                    .headers = &response_headers,
+                    .body = response_body,
+                    .connection_mode = http::ResponseConnectionMode::Auto,
+                    .end_stream = response_end_stream,
+            },
+            options_.downstream_write_timeout);
+    if (!sent_response_header) {
+        (void) upstream.abort(sent_response_header.error());
+        telemetry_.record_proxy_failure(AccessProxyFailurePhase::SendResponseHeader);
+        attempt_metrics_.aborted();
+        provider_.fail("aborted", sent_response_header.error());
+        telemetry_.record_response_error(sent_response_header.error());
+        co_return std::unexpected(Err::from_error(sent_response_header.error()));
+    }
+    if (response_end_stream) {
+        if (no_body) {
+            auto discarded = co_await upstream.discard_response_body();
+            if (!discarded) {
+                report_selection(false);
+                record_provider_failure(provider_, telemetry_, attempt_metrics_,
+                                        failure(ProxyFailurePhase::ReadResponseBody,
+                                                "failed to discard upstream response body", discarded.error()));
+                (void) upstream.abort(discarded.error());
+            } else {
+                report_selection(true);
+                attempt_metrics_.completed();
+                provider_.complete(upstream_head->status_code);
+            }
+        } else {
+            report_selection(true);
+            attempt_metrics_.completed();
+            provider_.complete(upstream_head->status_code);
+        }
+        co_return Result<void>{};
+    }
+
+    ProxyResponseBodyReader body_reader(upstream, request_plan_.max_response_body_size());
+    const http::HttpBodyPipeOptions pipe_options{
+            .buffer_size = options_.response_body_chunk_size,
+            .low_water = proxy_.flush.value_or(false)
+                                 ? http::kUnbufferedBodyPipeLowWater
+                                 : std::min(options_.response_body_chunk_size, http::kDefaultBodyPipeLowWater),
+            .read_timeout = std::chrono::milliseconds::max(),
+            .write_timeout = options_.downstream_write_timeout,
+    };
+    auto piped = co_await http::pipe_http_body(http::make_http_body_pipe_reader(body_reader),
+                                               http::make_http_body_pipe_writer(exchange_),
+                                               event::EventLoop::current().io_buf_node_pool(), pipe_options);
+    if (!piped) {
+        const http::HttpBodyPipeError pipe_error = piped.error();
+        if (body_reader.limit_exceeded()) {
+            telemetry_.record_proxy_failure(AccessProxyFailurePhase::ResponseBodyTooLarge);
+            attempt_metrics_.aborted();
+            provider_.fail("aborted", pipe_error.code);
+        } else if (pipe_error.phase == http::HttpBodyPipePhase::Read) {
+            report_selection(false);
+            record_provider_failure(provider_, telemetry_, attempt_metrics_,
+                                    failure(ProxyFailurePhase::ReadResponseBody,
+                                            "failed to read upstream response body", pipe_error.code));
+        } else {
+            telemetry_.record_proxy_failure(pipe_error.phase == http::HttpBodyPipePhase::Write
+                                                    ? AccessProxyFailurePhase::WriteResponseBody
+                                                    : AccessProxyFailurePhase::BuildResponseHeaders);
+            attempt_metrics_.aborted();
+            provider_.fail("aborted", pipe_error.code);
+            if (pipe_error.phase == http::HttpBodyPipePhase::Write) {
+                telemetry_.record_response_error(pipe_error.code);
+            }
+        }
+        co_return std::unexpected(Err::from_error(pipe_error.code));
+    }
+
+    report_selection(true);
+    attempt_metrics_.completed();
+    provider_.complete(upstream_head->status_code);
+    co_return Result<void>{};
+}
+
 } // namespace
 
 ProxyExecutor::ProxyExecutor(http::StealableHttp1ConnectionPoolSet &pool, ProxyClusterMatcher cluster_matcher,
@@ -701,7 +870,7 @@ AccessProxyAdapter ProxyExecutor::adapter() noexcept {
 async::Task<Result<void>> ProxyExecutor::execute_adapter(void *context, http::HttpExchange &exchange,
                                                          const CompiledProxyRoute &proxy, ProxyExecutionInput input,
                                                          AccessRequestTelemetry &telemetry) noexcept {
-    co_return co_await static_cast<ProxyExecutor *>(context)->execute(exchange, proxy, input, telemetry);
+    return static_cast<ProxyExecutor *>(context)->execute(exchange, proxy, input, telemetry);
 }
 
 async::Task<Result<void>> ProxyExecutor::execute(http::HttpExchange &exchange, const CompiledProxyRoute &proxy,
@@ -756,19 +925,8 @@ async::Task<Result<void>> ProxyExecutor::execute_impl(http::HttpExchange &exchan
         }
     }
 
-    const bool websocket_upgrade = is_websocket_request(exchange, proxy);
-    WebSocketMetricScope websocket_metrics(telemetry, websocket_upgrade);
-    const std::int32_t websocket_timeout_millis =
-            websocket_upgrade && proxy.websocket_timeout_millis ? *proxy.websocket_timeout_millis : 0;
-    const http::HttpBodySpec request_body = request_body_spec(exchange, websocket_upgrade);
-    const std::optional<std::uint64_t> max_response_body_size = normalized_max_response_body(proxy);
-    bool request_prepared = false;
-    std::string request_target_storage;
-    std::string_view request_target;
-    http::HttpHeaders request_headers(exchange.pool());
-    std::vector<EvaluatedTemplate> request_header_values;
-    request_header_values.reserve(proxy.proxy_headers.dynamic_size());
-    std::optional<ProxyHostBinding> host_binding;
+    ProxyRequestPlan request_plan(exchange.pool(), exchange, proxy);
+    WebSocketMetricScope websocket_metrics(telemetry, request_plan.websocket_upgrade());
 
     std::array<std::uint64_t, kMaxJavaAttempts> excluded_selection_tokens{};
     std::size_t excluded_selection_token_count = 0;
@@ -799,46 +957,15 @@ async::Task<Result<void>> ProxyExecutor::execute_impl(http::HttpExchange &exchan
             telemetry.record_proxy_failure(metric_failure_phase(selected_failure.phase));
             co_return proxy_failure_result(selected_failure);
         }
-        bool selection_reported = false;
-        const auto report_selection = [&](bool success) noexcept {
-            if (selection_reported) {
-                return;
-            }
-            proxy.address_selector->report_address(*selected, success);
-            selection_reported = true;
-        };
-
-        if (!request_prepared) {
-            auto resolved_target =
-                    resolve_request_target(exchange, proxy, input.template_evaluator, request_target_storage);
-            if (!resolved_target) {
-                telemetry.record_proxy_failure(AccessProxyFailurePhase::BuildRequest);
-                co_return std::unexpected(resolved_target.error());
-            }
-            request_target = *resolved_target;
-
-            auto built_headers = build_request_headers(*selected, exchange, proxy, input, websocket_upgrade, telemetry,
-                                                       request_headers, request_header_values);
-            if (!built_headers) {
-                telemetry.record_proxy_failure(AccessProxyFailurePhase::BuildHeaders);
-                co_return std::unexpected(built_headers.error());
-            }
-            host_binding = *built_headers;
-            request_prepared = true;
-        } else if (*host_binding == ProxyHostBinding::SelectedEndpoint &&
-                   !request_headers.set("Host", selected->host_header)) {
-            telemetry.record_proxy_failure(AccessProxyFailurePhase::BuildHeaders);
-            co_return std::unexpected(request_head_build_error());
+        ProxyRequestPlanResult planned = request_plan.prepared()
+                                                 ? request_plan.rebind_endpoint(*selected)
+                                                 : request_plan.prepare(*selected, exchange, proxy, input, telemetry);
+        if (!planned) {
+            telemetry.record_proxy_failure(planned.error().phase == ProxyRequestPlanErrorPhase::BuildRequest
+                                                   ? AccessProxyFailurePhase::BuildRequest
+                                                   : AccessProxyFailurePhase::BuildHeaders);
+            co_return std::unexpected(planned.error().error);
         }
-
-        const bool request_end_stream =
-                request_body.is_none() || (request_body.is_content_length() && request_body.content_length() == 0);
-        const http::Http1RequestHead request_head{
-                .method = exchange.method(),
-                .target = request_target,
-                .headers = &request_headers,
-                .body = request_body,
-        };
 
         const std::string_view provider_name =
                 selected->provider_name.empty() ? selected->host_header : selected->provider_name;
@@ -852,318 +979,17 @@ async::Task<Result<void>> ProxyExecutor::execute_impl(http::HttpExchange &exchan
             telemetry.record_proxy_connection(connected.error().observation);
             ProxyFailure connect_failure = from_connect_error(connected.error());
             record_provider_failure(provider_transaction, telemetry, attempt_metrics, connect_failure);
-            report_selection(false);
+            proxy.address_selector->report_address(*selected, false);
             FIBER_ASSERT(excluded_selection_token_count < excluded_selection_tokens.size());
             excluded_selection_tokens[excluded_selection_token_count++] = selected->selection_token;
             previous_failure = connect_failure;
             continue;
         }
         telemetry.record_proxy_connection(connected->observation);
-        provider_transaction.add_connection_reuse(connected->connection->request_count());
-        telemetry.set_upstream(*selected);
-
-        if (!telemetry.inject_upstream_headers(request_headers, provider_transaction)) {
-            telemetry.record_proxy_failure(AccessProxyFailurePhase::BuildHeaders);
-            attempt_metrics.aborted();
-            provider_transaction.fail("build_headers", common::IoErr::NoMem);
-            co_return std::unexpected(Err::from_error(common::IoErr::NoMem));
-        }
-
-        http::ClientHttp1Exchange upstream(*connected->connection, exchange.pool());
-        if (!upstream.valid()) {
-            const ProxyFailure exchange_failure =
-                    failure(ProxyFailurePhase::Connect, "failed to create upstream HTTP exchange", common::IoErr::Busy);
-            record_provider_failure(provider_transaction, telemetry, attempt_metrics, exchange_failure);
-            co_return proxy_failure_result(exchange_failure);
-        }
-
-        auto sent_request_header = co_await upstream.send_header(request_head, request_end_stream);
-        if (!sent_request_header) {
-            const ProxyFailure send_failure =
-                    failure(ProxyFailurePhase::SendHeader, "failed to send upstream request header",
-                            sent_request_header.error());
-            record_provider_failure(provider_transaction, telemetry, attempt_metrics, send_failure);
-            report_selection(false);
-            co_return proxy_failure_result(send_failure);
-        }
-
-        if (!request_end_stream) {
-            http::proxy_core::RequestBodyForwardState forward_state(request_body);
-            std::size_t received_request_body = 0;
-            for (;;) {
-                auto body = co_await exchange.read_body(options_.request_body_chunk_size);
-                if (!body) {
-                    (void) upstream.abort(body.error());
-                    const ProxyFailure read_failure = failure(ProxyFailurePhase::ReadRequestBody,
-                                                              "failed to read downstream request body", body.error());
-                    record_provider_failure(provider_transaction, telemetry, attempt_metrics, read_failure);
-                    co_return proxy_failure_result(read_failure);
-                }
-                const bool complete = body->complete();
-                const std::size_t body_bytes = body->readable_bytes();
-                if (!forward_state.accepts(body_bytes)) {
-                    (void) upstream.abort(common::IoErr::Invalid);
-                    const ProxyFailure read_failure =
-                            failure(ProxyFailurePhase::ReadRequestBody,
-                                    "downstream request body does not match Content-Length", common::IoErr::Invalid);
-                    record_provider_failure(provider_transaction, telemetry, attempt_metrics, read_failure);
-                    co_return proxy_failure_result(read_failure);
-                }
-                if (input.max_request_body_size != 0 &&
-                    body_bytes > input.max_request_body_size -
-                                         std::min(received_request_body, input.max_request_body_size)) {
-                    (void) upstream.abort(common::IoErr::MessageTooLarge);
-                    const ProxyFailure limit_failure =
-                            failure(ProxyFailurePhase::RequestBodyTooLarge,
-                                    "downstream request body exceeds route limit", common::IoErr::MessageTooLarge);
-                    record_provider_failure(provider_transaction, telemetry, attempt_metrics, limit_failure);
-                    co_return proxy_failure_result(limit_failure);
-                }
-                received_request_body += body_bytes;
-                if (forward_state.should_write(body_bytes)) {
-                    auto written = co_await upstream.write_all(std::move(*body));
-                    if (!written) {
-                        const ProxyFailure send_failure =
-                                failure(ProxyFailurePhase::SendRequestBody, "failed to send upstream request body",
-                                        written.error());
-                        record_provider_failure(provider_transaction, telemetry, attempt_metrics, send_failure);
-                        report_selection(false);
-                        co_return proxy_failure_result(send_failure);
-                    }
-                    if (*written != body_bytes) {
-                        (void) upstream.abort(common::IoErr::Invalid);
-                        const ProxyFailure send_failure =
-                                failure(ProxyFailurePhase::SendRequestBody,
-                                        "upstream request body write was incomplete", common::IoErr::Invalid);
-                        record_provider_failure(provider_transaction, telemetry, attempt_metrics, send_failure);
-                        report_selection(false);
-                        co_return proxy_failure_result(send_failure);
-                    }
-                    forward_state.record_write(*written);
-                }
-                if (complete) {
-                    if (request_body.is_content_length() && !forward_state.complete()) {
-                        (void) upstream.abort(common::IoErr::Invalid);
-                        const ProxyFailure read_failure =
-                                failure(ProxyFailurePhase::ReadRequestBody,
-                                        "downstream request body ended before Content-Length", common::IoErr::Invalid);
-                        record_provider_failure(provider_transaction, telemetry, attempt_metrics, read_failure);
-                        co_return proxy_failure_result(read_failure);
-                    }
-                    break;
-                }
-            }
-        }
-
-        const http::Http1ResponseHead *upstream_head = nullptr;
-        for (;;) {
-            auto received = co_await upstream.read_header(response_header_timeout(proxy.timeout_millis));
-            if (!received) {
-                const ProxyFailure response_failure =
-                        failure(ProxyFailurePhase::ReadResponseHeader, "failed to read upstream response header",
-                                received.error());
-                record_provider_failure(provider_transaction, telemetry, attempt_metrics, response_failure);
-                report_selection(false);
-                co_return proxy_failure_result(response_failure);
-            }
-            if ((*received)->status_code == 101 || !(*received)->is_informational()) {
-                upstream_head = *received;
-                break;
-            }
-        }
-
-        if (upstream_head->status_code >= 500) {
-            report_selection(false);
-        }
-        const bool websocket_response = websocket_upgrade && upstream_head->status_code == 101;
-        if (websocket_upgrade && !websocket_response) {
-            websocket_metrics.rejected();
-        }
-
-        auto custom_headers = prepare_proxy_response_headers(proxy.response_headers, input.template_evaluator);
-        if (!custom_headers) {
-            telemetry.record_proxy_failure(AccessProxyFailurePhase::BuildResponseHeaders);
-            if (websocket_response) {
-                (void) upstream.abort(common::IoErr::Canceled);
-                attempt_metrics.aborted();
-                provider_transaction.fail("aborted", common::IoErr::Canceled);
-            } else {
-                auto discarded = co_await upstream.discard_response_body();
-                if (!discarded) {
-                    report_selection(false);
-                    record_provider_failure(provider_transaction, telemetry, attempt_metrics,
-                                            failure(ProxyFailurePhase::ReadResponseBody,
-                                                    "failed to discard upstream response body", discarded.error()));
-                    (void) upstream.abort(discarded.error());
-                } else {
-                    report_selection(true);
-                    attempt_metrics.completed();
-                    provider_transaction.complete(upstream_head->status_code);
-                }
-            }
-            co_return std::unexpected(custom_headers.error());
-        }
-
-        const std::string_view content_length_text = upstream_head->headers.get("Content-Length");
-        std::size_t content_length = 0;
-        const bool has_content_length = parse_content_length(content_length_text, content_length);
-        if (!websocket_response && has_content_length &&
-            response_limit_exceeded(max_response_body_size, content_length)) {
-            (void) upstream.abort(common::IoErr::MessageTooLarge);
-            telemetry.record_proxy_failure(AccessProxyFailurePhase::ResponseBodyTooLarge);
-            attempt_metrics.aborted();
-            provider_transaction.fail("aborted", common::IoErr::MessageTooLarge);
-            auto exception = response_body_too_large(exchange.pool(), content_length);
-            if (!exception) {
-                co_return std::unexpected(Err::from_error(exception.error()));
-            }
-            co_return std::unexpected(Err::from_exception(*exception));
-        }
-
-        const bool no_body = http::proxy_core::response_has_no_body(exchange.method(), upstream_head->status_code);
-        if (websocket_response) {
-            auto switched = upstream.switch_to_raw_stream();
-            if (!switched) {
-                report_selection(false);
-                const Exception exception = Exception::unknown("failed to upgrade websocket");
-                telemetry.record_proxy_failure(AccessProxyFailurePhase::SwitchWebSocket);
-                attempt_metrics.failed();
-                provider_transaction.call_error(exception, "switch_to_raw_stream", switched.error());
-                (void) upstream.abort(switched.error());
-                co_return std::unexpected(Err::from_upstream_exception(exception));
-            }
-        }
-
-        http::HttpHeaders &response_headers = telemetry.response_headers();
-        if (!build_downstream_headers(exchange, proxy, *selected, *upstream_head, *custom_headers, websocket_response,
-                                      telemetry.client_metadata(), response_headers) ||
-            !telemetry.finalize_response_headers()) {
-            (void) upstream.abort(common::IoErr::NoMem);
-            telemetry.record_proxy_failure(AccessProxyFailurePhase::BuildResponseHeaders);
-            attempt_metrics.aborted();
-            provider_transaction.fail("aborted", common::IoErr::NoMem);
-            co_return std::unexpected(Err::from_error(common::IoErr::NoMem));
-        }
-
-        if (websocket_response) {
-            report_selection(true);
-
-            auto sent_header = co_await exchange.send_header(
-                    {
-                            .kind = http::OutgoingHeaderKind::Final,
-                            .status_code = 101,
-                            .reason = upstream_head->reason,
-                            .headers = &response_headers,
-                            .body = http::HttpBodySpec::Stream(),
-                            .connection_mode = http::ResponseConnectionMode::Auto,
-                            .end_stream = false,
-                    },
-                    options_.downstream_write_timeout);
-            if (!sent_header) {
-                (void) upstream.abort(sent_header.error());
-                telemetry.record_proxy_failure(AccessProxyFailurePhase::SendResponseHeader);
-                attempt_metrics.aborted();
-                provider_transaction.fail("aborted", sent_header.error());
-                telemetry.record_response_error(sent_header.error());
-                co_return std::unexpected(Err::from_error(sent_header.error()));
-            }
-
-            websocket_metrics.accepted();
-            co_await http::proxy_core::relay_websocket_tunnel(exchange, upstream,
-                                                              std::chrono::milliseconds(websocket_timeout_millis),
-                                                              std::chrono::milliseconds(websocket_timeout_millis));
-            websocket_metrics.closed();
-            attempt_metrics.completed();
-            provider_transaction.complete(upstream_head->status_code);
-            co_return Result<void>{};
-        }
-
-        const http::HttpBodySpec response_body =
-                no_body ? http::HttpBodySpec::None()
-                        : (has_content_length ? http::HttpBodySpec::ContentLength(content_length)
-                                              : http::HttpBodySpec::Auto());
-        const bool response_end_stream = no_body || (has_content_length && content_length == 0);
-        auto sent_response_header = co_await exchange.send_header(
-                {
-                        .kind = http::OutgoingHeaderKind::Final,
-                        .status_code = upstream_head->status_code,
-                        .reason = upstream_head->reason,
-                        .headers = &response_headers,
-                        .body = response_body,
-                        .connection_mode = http::ResponseConnectionMode::Auto,
-                        .end_stream = response_end_stream,
-                },
-                options_.downstream_write_timeout);
-        if (!sent_response_header) {
-            (void) upstream.abort(sent_response_header.error());
-            telemetry.record_proxy_failure(AccessProxyFailurePhase::SendResponseHeader);
-            attempt_metrics.aborted();
-            provider_transaction.fail("aborted", sent_response_header.error());
-            telemetry.record_response_error(sent_response_header.error());
-            co_return std::unexpected(Err::from_error(sent_response_header.error()));
-        }
-        if (response_end_stream) {
-            if (no_body) {
-                auto discarded = co_await upstream.discard_response_body();
-                if (!discarded) {
-                    report_selection(false);
-                    record_provider_failure(provider_transaction, telemetry, attempt_metrics,
-                                            failure(ProxyFailurePhase::ReadResponseBody,
-                                                    "failed to discard upstream response body", discarded.error()));
-                    (void) upstream.abort(discarded.error());
-                } else {
-                    report_selection(true);
-                    attempt_metrics.completed();
-                    provider_transaction.complete(upstream_head->status_code);
-                }
-            } else {
-                report_selection(true);
-                attempt_metrics.completed();
-                provider_transaction.complete(upstream_head->status_code);
-            }
-            co_return Result<void>{};
-        }
-
-        ProxyResponseBodyReader body_reader(upstream, max_response_body_size);
-        const http::HttpBodyPipeOptions pipe_options{
-                .buffer_size = options_.response_body_chunk_size,
-                .low_water = proxy.flush.value_or(false)
-                                     ? http::kUnbufferedBodyPipeLowWater
-                                     : std::min(options_.response_body_chunk_size, http::kDefaultBodyPipeLowWater),
-                .read_timeout = std::chrono::milliseconds::max(),
-                .write_timeout = options_.downstream_write_timeout,
-        };
-        auto piped = co_await http::pipe_http_body(http::make_http_body_pipe_reader(body_reader),
-                                                   http::make_http_body_pipe_writer(exchange),
-                                                   event::EventLoop::current().io_buf_node_pool(), pipe_options);
-        if (!piped) {
-            const http::HttpBodyPipeError pipe_error = piped.error();
-            if (body_reader.limit_exceeded()) {
-                telemetry.record_proxy_failure(AccessProxyFailurePhase::ResponseBodyTooLarge);
-                attempt_metrics.aborted();
-                provider_transaction.fail("aborted", pipe_error.code);
-            } else if (pipe_error.phase == http::HttpBodyPipePhase::Read) {
-                report_selection(false);
-                record_provider_failure(provider_transaction, telemetry, attempt_metrics,
-                                        failure(ProxyFailurePhase::ReadResponseBody,
-                                                "failed to read upstream response body", pipe_error.code));
-            } else {
-                telemetry.record_proxy_failure(pipe_error.phase == http::HttpBodyPipePhase::Write
-                                                       ? AccessProxyFailurePhase::WriteResponseBody
-                                                       : AccessProxyFailurePhase::BuildResponseHeaders);
-                attempt_metrics.aborted();
-                provider_transaction.fail("aborted", pipe_error.code);
-                if (pipe_error.phase == http::HttpBodyPipePhase::Write) {
-                    telemetry.record_response_error(pipe_error.code);
-                }
-            }
-            co_return std::unexpected(Err::from_error(pipe_error.code));
-        }
-
-        report_selection(true);
-        attempt_metrics.completed();
-        provider_transaction.complete(upstream_head->status_code);
-        co_return Result<void>{};
+        UpstreamAttempt upstream_attempt(exchange, proxy, input, telemetry, request_plan, *selected, *connected,
+                                         *proxy.address_selector, options_, provider_transaction, attempt_metrics,
+                                         websocket_metrics);
+        co_return co_await upstream_attempt.run();
     }
 
     if (!previous_failure) {

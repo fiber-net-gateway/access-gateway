@@ -257,7 +257,8 @@ listener 只在 Nacos client/config/naming、project/gray watcher、项目列表
 - `src/config/`：统一接入配置 wire model 和 Java 兼容 codec；
 - `src/routing/`：compiled model、CIDR、Host/Path matcher 和全局不可变快照；
 - `src/execution/`：live request handler、无状态 Host/Route policy evaluator、RESPONSE
-  计划/执行、PROXY 请求计划与执行器边界、模板适配边界和统一错误响应；
+  计划/执行、一次性 PROXY request plan、连接重试与 connected upstream attempt 边界、模板
+  适配边界和统一错误响应；
 - `src/observability/`：请求 CAT 上下文、固定 schema Prometheus 指标和 logging
   category；
 - `src/runtime/`：本地脚本 runtime、候选快照编译/原子发布、Nacos 配置 watcher、
