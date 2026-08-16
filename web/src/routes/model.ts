@@ -18,6 +18,7 @@ const routeFields = new Set([
   'rewrite',
   'status',
   'body',
+  'gzip',
   'timeout',
   'max_client_body_size',
   'max_proxy_body_size',
@@ -32,6 +33,7 @@ status: 200
 body:
   type: TEXT
   content: ok
+gzip: true
 response_headers:
   Content-Type: text/plain; charset=utf-8
 `
@@ -194,6 +196,128 @@ function validateRouteFieldShapes(
     if (field in value && !isScalarValue(value[field])) addTypeIssue(field, 'scalar 或 null')
   }
   if ('body' in value && !isScalarMap(value.body)) addTypeIssue('body', 'mapping 或 null')
+}
+
+function validateResponseGzip(
+  route: RouteItemModel,
+  lineCounter: LineCounter,
+  document: ReturnType<typeof parseDocument>,
+  value: Readonly<Record<string, unknown>>,
+  issues: RouteValidationIssue[],
+): void {
+  if (!('gzip' in value)) return
+
+  const offset = fieldOffset(document, 'gzip')
+  const gzip = value.gzip
+  const valid =
+    typeof gzip === 'boolean' ||
+    (typeof gzip === 'number' && Number.isInteger(gzip) && gzip >= 1 && gzip <= 9)
+  if (!valid) {
+    issues.push(
+      sourceIssue(
+        route.id,
+        lineCounter,
+        'INVALID_ROUTE_GZIP',
+        'gzip 必须是 true、false，或 1-9 的整数压缩级别',
+        'gzip',
+        offset,
+      ),
+    )
+    return
+  }
+  if (value.type !== 'RESPONSE') {
+    if (value.type === 'PROXY') {
+      issues.push(
+        sourceIssue(
+          route.id,
+          lineCounter,
+          'ROUTE_GZIP_TYPE_CONFLICT',
+          'gzip 只能用于 RESPONSE Route',
+          'gzip',
+          offset,
+        ),
+      )
+    }
+    return
+  }
+  if (gzip === false) return
+
+  const body = value.body
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+    issues.push(
+      sourceIssue(
+        route.id,
+        lineCounter,
+        'ROUTE_GZIP_BODY_CONFLICT',
+        '启用 gzip 时必须配置非空的 TEXT 或 BASE64 response body',
+        'gzip',
+        offset,
+      ),
+    )
+  } else {
+    const bodyValue = body as Readonly<Record<string, unknown>>
+    if (
+      (bodyValue.type !== 'TEXT' && bodyValue.type !== 'BASE64') ||
+      typeof bodyValue.content !== 'string' ||
+      bodyValue.content.length === 0
+    ) {
+      issues.push(
+        sourceIssue(
+          route.id,
+          lineCounter,
+          'ROUTE_GZIP_BODY_CONFLICT',
+          '启用 gzip 时必须配置非空的 TEXT 或 BASE64 response body',
+          'gzip',
+          offset,
+        ),
+      )
+    }
+  }
+
+  const status =
+    typeof value.status === 'number'
+      ? value.status
+      : typeof value.status === 'string' && /^[+-]?\d+$/u.test(value.status)
+        ? Number(value.status)
+        : null
+  if (
+    status !== null &&
+    ((status >= 100 && status < 200) ||
+      status === 204 ||
+      status === 205 ||
+      status === 206 ||
+      status === 304)
+  ) {
+    issues.push(
+      sourceIssue(
+        route.id,
+        lineCounter,
+        'ROUTE_GZIP_STATUS_CONFLICT',
+        'gzip 不支持 1xx、204、205、206 或 304 response',
+        'gzip',
+        offset,
+      ),
+    )
+  }
+
+  const responseHeaders = value.response_headers
+  if (
+    typeof responseHeaders === 'object' &&
+    responseHeaders !== null &&
+    !Array.isArray(responseHeaders) &&
+    Object.keys(responseHeaders).some((name) => name.toLowerCase() === 'content-encoding')
+  ) {
+    issues.push(
+      sourceIssue(
+        route.id,
+        lineCounter,
+        'ROUTE_GZIP_CONTENT_ENCODING_CONFLICT',
+        '启用 gzip 时不能同时配置 response_headers.Content-Encoding',
+        'gzip',
+        offset,
+      ),
+    )
+  }
 }
 
 function sourceIssue(
@@ -398,6 +522,7 @@ function analyzeRouteSourceUncached(route: RouteItemModel): RouteSourceAnalysis 
     )
   }
   validateRouteFieldShapes(route, lineCounter, document, routeValue, issues)
+  validateResponseGzip(route, lineCounter, document, routeValue, issues)
   return {
     path: typeof routeValue.path === 'string' ? routeValue.path : null,
     method: typeof routeValue.method === 'string' ? routeValue.method : null,

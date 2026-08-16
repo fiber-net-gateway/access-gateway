@@ -26,13 +26,17 @@ public:
     public:
         void request_started() noexcept;
         void request_finished(const http::HttpResponseStats &response, std::chrono::microseconds duration) noexcept;
+        void response_compression_selected(bool compressed) noexcept;
+        void response_compression_not_acceptable() noexcept;
 
     private:
         friend class AccessServerMetrics;
 
         static constexpr std::size_t kRequestResultCount = 4;
+        static constexpr std::size_t kResponseCompressionResultCount = 3;
 
         std::array<prometheus::CounterRef, kRequestResultCount> requests_;
+        std::array<prometheus::CounterRef, kResponseCompressionResultCount> response_compression_;
         prometheus::HistogramRef request_duration_;
         prometheus::GaugeRef inflight_;
     };

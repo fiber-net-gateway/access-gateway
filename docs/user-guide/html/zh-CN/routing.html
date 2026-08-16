@@ -432,6 +432,16 @@ service: report-service/stable
       <td>可选；缺失表示空 body</td>
     </tr>
     <tr>
+      <td><code>gzip</code></td>
+      <td>RESPONSE</td>
+      <td>
+        可选；<code>true</code> 使用级别 6，<code>1</code>–<code>9</code> 指定级别，<code
+          >false</code
+        >
+        关闭
+      </td>
+    </tr>
+    <tr>
       <td><code>timeout</code></td>
       <td>PROXY</td>
       <td>response header timeout；默认 60000 ms，配置值至少 5 ms</td>
@@ -497,6 +507,7 @@ status: 200
 body:
     type: TEXT
     content: ok
+gzip: true
 response_headers:
     Content-Type: text/plain; charset=utf-8
     Cache-Control: no-store
@@ -560,6 +571,34 @@ response_headers:
 Proxy-Authenticate, Proxy-Authorization, TE, Trailer,
 Transfer-Encoding, Upgrade
 </code></pre>
+<h3 id="7-4-gzip-内容协商">
+  7.4 Gzip 内容协商<a
+    class="documentation-heading-anchor"
+    href="#7-4-gzip-内容协商"
+    aria-label="Link to 7.4 Gzip 内容协商"
+    >#</a
+  >
+</h3>
+<p>
+  <code>gzip</code> 缺失或为 <code>false</code> 时不压缩；<code>true</code> 使用默认压缩级别 6，整数
+  <code>1</code>–<code>9</code> 指定压缩级别。 首版只支持非空 <code>TEXT</code> 和
+  <code>BASE64</code> body：access-server 在候选快照发布前同时固化 identity 与 gzip
+  字节，请求热路径只选择已有表示，不执行压缩。<code>TEMPLATE</code> body 暂不支持 gzip。
+</p>
+<p>
+  启用后，access-server 根据 <code>Accept-Encoding</code> 中的
+  <code>gzip</code>、<code>identity</code>、<code>*</code> 和 <code>q</code> 权重选择表示； 未发送该
+  header 时返回 identity，两个表示都被显式拒绝时返回 406 <code>NOT_ACCEPTABLE</code>。响应总是合并
+  <code>Vary: Accept-Encoding</code>；选择 gzip 时写 <code>Content-Encoding: gzip</code> 和对应
+  <code>Content-Length</code>。 配置的强 ETag 会降为弱 ETag，HEAD 执行相同的编码选择并发送对应
+  header，但不发送 body。
+</p>
+<p>
+  以下组合会在配置编译阶段被拒绝：PROXY Route 上出现 <code>gzip</code> 字段、空 body、<code
+    >TEMPLATE</code
+  >
+  body、 1xx/204/205/206/304 status，以及同时配置 <code>response_headers.Content-Encoding</code>。
+</p>
 <h2 id="8-proxy-route">
   8. PROXY Route<a
     class="documentation-heading-anchor"

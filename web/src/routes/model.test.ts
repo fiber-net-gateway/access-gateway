@@ -28,6 +28,7 @@ test('creates independent RESPONSE and PROXY YAML route items', () => {
   assert.notEqual(response.id, proxy.id)
   assert.equal(response.format, 'yaml')
   assert.equal(proxy.format, 'yaml')
+  assert.match(response.source, /^gzip: true$/mu)
   assert.equal(analyzeRouteSource(response).type, 'RESPONSE')
   assert.equal(analyzeRouteSource(proxy).type, 'PROXY')
 
@@ -91,6 +92,56 @@ test('rejects a scalar response_headers block even though it is valid YAML synta
       (issue) => issue.code === 'INVALID_ROUTE_FIELD_TYPE' && issue.path === 'response_headers',
     ),
   )
+})
+
+test('accepts RESPONSE gzip booleans and levels supported by access-server', () => {
+  for (const gzip of ['true', 'false', '1', '9']) {
+    const body = gzip === 'false' ? '' : '\nbody: { type: TEXT, content: ok }'
+    const result = analyzeRouteSource({
+      id: crypto.randomUUID(),
+      format: 'yaml',
+      source: `path: /\ntype: RESPONSE\nstatus: 200${body}\ngzip: ${gzip}`,
+    })
+    assert.deepEqual(result.issues, [], gzip)
+  }
+})
+
+test('reports RESPONSE gzip values and combinations rejected by access-server', () => {
+  const cases = [
+    { source: 'path: /\ntype: RESPONSE\ngzip: 10', code: 'INVALID_ROUTE_GZIP' },
+    { source: 'path: /\ntype: RESPONSE\ngzip: null', code: 'INVALID_ROUTE_GZIP' },
+    {
+      source: 'path: /\ntype: PROXY\nservice: users\ngzip: false',
+      code: 'ROUTE_GZIP_TYPE_CONFLICT',
+    },
+    {
+      source:
+        'path: /\ntype: RESPONSE\nstatus: 200\nbody: { type: TEMPLATE, content: value }\ngzip: true',
+      code: 'ROUTE_GZIP_BODY_CONFLICT',
+    },
+    {
+      source:
+        'path: /\ntype: RESPONSE\nstatus: 206\nbody: { type: TEXT, content: value }\ngzip: true',
+      code: 'ROUTE_GZIP_STATUS_CONFLICT',
+    },
+    {
+      source:
+        'path: /\ntype: RESPONSE\nstatus: 200\nbody: { type: TEXT, content: value }\ngzip: true\nresponse_headers: { Content-Encoding: br }',
+      code: 'ROUTE_GZIP_CONTENT_ENCODING_CONFLICT',
+    },
+  ]
+
+  for (const testCase of cases) {
+    const result = analyzeRouteSource({
+      id: crypto.randomUUID(),
+      format: 'yaml',
+      source: testCase.source,
+    })
+    assert.ok(
+      result.issues.some((issue) => issue.code === testCase.code && issue.path === 'gzip'),
+      `${testCase.code}: ${JSON.stringify(result.issues)}`,
+    )
+  }
 })
 
 test('rejects YAML scalar values that cannot be represented safely in JSON', () => {

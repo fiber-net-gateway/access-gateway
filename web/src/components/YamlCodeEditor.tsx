@@ -70,6 +70,12 @@ const routeCompletions: readonly Completion[] = [
     detail: 'RESPONSE body',
   },
   {
+    label: 'gzip',
+    type: 'property',
+    apply: 'gzip: true',
+    detail: 'RESPONSE gzip；true 使用级别 6，也可填写 1-9',
+  },
+  {
     label: 'proxy_headers',
     type: 'property',
     apply: 'proxy_headers:\n  X-Header: value',

@@ -34,6 +34,12 @@ void AccessServerMetrics::Worker::request_finished(const http::HttpResponseStats
     request_duration_.observe(static_cast<std::uint64_t>(std::max<std::int64_t>(duration.count(), 0)));
 }
 
+void AccessServerMetrics::Worker::response_compression_selected(bool compressed) noexcept {
+    response_compression_[compressed ? 0 : 1].inc();
+}
+
+void AccessServerMetrics::Worker::response_compression_not_acceptable() noexcept { response_compression_[2].inc(); }
+
 AccessServerMetrics::AccessServerMetrics(event::EventLoopGroup &workers) { valid_ = initialize(workers); }
 
 AccessServerMetrics::~AccessServerMetrics() { FIBER_ASSERT(!valid_ || collecting_stopped_); }
@@ -46,6 +52,11 @@ bool AccessServerMetrics::initialize(event::EventLoopGroup &worker_group) {
             "server_error",
             "canceled",
     };
+    constexpr std::array<std::string_view, 3> kCompressionResults{
+            "gzip",
+            "identity",
+            "not_acceptable",
+    };
     constexpr std::array<std::uint64_t, 15> kDurationBounds{
             1000,    5000,    10000,   25000,    50000,    100000,   250000,    500000,
             1000000, 2500000, 5000000, 10000000, 30000000, 60000000, 300000000,
@@ -53,12 +64,15 @@ bool AccessServerMetrics::initialize(event::EventLoopGroup &worker_group) {
 
     auto requests = registry_.register_counter("access_server_requests_total", "Completed access-server requests.",
                                                kResultLabel);
+    auto response_compression =
+            registry_.register_counter("access_server_response_compression_total",
+                                       "Negotiated outcomes for gzip-enabled RESPONSE routes.", kResultLabel);
     auto duration =
             registry_.register_histogram("access_server_request_duration_seconds", "Access-server request duration.",
                                          kDurationBounds, prometheus::HistogramUnit::Microseconds);
     auto inflight = registry_.register_gauge("access_server_requests_inflight", "In-flight access-server requests.",
                                              prometheus::GaugeReduction::Sum);
-    if (!requests || !duration || !inflight) {
+    if (!requests || !response_compression || !duration || !inflight) {
         return false;
     }
 
@@ -69,6 +83,15 @@ bool AccessServerMetrics::initialize(event::EventLoopGroup &worker_group) {
             return false;
         }
         request_series[i] = *series;
+    }
+    std::array<prometheus::SeriesId, kCompressionResults.size()> compression_series;
+    for (std::size_t i = 0; i < kCompressionResults.size(); ++i) {
+        auto series = registry_.register_series(*response_compression,
+                                                std::array<std::string_view, 1>{kCompressionResults[i]});
+        if (!series) {
+            return false;
+        }
+        compression_series[i] = *series;
     }
     auto duration_series = registry_.register_series(*duration);
     auto inflight_series = registry_.register_series(*inflight);
@@ -102,6 +125,13 @@ bool AccessServerMetrics::initialize(event::EventLoopGroup &worker_group) {
                 return false;
             }
             worker.requests_[result] = *value;
+        }
+        for (std::size_t result = 0; result < compression_series.size(); ++result) {
+            auto value = shard->counter(compression_series[result]);
+            if (!value) {
+                return false;
+            }
+            worker.response_compression_[result] = *value;
         }
         auto duration_value = shard->histogram(*duration_series);
         auto inflight_value = shard->gauge(*inflight_series);

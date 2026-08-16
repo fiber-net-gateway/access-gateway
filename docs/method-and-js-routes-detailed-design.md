@@ -71,7 +71,7 @@ method token 使用 RFC 9110 token 字符集合：
 JS source 空字符串报 `EMPTY_ROUTE_SCRIPT`；path 复用 native path pattern 的最终校验，本地先做非空和
 长度校验。脚本语法不在 Node 中解析，交给 Native Validator，防止出现两个脚本语义来源。
 
-编译器 revision 更新为 `project-routes-mixed-v5-method-script`。
+该增量当时把编译器 revision 更新为 `project-routes-mixed-v5-method-script`；后续功能继续递增。
 
 ## 4. Native wire 与 codec
 

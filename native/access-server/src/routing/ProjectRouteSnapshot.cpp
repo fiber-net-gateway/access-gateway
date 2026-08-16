@@ -1,4 +1,5 @@
 #include "ProjectRouteSnapshot.h"
+#include "../execution/GzipEncoder.h"
 
 #include <fiber/common/util/Base64.h>
 
@@ -279,7 +280,7 @@ bool has_script_only_field_conflict(const RouteConfig &source) noexcept {
            !source.context.empty() || source.rewrite.has_value() || source.status != 0 || source.body.has_value() ||
            source.timeout_millis.has_value() || source.max_client_body_size.has_value() ||
            source.max_proxy_body_size.has_value() || source.websocket_timeout_millis.has_value() ||
-           source.flush.has_value();
+           source.flush.has_value() || source.gzip.has_value();
 }
 
 std::string method_route_key(std::string_view path, std::string_view method,
@@ -315,6 +316,19 @@ bool ascii_iequals(std::string_view left, std::string_view right) noexcept {
         }
     }
     return true;
+}
+
+bool contains_header(const StringConfigMap &headers, std::string_view name) noexcept {
+    for (const StringConfigEntry &header: headers) {
+        if (ascii_iequals(header.name, name)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool response_status_has_no_content(std::int32_t status) noexcept {
+    return (status >= 100 && status < 200) || status == 204 || status == 205 || status == 304;
 }
 
 std::expected<std::vector<CompiledTemplateEntry>, AccessConfigError> compile_context(const StringConfigMap &input,
@@ -529,8 +543,38 @@ std::expected<CompiledRoute, AccessConfigError> compile_route(const RouteConfig 
             return std::unexpected(std::move(headers.error()));
         }
         response.response_headers = std::move(*headers);
+
+        if (source.gzip && source.gzip->enabled) {
+            if (response.body_kind == ResponseBodyKind::Template) {
+                return std::unexpected(route_error(AccessConfigErrorCode::InvalidCombination, route_index, "gzip",
+                                                   "gzip is not supported for TEMPLATE response bodies"));
+            }
+            if (!source.body || response.body.empty()) {
+                return std::unexpected(route_error(AccessConfigErrorCode::InvalidCombination, route_index, "gzip",
+                                                   "gzip requires a non-empty response body"));
+            }
+            if (response_status_has_no_content(response.status) || response.status == 206) {
+                return std::unexpected(route_error(AccessConfigErrorCode::InvalidCombination, route_index, "gzip",
+                                                   "gzip is not supported for this response status"));
+            }
+            if (contains_header(source.response_headers, "Content-Encoding")) {
+                return std::unexpected(route_error(AccessConfigErrorCode::InvalidCombination, route_index, "gzip",
+                                                   "gzip cannot be combined with a Content-Encoding header"));
+            }
+            auto encoded = gzip_encode(response.body, source.gzip->level);
+            if (!encoded) {
+                return std::unexpected(route_error(AccessConfigErrorCode::InvalidField, route_index, "gzip",
+                                                   "failed to precompress response body"));
+            }
+            response.gzip_level = source.gzip->level;
+            response.gzip_body = std::move(*encoded);
+        }
         route.response.emplace(std::move(response));
     } else {
+        if (source.gzip.has_value()) {
+            return std::unexpected(route_error(AccessConfigErrorCode::InvalidCombination, route_index, "gzip",
+                                               "gzip is only valid for RESPONSE routes"));
+        }
         route.max_client_body_size = source.max_client_body_size;
         if (source.timeout_millis && *source.timeout_millis < 5) {
             return std::unexpected(

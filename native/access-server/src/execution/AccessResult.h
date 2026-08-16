@@ -59,6 +59,14 @@ struct Exception {
         };
     }
 
+    [[nodiscard]] static constexpr Exception not_acceptable() noexcept {
+        return {
+                .name = "NOT_ACCEPTABLE",
+                .message = "no acceptable response content coding",
+                .status = 406,
+        };
+    }
+
     [[nodiscard]] static constexpr Exception unknown(std::string_view message = {}) noexcept {
         return {
                 .name = "ACCESS_UNKNOWN_ERROR",

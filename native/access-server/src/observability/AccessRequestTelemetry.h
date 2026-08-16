@@ -74,6 +74,8 @@ public:
     void record_exception(const Exception &exception) noexcept;
     void record_upstream_exception(const Exception &exception) noexcept;
     void record_response_error(common::IoErr error) noexcept;
+    void record_response_compression(bool compressed) noexcept;
+    void record_response_compression_not_acceptable() noexcept;
     void mark_io_error(common::IoErr error) noexcept;
     void set_upstream(const ProxyUpstreamEndpoint &endpoint) noexcept;
     [[nodiscard]] AccessProviderTransaction start_provider_transaction(std::string_view name) noexcept;
@@ -112,6 +114,7 @@ private:
     std::string_view route_;
     std::string_view cluster_;
     std::string_view upstream_;
+    std::string_view response_compression_;
     std::string_view error_;
     bool execution_failed_ = false;
     bool failure_recorded_ = false;

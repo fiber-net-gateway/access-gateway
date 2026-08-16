@@ -36,6 +36,7 @@ using fiber::access_server::PathVariable;
 using fiber::access_server::ProjectConfig;
 using fiber::access_server::ProjectRouteSnapshot;
 using fiber::access_server::ResponseBodyKind;
+using fiber::access_server::ResponseGzipConfig;
 using fiber::access_server::RouteBodyConfig;
 using fiber::access_server::RouteConfig;
 using fiber::access_server::RouteType;
@@ -420,6 +421,78 @@ TEST(ProjectRouteSnapshotTest, CompilesResponseBodyAndHeaders) {
     EXPECT_EQ(snapshot.routes()[0].response->body_kind, ResponseBodyKind::Base64);
     EXPECT_EQ(snapshot.routes()[0].response->body, "hello");
     EXPECT_EQ(snapshot.routes()[0].response->response_headers.size(), 1U);
+}
+
+TEST(ProjectRouteSnapshotTest, PrecompressesEnabledStaticResponseBodies) {
+    RouteConfig route = response_route("/compressed");
+    route.body = RouteBodyConfig{
+            .type = BodyType::Text,
+            .content = "compressible response response response response",
+    };
+    route.gzip = ResponseGzipConfig{.enabled = true, .level = 1};
+
+    auto result = compile_project_config("demo", project_with_routes({std::move(route)}));
+    const ProjectRouteSnapshot &snapshot = require_snapshot(result);
+    ASSERT_TRUE(snapshot.routes()[0].response);
+    const auto &response = *snapshot.routes()[0].response;
+    ASSERT_TRUE(response.gzip_level);
+    EXPECT_EQ(*response.gzip_level, 1);
+    ASSERT_GE(response.gzip_body.size(), 10U);
+    EXPECT_EQ(static_cast<unsigned char>(response.gzip_body[0]), 0x1fU);
+    EXPECT_EQ(static_cast<unsigned char>(response.gzip_body[1]), 0x8bU);
+    EXPECT_EQ(response.body, "compressible response response response response");
+
+    RouteConfig disabled = response_route("/identity");
+    disabled.body = RouteBodyConfig{.type = BodyType::Text, .content = "identity"};
+    disabled.gzip = ResponseGzipConfig{.enabled = false};
+    auto disabled_result = compile_project_config("demo", project_with_routes({std::move(disabled)}));
+    const ProjectRouteSnapshot &disabled_snapshot = require_snapshot(disabled_result);
+    ASSERT_TRUE(disabled_snapshot.routes()[0].response);
+    EXPECT_FALSE(disabled_snapshot.routes()[0].response->gzip_level);
+    EXPECT_TRUE(disabled_snapshot.routes()[0].response->gzip_body.empty());
+}
+
+TEST(ProjectRouteSnapshotTest, RejectsUnsupportedResponseGzipCombinations) {
+    {
+        RouteConfig route = proxy_route("/proxy");
+        route.gzip = ResponseGzipConfig{.enabled = false};
+        auto result = compile_project_config("demo", project_with_routes({std::move(route)}));
+        ASSERT_FALSE(result);
+        EXPECT_EQ(result.error().field, "routes[0].gzip");
+    }
+    {
+        RouteConfig route = response_route("/template");
+        route.body = RouteBodyConfig{.type = BodyType::Template, .content = "${$req.method}"};
+        route.gzip = ResponseGzipConfig{.enabled = true};
+        auto result = compile_project_config("demo", project_with_routes({std::move(route)}));
+        ASSERT_FALSE(result);
+        EXPECT_EQ(result.error().field, "routes[0].gzip");
+    }
+    {
+        RouteConfig route = response_route("/encoded");
+        route.body = RouteBodyConfig{.type = BodyType::Text, .content = "body"};
+        route.gzip = ResponseGzipConfig{.enabled = true};
+        route.response_headers.push_back(StringConfigEntry{.name = "content-encoding", .value = "br"});
+        auto result = compile_project_config("demo", project_with_routes({std::move(route)}));
+        ASSERT_FALSE(result);
+        EXPECT_EQ(result.error().field, "routes[0].gzip");
+    }
+    for (const std::int32_t status: {204, 206, 304}) {
+        SCOPED_TRACE(status);
+        RouteConfig route = response_route("/status", status);
+        route.body = RouteBodyConfig{.type = BodyType::Text, .content = "body"};
+        route.gzip = ResponseGzipConfig{.enabled = true};
+        auto result = compile_project_config("demo", project_with_routes({std::move(route)}));
+        ASSERT_FALSE(result);
+        EXPECT_EQ(result.error().field, "routes[0].gzip");
+    }
+    {
+        RouteConfig route = response_route("/empty");
+        route.gzip = ResponseGzipConfig{.enabled = true};
+        auto result = compile_project_config("demo", project_with_routes({std::move(route)}));
+        ASSERT_FALSE(result);
+        EXPECT_EQ(result.error().field, "routes[0].gzip");
+    }
 }
 
 TEST(ProjectRouteSnapshotTest, BindsPreparsedTemplateExpressionsAfterDiscoveringPathVariables) {

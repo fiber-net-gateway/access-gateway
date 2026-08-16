@@ -5,6 +5,7 @@
 #include <fiber/http/HttpExchange.h>
 #include <fiber/http/HttpExchangeIo.h>
 #include <fiber/http/HttpHeaders.h>
+#include <fiber/http/HttpProxyCore.h>
 
 namespace fiber::access_server {
 namespace {
@@ -30,26 +31,32 @@ async::Task<Result<void>> send_response(http::HttpExchange &exchange, const Prep
         co_return std::unexpected(Err::from_error(common::IoErr::NoMem));
     }
 
-    const bool empty = response.body.empty();
+    const std::string_view body = response.body_view();
+    const bool no_body = http::proxy_core::response_has_no_body(exchange.method(), response.status);
+    const bool reset_content = response.status == 205;
+    const bool suppress_body = no_body || reset_content;
+    const bool empty = body.empty();
+    const http::HttpBodySpec body_spec =
+            no_body ? http::HttpBodySpec::None() : http::HttpBodySpec::ContentLength(reset_content ? 0 : body.size());
     auto header_result = co_await exchange.send_header(
             {
                     .kind = http::OutgoingHeaderKind::Final,
                     .status_code = response.status,
                     .headers = &headers,
-                    .body = http::HttpBodySpec::ContentLength(response.body.size()),
+                    .body = body_spec,
                     .connection_mode = http::ResponseConnectionMode::Auto,
-                    .end_stream = empty,
+                    .end_stream = suppress_body || empty,
             },
             timeout);
     if (!header_result) {
         co_return std::unexpected(Err::from_error(header_result.error()));
     }
-    if (empty) {
+    if (suppress_body || empty) {
         co_return Result<void>{};
     }
 
-    auto body_result = co_await exchange.write_all(reinterpret_cast<const std::uint8_t *>(response.body.data()),
-                                                   response.body.size(), true, timeout);
+    auto body_result = co_await exchange.write_all(reinterpret_cast<const std::uint8_t *>(body.data()), body.size(),
+                                                   true, timeout);
     if (!body_result) {
         co_return std::unexpected(Err::from_error(body_result.error()));
     }
@@ -102,6 +109,19 @@ async::Task<Result<void>> ResponseExecutor::execute(http::HttpExchange &exchange
     auto prepared = prepare_response(*route.response, evaluator);
     if (!prepared) {
         co_return std::unexpected(prepared.error());
+    }
+    auto coding = apply_response_gzip(*route.response, exchange.request_headers(), *prepared);
+    if (!coding) {
+        if (coding.error().kind == Err::Kind::Exception && coding.error().exception.status == 406) {
+            if (!telemetry.response_headers().set("Vary", "Accept-Encoding")) {
+                co_return std::unexpected(Err::from_error(common::IoErr::NoMem));
+            }
+            telemetry.record_response_compression_not_acceptable();
+        }
+        co_return std::unexpected(coding.error());
+    }
+    if (route.response->gzip_level) {
+        telemetry.record_response_compression(*coding == ResponseContentCoding::Gzip);
     }
     co_return co_await send_response(exchange, *prepared, options_.write_timeout, telemetry);
 }

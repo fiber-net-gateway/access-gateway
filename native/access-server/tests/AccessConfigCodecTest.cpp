@@ -18,6 +18,7 @@ using fiber::access_server::AccessConfigErrorCode;
 using fiber::access_server::BodyType;
 using fiber::access_server::HostConfigEntry;
 using fiber::access_server::HttpsStrategy;
+using fiber::access_server::kDefaultGzipLevel;
 using fiber::access_server::kNetOffice;
 using fiber::access_server::kNetVdi;
 using fiber::access_server::parse_project_config;
@@ -225,6 +226,41 @@ TEST(AccessConfigCodecTest, ParsesMethodAndScriptRoutes) {
     EXPECT_EQ(*route.type, RouteType::Script);
     ASSERT_TRUE(route.script);
     EXPECT_EQ(*route.script, "return $path.id;");
+}
+
+TEST(AccessConfigCodecTest, ParsesResponseGzipBooleanAndCompressionLevels) {
+    auto result = parse_project_config(R"({"routes":[{}, {"gzip":true}, {"gzip":false}, {"gzip":1}, {"gzip":9}]})");
+
+    ASSERT_TRUE(result) << result.error().message;
+    ASSERT_TRUE(*result);
+    const ProjectConfig &config = **result;
+    EXPECT_FALSE(require_route(config, 0).gzip);
+    ASSERT_TRUE(require_route(config, 1).gzip);
+    EXPECT_TRUE(require_route(config, 1).gzip->enabled);
+    EXPECT_EQ(require_route(config, 1).gzip->level, kDefaultGzipLevel);
+    ASSERT_TRUE(require_route(config, 2).gzip);
+    EXPECT_FALSE(require_route(config, 2).gzip->enabled);
+    EXPECT_EQ(require_route(config, 2).gzip->level, kDefaultGzipLevel);
+    ASSERT_TRUE(require_route(config, 3).gzip);
+    EXPECT_TRUE(require_route(config, 3).gzip->enabled);
+    EXPECT_EQ(require_route(config, 3).gzip->level, 1);
+    ASSERT_TRUE(require_route(config, 4).gzip);
+    EXPECT_TRUE(require_route(config, 4).gzip->enabled);
+    EXPECT_EQ(require_route(config, 4).gzip->level, 9);
+}
+
+TEST(AccessConfigCodecTest, RejectsInvalidResponseGzipScalars) {
+    for (const std::string_view value: {"0", "10", "null", R"("1")", "1.0"}) {
+        SCOPED_TRACE(value);
+        std::string input = R"({"routes":[{"gzip":)";
+        input.append(value);
+        input.append("}]}");
+
+        auto result = parse_project_config(input);
+
+        ASSERT_FALSE(result);
+        EXPECT_EQ(result.error().field, "routes[0].gzip");
+    }
 }
 
 TEST(AccessConfigCodecTest, ParsesJavaDurationAndDataSizeBoundaries) {

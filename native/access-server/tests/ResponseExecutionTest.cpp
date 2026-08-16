@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <array>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -7,14 +8,18 @@
 #include <vector>
 
 #include <fiber/common/mem/BufPool.h>
+#include <fiber/http/HttpHeaders.h>
+#include <zlib.h>
 #include "execution/AccessResult.h"
 #include "execution/ErrorResponder.h"
+#include "execution/GzipEncoder.h"
 #include "execution/ProxyResponsePlan.h"
 #include "execution/ResponsePlan.h"
 #include "execution/TemplateEvaluator.h"
 
 namespace {
 
+using fiber::access_server::apply_response_gzip;
 using fiber::access_server::CompiledHeaderTemplates;
 using fiber::access_server::CompiledResponseRoute;
 using fiber::access_server::CompiledTemplate;
@@ -23,15 +28,18 @@ using fiber::access_server::Err;
 using fiber::access_server::ErrorResponder;
 using fiber::access_server::evaluate_template;
 using fiber::access_server::Exception;
+using fiber::access_server::gzip_encode;
 using fiber::access_server::is_java_filtered_response_header;
 using fiber::access_server::make_url_not_matched_exception;
 using fiber::access_server::parse_template;
 using fiber::access_server::prepare_proxy_response_headers;
 using fiber::access_server::prepare_response;
 using fiber::access_server::ResponseBodyKind;
+using fiber::access_server::ResponseContentCoding;
 using fiber::access_server::Result;
 using fiber::access_server::rewrite_java_proxy_location;
 using fiber::access_server::rewrite_java_proxy_refresh;
+using fiber::access_server::select_response_content_coding;
 using fiber::access_server::TemplateEvaluator;
 
 struct EvaluatorState {
@@ -88,6 +96,44 @@ CompiledHeaderTemplates compiled_headers(std::vector<CompiledTemplateEntry> entr
     return std::move(builder).build();
 }
 
+std::optional<std::string> gunzip(std::string_view input) {
+    z_stream stream{};
+    if (inflateInit2(&stream, MAX_WBITS + 16) != Z_OK) {
+        return std::nullopt;
+    }
+
+    stream.next_in = reinterpret_cast<Bytef *>(const_cast<char *>(input.data()));
+    stream.avail_in = static_cast<uInt>(input.size());
+    std::array<unsigned char, 4096> buffer{};
+    std::string output;
+    int result = Z_OK;
+    do {
+        stream.next_out = buffer.data();
+        stream.avail_out = static_cast<uInt>(buffer.size());
+        result = inflate(&stream, Z_NO_FLUSH);
+        if (result != Z_OK && result != Z_STREAM_END) {
+            (void) inflateEnd(&stream);
+            return std::nullopt;
+        }
+        output.append(reinterpret_cast<const char *>(buffer.data()), buffer.size() - stream.avail_out);
+    } while (result != Z_STREAM_END);
+
+    if (inflateEnd(&stream) != Z_OK) {
+        return std::nullopt;
+    }
+    return output;
+}
+
+std::string_view find_header(const fiber::access_server::PreparedResponse &response, std::string_view name) {
+    std::string_view matched;
+    for (const auto &header: response.headers) {
+        if (fiber::http::http_header_name_equals_ci(header.name, name)) {
+            matched = header.value;
+        }
+    }
+    return matched;
+}
+
 TEST(AccessResultTest, UsesJavaCompatibleStableExceptions) {
     const Exception router = Exception::router_not_found();
     EXPECT_EQ(router.status, 404);
@@ -121,6 +167,11 @@ TEST(AccessResultTest, UsesJavaCompatibleStableExceptions) {
     EXPECT_EQ(body.status, 413);
     EXPECT_EQ(body.name, "REQ_BODY_TOO_LARGE");
     EXPECT_EQ(body.message, "request body is too large");
+
+    const Exception encoding = Exception::not_acceptable();
+    EXPECT_EQ(encoding.status, 406);
+    EXPECT_EQ(encoding.name, "NOT_ACCEPTABLE");
+    EXPECT_EQ(encoding.message, "no acceptable response content coding");
 }
 
 TEST(AccessResultTest, DistinguishesUpstreamExceptionsFromLocalExceptions) {
@@ -172,7 +223,7 @@ TEST(ResponsePlanTest, EvaluatesEveryHeaderBeforeApplyingJavaHopHeaderFilter) {
 
     ASSERT_TRUE(result);
     EXPECT_EQ(result->status, 201);
-    EXPECT_EQ(result->body, "created");
+    EXPECT_EQ(result->body_view(), "created");
     ASSERT_EQ(result->headers.size(), 2U);
     EXPECT_EQ(result->headers[0].name, "X-Request");
     EXPECT_EQ(result->headers[0].value, "POST");
@@ -197,7 +248,7 @@ TEST(ResponsePlanTest, PreservesEmptyAndPrecompiledStaticBodyBytes) {
 
         ASSERT_TRUE(result);
         EXPECT_EQ(result->status, 206);
-        EXPECT_EQ(result->body, body);
+        EXPECT_EQ(result->body_view(), body);
     }
 }
 
@@ -216,8 +267,128 @@ TEST(ResponsePlanTest, EvaluatesTemplateBodyAfterHeaders) {
     auto result = prepare_response(response, evaluator(state));
 
     ASSERT_TRUE(result);
-    EXPECT_EQ(result->body, "item-42");
+    EXPECT_EQ(result->body_view(), "item-42");
     EXPECT_EQ(state.expressions, (std::vector<std::string>{"$request.method", "$path.id"}));
+}
+
+TEST(GzipEncoderTest, ProducesDeterministicRoundTrippableRfc1952Bytes) {
+    constexpr char kBody[] = "plain\0binary payload repeated repeated repeated";
+    const std::string body(kBody, sizeof(kBody) - 1);
+
+    auto first = gzip_encode(body, 6);
+    auto second = gzip_encode(body, 6);
+
+    ASSERT_TRUE(first);
+    ASSERT_TRUE(second);
+    EXPECT_EQ(*first, *second);
+    ASSERT_GE(first->size(), 10U);
+    EXPECT_EQ(static_cast<unsigned char>((*first)[0]), 0x1fU);
+    EXPECT_EQ(static_cast<unsigned char>((*first)[1]), 0x8bU);
+    EXPECT_EQ(static_cast<unsigned char>((*first)[9]), 0xffU);
+    EXPECT_EQ(gunzip(*first), body);
+    EXPECT_FALSE(gzip_encode(body, 0));
+    EXPECT_FALSE(gzip_encode(body, 10));
+}
+
+TEST(ResponsePlanTest, NegotiatesGzipUsingRfcQualityAndWildcardRules) {
+    struct Case {
+        std::string_view value;
+        ResponseContentCoding expected;
+    };
+    const std::array cases{
+            Case{"gzip", ResponseContentCoding::Gzip},
+            Case{"GZIP, br", ResponseContentCoding::Gzip},
+            Case{"gzip;q=0", ResponseContentCoding::Identity},
+            Case{"gzip;q=0.5", ResponseContentCoding::Identity},
+            Case{"gzip;q=0.5, identity;q=0.1", ResponseContentCoding::Gzip},
+            Case{"*", ResponseContentCoding::Gzip},
+            Case{"gzip;q=0, *;q=1", ResponseContentCoding::Identity},
+            Case{"*;q=0", ResponseContentCoding::NotAcceptable},
+            Case{"gzip;q=0, identity;q=0", ResponseContentCoding::NotAcceptable},
+            Case{"gzip;q=bogus", ResponseContentCoding::Identity},
+    };
+
+    for (const Case &test_case: cases) {
+        SCOPED_TRACE(test_case.value);
+        fiber::mem::BufPool pool;
+        fiber::http::HttpHeaders headers(pool);
+        ASSERT_NE(headers.add("Accept-Encoding", test_case.value), nullptr);
+        EXPECT_EQ(select_response_content_coding(headers), test_case.expected);
+    }
+
+    fiber::mem::BufPool pool;
+    fiber::http::HttpHeaders absent(pool);
+    EXPECT_EQ(select_response_content_coding(absent), ResponseContentCoding::Identity);
+}
+
+TEST(ResponsePlanTest, AppliesSelectedGzipVariantAndRepresentationHeaders) {
+    const std::string body = "compressible response response response response";
+    auto encoded = gzip_encode(body, 6);
+    ASSERT_TRUE(encoded);
+    const CompiledResponseRoute response{
+            .status = 200,
+            .body_kind = ResponseBodyKind::Text,
+            .body = body,
+            .gzip_level = 6,
+            .gzip_body = *encoded,
+            .response_headers =
+                    {
+                            template_entry("Vary", "Origin"),
+                            template_entry("vary", "Accept-Language"),
+                            template_entry("ETag", R"("version-1")"),
+                    },
+    };
+    auto prepared = prepare_response(response, {});
+    ASSERT_TRUE(prepared);
+    fiber::mem::BufPool pool;
+    fiber::http::HttpHeaders headers(pool);
+    ASSERT_NE(headers.add("Accept-Encoding", "gzip, identity;q=0.5"), nullptr);
+
+    auto selected = apply_response_gzip(response, headers, *prepared);
+
+    ASSERT_TRUE(selected);
+    EXPECT_EQ(*selected, ResponseContentCoding::Gzip);
+    EXPECT_EQ(find_header(*prepared, "Content-Encoding"), "gzip");
+    EXPECT_EQ(find_header(*prepared, "Vary"), "Accept-Language, Accept-Encoding");
+    EXPECT_EQ(find_header(*prepared, "ETag"), R"(W/"version-1")");
+    EXPECT_EQ(gunzip(prepared->body_view()), body);
+}
+
+TEST(ResponsePlanTest, KeepsIdentityVariantAndRejectsWhenNoCodingIsAcceptable) {
+    const std::string body = "identity response";
+    auto encoded = gzip_encode(body, 1);
+    ASSERT_TRUE(encoded);
+    const CompiledResponseRoute response{
+            .status = 200,
+            .body_kind = ResponseBodyKind::Text,
+            .body = body,
+            .gzip_level = 1,
+            .gzip_body = *encoded,
+    };
+    auto prepared = prepare_response(response, {});
+    ASSERT_TRUE(prepared);
+    fiber::mem::BufPool identity_pool;
+    fiber::http::HttpHeaders identity_headers(identity_pool);
+
+    auto identity = apply_response_gzip(response, identity_headers, *prepared);
+
+    ASSERT_TRUE(identity);
+    EXPECT_EQ(*identity, ResponseContentCoding::Identity);
+    EXPECT_EQ(prepared->body_view(), body);
+    EXPECT_EQ(find_header(*prepared, "Vary"), "Accept-Encoding");
+    EXPECT_TRUE(find_header(*prepared, "Content-Encoding").empty());
+
+    fiber::mem::BufPool rejected_pool;
+    fiber::http::HttpHeaders rejected_headers(rejected_pool);
+    ASSERT_NE(rejected_headers.add("Accept-Encoding", "gzip;q=0, identity;q=0"), nullptr);
+    auto rejected_prepared = prepare_response(response, {});
+    ASSERT_TRUE(rejected_prepared);
+
+    auto rejected = apply_response_gzip(response, rejected_headers, *rejected_prepared);
+
+    ASSERT_FALSE(rejected);
+    EXPECT_EQ(rejected.error().exception.status, 406U);
+    EXPECT_EQ(rejected.error().exception.name, "NOT_ACCEPTABLE");
 }
 
 TEST(ResponsePlanTest, DiscardsAllConfiguredHeadersWhenAHeaderTemplateFails) {

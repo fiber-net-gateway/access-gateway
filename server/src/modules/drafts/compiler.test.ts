@@ -151,6 +151,76 @@ test('rejects scalar header blocks that YAML accepts but the native route codec 
   )
 })
 
+test('compiles boolean and numeric RESPONSE gzip settings without coercion', () => {
+  const result = compileProjectRoutes(
+    'api.example.com',
+    model(
+      'path: /default\ntype: RESPONSE\nstatus: 200\nbody: { type: TEXT, content: ok }\ngzip: true',
+      'path: /fast\ntype: RESPONSE\nstatus: 200\nbody: { type: BASE64, content: YQ== }\ngzip: 1',
+      'path: /identity\ntype: RESPONSE\nstatus: 200\ngzip: false',
+    ),
+  )
+
+  assert.deepEqual(result.issues, [])
+  const payload = JSON.parse(result.compiled!.payloadText) as { routes: unknown[] }
+  assert.deepEqual(payload.routes, [
+    {
+      body: { content: 'ok', type: 'TEXT' },
+      gzip: true,
+      path: '/default',
+      status: 200,
+      type: 'RESPONSE',
+    },
+    {
+      body: { content: 'YQ==', type: 'BASE64' },
+      gzip: 1,
+      path: '/fast',
+      status: 200,
+      type: 'RESPONSE',
+    },
+    { gzip: false, path: '/identity', status: 200, type: 'RESPONSE' },
+  ])
+})
+
+test('rejects gzip values and combinations unsupported by access-server', () => {
+  const cases = [
+    { source: 'path: /\ntype: RESPONSE\ngzip: 0', code: 'INVALID_ROUTE_GZIP' },
+    { source: 'path: /\ntype: RESPONSE\ngzip: "1"', code: 'INVALID_ROUTE_GZIP' },
+    {
+      source: 'path: /\ntype: PROXY\nservice: users\ngzip: false',
+      code: 'ROUTE_GZIP_TYPE_CONFLICT',
+    },
+    {
+      source:
+        'path: /\ntype: RESPONSE\nstatus: 200\nbody: { type: TEMPLATE, content: "${$req.method}" }\ngzip: true',
+      code: 'ROUTE_GZIP_BODY_CONFLICT',
+    },
+    {
+      source:
+        'path: /\ntype: RESPONSE\nstatus: 204\nbody: { type: TEXT, content: body }\ngzip: true',
+      code: 'ROUTE_GZIP_STATUS_CONFLICT',
+    },
+    {
+      source:
+        'path: /\ntype: RESPONSE\nstatus: 200\nbody: { type: TEXT, content: body }\ngzip: true\nresponse_headers: { content-encoding: br }',
+      code: 'ROUTE_GZIP_CONTENT_ENCODING_CONFLICT',
+    },
+    {
+      source: 'path: /\ntype: RESPONSE\nstatus: 200\ngzip: true',
+      code: 'ROUTE_GZIP_BODY_CONFLICT',
+    },
+  ]
+
+  for (const testCase of cases) {
+    const result = compileProjectRoutes('api.example.com', model(testCase.source))
+    assert.equal(result.compiled, null)
+    assert.ok(
+      result.issues.some((issue) => issue.code === testCase.code && issue.path === 'gzip'),
+      `${testCase.code}: ${JSON.stringify(result.issues)}`,
+    )
+  }
+})
+
 test('comments and formatting do not change the compiled semantic digest', () => {
   const compact = compileProjectRoutes(
     'api.example.com',

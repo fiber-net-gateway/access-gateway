@@ -396,6 +396,26 @@ DecodeResult<std::optional<bool>> nullable_java_bool(const AccessJsonValue &valu
     return invalid_field<std::optional<bool>>(field, "expected Java Boolean");
 }
 
+DecodeResult<ResponseGzipConfig> response_gzip(const AccessJsonValue &value, std::string_view field) {
+    if (value.is_bool()) {
+        return ResponseGzipConfig{
+                .enabled = value.as_bool(),
+                .level = kDefaultGzipLevel,
+        };
+    }
+    if (value.is_integer()) {
+        const std::int64_t level = value.as_integer();
+        if (level < 1 || level > 9) {
+            return out_of_range<ResponseGzipConfig>(field, "gzip level must be between 1 and 9");
+        }
+        return ResponseGzipConfig{
+                .enabled = true,
+                .level = static_cast<std::uint8_t>(level),
+        };
+    }
+    return invalid_field<ResponseGzipConfig>(field, "gzip must be a boolean or an integer level between 1 and 9");
+}
+
 template<typename Enum>
 using EnumLookup = std::initializer_list<std::pair<std::string_view, Enum>>;
 
@@ -701,6 +721,12 @@ DecodeResult<RouteConfig> route_config(const AccessJsonValue &value, std::string
                 return std::unexpected(std::move(decoded.error()));
             }
             result.body = std::move(*decoded);
+        } else if (entry.key == "gzip") {
+            auto decoded = response_gzip(entry.value, path);
+            if (!decoded) {
+                return std::unexpected(std::move(decoded.error()));
+            }
+            result.gzip = *decoded;
         } else if (entry.key == "timeout") {
             auto decoded = duration_millis(entry.value, path);
             if (!decoded) {
