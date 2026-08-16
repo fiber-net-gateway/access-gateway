@@ -37,6 +37,7 @@ namespace fiber::access_server {
 struct Exception;
 struct CompiledRoute;
 struct ProxyUpstreamEndpoint;
+struct ProxyConnectionObservation;
 class AccessLogPolicy;
 class ClientMetadataResolver;
 
@@ -80,6 +81,14 @@ public:
     void record_response_error(common::IoErr error) noexcept;
     void record_response_compression(bool compressed) noexcept;
     void record_response_compression_not_acceptable() noexcept;
+    void record_proxy_execution(AccessProxyExecutionResult result) noexcept;
+    void record_proxy_attempt_started() noexcept;
+    void record_proxy_attempt_finished(AccessProxyAttemptResult result) noexcept;
+    void record_proxy_failure(AccessProxyFailurePhase phase) noexcept;
+    void record_proxy_connection(const ProxyConnectionObservation &observation) noexcept;
+    void record_websocket_handshake(AccessWebSocketHandshakeResult result) noexcept;
+    void record_websocket_session_started() noexcept;
+    void record_websocket_session_finished(AccessWebSocketSessionResult result) noexcept;
     void mark_io_error(common::IoErr error) noexcept;
     void set_upstream(const ProxyUpstreamEndpoint &endpoint) noexcept;
     [[nodiscard]] AccessProviderTransaction start_provider_transaction(std::string_view name) noexcept;

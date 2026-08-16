@@ -35,15 +35,35 @@ enum class ProxyConnectErrorCode : std::uint8_t {
     Tls,
 };
 
+// Per-acquisition facts carried back to the request worker. The fields are
+// deliberately fixed and identifier-free so the telemetry layer can update
+// pre-bound counters without callbacks or allocation in this coroutine.
+struct ProxyConnectionObservation {
+    std::uint32_t pool_hits = 0;
+    std::uint32_t pool_misses = 0;
+    std::uint32_t pool_shutdown = 0;
+    std::uint32_t dns_success = 0;
+    std::uint32_t dns_empty = 0;
+    std::uint32_t dns_failure = 0;
+    std::uint32_t dns_unavailable = 0;
+    std::uint32_t connect_success = 0;
+    std::uint32_t connect_failure = 0;
+    std::uint32_t tls_failure = 0;
+    std::uint32_t create_failure = 0;
+};
+static_assert(sizeof(ProxyConnectionObservation) <= 48);
+
 struct ProxyConnectError {
     ProxyConnectErrorCode code = ProxyConnectErrorCode::Connect;
     common::IoErr io_error = common::IoErr::None;
     const char *message = nullptr;
+    ProxyConnectionObservation observation;
 };
 
 struct ProxyUpstreamConnection {
     http::StealableHttp1ConnectionPoolSet::Lease lease;
     http::Http1ClientConnection *connection = nullptr;
+    ProxyConnectionObservation observation;
 };
 
 [[nodiscard]] async::Task<std::expected<ProxyUpstreamConnection, ProxyConnectError>>

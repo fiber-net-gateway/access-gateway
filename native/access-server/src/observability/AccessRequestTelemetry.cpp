@@ -3,6 +3,7 @@
 #include "AccessServerLogCategories.h"
 
 #include "../execution/AccessResult.h"
+#include "../execution/ProxyUpstreamConnection.h"
 #include "../routing/ProjectRouteSnapshot.h"
 #include "../routing/ProxyAddressSelector.h"
 
@@ -380,6 +381,87 @@ void AccessRequestTelemetry::record_response_compression_not_acceptable() noexce
     add_root_data("responseCompression", response_compression_);
     if (metrics_) {
         metrics_->response_compression_not_acceptable();
+    }
+}
+
+void AccessRequestTelemetry::record_proxy_execution(AccessProxyExecutionResult result) noexcept {
+    if (metrics_) {
+        metrics_->proxy_execution_finished(result);
+    }
+}
+
+void AccessRequestTelemetry::record_proxy_attempt_started() noexcept {
+    if (metrics_) {
+        metrics_->proxy_attempt_started();
+    }
+}
+
+void AccessRequestTelemetry::record_proxy_attempt_finished(AccessProxyAttemptResult result) noexcept {
+    if (metrics_) {
+        metrics_->proxy_attempt_finished(result);
+    }
+}
+
+void AccessRequestTelemetry::record_proxy_failure(AccessProxyFailurePhase phase) noexcept {
+    if (metrics_) {
+        metrics_->proxy_failure(phase);
+    }
+}
+
+void AccessRequestTelemetry::record_proxy_connection(const ProxyConnectionObservation &observation) noexcept {
+    if (!metrics_) {
+        return;
+    }
+    if (observation.pool_hits != 0) {
+        metrics_->proxy_pool_acquired(AccessProxyPoolResult::Hit, observation.pool_hits);
+    }
+    if (observation.pool_misses != 0) {
+        metrics_->proxy_pool_acquired(AccessProxyPoolResult::Miss, observation.pool_misses);
+    }
+    if (observation.pool_shutdown != 0) {
+        metrics_->proxy_pool_acquired(AccessProxyPoolResult::Shutdown, observation.pool_shutdown);
+    }
+    if (observation.dns_success != 0) {
+        metrics_->proxy_dns_resolved(AccessProxyDnsResult::Success, observation.dns_success);
+    }
+    if (observation.dns_empty != 0) {
+        metrics_->proxy_dns_resolved(AccessProxyDnsResult::Empty, observation.dns_empty);
+    }
+    if (observation.dns_failure != 0) {
+        metrics_->proxy_dns_resolved(AccessProxyDnsResult::Failure, observation.dns_failure);
+    }
+    if (observation.dns_unavailable != 0) {
+        metrics_->proxy_dns_resolved(AccessProxyDnsResult::Unavailable, observation.dns_unavailable);
+    }
+    if (observation.connect_success != 0) {
+        metrics_->proxy_connect_attempted(AccessProxyConnectResult::Success, observation.connect_success);
+    }
+    if (observation.connect_failure != 0) {
+        metrics_->proxy_connect_attempted(AccessProxyConnectResult::Failure, observation.connect_failure);
+    }
+    if (observation.tls_failure != 0) {
+        metrics_->proxy_connect_attempted(AccessProxyConnectResult::TlsFailure, observation.tls_failure);
+    }
+    if (observation.create_failure != 0) {
+        metrics_->proxy_connect_attempted(AccessProxyConnectResult::CreateFailure, observation.create_failure);
+    }
+}
+
+void AccessRequestTelemetry::record_websocket_handshake(AccessWebSocketHandshakeResult result) noexcept {
+    if (metrics_) {
+        metrics_->websocket_handshake_finished(result);
+    }
+}
+
+void AccessRequestTelemetry::record_websocket_session_started() noexcept {
+    if (metrics_) {
+        metrics_->websocket_session_started();
+    }
+}
+
+void AccessRequestTelemetry::record_websocket_session_finished(AccessWebSocketSessionResult result) noexcept {
+    if (metrics_) {
+        metrics_->websocket_session_finished(result);
     }
 }
 

@@ -99,6 +99,40 @@ ProxyFailure from_select_error(const ProxyAddressSelectError &select_error) noex
     return failure(phase, select_error.message, select_error.io_error);
 }
 
+AccessProxyFailurePhase metric_failure_phase(ProxyFailurePhase phase) noexcept {
+    switch (phase) {
+        case ProxyFailurePhase::NoUpstreamHosts:
+            return AccessProxyFailurePhase::NoUpstreamHosts;
+        case ProxyFailurePhase::UpstreamCircuitOpen:
+            return AccessProxyFailurePhase::UpstreamCircuitOpen;
+        case ProxyFailurePhase::InvalidSelection:
+            return AccessProxyFailurePhase::InvalidSelection;
+        case ProxyFailurePhase::ResolveUpstream:
+            return AccessProxyFailurePhase::ResolveUpstream;
+        case ProxyFailurePhase::PoolShutdown:
+            return AccessProxyFailurePhase::PoolShutdown;
+        case ProxyFailurePhase::Connect:
+            return AccessProxyFailurePhase::Connect;
+        case ProxyFailurePhase::Tls:
+            return AccessProxyFailurePhase::Tls;
+        case ProxyFailurePhase::BuildHeaders:
+            return AccessProxyFailurePhase::BuildHeaders;
+        case ProxyFailurePhase::SendHeader:
+            return AccessProxyFailurePhase::SendHeader;
+        case ProxyFailurePhase::ReadRequestBody:
+            return AccessProxyFailurePhase::ReadRequestBody;
+        case ProxyFailurePhase::RequestBodyTooLarge:
+            return AccessProxyFailurePhase::RequestBodyTooLarge;
+        case ProxyFailurePhase::SendRequestBody:
+            return AccessProxyFailurePhase::SendRequestBody;
+        case ProxyFailurePhase::ReadResponseHeader:
+            return AccessProxyFailurePhase::ReadResponseHeader;
+        case ProxyFailurePhase::ReadResponseBody:
+            return AccessProxyFailurePhase::ReadResponseBody;
+    }
+    return AccessProxyFailurePhase::Connect;
+}
+
 std::string_view proxy_failure_phase_name(ProxyFailurePhase phase) noexcept {
     switch (phase) {
         case ProxyFailurePhase::NoUpstreamHosts:
@@ -214,7 +248,97 @@ Result<void> proxy_failure_result(const ProxyFailure &proxy_failure) noexcept {
                                                                          : Err::from_exception(exception));
 }
 
-void record_provider_failure(AccessProviderTransaction &provider, const ProxyFailure &proxy_failure) noexcept {
+class ProxyAttemptMetricScope final {
+public:
+    explicit ProxyAttemptMetricScope(AccessRequestTelemetry &telemetry) noexcept : telemetry_(&telemetry) {
+        telemetry_->record_proxy_attempt_started();
+    }
+
+    ProxyAttemptMetricScope(const ProxyAttemptMetricScope &) = delete;
+    ProxyAttemptMetricScope &operator=(const ProxyAttemptMetricScope &) = delete;
+    ProxyAttemptMetricScope(ProxyAttemptMetricScope &&) = delete;
+    ProxyAttemptMetricScope &operator=(ProxyAttemptMetricScope &&) = delete;
+
+    ~ProxyAttemptMetricScope() noexcept { finish(AccessProxyAttemptResult::Aborted); }
+
+    void completed() noexcept { finish(AccessProxyAttemptResult::Completed); }
+    void failed() noexcept { finish(AccessProxyAttemptResult::Failed); }
+    void aborted() noexcept { finish(AccessProxyAttemptResult::Aborted); }
+
+private:
+    void finish(AccessProxyAttemptResult result) noexcept {
+        if (!telemetry_) {
+            return;
+        }
+        telemetry_->record_proxy_attempt_finished(result);
+        telemetry_ = nullptr;
+    }
+
+    AccessRequestTelemetry *telemetry_ = nullptr;
+};
+
+class WebSocketMetricScope final {
+public:
+    WebSocketMetricScope(AccessRequestTelemetry &telemetry, bool active) noexcept :
+        telemetry_(&telemetry), active_(active) {}
+
+    WebSocketMetricScope(const WebSocketMetricScope &) = delete;
+    WebSocketMetricScope &operator=(const WebSocketMetricScope &) = delete;
+    WebSocketMetricScope(WebSocketMetricScope &&) = delete;
+    WebSocketMetricScope &operator=(WebSocketMetricScope &&) = delete;
+
+    ~WebSocketMetricScope() noexcept {
+        if (!active_) {
+            return;
+        }
+        if (!handshake_finished_) {
+            telemetry_->record_websocket_handshake(AccessWebSocketHandshakeResult::Failed);
+        } else if (session_active_) {
+            telemetry_->record_websocket_session_finished(AccessWebSocketSessionResult::Aborted);
+        }
+    }
+
+    void rejected() noexcept {
+        if (!active_ || handshake_finished_) {
+            return;
+        }
+        telemetry_->record_websocket_handshake(AccessWebSocketHandshakeResult::Rejected);
+        handshake_finished_ = true;
+    }
+
+    void accepted() noexcept {
+        if (!active_ || handshake_finished_) {
+            return;
+        }
+        telemetry_->record_websocket_handshake(AccessWebSocketHandshakeResult::Accepted);
+        telemetry_->record_websocket_session_started();
+        handshake_finished_ = true;
+        session_active_ = true;
+    }
+
+    void closed() noexcept {
+        if (!session_active_) {
+            return;
+        }
+        telemetry_->record_websocket_session_finished(AccessWebSocketSessionResult::Closed);
+        session_active_ = false;
+    }
+
+private:
+    AccessRequestTelemetry *telemetry_ = nullptr;
+    bool active_ = false;
+    bool handshake_finished_ = false;
+    bool session_active_ = false;
+};
+
+void record_provider_failure(AccessProviderTransaction &provider, AccessRequestTelemetry &telemetry,
+                             ProxyAttemptMetricScope &attempt, const ProxyFailure &proxy_failure) noexcept {
+    telemetry.record_proxy_failure(metric_failure_phase(proxy_failure.phase));
+    if (is_upstream_call_failure(proxy_failure.phase)) {
+        attempt.failed();
+    } else {
+        attempt.aborted();
+    }
     const std::string_view phase = proxy_failure_phase_name(proxy_failure.phase);
     if (is_upstream_call_failure(proxy_failure.phase)) {
         provider.call_error(map_proxy_failure(proxy_failure), phase, proxy_failure.io_error);
@@ -584,6 +708,7 @@ async::Task<Result<void>> ProxyExecutor::execute(http::HttpExchange &exchange, c
                                                  ProxyExecutionInput input,
                                                  AccessRequestTelemetry &telemetry) noexcept {
     if (exchange.response_channel_closed()) {
+        telemetry.record_proxy_execution(AccessProxyExecutionResult::Canceled);
         co_return Result<void>{};
     }
 
@@ -591,13 +716,18 @@ async::Task<Result<void>> ProxyExecutor::execute(http::HttpExchange &exchange, c
             co_await async::when_any([&exchange]() { return exchange.wait_response_channel_closed(); },
                                      [&]() { return execute_impl(exchange, proxy, input, telemetry).select(); });
     if (completed.is<1>()) {
-        co_return std::move(completed).get<1>();
+        auto result = std::move(completed).get<1>();
+        telemetry.record_proxy_execution(result ? AccessProxyExecutionResult::Completed
+                                                : AccessProxyExecutionResult::Failed);
+        co_return result;
     }
 
     auto closed = std::move(completed).get<0>();
     if (!closed && !exchange.response_channel_closed()) {
+        telemetry.record_proxy_execution(AccessProxyExecutionResult::Failed);
         co_return std::unexpected(Err::from_error(closed.error()));
     }
+    telemetry.record_proxy_execution(AccessProxyExecutionResult::Canceled);
     co_return Result<void>{};
 }
 
@@ -609,6 +739,7 @@ async::Task<Result<void>> ProxyExecutor::execute_impl(http::HttpExchange &exchan
     auto context_cluster =
             evaluate_proxy_context(proxy.context, input.template_evaluator, input.initial_context_cluster, telemetry);
     if (!context_cluster) {
+        telemetry.record_proxy_failure(AccessProxyFailurePhase::EvaluateContext);
         co_return std::unexpected(context_cluster.error());
     }
     std::optional<std::string_view> cluster_override;
@@ -620,11 +751,13 @@ async::Task<Result<void>> ProxyExecutor::execute_impl(http::HttpExchange &exchan
         cluster_override = std::string_view("gray");
         auto stored = telemetry.put_trace_context(kTraceCluster, "gray");
         if (!stored) {
+            telemetry.record_proxy_failure(AccessProxyFailurePhase::EvaluateContext);
             co_return std::unexpected(Err::from_error(stored.error()));
         }
     }
 
     const bool websocket_upgrade = is_websocket_request(exchange, proxy);
+    WebSocketMetricScope websocket_metrics(telemetry, websocket_upgrade);
     const std::int32_t websocket_timeout_millis =
             websocket_upgrade && proxy.websocket_timeout_millis ? *proxy.websocket_timeout_millis : 0;
     const http::HttpBodySpec request_body = request_body_spec(exchange, websocket_upgrade);
@@ -647,17 +780,24 @@ async::Task<Result<void>> ProxyExecutor::execute_impl(http::HttpExchange &exchan
                 std::span<const std::uint64_t>(excluded_selection_tokens.data(), excluded_selection_token_count));
         if (!selected) {
             ProxyFailure selected_failure = previous_failure.value_or(from_select_error(selected.error()));
+            if (!previous_failure) {
+                telemetry.record_proxy_failure(metric_failure_phase(selected_failure.phase));
+            }
             co_return proxy_failure_result(selected_failure);
         }
         if (selected->selection_token == 0) {
-            co_return proxy_failure_result(failure(ProxyFailurePhase::InvalidSelection,
-                                                   "upstream selector returned an invalid selection token",
-                                                   common::IoErr::Invalid));
+            const ProxyFailure selected_failure =
+                    failure(ProxyFailurePhase::InvalidSelection,
+                            "upstream selector returned an invalid selection token", common::IoErr::Invalid);
+            telemetry.record_proxy_failure(metric_failure_phase(selected_failure.phase));
+            co_return proxy_failure_result(selected_failure);
         }
         if (selected->connection_key == nullptr) {
-            co_return proxy_failure_result(failure(ProxyFailurePhase::InvalidSelection,
-                                                   "upstream cannot be used as a connection pool key",
-                                                   common::IoErr::Invalid));
+            const ProxyFailure selected_failure =
+                    failure(ProxyFailurePhase::InvalidSelection, "upstream cannot be used as a connection pool key",
+                            common::IoErr::Invalid);
+            telemetry.record_proxy_failure(metric_failure_phase(selected_failure.phase));
+            co_return proxy_failure_result(selected_failure);
         }
         bool selection_reported = false;
         const auto report_selection = [&](bool success) noexcept {
@@ -672,6 +812,7 @@ async::Task<Result<void>> ProxyExecutor::execute_impl(http::HttpExchange &exchan
             auto resolved_target =
                     resolve_request_target(exchange, proxy, input.template_evaluator, request_target_storage);
             if (!resolved_target) {
+                telemetry.record_proxy_failure(AccessProxyFailurePhase::BuildRequest);
                 co_return std::unexpected(resolved_target.error());
             }
             request_target = *resolved_target;
@@ -679,12 +820,14 @@ async::Task<Result<void>> ProxyExecutor::execute_impl(http::HttpExchange &exchan
             auto built_headers = build_request_headers(*selected, exchange, proxy, input, websocket_upgrade, telemetry,
                                                        request_headers, request_header_values);
             if (!built_headers) {
+                telemetry.record_proxy_failure(AccessProxyFailurePhase::BuildHeaders);
                 co_return std::unexpected(built_headers.error());
             }
             host_binding = *built_headers;
             request_prepared = true;
         } else if (*host_binding == ProxyHostBinding::SelectedEndpoint &&
                    !request_headers.set("Host", selected->host_header)) {
+            telemetry.record_proxy_failure(AccessProxyFailurePhase::BuildHeaders);
             co_return std::unexpected(request_head_build_error());
         }
 
@@ -701,22 +844,27 @@ async::Task<Result<void>> ProxyExecutor::execute_impl(http::HttpExchange &exchan
                 selected->provider_name.empty() ? selected->host_header : selected->provider_name;
         AccessProviderTransaction provider_transaction = telemetry.start_provider_transaction(provider_name);
         provider_transaction.add_upstream(selected->host_header, attempt + 1);
+        ProxyAttemptMetricScope attempt_metrics(telemetry);
 
         auto connected = co_await acquire_proxy_upstream_connection(pool_, dns_resolver_, *selected->connection_key,
                                                                     options_.upstream_tls, options_.connect_timeout);
         if (!connected) {
+            telemetry.record_proxy_connection(connected.error().observation);
             ProxyFailure connect_failure = from_connect_error(connected.error());
-            record_provider_failure(provider_transaction, connect_failure);
+            record_provider_failure(provider_transaction, telemetry, attempt_metrics, connect_failure);
             report_selection(false);
             FIBER_ASSERT(excluded_selection_token_count < excluded_selection_tokens.size());
             excluded_selection_tokens[excluded_selection_token_count++] = selected->selection_token;
             previous_failure = connect_failure;
             continue;
         }
+        telemetry.record_proxy_connection(connected->observation);
         provider_transaction.add_connection_reuse(connected->connection->request_count());
         telemetry.set_upstream(*selected);
 
         if (!telemetry.inject_upstream_headers(request_headers, provider_transaction)) {
+            telemetry.record_proxy_failure(AccessProxyFailurePhase::BuildHeaders);
+            attempt_metrics.aborted();
             provider_transaction.fail("build_headers", common::IoErr::NoMem);
             co_return std::unexpected(Err::from_error(common::IoErr::NoMem));
         }
@@ -725,7 +873,7 @@ async::Task<Result<void>> ProxyExecutor::execute_impl(http::HttpExchange &exchan
         if (!upstream.valid()) {
             const ProxyFailure exchange_failure =
                     failure(ProxyFailurePhase::Connect, "failed to create upstream HTTP exchange", common::IoErr::Busy);
-            record_provider_failure(provider_transaction, exchange_failure);
+            record_provider_failure(provider_transaction, telemetry, attempt_metrics, exchange_failure);
             co_return proxy_failure_result(exchange_failure);
         }
 
@@ -734,7 +882,7 @@ async::Task<Result<void>> ProxyExecutor::execute_impl(http::HttpExchange &exchan
             const ProxyFailure send_failure =
                     failure(ProxyFailurePhase::SendHeader, "failed to send upstream request header",
                             sent_request_header.error());
-            record_provider_failure(provider_transaction, send_failure);
+            record_provider_failure(provider_transaction, telemetry, attempt_metrics, send_failure);
             report_selection(false);
             co_return proxy_failure_result(send_failure);
         }
@@ -748,7 +896,7 @@ async::Task<Result<void>> ProxyExecutor::execute_impl(http::HttpExchange &exchan
                     (void) upstream.abort(body.error());
                     const ProxyFailure read_failure = failure(ProxyFailurePhase::ReadRequestBody,
                                                               "failed to read downstream request body", body.error());
-                    record_provider_failure(provider_transaction, read_failure);
+                    record_provider_failure(provider_transaction, telemetry, attempt_metrics, read_failure);
                     co_return proxy_failure_result(read_failure);
                 }
                 const bool complete = body->complete();
@@ -758,7 +906,7 @@ async::Task<Result<void>> ProxyExecutor::execute_impl(http::HttpExchange &exchan
                     const ProxyFailure read_failure =
                             failure(ProxyFailurePhase::ReadRequestBody,
                                     "downstream request body does not match Content-Length", common::IoErr::Invalid);
-                    record_provider_failure(provider_transaction, read_failure);
+                    record_provider_failure(provider_transaction, telemetry, attempt_metrics, read_failure);
                     co_return proxy_failure_result(read_failure);
                 }
                 if (input.max_request_body_size != 0 &&
@@ -768,7 +916,7 @@ async::Task<Result<void>> ProxyExecutor::execute_impl(http::HttpExchange &exchan
                     const ProxyFailure limit_failure =
                             failure(ProxyFailurePhase::RequestBodyTooLarge,
                                     "downstream request body exceeds route limit", common::IoErr::MessageTooLarge);
-                    record_provider_failure(provider_transaction, limit_failure);
+                    record_provider_failure(provider_transaction, telemetry, attempt_metrics, limit_failure);
                     co_return proxy_failure_result(limit_failure);
                 }
                 received_request_body += body_bytes;
@@ -778,7 +926,7 @@ async::Task<Result<void>> ProxyExecutor::execute_impl(http::HttpExchange &exchan
                         const ProxyFailure send_failure =
                                 failure(ProxyFailurePhase::SendRequestBody, "failed to send upstream request body",
                                         written.error());
-                        record_provider_failure(provider_transaction, send_failure);
+                        record_provider_failure(provider_transaction, telemetry, attempt_metrics, send_failure);
                         report_selection(false);
                         co_return proxy_failure_result(send_failure);
                     }
@@ -787,7 +935,7 @@ async::Task<Result<void>> ProxyExecutor::execute_impl(http::HttpExchange &exchan
                         const ProxyFailure send_failure =
                                 failure(ProxyFailurePhase::SendRequestBody,
                                         "upstream request body write was incomplete", common::IoErr::Invalid);
-                        record_provider_failure(provider_transaction, send_failure);
+                        record_provider_failure(provider_transaction, telemetry, attempt_metrics, send_failure);
                         report_selection(false);
                         co_return proxy_failure_result(send_failure);
                     }
@@ -799,7 +947,7 @@ async::Task<Result<void>> ProxyExecutor::execute_impl(http::HttpExchange &exchan
                         const ProxyFailure read_failure =
                                 failure(ProxyFailurePhase::ReadRequestBody,
                                         "downstream request body ended before Content-Length", common::IoErr::Invalid);
-                        record_provider_failure(provider_transaction, read_failure);
+                        record_provider_failure(provider_transaction, telemetry, attempt_metrics, read_failure);
                         co_return proxy_failure_result(read_failure);
                     }
                     break;
@@ -814,7 +962,7 @@ async::Task<Result<void>> ProxyExecutor::execute_impl(http::HttpExchange &exchan
                 const ProxyFailure response_failure =
                         failure(ProxyFailurePhase::ReadResponseHeader, "failed to read upstream response header",
                                 received.error());
-                record_provider_failure(provider_transaction, response_failure);
+                record_provider_failure(provider_transaction, telemetry, attempt_metrics, response_failure);
                 report_selection(false);
                 co_return proxy_failure_result(response_failure);
             }
@@ -828,22 +976,28 @@ async::Task<Result<void>> ProxyExecutor::execute_impl(http::HttpExchange &exchan
             report_selection(false);
         }
         const bool websocket_response = websocket_upgrade && upstream_head->status_code == 101;
+        if (websocket_upgrade && !websocket_response) {
+            websocket_metrics.rejected();
+        }
 
         auto custom_headers = prepare_proxy_response_headers(proxy.response_headers, input.template_evaluator);
         if (!custom_headers) {
+            telemetry.record_proxy_failure(AccessProxyFailurePhase::BuildResponseHeaders);
             if (websocket_response) {
                 (void) upstream.abort(common::IoErr::Canceled);
+                attempt_metrics.aborted();
                 provider_transaction.fail("aborted", common::IoErr::Canceled);
             } else {
                 auto discarded = co_await upstream.discard_response_body();
                 if (!discarded) {
                     report_selection(false);
-                    record_provider_failure(provider_transaction,
+                    record_provider_failure(provider_transaction, telemetry, attempt_metrics,
                                             failure(ProxyFailurePhase::ReadResponseBody,
                                                     "failed to discard upstream response body", discarded.error()));
                     (void) upstream.abort(discarded.error());
                 } else {
                     report_selection(true);
+                    attempt_metrics.completed();
                     provider_transaction.complete(upstream_head->status_code);
                 }
             }
@@ -856,6 +1010,8 @@ async::Task<Result<void>> ProxyExecutor::execute_impl(http::HttpExchange &exchan
         if (!websocket_response && has_content_length &&
             response_limit_exceeded(max_response_body_size, content_length)) {
             (void) upstream.abort(common::IoErr::MessageTooLarge);
+            telemetry.record_proxy_failure(AccessProxyFailurePhase::ResponseBodyTooLarge);
+            attempt_metrics.aborted();
             provider_transaction.fail("aborted", common::IoErr::MessageTooLarge);
             auto exception = response_body_too_large(exchange.pool(), content_length);
             if (!exception) {
@@ -870,6 +1026,8 @@ async::Task<Result<void>> ProxyExecutor::execute_impl(http::HttpExchange &exchan
             if (!switched) {
                 report_selection(false);
                 const Exception exception = Exception::unknown("failed to upgrade websocket");
+                telemetry.record_proxy_failure(AccessProxyFailurePhase::SwitchWebSocket);
+                attempt_metrics.failed();
                 provider_transaction.call_error(exception, "switch_to_raw_stream", switched.error());
                 (void) upstream.abort(switched.error());
                 co_return std::unexpected(Err::from_upstream_exception(exception));
@@ -881,6 +1039,8 @@ async::Task<Result<void>> ProxyExecutor::execute_impl(http::HttpExchange &exchan
                                       telemetry.client_metadata(), response_headers) ||
             !telemetry.finalize_response_headers()) {
             (void) upstream.abort(common::IoErr::NoMem);
+            telemetry.record_proxy_failure(AccessProxyFailurePhase::BuildResponseHeaders);
+            attempt_metrics.aborted();
             provider_transaction.fail("aborted", common::IoErr::NoMem);
             co_return std::unexpected(Err::from_error(common::IoErr::NoMem));
         }
@@ -901,14 +1061,19 @@ async::Task<Result<void>> ProxyExecutor::execute_impl(http::HttpExchange &exchan
                     options_.downstream_write_timeout);
             if (!sent_header) {
                 (void) upstream.abort(sent_header.error());
+                telemetry.record_proxy_failure(AccessProxyFailurePhase::SendResponseHeader);
+                attempt_metrics.aborted();
                 provider_transaction.fail("aborted", sent_header.error());
                 telemetry.record_response_error(sent_header.error());
                 co_return std::unexpected(Err::from_error(sent_header.error()));
             }
 
+            websocket_metrics.accepted();
             co_await http::proxy_core::relay_websocket_tunnel(exchange, upstream,
                                                               std::chrono::milliseconds(websocket_timeout_millis),
                                                               std::chrono::milliseconds(websocket_timeout_millis));
+            websocket_metrics.closed();
+            attempt_metrics.completed();
             provider_transaction.complete(upstream_head->status_code);
             co_return Result<void>{};
         }
@@ -931,6 +1096,8 @@ async::Task<Result<void>> ProxyExecutor::execute_impl(http::HttpExchange &exchan
                 options_.downstream_write_timeout);
         if (!sent_response_header) {
             (void) upstream.abort(sent_response_header.error());
+            telemetry.record_proxy_failure(AccessProxyFailurePhase::SendResponseHeader);
+            attempt_metrics.aborted();
             provider_transaction.fail("aborted", sent_response_header.error());
             telemetry.record_response_error(sent_response_header.error());
             co_return std::unexpected(Err::from_error(sent_response_header.error()));
@@ -940,16 +1107,18 @@ async::Task<Result<void>> ProxyExecutor::execute_impl(http::HttpExchange &exchan
                 auto discarded = co_await upstream.discard_response_body();
                 if (!discarded) {
                     report_selection(false);
-                    record_provider_failure(provider_transaction,
+                    record_provider_failure(provider_transaction, telemetry, attempt_metrics,
                                             failure(ProxyFailurePhase::ReadResponseBody,
                                                     "failed to discard upstream response body", discarded.error()));
                     (void) upstream.abort(discarded.error());
                 } else {
                     report_selection(true);
+                    attempt_metrics.completed();
                     provider_transaction.complete(upstream_head->status_code);
                 }
             } else {
                 report_selection(true);
+                attempt_metrics.completed();
                 provider_transaction.complete(upstream_head->status_code);
             }
             co_return Result<void>{};
@@ -970,13 +1139,19 @@ async::Task<Result<void>> ProxyExecutor::execute_impl(http::HttpExchange &exchan
         if (!piped) {
             const http::HttpBodyPipeError pipe_error = piped.error();
             if (body_reader.limit_exceeded()) {
+                telemetry.record_proxy_failure(AccessProxyFailurePhase::ResponseBodyTooLarge);
+                attempt_metrics.aborted();
                 provider_transaction.fail("aborted", pipe_error.code);
             } else if (pipe_error.phase == http::HttpBodyPipePhase::Read) {
                 report_selection(false);
-                record_provider_failure(provider_transaction,
+                record_provider_failure(provider_transaction, telemetry, attempt_metrics,
                                         failure(ProxyFailurePhase::ReadResponseBody,
                                                 "failed to read upstream response body", pipe_error.code));
             } else {
+                telemetry.record_proxy_failure(pipe_error.phase == http::HttpBodyPipePhase::Write
+                                                       ? AccessProxyFailurePhase::WriteResponseBody
+                                                       : AccessProxyFailurePhase::BuildResponseHeaders);
+                attempt_metrics.aborted();
                 provider_transaction.fail("aborted", pipe_error.code);
                 if (pipe_error.phase == http::HttpBodyPipePhase::Write) {
                     telemetry.record_response_error(pipe_error.code);
@@ -986,10 +1161,14 @@ async::Task<Result<void>> ProxyExecutor::execute_impl(http::HttpExchange &exchan
         }
 
         report_selection(true);
+        attempt_metrics.completed();
         provider_transaction.complete(upstream_head->status_code);
         co_return Result<void>{};
     }
 
+    if (!previous_failure) {
+        telemetry.record_proxy_failure(AccessProxyFailurePhase::NoUpstreamHosts);
+    }
     co_return proxy_failure_result(previous_failure.value_or(
             failure(ProxyFailurePhase::NoUpstreamHosts, "no usable upstream", common::IoErr::NotFound)));
 }

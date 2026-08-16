@@ -270,8 +270,8 @@ listener 只在 Nacos client/config/naming、project/gray watcher、项目列表
   发布和有序关闭契约；
 - `docs/config-publication-typestate.md`：Project 候选从 Prepared 到 Ready 再到 commit 的
   move-only 类型状态、取消和兼容语义；
-- `docs/bounded-metrics.md`：请求、配置、Nacos 组件生命周期与服务发现指标的固定 label 集、
-  readiness/snapshot 语义、并发成本及仍待实现的 O-02 范围；
+- `docs/bounded-metrics.md`：请求、配置、Nacos/发现、TLS、proxy/DNS/pool/WebSocket 指标的
+  固定 label 集、readiness/snapshot 语义、并发成本及仍待实现的 O-02 范围；
 - `../../docs/activation-evidence.md`：实例证据协议、鉴权和分页边界、collector 租约/TTL、
   Release 聚合状态和部署检查；
 - `docs/script-corpus-differential.md`：现网 condition/template/rewrite 的脱敏统计、
