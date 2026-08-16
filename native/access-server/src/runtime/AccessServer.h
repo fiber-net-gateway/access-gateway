@@ -1,34 +1,22 @@
 #ifndef FIBER_ACCESS_SERVER_ACCESS_SERVER_H
 #define FIBER_ACCESS_SERVER_ACCESS_SERVER_H
 
-#include "../execution/AccessRequestHandler.h"
-#include "../execution/ClientMetadata.h"
-#include "../execution/ProxyExecutor.h"
-#include "../observability/AccessLogPolicy.h"
-#include "../observability/AccessServerMetrics.h"
-#include "AccessActivationEndpoint.h"
-#include "AccessDnsService.h"
+#include "AccessMetricsEndpoint.h"
+#include "AccessWorkerResources.h"
 #include "RouteConfigStore.h"
 
 #include <cstddef>
 #include <string>
 
 #include <fiber/async/Task.h>
-#include <fiber/async/WaitGroup.h>
 #include <fiber/common/IoError.h>
 #include <fiber/common/NonCopyable.h>
 #include <fiber/common/NonMovable.h>
 #include <fiber/event/EventLoop.h>
 #include <fiber/event/EventLoopGroup.h>
-#include <fiber/http/Http1Server.h>
 #include <fiber/http/HttpServer.h>
-#include <fiber/http/StealableHttp1ConnectionPoolSet.h>
 #include <fiber/net/SocketAddress.h>
 #include <fiber/net/TcpListener.h>
-
-namespace fiber::cat {
-class CatClient;
-}
 
 namespace fiber::access_server {
 
@@ -64,31 +52,14 @@ public:
     async::DetachedTask serve_metrics();
     [[nodiscard]] async::Task<void> shutdown_and_wait() noexcept;
     [[nodiscard]] int fd() const noexcept { return server_.fd(); }
-    [[nodiscard]] int metrics_fd() const noexcept { return metrics_server_.fd(); }
+    [[nodiscard]] int metrics_fd() const noexcept { return metrics_endpoint_.fd(); }
 
 private:
-    [[nodiscard]] async::Task<void> handle(http::HttpExchange &exchange) noexcept;
-    [[nodiscard]] async::Task<void> handle_metrics(http::HttpExchange &exchange) noexcept;
-    [[nodiscard]] async::DetachedTask detach_cat_worker() noexcept;
-    [[nodiscard]] async::Task<void> detach_cat_workers() noexcept;
-
     event::EventLoop *accept_loop_ = nullptr;
-    event::EventLoopGroup *workers_ = nullptr;
-    ClientMetadataResolver client_metadata_resolver_;
-    AccessLogPolicy access_log_policy_;
-    AccessDnsService dns_;
-    http::StealableHttp1ConnectionPoolSet pool_;
-    ProxyExecutor executor_;
-    AccessRequestHandler handler_;
-    AccessServerMetrics metrics_;
-    AccessActivationEndpoint activation_endpoint_;
-    cat::CatClient *cat_client_ = nullptr;
+    AccessWorkerResources worker_resources_;
     http::HttpServer server_;
-    http::Http1Server metrics_server_;
-    async::WaitGroup cat_detach_tasks_;
+    AccessMetricsEndpoint metrics_endpoint_;
     bool initialized_ = false;
-    bool metrics_bound_ = false;
-    std::string http3_alt_svc_;
 };
 
 } // namespace fiber::access_server

@@ -879,9 +879,18 @@ root 合理，但具体依赖过多，生命周期难以使用 fake 完整测试
 
 **归属：本项目。**
 
-建议保留其 data-plane façade 角色，但将 DNS、pool、CAT worker attachment 抽成
-`WorkerResources`，metrics listener 抽成 `MetricsEndpoint`。`AccessServer` 最终只负责
-initialize、bind、serve 和全异步 shutdown。
+**实施状态：已解决（2026-08-17）。** `AccessServer` 现在只保留业务 `HttpServer`、
+`AccessWorkerResources`、`AccessMetricsEndpoint` 和四个 façade 生命周期入口。
+`AccessWorkerResources` 独占 client metadata/access log、DNS、pool、proxy/handler、worker
+metrics 和 CAT worker detach；`AccessMetricsEndpoint` 独占 status listener、Prometheus 渲染
+及 activation 分流。关闭仍严格按 metrics listener、业务 listener、metrics collection、CAT
+worker context、pool、DNS 排序，之后才由 runtime 停 CAT client。提取没有增加虚调用、
+`std::function`、共享所有权、请求期分配或跨 loop post，原有 loopback façade 测试覆盖业务、
+metrics、activation、CAT 和关闭行为。
+
+实现保留其 data-plane façade 角色，将 DNS、pool、CAT worker attachment 抽成
+`AccessWorkerResources`，metrics listener 抽成 `AccessMetricsEndpoint`；`AccessServer`
+只负责 initialize、bind、serve 和全异步 shutdown。
 
 ### 8.3 C-01：配置 watcher
 

@@ -67,6 +67,9 @@ connection pool，以及 Nacos、CAT、Prometheus 组件。迁移不要求这些
 - 已实现 `AccessServerRuntime`：启动 Nacos client/config/naming，建立 project/gray
   watcher 和 NamingService selector，在每个 HTTP worker 初始化 DNS resolver 与本地
   connection pool，并在收到项目列表首值后才绑定 listener；
+- `AccessServer` 已收敛为 data-plane façade：`AccessWorkerResources` 独占 request handler、
+  DNS、connection pool、worker metrics 和 CAT detach 生命周期，`AccessMetricsEndpoint`
+  独占 metrics/activation listener；façade 只编排 initialize、bind、serve 和异步 shutdown；
 - `main` 已装配 SIGINT/SIGTERM、accept loop、HTTP worker group、CAT sender loop、
   Nacos owner loop 和逆序关闭；关闭顺序为 metrics/业务 listener 与 active exchange、
   指标采集和 CAT worker 上下文、connection pool/DNS、CAT client、配置和服务订阅、
