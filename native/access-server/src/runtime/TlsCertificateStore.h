@@ -2,9 +2,11 @@
 #define FIBER_ACCESS_SERVER_TLS_CERTIFICATE_STORE_H
 
 #include "../config/TlsCertificateConfig.h"
+#include "../observability/AccessTlsMetrics.h"
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <expected>
 #include <memory>
@@ -81,7 +83,8 @@ public:
         std::shared_ptr<TlsBootstrapIdentity> bootstrap_;
     };
 
-    TlsCertificateStore(event::EventLoop &owner_loop, event::EventLoopGroup &workers, bool quic_enabled);
+    TlsCertificateStore(event::EventLoop &owner_loop, event::EventLoopGroup &workers, bool quic_enabled,
+                        AccessTlsMetricsObserver metrics_observer = {});
     ~TlsCertificateStore();
 
     [[nodiscard]] static TlsCertificateContentDigest content_digest(std::string_view wire_content) noexcept;
@@ -109,22 +112,29 @@ private:
         TlsCertificateStore *store = nullptr;
     };
 
+    struct RetiredSnapshot {
+        std::unique_ptr<Snapshot> snapshot;
+        std::chrono::steady_clock::time_point retired_at;
+    };
+
     [[nodiscard]] static net::TlsContext *select_identity(void *context,
                                                           const net::TlsIdentitySelectInput &input) noexcept;
     static void clear_hazard(WorkerSlot *slot) noexcept;
     static void run_reaper(TlsCertificateStore *store) noexcept;
     void request_reclaim() noexcept;
-    void reclaim_retired() noexcept;
+    void reclaim_retired(AccessTlsReclaimTrigger trigger) noexcept;
 
     event::EventLoop *owner_loop_ = nullptr;
     event::EventLoopGroup *workers_ = nullptr;
     std::vector<std::unique_ptr<WorkerSlot>> worker_slots_;
     std::atomic<Snapshot *> current_{nullptr};
     std::unique_ptr<Snapshot> active_;
-    std::vector<std::unique_ptr<Snapshot>> retired_;
+    std::vector<RetiredSnapshot> retired_;
     std::shared_ptr<TlsBootstrapIdentity> bootstrap_;
     TlsCertificateContentDigest content_digest_{};
+    AccessTlsMetricsObserver metrics_observer_;
     event::EventLoop::NotifyEntry reaper_entry_;
+    std::atomic<bool> retirement_pending_{false};
     std::atomic<bool> reaper_posted_{false};
     async::Watch<std::uint64_t> reclaim_epoch_{0};
     std::optional<async::Watch<std::uint64_t>::Publisher> reclaim_publisher_;

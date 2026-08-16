@@ -160,7 +160,8 @@ AccessServerRuntime::AccessServerRuntime(
     config_watcher_(nacos_loop, config_compiler_, *config_service_, route_store_, std::move(watcher_options), {},
                     runtime_metrics_.config().observer()),
     gray_watcher_(nacos_loop, *config_service_, gray_store_, std::move(gray_options)),
-    tls_certificate_store_(nacos_loop, http_workers, http_server_options_.http3.enabled),
+    tls_certificate_store_(nacos_loop, http_workers, http_server_options_.http3.enabled,
+                           runtime_metrics_.tls().observer()),
     tls_certificate_watcher_(nacos_loop, config_compiler_, *config_service_, tls_certificate_store_,
                              std::move(tls_certificate_options)) {
     FIBER_ASSERT(accept_loop_ != nacos_loop_);
