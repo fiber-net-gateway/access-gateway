@@ -31,13 +31,10 @@ RouteConfigStore::RouteConfigStore(ScriptCompilerAdapter script_compiler, Access
 PreparedConfigUpdateOutcome RouteConfigStore::prepare(std::string_view project,
                                                       const std::optional<ProjectConfig> &config) {
     if (!config) {
-        return PreparedConfigUpdate{
-                .status = ConfigUpdateStatus::IgnoredEmpty,
-                .project = std::string(project),
-        };
+        return prepare_compiled(project, std::nullopt, std::nullopt);
     }
 
-    const std::optional<std::int32_t> current_version = published_version(project);
+    const std::optional<std::int32_t> current_version = this->current_version(project);
     if (current_version && *current_version == config->version) {
         return PreparedConfigUpdate{
                 .status = ConfigUpdateStatus::VersionUnchanged,
@@ -46,16 +43,50 @@ PreparedConfigUpdateOutcome RouteConfigStore::prepare(std::string_view project,
         };
     }
 
+    auto compiled = compile_project_config(project, *config, script_compiler_);
+    if (!compiled) {
+        return std::unexpected(std::move(compiled.error()));
+    }
+    return prepare_compiled(project, config->version, std::move(*compiled));
+}
+
+PreparedConfigUpdateOutcome RouteConfigStore::prepare_compiled(std::string_view project,
+                                                               std::optional<std::int32_t> version,
+                                                               std::optional<ProjectRouteSnapshot> project_snapshot) {
+    if (!version) {
+        return PreparedConfigUpdate{
+                .status = ConfigUpdateStatus::IgnoredEmpty,
+                .project = std::string(project),
+        };
+    }
+
+    const std::optional<std::int32_t> published = current_version(project);
+    if (published && *published == *version) {
+        return PreparedConfigUpdate{
+                .status = ConfigUpdateStatus::VersionUnchanged,
+                .project = std::string(project),
+                .version = *version,
+        };
+    }
+
+    if (!project_snapshot) {
+        return PreparedConfigUpdate{
+                .status = ConfigUpdateStatus::Unloaded,
+                .project = std::string(project),
+                .version = *version,
+        };
+    }
+
     if (uses_service_discovery_) {
         service_selector_factory_.begin_compile();
     }
-    auto compiled = compile_project_config(project, *config, script_compiler_, selector_factory_);
+    auto bound = bind_project_service_selectors(*project_snapshot, selector_factory_);
     std::optional<nacos::NamingServiceError> acquire_error;
     if (uses_service_discovery_) {
         acquire_error = service_selector_factory_.take_error();
     }
-    if (!compiled) {
-        return std::unexpected(std::move(compiled.error()));
+    if (!bound) {
+        return std::unexpected(std::move(bound.error()));
     }
     if (acquire_error) {
         return std::unexpected(AccessConfigError{
@@ -65,19 +96,11 @@ PreparedConfigUpdateOutcome RouteConfigStore::prepare(std::string_view project,
         });
     }
 
-    if (!*compiled) {
-        return PreparedConfigUpdate{
-                .status = ConfigUpdateStatus::Unloaded,
-                .project = std::string(project),
-                .version = config->version,
-        };
-    }
-
     return PreparedConfigUpdate{
             .status = ConfigUpdateStatus::Published,
             .project = std::string(project),
-            .version = config->version,
-            .project_snapshot = std::make_shared<const ProjectRouteSnapshot>(std::move(**compiled)),
+            .version = *version,
+            .project_snapshot = std::make_shared<const ProjectRouteSnapshot>(std::move(*project_snapshot)),
     };
 }
 
@@ -163,7 +186,7 @@ void RouteConfigStore::clear() noexcept {
 #endif
 }
 
-std::optional<std::int32_t> RouteConfigStore::published_version(std::string_view project) const noexcept {
+std::optional<std::int32_t> RouteConfigStore::current_version(std::string_view project) const noexcept {
     for (const PublishedVersion &entry: published_versions_) {
         if (entry.project == project) {
             return entry.version;

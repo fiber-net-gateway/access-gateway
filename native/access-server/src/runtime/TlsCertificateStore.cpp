@@ -286,6 +286,13 @@ public:
     Identity *default_identity = nullptr;
 };
 
+TlsCertificateStore::PreparedUpdate::PreparedUpdate(PreparedUpdate &&other) noexcept = default;
+
+TlsCertificateStore::PreparedUpdate &
+TlsCertificateStore::PreparedUpdate::operator=(PreparedUpdate &&other) noexcept = default;
+
+TlsCertificateStore::PreparedUpdate::~PreparedUpdate() = default;
+
 namespace {
 
 std::expected<std::unique_ptr<TlsCertificateStore::Snapshot>, TlsCertificateConfigError>
@@ -388,6 +395,38 @@ TlsBootstrapIdentity::create(std::string_view certificate_pem, std::string_view 
     return std::shared_ptr<TlsBootstrapIdentity>(new TlsBootstrapIdentity(*certificate_fd, *private_key_fd));
 }
 
+TlsCertificateContentDigest TlsCertificateStore::content_digest(std::string_view wire_content) noexcept {
+    TlsCertificateContentDigest digest{};
+    SHA256(reinterpret_cast<const std::uint8_t *>(wire_content.data()), wire_content.size(), digest.data());
+    return digest;
+}
+
+std::expected<TlsCertificateStore::PreparedUpdate, TlsCertificateConfigError>
+TlsCertificateStore::prepare(const TlsCertificateSnapshotConfig &config, TlsCertificateContentDigest digest,
+                             bool quic_enabled, bool prepare_bootstrap) {
+    auto candidate = compile_snapshot(config, quic_enabled);
+    if (!candidate) {
+        return std::unexpected(std::move(candidate.error()));
+    }
+
+    PreparedUpdate prepared;
+    prepared.version_ = config.version;
+    prepared.content_digest_ = digest;
+    prepared.snapshot_ = std::move(*candidate);
+    if (prepare_bootstrap) {
+        const auto default_config =
+                std::find_if(config.certificates.begin(), config.certificates.end(),
+                             [&](const auto &entry) { return entry.id == config.default_certificate; });
+        FIBER_ASSERT(default_config != config.certificates.end());
+        auto bootstrap = TlsBootstrapIdentity::create(default_config->certificate_pem, default_config->private_key_pem);
+        if (!bootstrap) {
+            return std::unexpected(std::move(bootstrap.error()));
+        }
+        prepared.bootstrap_ = std::move(*bootstrap);
+    }
+    return prepared;
+}
+
 void TlsBootstrapIdentity::close() noexcept {
     const int certificate_fd = certificate_fd_.exchange(-1, std::memory_order_acq_rel);
     if (certificate_fd >= 0) {
@@ -421,42 +460,72 @@ TlsCertificateStore::~TlsCertificateStore() {
 std::expected<TlsCertificateUpdateStatus, TlsCertificateConfigError>
 TlsCertificateStore::apply(const TlsCertificateSnapshotConfig &config, std::string_view wire_content) {
     FIBER_ASSERT(owner_loop_->in_loop());
-    std::array<std::uint8_t, 32> digest{};
-    SHA256(reinterpret_cast<const std::uint8_t *>(wire_content.data()), wire_content.size(), digest.data());
-    if (active_ && config.version < version_) {
-        return TlsCertificateUpdateStatus::IgnoredOlderVersion;
+    const TlsCertificateContentDigest digest = content_digest(wire_content);
+    if (TlsCertificateClassification classified = classify(config.version, digest)) {
+        return std::move(*classified);
     }
-    if (active_ && config.version == version_) {
+    auto prepared = prepare(config, digest, quic_enabled_, !bootstrap_);
+    if (!prepared) {
+        return std::unexpected(std::move(prepared.error()));
+    }
+    return commit(std::move(*prepared));
+}
+
+TlsCertificateVersionState TlsCertificateStore::version_state() const noexcept {
+    FIBER_ASSERT(owner_loop_->in_loop());
+    return TlsCertificateVersionState{
+            .active = active_ != nullptr,
+            .version = version_,
+            .content_digest = content_digest_,
+    };
+}
+
+TlsCertificateClassification TlsCertificateStore::classify(std::uint64_t version,
+                                                           const TlsCertificateContentDigest &digest) const {
+    FIBER_ASSERT(owner_loop_->in_loop());
+    if (!active_) {
+        return std::nullopt;
+    }
+    if (version < version_) {
+        return TlsCertificateClassification(std::in_place, TlsCertificateUpdateStatus::IgnoredOlderVersion);
+    }
+    if (version == version_) {
         if (digest == content_digest_) {
-            return TlsCertificateUpdateStatus::VersionUnchanged;
+            return TlsCertificateClassification(std::in_place, TlsCertificateUpdateStatus::VersionUnchanged);
         }
-        return std::unexpected(config_error(TlsCertificateConfigErrorCode::VersionConflict, "version",
-                                            "same TLS snapshot version has different content"));
+        return TlsCertificateClassification(
+                std::in_place, std::unexpected(config_error(TlsCertificateConfigErrorCode::VersionConflict, "version",
+                                                            "same TLS snapshot version has different content")));
     }
-    auto candidate = compile_snapshot(config, quic_enabled_);
-    if (!candidate) {
-        return std::unexpected(std::move(candidate.error()));
+    return std::nullopt;
+}
+
+std::expected<TlsCertificateUpdateStatus, TlsCertificateConfigError>
+TlsCertificateStore::commit(PreparedUpdate prepared) {
+    FIBER_ASSERT(owner_loop_->in_loop());
+    if (TlsCertificateClassification classified = classify(prepared.version_, prepared.content_digest_)) {
+        return std::move(*classified);
+    }
+    if (!prepared.snapshot_) {
+        return std::unexpected(config_error(TlsCertificateConfigErrorCode::InvalidField, "snapshot",
+                                            "prepared TLS snapshot is empty"));
     }
     if (!bootstrap_) {
-        const auto default_config =
-                std::find_if(config.certificates.begin(), config.certificates.end(),
-                             [&](const auto &entry) { return entry.id == config.default_certificate; });
-        FIBER_ASSERT(default_config != config.certificates.end());
-        auto bootstrap = TlsBootstrapIdentity::create(default_config->certificate_pem, default_config->private_key_pem);
-        if (!bootstrap) {
-            return std::unexpected(std::move(bootstrap.error()));
+        if (!prepared.bootstrap_) {
+            return std::unexpected(config_error(TlsCertificateConfigErrorCode::InvalidField, "defaultCertificate",
+                                                "prepared TLS snapshot has no bootstrap identity"));
         }
-        bootstrap_ = std::move(*bootstrap);
+        bootstrap_ = std::move(prepared.bootstrap_);
     }
 
-    Snapshot *old = current_.exchange(candidate->get(), std::memory_order_acq_rel);
+    Snapshot *old = current_.exchange(prepared.snapshot_.get(), std::memory_order_acq_rel);
     if (active_) {
         FIBER_ASSERT(old == active_.get());
         retired_.push_back(std::move(active_));
     }
-    active_ = std::move(*candidate);
-    version_ = config.version;
-    content_digest_ = digest;
+    active_ = std::move(prepared.snapshot_);
+    version_ = prepared.version_;
+    content_digest_ = prepared.content_digest_;
     reclaim_retired();
     return TlsCertificateUpdateStatus::Published;
 }

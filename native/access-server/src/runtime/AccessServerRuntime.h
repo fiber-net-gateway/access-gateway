@@ -1,6 +1,7 @@
 #ifndef FIBER_ACCESS_SERVER_ACCESS_SERVER_RUNTIME_H
 #define FIBER_ACCESS_SERVER_ACCESS_SERVER_RUNTIME_H
 
+#include "AccessConfigCompiler.h"
 #include "AccessConfigWatcher.h"
 #include "AccessScriptRuntime.h"
 #include "AccessServer.h"
@@ -76,8 +77,8 @@ enum class AccessServerRuntimeState : std::uint8_t {
 class AccessServerRuntime final : public common::NonCopyable, public common::NonMovable {
 public:
     [[nodiscard]] static std::expected<std::unique_ptr<AccessServerRuntime>, AccessServerRuntimeError>
-    create(event::EventLoop &accept_loop, event::EventLoop &nacos_loop, event::EventLoop &cat_loop,
-           event::EventLoopGroup &http_workers, const AccessServerConfig &config,
+    create(event::EventLoop &accept_loop, event::EventLoop &nacos_loop, event::EventLoop &compiler_loop,
+           event::EventLoop &cat_loop, event::EventLoopGroup &http_workers, const AccessServerConfig &config,
            const net::ListenOptions &listen_options = {});
 
     ~AccessServerRuntime();
@@ -100,14 +101,14 @@ private:
         AccessServerRuntimeError error;
     };
 
-    AccessServerRuntime(event::EventLoop &accept_loop, event::EventLoop &nacos_loop, event::EventLoop &cat_loop,
-                        event::EventLoopGroup &http_workers, net::SocketAddress listen_address,
-                        http::HttpServerOptions http_server_options, net::SocketAddress metrics_listen_address,
-                        net::ListenOptions listen_options, std::chrono::milliseconds initial_config_timeout,
-                        std::size_t default_max_request_body_size, bool test_mode,
-                        ClientMetadataResolverOptions client_metadata_options, AccessLogOptions access_log_options,
-                        AccessConfigWatcherOptions watcher_options, GrayConfigWatcherOptions gray_options,
-                        TlsCertificateWatcherOptions tls_certificate_options,
+    AccessServerRuntime(event::EventLoop &accept_loop, event::EventLoop &nacos_loop, event::EventLoop &compiler_loop,
+                        event::EventLoop &cat_loop, event::EventLoopGroup &http_workers,
+                        net::SocketAddress listen_address, http::HttpServerOptions http_server_options,
+                        net::SocketAddress metrics_listen_address, net::ListenOptions listen_options,
+                        std::chrono::milliseconds initial_config_timeout, std::size_t default_max_request_body_size,
+                        bool test_mode, ClientMetadataResolverOptions client_metadata_options,
+                        AccessLogOptions access_log_options, AccessConfigWatcherOptions watcher_options,
+                        GrayConfigWatcherOptions gray_options, TlsCertificateWatcherOptions tls_certificate_options,
                         AccessServiceDiscoveryOptions service_discovery_options,
                         std::unique_ptr<cat::CatClient> cat_client, std::unique_ptr<nacos::NacosClient> nacos_client,
                         std::unique_ptr<nacos::ConfigService> config_service,
@@ -128,6 +129,7 @@ private:
 
     event::EventLoop *accept_loop_ = nullptr;
     event::EventLoop *nacos_loop_ = nullptr;
+    event::EventLoop *compiler_loop_ = nullptr;
     event::EventLoop *cat_loop_ = nullptr;
     event::EventLoopGroup *http_workers_ = nullptr;
     net::SocketAddress listen_address_;
@@ -144,6 +146,7 @@ private:
     std::unique_ptr<nacos::ConfigService> config_service_;
     std::unique_ptr<nacos::NamingService> naming_service_;
     AccessScriptRuntime script_runtime_;
+    AccessConfigCompiler config_compiler_;
     GrayMatchStore gray_store_;
     AccessServiceDiscovery service_discovery_;
     RouteConfigStore route_store_;

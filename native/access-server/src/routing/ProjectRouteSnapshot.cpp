@@ -1121,4 +1121,34 @@ ProjectSnapshotResult compile_project_config(std::string_view project, const Pro
     return std::optional<ProjectRouteSnapshot>(std::move(snapshot));
 }
 
+std::expected<void, AccessConfigError> bind_project_service_selectors(ProjectRouteSnapshot &snapshot,
+                                                                      ProxyAddressSelectorFactory selector_factory) {
+    if (!selector_factory.create_service) {
+        return {};
+    }
+    for (std::size_t route_index = 0; route_index < snapshot.routes_.size(); ++route_index) {
+        CompiledRoute &route = snapshot.routes_[route_index];
+        if (!route.proxy || !route.proxy->address_selector) {
+            continue;
+        }
+        const std::string_view service_view = route.proxy->address_selector->service_name();
+        if (service_view.empty()) {
+            continue;
+        }
+        std::string service(service_view);
+        std::string cluster(kDefaultServiceCluster);
+        if (const auto configured = route.proxy->address_selector->configured_cluster()) {
+            cluster = *configured;
+        }
+        auto selector =
+                selector_factory.create_service(selector_factory.context, std::move(service), std::move(cluster));
+        if (!selector) {
+            return std::unexpected(route_error(AccessConfigErrorCode::InvalidCombination, route_index, "service",
+                                               "upstream selector factory returned null"));
+        }
+        route.proxy->address_selector = std::move(selector);
+    }
+    return {};
+}
+
 } // namespace fiber::access_server

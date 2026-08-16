@@ -125,6 +125,8 @@ private:
     friend std::expected<std::optional<ProjectRouteSnapshot>, AccessConfigError>
     compile_project_config(std::string_view project, const ProjectConfig &config, ScriptCompilerAdapter compiler,
                            ProxyAddressSelectorFactory selector_factory, const AccessConfigLimits &limits);
+    friend std::expected<void, AccessConfigError>
+    bind_project_service_selectors(ProjectRouteSnapshot &snapshot, ProxyAddressSelectorFactory selector_factory);
 
     std::string project_;
     std::int32_t version_ = 0;
@@ -150,6 +152,12 @@ using ProjectSnapshotResult = std::expected<std::optional<ProjectRouteSnapshot>,
                                                            ScriptCompilerAdapter compiler,
                                                            ProxyAddressSelectorFactory selector_factory,
                                                            const AccessConfigLimits &limits = kAccessConfigLimits);
+
+// Pure project compilation represents service routes with unavailable selectors
+// carrying their service/cluster metadata. Runtime callers bind those selectors
+// on the NamingService owner EventLoop before waiting for readiness or publishing.
+[[nodiscard]] std::expected<void, AccessConfigError>
+bind_project_service_selectors(ProjectRouteSnapshot &snapshot, ProxyAddressSelectorFactory selector_factory);
 
 } // namespace fiber::access_server
 

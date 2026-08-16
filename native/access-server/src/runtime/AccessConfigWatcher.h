@@ -1,11 +1,14 @@
 #ifndef FIBER_ACCESS_SERVER_ACCESS_CONFIG_WATCHER_H
 #define FIBER_ACCESS_SERVER_ACCESS_CONFIG_WATCHER_H
 
+#include "AccessConfigCompiler.h"
 #include "RouteConfigStore.h"
 
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <expected>
 #include <map>
 #include <memory>
@@ -87,6 +90,7 @@ struct AccessConfigReadiness {
     std::size_t subscribed_projects = 0;
     std::size_t synchronized_projects = 0;
     std::size_t retrying_projects = 0;
+    std::size_t processing_projects = 0;
     std::size_t rejected_projects = 0;
     common::IoErr io_error = common::IoErr::None;
     std::string message;
@@ -122,8 +126,9 @@ struct RouteSnapshotObserver {
 // RouteConfigStore publishes immutable snapshots for request workers.
 class AccessConfigWatcher final : public common::NonCopyable, public common::NonMovable {
 public:
-    AccessConfigWatcher(event::EventLoop &loop, nacos::ConfigService &config_service, RouteConfigStore &store,
-                        AccessConfigWatcherOptions options = {}, RouteSnapshotObserver observer = {});
+    AccessConfigWatcher(event::EventLoop &loop, AccessConfigCompiler &compiler, nacos::ConfigService &config_service,
+                        RouteConfigStore &store, AccessConfigWatcherOptions options = {},
+                        RouteSnapshotObserver observer = {});
     ~AccessConfigWatcher();
 
     [[nodiscard]] std::expected<void, nacos::ConfigServiceError> start();
@@ -146,12 +151,23 @@ public:
 private:
     struct ProjectListEntry;
     struct ProjectEntry;
+    struct ProjectCompileJob;
 
     static void project_list_notify(void *context, const nacos::SubscriptionResult<nacos::ConfigData> &result) noexcept;
     static void project_notify(void *context, const nacos::SubscriptionResult<nacos::ConfigData> &result) noexcept;
+    static void run_project_compile(ProjectCompileJob *job) noexcept;
+    static void complete_project_compile(ProjectCompileJob *job) noexcept;
 
     void apply_project_list(const nacos::ConfigData &data);
-    void apply_project(const std::shared_ptr<ProjectEntry> &entry, const nacos::ConfigData &data);
+    void apply_project(const std::shared_ptr<ProjectEntry> &entry, std::shared_ptr<const nacos::ConfigData> data);
+    void enqueue_project_compile(const std::shared_ptr<ProjectEntry> &entry,
+                                 std::shared_ptr<const nacos::ConfigData> data, bool force_compile = false);
+    void dispatch_project_compile();
+    void cancel_project_compile(const std::shared_ptr<ProjectEntry> &entry) noexcept;
+    void apply_compiled_project(ProjectCompileJob &job);
+    void apply_prepared_project(const std::shared_ptr<ProjectEntry> &entry, PreparedConfigUpdate prepared,
+                                std::uint64_t generation, std::uint64_t revision_version, std::string data_id,
+                                std::string md5);
     [[nodiscard]] async::DetachedTask apply_ready_project(std::shared_ptr<ProjectEntry> entry,
                                                           PreparedConfigUpdate prepared, std::uint64_t generation,
                                                           std::uint64_t revision_version, std::string data_id,
@@ -175,12 +191,14 @@ private:
     [[nodiscard]] static bool retryable_subscription_error(nacos::ConfigServiceErrorCode code) noexcept;
 
     event::EventLoop *loop_ = nullptr;
+    AccessConfigCompiler *compiler_ = nullptr;
     nacos::ConfigService *config_service_ = nullptr;
     RouteConfigStore *store_ = nullptr;
     AccessConfigWatcherOptions options_;
     RouteSnapshotObserver observer_;
     std::unique_ptr<ProjectListEntry> project_list_;
     std::map<std::string, std::shared_ptr<ProjectEntry>, std::less<>> projects_;
+    std::deque<std::shared_ptr<ProjectEntry>> compile_queue_;
     std::optional<AccessConfigWatcherFailure> last_failure_;
     std::optional<AccessConfigWatcherFailure> unavailable_failure_;
     std::optional<AccessConfigWatcherFailure> project_list_failure_;
@@ -191,6 +209,7 @@ private:
     AccessConfigWatcherState state_ = AccessConfigWatcherState::Created;
     bool initial_project_list_received_ = false;
     bool defer_readiness_updates_ = false;
+    std::size_t active_compiler_jobs_ = 0;
     std::uint64_t successful_updates_ = 0;
     std::uint64_t failed_updates_ = 0;
 };

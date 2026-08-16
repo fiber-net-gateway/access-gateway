@@ -333,6 +333,7 @@ in English and Simplified Chinese:
 - [Fixed workspace and secure listener design](docs/fixed-workspace-and-secure-listener-design.md)
 - [Access Server guide](native/access-server/README.md)
 - [Compatibility contract](native/access-server/docs/compatibility-contract.md)
+- [Configuration compiler thread model](native/access-server/docs/config-compilation.md)
 - [Migration plan](native/access-server/docs/migration-plan.md)
 - [Script-corpus differential status](native/access-server/docs/script-corpus-differential.md)
 - [Upstream provenance](native/access-server/UPSTREAM.md)
