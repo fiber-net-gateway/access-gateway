@@ -3,6 +3,7 @@
 
 #include "AccessConfigMetrics.h"
 #include "AccessDiscoveryMetrics.h"
+#include "AccessTlsMetrics.h"
 
 #include <chrono>
 #include <string>
@@ -20,12 +21,14 @@ public:
 
     [[nodiscard]] AccessConfigMetrics &config() noexcept { return config_; }
     [[nodiscard]] AccessDiscoveryMetrics &discovery() noexcept { return discovery_; }
+    [[nodiscard]] AccessTlsMetrics &tls() noexcept { return tls_; }
 
     void append_prometheus(std::string &output, std::chrono::steady_clock::time_point now) const;
 
 private:
     AccessConfigMetrics config_;
     AccessDiscoveryMetrics discovery_;
+    AccessTlsMetrics tls_;
 };
 
 } // namespace fiber::access_server

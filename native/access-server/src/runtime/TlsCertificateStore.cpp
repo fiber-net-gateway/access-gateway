@@ -439,8 +439,8 @@ void TlsBootstrapIdentity::close() noexcept {
 }
 
 TlsCertificateStore::TlsCertificateStore(event::EventLoop &owner_loop, event::EventLoopGroup &workers,
-                                         bool quic_enabled) :
-    owner_loop_(&owner_loop), workers_(&workers), quic_enabled_(quic_enabled) {
+                                         bool quic_enabled, AccessTlsMetricsObserver metrics_observer) :
+    owner_loop_(&owner_loop), workers_(&workers), metrics_observer_(metrics_observer), quic_enabled_(quic_enabled) {
     worker_slots_.reserve(workers.size());
     for (std::size_t i = 0; i < workers.size(); ++i) {
         auto slot = std::make_unique<WorkerSlot>();
@@ -455,6 +455,8 @@ TlsCertificateStore::~TlsCertificateStore() {
     FIBER_ASSERT(current_.load(std::memory_order_relaxed) == nullptr);
     FIBER_ASSERT(!active_);
     FIBER_ASSERT(retired_.empty());
+    FIBER_ASSERT(!retirement_pending_.load(std::memory_order_relaxed));
+    FIBER_ASSERT(!reaper_posted_.load(std::memory_order_relaxed));
 }
 
 std::expected<TlsCertificateUpdateStatus, TlsCertificateConfigError>
@@ -521,12 +523,22 @@ TlsCertificateStore::commit(PreparedUpdate prepared) {
     Snapshot *old = current_.exchange(prepared.snapshot_.get(), std::memory_order_acq_rel);
     if (active_) {
         FIBER_ASSERT(old == active_.get());
-        retired_.push_back(std::move(active_));
+        retired_.push_back(RetiredSnapshot{
+                .snapshot = std::move(active_),
+                .retired_at = event::EventLoop::current().now(),
+        });
+        // Publish pending before the scan. A hazard cleared before the scan is
+        // observed as null; one cleared after a retained hazard was observed
+        // sees pending and schedules the next scan.
+        retirement_pending_.store(true, std::memory_order_release);
+        metrics_observer_.record_rotation();
     }
     active_ = std::move(prepared.snapshot_);
     version_ = prepared.version_;
     content_digest_ = prepared.content_digest_;
-    reclaim_retired();
+    if (!retired_.empty()) {
+        reclaim_retired(AccessTlsReclaimTrigger::Publication);
+    }
     return TlsCertificateUpdateStatus::Published;
 }
 
@@ -566,6 +578,9 @@ void TlsCertificateStore::clear_hazard(WorkerSlot *slot) noexcept {
 }
 
 void TlsCertificateStore::request_reclaim() noexcept {
+    if (!retirement_pending_.load(std::memory_order_acquire)) {
+        return;
+    }
     if (!reaper_posted_.exchange(true, std::memory_order_acq_rel)) {
         owner_loop_->post<TlsCertificateStore, &TlsCertificateStore::reaper_entry_, &run_reaper>(*this);
     }
@@ -573,21 +588,39 @@ void TlsCertificateStore::request_reclaim() noexcept {
 
 void TlsCertificateStore::run_reaper(TlsCertificateStore *store) noexcept {
     store->reaper_posted_.store(false, std::memory_order_release);
-    store->reclaim_retired();
+    store->reclaim_retired(AccessTlsReclaimTrigger::HazardClear);
 }
 
-void TlsCertificateStore::reclaim_retired() noexcept {
+void TlsCertificateStore::reclaim_retired(AccessTlsReclaimTrigger trigger) noexcept {
     FIBER_ASSERT(owner_loop_->in_loop());
+    const auto now = event::EventLoop::current().now();
+    std::chrono::nanoseconds max_reclaimed_retention{0};
+    const std::size_t before = retired_.size();
     retired_.erase(std::remove_if(retired_.begin(), retired_.end(),
-                                  [&](const auto &snapshot) {
+                                  [&](const RetiredSnapshot &retired) {
                                       for (const auto &slot: worker_slots_) {
-                                          if (slot->hazard.load(std::memory_order_seq_cst) == snapshot.get()) {
+                                          if (slot->hazard.load(std::memory_order_seq_cst) == retired.snapshot.get()) {
                                               return false;
                                           }
+                                      }
+                                      if (now > retired.retired_at) {
+                                          max_reclaimed_retention =
+                                                  std::max(max_reclaimed_retention,
+                                                           std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                                   now - retired.retired_at));
                                       }
                                       return true;
                                   }),
                    retired_.end());
+    retirement_pending_.store(!retired_.empty(), std::memory_order_release);
+    metrics_observer_.record_reclaim(AccessTlsReclaimObservation{
+            .trigger = trigger,
+            .reclaimed_snapshots = before - retired_.size(),
+            .retired_snapshots = retired_.size(),
+            .oldest_retired_at =
+                    retired_.empty() ? std::chrono::steady_clock::time_point{} : retired_.front().retired_at,
+            .max_reclaimed_retention = max_reclaimed_retention,
+    });
     ++reclaim_epoch_value_;
     reclaim_publisher_->publish(reclaim_epoch_value_);
 }
@@ -601,12 +634,16 @@ async::Task<void> TlsCertificateStore::shutdown() noexcept {
     Snapshot *old = current_.exchange(nullptr, std::memory_order_acq_rel);
     if (active_) {
         FIBER_ASSERT(old == active_.get());
-        retired_.push_back(std::move(active_));
+        retired_.push_back(RetiredSnapshot{
+                .snapshot = std::move(active_),
+                .retired_at = event::EventLoop::current().now(),
+        });
+        retirement_pending_.store(true, std::memory_order_release);
     }
     auto subscriber = reclaim_epoch_.subscribe();
     auto epoch = subscriber.current();
-    reclaim_retired();
-    while (!retired_.empty()) {
+    reclaim_retired(AccessTlsReclaimTrigger::Shutdown);
+    while (!retired_.empty() || reaper_posted_.load(std::memory_order_acquire)) {
         epoch = co_await subscriber.next(epoch.version);
     }
     bootstrap_.reset();

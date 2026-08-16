@@ -555,19 +555,29 @@ entry、无效 CIDR、ratio 边界等既有兼容行为。
 
 **归属：本项目。**
 
+**实施状态：已解决（2026-08-17）。** `TlsCertificateStore` 现在维护原子
+`retirement_pending`：普通握手清除 hazard 时只有在确实存在未回收 snapshot 才会投递
+Nacos owner-loop reaper。证书 rotation 会先把旧 snapshot 标记为 pending，再立即执行一次
+owner-loop reclaim；如果 worker 仍持有 hazard，后续 clear 才负责唤醒 reaper。这个先标记、
+后扫描的顺序覆盖了 clear 与 publish 交错，避免漏唤醒。
+
 TLS identity selector 使用 hazard pointer，避免握手热路径 shared ownership，这是合理的
-设计。但每次清除 hazard 都调用 `request_reclaim()`；即使没有 retired snapshot，也可能
-向 Nacos owner loop 投递 reaper。
+设计。改造前每次清除 hazard 都调用 `request_reclaim()`；即使没有 retired snapshot，也会
+尝试向 Nacos owner loop 投递 reaper。
 
-代码位置：[`TlsCertificateStore.cpp`](../src/runtime/TlsCertificateStore.cpp#L473)。
+代码位置：[`TlsCertificateStore.cpp`](../src/runtime/TlsCertificateStore.cpp) 和
+[`AccessTlsMetrics.cpp`](../src/observability/AccessTlsMetrics.cpp)。
 
-建议：
+本次实现同时：
 
-- 维护 `retirement_pending`；
-- 只有 rotation 后存在未回收 snapshot 才允许投递；
-- publish 时先主动 reclaim，仍被 worker hazard 持有才等待后续 clear；
-- 记录 rotation/reclaim 次数、retired 数量和最长保留时间；
-- 在没有 hazard-pointer 内存模型证明前不放松 `seq_cst`。
+- 为 retired entry 记录 owner-loop retirement time；
+- 暴露固定 trigger 的 rotation/reclaim 次数、retired 数量、最老对象年龄和最长保留时间；
+- shutdown 同时等待 retired queue 清空和已投递 reaper 完成，保证回调先于 store 析构；
+- 保留 hazard publish/clear/scan 的 `seq_cst`，未把性能修改扩大为内存模型变更。
+
+确定性测试分别覆盖无 rotation 的高频 clear 不触发 reaper，以及 rotation 时旧 snapshot
+被 hazard 持有、clear 后恰好触发回收。指标契约见
+[`bounded-metrics.md`](bounded-metrics.md#tls-certificate-rotation-and-reclamation)。
 
 Fiber 的 TLS selector 已能提供 ClientHello 和 context 选择；当前问题来自本项目的动态
 证书快照实现，不要求 Fiber 修改。若未来多个应用都需要动态 TLS identity store，再单独
@@ -793,16 +803,19 @@ activation。在协议实现前 activation 保持 `unknown`。
 析构只更新原子 lease gauge。具体 schema、并发模型和非 activation 语义见
 [`bounded-metrics.md`](bounded-metrics.md)。
 
+第三阶段随 P-04 增加 `AccessTlsMetrics`：报告证书 rotation、按固定 trigger 分类的 reclaim
+scan/reclaimed snapshot、当前 retired snapshot 和最长保留时间。普通 TLS 握手不更新指标、
+不投递 owner loop，只有实际 rotation 后的 hazard clear 才可能触发回收。
+
 `start()` 成功只报告 `running`，绝不冒充 transport connected。真实连接、认证和 reconnect
 状态需要 Fiber 公共 typed snapshot/watch，已提交
 [fiber-gateway-cpp #27](https://github.com/fiber-net-gateway/fiber-gateway-cpp/issues/27)。本阶段尚未覆盖
-DNS/pool/proxy/WebSocket、TLS、异步日志和 CAT drop；以下清单保留为后续独立提交：
+DNS/pool/proxy/WebSocket、异步日志和 CAT drop；以下清单保留为后续独立提交：
 
 建议增加：
 
 - Fiber #27 落地后接入 Nacos config/naming transport/reconnect state；
 - proxy phase/outcome/attempt、pool hit、DNS outcome；
-- TLS rotation/reclaim；
 - WebSocket outcome；
 - async log queue/appender drop 和 CAT drop。
 

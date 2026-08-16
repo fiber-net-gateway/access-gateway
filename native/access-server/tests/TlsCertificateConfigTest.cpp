@@ -6,6 +6,8 @@
 #include "runtime/TlsCertificateWatcher.h"
 
 #include <expected>
+#include <functional>
+#include <future>
 #include <memory>
 #include <optional>
 #include <string>
@@ -117,6 +119,23 @@ async::Task<void> wait_for_bool(async::Watch<bool>::Subscriber &subscriber, asyn
         snapshot = co_await subscriber.next(snapshot.version);
     }
 }
+
+struct DeferredTlsStoreStep {
+    event::EventLoop *loop = nullptr;
+    event::EventLoop::DeferEntry defer_entry;
+    event::EventLoop::NotifyEntry notify_entry;
+    std::function<void()> callback;
+
+    void schedule() noexcept {
+        loop->post_local<DeferredTlsStoreStep, &DeferredTlsStoreStep::defer_entry, &enqueue>(*this);
+    }
+
+    static void enqueue(DeferredTlsStoreStep *step) noexcept {
+        step->loop->post<DeferredTlsStoreStep, &DeferredTlsStoreStep::notify_entry, &run>(*step);
+    }
+
+    static void run(DeferredTlsStoreStep *step) noexcept { step->callback(); }
+};
 
 std::pair<std::string, std::string> make_test_identity() {
     using BioPtr = std::unique_ptr<BIO, decltype(&BIO_free)>;
@@ -277,6 +296,123 @@ TEST(TlsCertificateStoreTest, PublishesOnlyIncreasingValidSnapshotsAndKeepsNoPem
     });
     owner_loop.run();
     EXPECT_TRUE(completed);
+}
+
+TEST(TlsCertificateStoreTest, PostsReaperOnlyForSnapshotsStillHeldByHazards) {
+    using namespace std::chrono_literals;
+
+    auto [certificate_pem, private_key_pem] = make_test_identity();
+    TlsCertificateSnapshotConfig config{
+            .version = 1,
+            .default_certificate = "default",
+            .certificates = {{
+                    .id = "default",
+                    .certificate_pem = std::move(certificate_pem),
+                    .private_key_pem = std::move(private_key_pem),
+            }},
+    };
+    event::EventLoopGroup workers(1);
+    event::EventLoop &loop = workers.at(0);
+    AccessTlsMetrics metrics(loop);
+    TlsCertificateStore store(loop, workers, false, metrics.observer());
+    DeferredTlsStoreStep after_idle_clear{.loop = &loop};
+    DeferredTlsStoreStep after_rotation_clear{.loop = &loop};
+    std::promise<void> done_promise;
+    auto done = done_promise.get_future();
+
+    after_idle_clear.callback = [&]() {
+        std::string idle_output;
+        metrics.append_prometheus(idle_output, loop.now());
+        EXPECT_NE(idle_output.find("access_server_tls_certificate_rotations_total 0"), std::string::npos);
+        EXPECT_NE(idle_output.find("access_server_tls_certificate_reclaim_runs_total{trigger=\"hazard_clear\"} 0"),
+                  std::string::npos);
+        EXPECT_NE(idle_output.find("access_server_tls_certificate_retired_snapshots 0"), std::string::npos);
+
+        const net::TlsIdentitySelectorOps selector = store.selector_ops();
+        net::TlsContext *selected = selector.select(selector.ctx, net::TlsIdentitySelectInput{
+                                                                          .server_name = "api.example.com",
+                                                                          .transport = net::TlsTransportKind::Tcp,
+                                                                  });
+        EXPECT_NE(selected, nullptr);
+        config.version = 2;
+        auto rotated = store.apply(config, "wire-v2");
+        EXPECT_TRUE(rotated);
+        if (rotated) {
+            EXPECT_EQ(*rotated, TlsCertificateUpdateStatus::Published);
+        }
+
+        std::string retained_output;
+        metrics.append_prometheus(retained_output, loop.now());
+        EXPECT_NE(retained_output.find("access_server_tls_certificate_rotations_total 1"), std::string::npos);
+        EXPECT_NE(retained_output.find("access_server_tls_certificate_reclaim_runs_total{trigger=\"publish\"} 1"),
+                  std::string::npos);
+        EXPECT_NE(
+                retained_output.find("access_server_tls_certificate_reclaimed_snapshots_total{trigger=\"publish\"} 0"),
+                std::string::npos);
+        EXPECT_NE(retained_output.find("access_server_tls_certificate_retired_snapshots 1"), std::string::npos);
+        after_rotation_clear.schedule();
+    };
+
+    after_rotation_clear.callback = [&]() {
+        std::string reclaimed_output;
+        metrics.append_prometheus(reclaimed_output, loop.now());
+        EXPECT_NE(reclaimed_output.find("access_server_tls_certificate_reclaim_runs_total{trigger=\"hazard_clear\"} 1"),
+                  std::string::npos);
+        EXPECT_NE(reclaimed_output.find(
+                          "access_server_tls_certificate_reclaimed_snapshots_total{trigger=\"hazard_clear\"} 1"),
+                  std::string::npos);
+        EXPECT_NE(reclaimed_output.find("access_server_tls_certificate_retired_snapshots 0"), std::string::npos);
+
+        config.version = 3;
+        auto rotated = store.apply(config, "wire-v3");
+        EXPECT_TRUE(rotated);
+        if (rotated) {
+            EXPECT_EQ(*rotated, TlsCertificateUpdateStatus::Published);
+        }
+        std::string direct_output;
+        metrics.append_prometheus(direct_output, loop.now());
+        EXPECT_NE(direct_output.find("access_server_tls_certificate_rotations_total 2"), std::string::npos);
+        EXPECT_NE(direct_output.find("access_server_tls_certificate_reclaim_runs_total{trigger=\"publish\"} 2"),
+                  std::string::npos);
+        EXPECT_NE(direct_output.find("access_server_tls_certificate_reclaimed_snapshots_total{trigger=\"publish\"} 1"),
+                  std::string::npos);
+        EXPECT_NE(direct_output.find("access_server_tls_certificate_retired_snapshots 0"), std::string::npos);
+
+        async::spawn(loop, [&]() -> async::DetachedTask {
+            co_await store.shutdown();
+            std::string shutdown_output;
+            metrics.append_prometheus(shutdown_output, loop.now());
+            EXPECT_NE(shutdown_output.find("access_server_tls_certificate_reclaim_runs_total{trigger=\"shutdown\"} 1"),
+                      std::string::npos);
+            EXPECT_NE(shutdown_output.find(
+                              "access_server_tls_certificate_reclaimed_snapshots_total{trigger=\"shutdown\"} 1"),
+                      std::string::npos);
+            done_promise.set_value();
+            loop.stop();
+        });
+    };
+
+    workers.start();
+    async::spawn(loop, [&]() -> async::DetachedTask {
+        auto published = store.apply(config, "wire-v1");
+        EXPECT_TRUE(published);
+        if (published) {
+            EXPECT_EQ(*published, TlsCertificateUpdateStatus::Published);
+        }
+        const net::TlsIdentitySelectorOps selector = store.selector_ops();
+        net::TlsContext *selected = selector.select(selector.ctx, net::TlsIdentitySelectInput{
+                                                                          .server_name = "api.example.com",
+                                                                          .transport = net::TlsTransportKind::Tcp,
+                                                                  });
+        EXPECT_NE(selected, nullptr);
+        after_idle_clear.schedule();
+        co_return;
+    });
+
+    const std::future_status status = done.wait_for(5s);
+    workers.stop();
+    workers.join();
+    EXPECT_EQ(status, std::future_status::ready);
 }
 
 TEST(TlsCertificateWatcherTest, CompilesOffLoopAndCoalescesLatestSnapshot) {
