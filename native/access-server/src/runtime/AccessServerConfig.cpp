@@ -23,6 +23,12 @@ constexpr std::string_view kMetricsListenPort = "ACCESS_SERVER_METRICS_LISTEN_PO
 constexpr std::string_view kInitialConfigTimeout = "ACCESS_SERVER_INITIAL_CONFIG_TIMEOUT_MILLIS";
 constexpr std::string_view kMaxRequestBody = "ACCESS_SERVER_MAX_REQUEST_BODY_SIZE";
 constexpr std::string_view kTestMode = "ACCESS_SERVER_TEST_MODE";
+constexpr std::string_view kAccessLogQueryAllowlist = "ACCESS_SERVER_ACCESS_LOG_QUERY_ALLOWLIST";
+constexpr std::string_view kAccessLogSensitiveQueryKeys = "ACCESS_SERVER_ACCESS_LOG_SENSITIVE_QUERY_KEYS";
+constexpr std::string_view kAccessLogQueryHashEnabled = "ACCESS_SERVER_ACCESS_LOG_QUERY_HASH_ENABLED";
+constexpr std::string_view kAccessLogSuccessSampleRate = "ACCESS_SERVER_ACCESS_LOG_SUCCESS_SAMPLE_RATE_BPS";
+constexpr std::string_view kAccessLogMaxPathBytes = "ACCESS_SERVER_ACCESS_LOG_MAX_PATH_BYTES";
+constexpr std::string_view kAccessLogMaxQueryBytes = "ACCESS_SERVER_ACCESS_LOG_MAX_QUERY_BYTES";
 constexpr std::string_view kProjectsDataId = "ACCESS_SERVER_PROJECTS_DATA_ID";
 constexpr std::string_view kRouteDataIdPrefix = "ACCESS_SERVER_ROUTE_DATA_ID_PREFIX";
 constexpr std::string_view kRouteGroup = "ACCESS_SERVER_ROUTE_GROUP";
@@ -132,6 +138,59 @@ bool parse_boolean(std::string_view input, bool &output) noexcept {
     return false;
 }
 
+bool valid_query_key(std::string_view value) noexcept {
+    if (value.empty() || value.size() > kMaxAccessLogQueryKeyBytes) {
+        return false;
+    }
+    return std::all_of(value.begin(), value.end(), [](unsigned char character) {
+        return (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') ||
+               (character >= '0' && character <= '9') || character == '-' || character == '.' || character == '_' ||
+               character == '~';
+    });
+}
+
+std::expected<std::vector<std::string>, AccessServerConfigError>
+parse_query_keys(std::string_view input, std::size_t line, std::string_view setting, bool case_insensitive) {
+    std::vector<std::string> output;
+    std::set<std::string, std::less<>> unique;
+    if (input.empty()) {
+        return output;
+    }
+    while (true) {
+        const std::size_t comma = input.find(',');
+        const std::string_view item = trim(comma == std::string_view::npos ? input : input.substr(0, comma));
+        if (!valid_query_key(item)) {
+            return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, line, setting,
+                                         "expected comma-separated query keys using [A-Za-z0-9_.~-]"));
+        }
+        std::string normalized(item);
+        if (case_insensitive) {
+            std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](unsigned char character) {
+                return character >= 'A' && character <= 'Z' ? static_cast<char>(character + ('a' - 'A'))
+                                                            : static_cast<char>(character);
+            });
+        }
+        if (!unique.emplace(normalized).second) {
+            return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, line, setting,
+                                         "query key list contains a duplicate"));
+        }
+        output.push_back(std::move(normalized));
+        if (output.size() > kMaxAccessLogQueryKeys) {
+            return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, line, setting,
+                                         "query key list exceeds 64 entries"));
+        }
+        if (comma == std::string_view::npos) {
+            break;
+        }
+        input.remove_prefix(comma + 1);
+        if (input.empty()) {
+            return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, line, setting,
+                                         "query key list contains an empty entry"));
+        }
+    }
+    return output;
+}
+
 std::expected<std::pair<net::IpAddress, std::uint16_t>, AccessServerConfigError>
 parse_cat_endpoint(std::string_view text, std::size_t line, std::string_view key) {
     text = trim(text);
@@ -232,15 +291,17 @@ AccessServerConfigError nacos_error(const nacos::NacosConfigError &source) {
 AccessServerConfig::AccessServerConfig(
         net::SocketAddress listen_address, http::HttpServerOptions http_server_options,
         net::SocketAddress metrics_listen_address, std::chrono::milliseconds initial_config_timeout,
-        std::size_t default_max_request_body_size, bool test_mode, std::optional<cat::CatClientConfig> cat_config,
-        nacos::NacosClientConfig nacos_config, AccessConfigWatcherOptions watcher_options,
-        GrayConfigWatcherOptions gray_watcher_options, TlsCertificateWatcherOptions tls_certificate_watcher_options,
+        std::size_t default_max_request_body_size, bool test_mode, AccessLogOptions access_log_options,
+        std::optional<cat::CatClientConfig> cat_config, nacos::NacosClientConfig nacos_config,
+        AccessConfigWatcherOptions watcher_options, GrayConfigWatcherOptions gray_watcher_options,
+        TlsCertificateWatcherOptions tls_certificate_watcher_options,
         AccessServiceDiscoveryOptions service_discovery_options) noexcept :
     listen_address_(std::move(listen_address)), http_server_options_(std::move(http_server_options)),
     metrics_listen_address_(std::move(metrics_listen_address)), initial_config_timeout_(initial_config_timeout),
     default_max_request_body_size_(default_max_request_body_size), test_mode_(test_mode),
-    cat_config_(std::move(cat_config)), nacos_config_(std::move(nacos_config)),
-    watcher_options_(std::move(watcher_options)), gray_watcher_options_(std::move(gray_watcher_options)),
+    access_log_options_(std::move(access_log_options)), cat_config_(std::move(cat_config)),
+    nacos_config_(std::move(nacos_config)), watcher_options_(std::move(watcher_options)),
+    gray_watcher_options_(std::move(gray_watcher_options)),
     tls_certificate_watcher_options_(std::move(tls_certificate_watcher_options)),
     service_discovery_options_(std::move(service_discovery_options)) {}
 
@@ -274,6 +335,7 @@ AccessServerConfig::load_from_string(std::string_view input) {
     std::uint64_t timeout_millis = 60000;
     std::size_t max_request_body = 400U << 20U;
     bool test_mode = false;
+    AccessLogOptions access_log_options;
     cat::CatClientConfigParams cat_params{
             .thread_group_name = "access-server-cat",
             .thread_id = "0",
@@ -342,6 +404,40 @@ AccessServerConfig::load_from_string(std::string_view input) {
             if (!parse_boolean(value, test_mode)) {
                 return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, entry.line, entry.key,
                                              "expected true or false"));
+            }
+        } else if (entry.key == kAccessLogQueryAllowlist || entry.key == kAccessLogSensitiveQueryKeys) {
+            const bool sensitive = entry.key == kAccessLogSensitiveQueryKeys;
+            auto parsed = parse_query_keys(value, entry.line, entry.key, sensitive);
+            if (!parsed) {
+                return std::unexpected(std::move(parsed.error()));
+            }
+            if (sensitive) {
+                access_log_options.additional_sensitive_query_keys = std::move(*parsed);
+            } else {
+                access_log_options.query_allowlist = std::move(*parsed);
+            }
+        } else if (entry.key == kAccessLogQueryHashEnabled) {
+            if (!parse_boolean(value, access_log_options.query_hash_enabled)) {
+                return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, entry.line, entry.key,
+                                             "expected true or false"));
+            }
+        } else if (entry.key == kAccessLogSuccessSampleRate) {
+            if (!parse_unsigned(value, access_log_options.success_sample_rate_bps) ||
+                access_log_options.success_sample_rate_bps > kAccessLogSampleScale) {
+                return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, entry.line, entry.key,
+                                             "expected basis points in range 0..10000"));
+            }
+        } else if (entry.key == kAccessLogMaxPathBytes || entry.key == kAccessLogMaxQueryBytes) {
+            std::size_t maximum = 0;
+            if (!parse_unsigned(value, maximum) || maximum < kMinAccessLogFieldBytes ||
+                maximum > kMaxAccessLogFieldBytes) {
+                return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, entry.line, entry.key,
+                                             "expected a byte limit in range 16..65536"));
+            }
+            if (entry.key == kAccessLogMaxPathBytes) {
+                access_log_options.max_path_bytes = maximum;
+            } else {
+                access_log_options.max_query_bytes = maximum;
             }
         } else if (entry.key == kProjectsDataId) {
             watcher_options.project_list_data_id = entry.value;
@@ -442,8 +538,8 @@ AccessServerConfig::load_from_string(std::string_view input) {
     return AccessServerConfig(net::SocketAddress(listen_ip, listen_port), std::move(http_options),
                               net::SocketAddress(metrics_ip.value_or(listen_ip), *metrics_port),
                               std::chrono::milliseconds(timeout_millis), max_request_body, test_mode,
-                              std::move(cat_config), std::move(*nacos_config), std::move(watcher_options),
-                              std::move(gray_options), std::move(tls_certificate_options),
+                              std::move(access_log_options), std::move(cat_config), std::move(*nacos_config),
+                              std::move(watcher_options), std::move(gray_options), std::move(tls_certificate_options),
                               std::move(service_discovery_options));
 }
 

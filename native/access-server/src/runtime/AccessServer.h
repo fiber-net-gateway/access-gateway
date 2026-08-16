@@ -3,6 +3,7 @@
 
 #include "../execution/AccessRequestHandler.h"
 #include "../execution/ProxyExecutor.h"
+#include "../observability/AccessLogPolicy.h"
 #include "../observability/AccessServerMetrics.h"
 #include "AccessDnsService.h"
 #include "RouteConfigStore.h"
@@ -31,6 +32,7 @@ namespace fiber::access_server {
 
 struct AccessServerOptions {
     std::size_t default_max_request_body_size = 400U << 20U;
+    AccessLogOptions access_log;
     AccessRequestScriptAdapter script_adapter;
     ProxyExecutorOptions executor;
     cat::CatClient *cat_client = nullptr;
@@ -64,6 +66,7 @@ private:
 
     event::EventLoop *accept_loop_ = nullptr;
     event::EventLoopGroup *workers_ = nullptr;
+    AccessLogPolicy access_log_policy_;
     AccessDnsService dns_;
     http::StealableHttp1ConnectionPoolSet pool_;
     ProxyExecutor executor_;

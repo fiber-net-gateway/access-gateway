@@ -1,4 +1,5 @@
 #include "AccessRequestTelemetry.h"
+#include "AccessLogPolicy.h"
 #include "AccessServerLogCategories.h"
 
 #include "../execution/AccessResult.h"
@@ -45,6 +46,26 @@ constexpr std::string_view kTraceStateHeader = "tracestate";
 constexpr std::uint64_t kTraceStateHeaderHash = http::http_header_name_hash(kTraceStateHeader);
 constexpr std::string_view kTraceCluster = "HI-TRACE-CLUSTER";
 constexpr std::size_t kMaxUserAgentBytes = 1024;
+
+const AccessLogPolicy &default_access_log_policy() noexcept {
+    static const AccessLogPolicy policy;
+    return policy;
+}
+
+std::uint32_t next_access_log_sample() noexcept {
+    static thread_local std::uint64_t sequence = []() noexcept {
+        const event::EventLoop &loop = event::EventLoop::current();
+        const std::uint64_t worker = loop.has_group_index() ? static_cast<std::uint64_t>(loop.group_index()) + 1 : 1;
+        return worker * 0x9e3779b97f4a7c15ULL;
+    }();
+    std::uint64_t value = ++sequence;
+    value ^= value >> 30U;
+    value *= 0xbf58476d1ce4e5b9ULL;
+    value ^= value >> 27U;
+    value *= 0x94d049bb133111ebULL;
+    value ^= value >> 31U;
+    return static_cast<std::uint32_t>(value % kAccessLogSampleScale);
+}
 
 bool has_inbound_context(const cat::MessageTraceContext &context) noexcept {
     return !context.message_id.empty() || !context.root_message_id.empty() || !context.parent_message_id.empty();
@@ -207,9 +228,12 @@ void AccessProviderTransaction::cancel_pending() noexcept {
 }
 
 AccessRequestTelemetry::AccessRequestTelemetry(http::HttpExchange &exchange, AccessServerMetrics::Worker *metrics,
-                                               cat::CatClient *cat_client) noexcept :
+                                               cat::CatClient *cat_client,
+                                               const AccessLogPolicy *access_log_policy) noexcept :
     script_heap_(exchange.pool()), script_context_(exchange, script_heap_), response_headers_(exchange.pool()),
-    trace_state_(exchange.pool()), metrics_(metrics), started_(event::EventLoop::current().now()) {
+    trace_state_(exchange.pool()), metrics_(metrics),
+    access_log_policy_(access_log_policy ? access_log_policy : &default_access_log_policy()),
+    started_(event::EventLoop::current().now()) {
     if (metrics_) {
         metrics_->request_started();
     }
@@ -291,19 +315,30 @@ AccessRequestTelemetry::~AccessRequestTelemetry() {
         (void) root_.complete(success ? cat::status::Success : cat::status::Error);
     }
 
-    LOG(LOG_ACCESS, INFO) << "request completed"
-                          << " trace_id=" << log::quoted(trace_id())
-                          << " method=" << log::quoted(exchange.method_view())
-                          << " host=" << log::quoted(exchange.header("Host"))
-                          << " path=" << log::quoted(exchange.uri().unparsed_uri)
-                          << " project=" << log::quoted(project_) << " route=" << log::quoted(route_)
-                          << " cluster=" << log::quoted(cluster_) << " upstream=" << log::quoted(upstream_)
-                          << " response_compression=" << log::quoted(response_compression_)
-                          << " status=" << response.status_code << " result=" << response_result(response)
-                          << " error=" << log::quoted(error_)
-                          << " duration_us=" << std::max<std::int64_t>(duration.count(), 0)
-                          << " response_bytes=" << response.body_bytes_sent
-                          << " io_error=" << common::io_err_name(response.terminal_error);
+    const bool failed = execution_failed_ || !response.completed || response.terminal_error != common::IoErr::None ||
+                        response.status_code >= 400;
+    const std::uint32_t sample = access_log_policy_->options().success_sample_rate_bps >= kAccessLogSampleScale
+                                         ? 0
+                                         : next_access_log_sample();
+    if (access_log_policy_->should_log(failed, sample) && LOG_ACCESS.get().enabled(log::LogLevel::Info)) {
+        const AccessLogUri uri = access_log_policy_->render_uri(exchange.uri());
+        LOG(LOG_ACCESS, INFO) << "request completed"
+                              << " trace_id=" << log::quoted(trace_id())
+                              << " method=" << log::quoted(exchange.method_view())
+                              << " host=" << log::quoted(exchange.header("Host")) << " path=" << log::quoted(uri.path())
+                              << " query=" << log::quoted(uri.query) << " query_hash=" << log::quoted(uri.query_hash)
+                              << " query_filtered=" << uri.query_filtered << " query_redacted=" << uri.query_redacted
+                              << " path_truncated=" << uri.path_truncated << " query_truncated=" << uri.query_truncated
+                              << " query_hash_failed=" << uri.query_hash_failed << " project=" << log::quoted(project_)
+                              << " route=" << log::quoted(route_) << " cluster=" << log::quoted(cluster_)
+                              << " upstream=" << log::quoted(upstream_)
+                              << " response_compression=" << log::quoted(response_compression_)
+                              << " status=" << response.status_code << " result=" << response_result(response)
+                              << " error=" << log::quoted(error_)
+                              << " duration_us=" << std::max<std::int64_t>(duration.count(), 0)
+                              << " response_bytes=" << response.body_bytes_sent
+                              << " io_error=" << common::io_err_name(response.terminal_error);
+    }
 }
 
 void AccessRequestTelemetry::record_response_compression(bool compressed) noexcept {

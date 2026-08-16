@@ -593,6 +593,14 @@ listener。订阅暂态失败采用封顶指数退避，非法首值被记录为
   `CALL_ERROR`/`FiberException`；
 - project、route、context cluster、实际 upstream、稳定 `Exception.name` 和最终
   response completion 同时进入 CAT 与 `access_server.access`；
+- access log 的 `path` 只消费解析后的 path，不再记录包含原始 query 的 `unparsed_uri`；
+  query allowlist 默认为空，内置及附加敏感 key 即使命中 allowlist 也固定替换为
+  `[REDACTED]`。allowlist 对 form-decoded ASCII key 大小写敏感匹配，敏感判断不区分 ASCII
+  大小写；value 不做 percent decode。path/query 经有界 ASCII 安全编码，截断、过滤和脱敏
+  均有独立标记；
+- 可选 query correlation 使用实例随机密钥的 HMAC-SHA256；成功的 2xx/3xx 请求可按 bps
+  无锁采样，4xx/5xx、执行失败、未完成响应和 IO 错误始终保留。采样只影响 access log，
+  不改变 CAT、Prometheus 或 HTTP 结果；
 - Prometheus 在独立 listener 输出固定 `result` 标签的请求总数、inflight 和 duration；
   gzip-enabled RESPONSE 另输出 `access_server_response_compression_total`，其有界 `result`
   仅为 `gzip`、`identity` 或 `not_acceptable`。结构化 access log 和 CAT data 同时记录选择结果。
