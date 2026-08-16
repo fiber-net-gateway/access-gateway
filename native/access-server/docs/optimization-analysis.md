@@ -993,16 +993,22 @@ Bearer 认证、分页和 `no-store`；server 的独立进程负责认证采集�
 scan/reclaimed snapshot、当前 retired snapshot 和最长保留时间。普通 TLS 握手不更新指标、
 不投递 owner loop，只有实际 rotation 后的 hazard clear 才可能触发回收。
 
+第四阶段增加 worker-sharded proxy/DNS/pool/WebSocket 指标：execution 和 selected-upstream
+attempt 具有取消安全终态及 inflight；连接 acquisition 通过固定 POD 回传 pool hit/miss/shutdown、
+DNS success/empty/failure/unavailable 和 connect success/failure/TLS/create failure；proxy failure
+phase 以及 WebSocket handshake/session outcome 仅使用编译期枚举。记录路径不注册 label、不构造
+字符串、不加锁也不跨 loop 投递。Fiber WebSocket relay 当前不返回 typed close reason，因此仅区分
+relay 返回的 `closed` 与协程取消的 `aborted`，不猜测 timeout 或 peer 原因。详见
+[`bounded-metrics.md`](bounded-metrics.md#proxy-transport-and-websocket-metrics)。
+
 `start()` 成功只报告 `running`，绝不冒充 transport connected。真实连接、认证和 reconnect
 状态需要 Fiber 公共 typed snapshot/watch，已提交
 [fiber-gateway-cpp #27](https://github.com/fiber-net-gateway/fiber-gateway-cpp/issues/27)。本阶段尚未覆盖
-DNS/pool/proxy/WebSocket、异步日志和 CAT drop；以下清单保留为后续独立提交：
+异步日志和 CAT drop；以下清单保留为后续独立提交：
 
 建议增加：
 
 - Fiber #27 落地后接入 Nacos config/naming transport/reconnect state；
-- proxy phase/outcome/attempt、pool hit、DNS outcome；
-- WebSocket outcome；
 - async log queue/appender drop 和 CAT drop。
 
 project、route、cluster、host、Data ID、service name、header 和用户数据不得成为无界 label。

@@ -170,6 +170,7 @@ if (FIBER_BUILD_TESTS AND (GTest_FOUND OR TARGET GTest::gtest_main))
         "${CMAKE_CURRENT_LIST_DIR}/tests/AccessLogPolicyTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/AccessRequestHandlerTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/AccessServerTest.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/tests/AccessServerMetricsTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/AccessServerConfigTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/AccessTlsMetricsTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/AccessTraceStateTest.cpp"

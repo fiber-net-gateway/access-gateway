@@ -23,6 +23,55 @@ The existing worker-sharded metrics are:
 Request workers update pre-bound Fiber Prometheus references. No label registration or allocation
 occurs in the request path.
 
+## Proxy transport and WebSocket metrics
+
+Proxy execution uses only worker-local, pre-bound counters and gauges. The following terminal
+metrics are mutually exclusive within their respective scope:
+
+- `access_server_proxy_executions_total{result}` uses `completed`, `failed`, and `canceled`.
+  `completed` means the proxy coroutine returned successfully, including a fully relayed upstream
+  HTTP error response; `failed` means it returned an application or I/O error; `canceled` means the
+  downstream response channel closed first.
+- `access_server_proxy_attempts_total{result}` uses `completed`, `failed`, and `aborted`. An attempt
+  begins only after a valid upstream selection. `completed` means its upstream response was fully
+  handled, `failed` identifies an upstream-side failure, and `aborted` covers local policy,
+  downstream failure, or coroutine cancellation. `access_server_proxy_attempts_inflight` is
+  balanced by a cancellation-safe scope.
+
+`access_server_proxy_failures_total{phase}` is an event counter rather than a terminal outcome. A
+single execution can report a primary failure and a secondary cleanup failure. Its compile-time
+phase set is:
+
+- `no_upstream_hosts`, `upstream_circuit_open`, `invalid_selection`, and `evaluate_context`;
+- `resolve_upstream`, `pool_shutdown`, `connect`, and `tls`;
+- `build_request`, `build_headers`, `send_header`, `read_request_body`,
+  `request_body_too_large`, and `send_request_body`;
+- `read_response_header`, `build_response_headers`, `response_body_too_large`,
+  `switch_websocket`, `send_response_header`, `read_response_body`, and
+  `write_response_body`.
+
+Connection acquisition carries a fixed identifier-free observation back to the request telemetry
+owner. It feeds:
+
+- `access_server_proxy_pool_acquires_total{result}` with `hit`, `miss`, or `shutdown` for every
+  lease acquisition, including another acquisition before a later resolved address is tried;
+- `access_server_proxy_dns_resolutions_total{result}` with `success`, `empty`, `failure`, or
+  `unavailable`; literal IP targets and reusable pool hits do not perform or increment DNS;
+- `access_server_proxy_connect_attempts_total{result}` with `success`, `failure`, `tls_failure`, or
+  `create_failure` for new transport construction and connection attempts.
+
+WebSocket routing exposes `access_server_websocket_handshakes_total{result}` with `accepted`,
+`rejected`, or `failed`, plus `access_server_websocket_sessions_total{result}` with `closed` or
+`aborted` and `access_server_websocket_sessions_inflight`. A session becomes active only after the
+downstream upgrade header is sent. `closed` means Fiber's bidirectional relay returned; `aborted`
+means the surrounding proxy coroutine was canceled after acceptance. The pinned relay API returns
+no typed peer/timeout/error cause, so access-server does not infer a more specific close reason.
+
+Project, route, cluster, Host, upstream address, DNS name, error message, header, and request data
+are absent from every label. Recording performs direct integer increments and copies one bounded
+POD observation; it adds no registration, string construction, lock, atomic shared ownership, or
+cross-loop post to the request path.
+
 ## Configuration update metrics
 
 `access_server_config_updates_total{resource,result,reason}` has only the following series:
@@ -164,8 +213,9 @@ cross-EventLoop `CounterRef`/`GaugeRef` mutation is required.
 ## Remaining scope
 
 The implemented increments cover Project List/route outcomes, route readiness and snapshot
-size/age, application-owned Nacos lifecycle, service/endpoint/cluster/selector aggregates, and TLS
-rotation/reclamation. Actual Nacos transport/reconnect state remains blocked on Fiber #27.
-DNS/pool/proxy/WebSocket outcomes and async logging/CAT drops remain separate O-02 increments.
-Typed, authenticated, per-instance activation evidence is implemented separately from these
-metrics; see [`../../../docs/activation-evidence.md`](../../../docs/activation-evidence.md).
+size/age, application-owned Nacos lifecycle, service/endpoint/cluster/selector aggregates, TLS
+rotation/reclamation, and worker-sharded proxy/DNS/pool/WebSocket outcomes. Actual Nacos
+transport/reconnect state remains blocked on Fiber #27. Async logging and CAT drops remain the next
+O-02 increment. Typed, authenticated, per-instance activation evidence is implemented separately
+from these metrics; see
+[`../../../docs/activation-evidence.md`](../../../docs/activation-evidence.md).

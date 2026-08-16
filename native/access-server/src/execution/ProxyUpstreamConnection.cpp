@@ -11,12 +11,13 @@
 namespace fiber::access_server {
 namespace {
 
-ProxyConnectError error(ProxyConnectErrorCode code, const char *message,
-                        common::IoErr io_error = common::IoErr::None) noexcept {
+ProxyConnectError error(ProxyConnectErrorCode code, const char *message, common::IoErr io_error,
+                        ProxyConnectionObservation observation) noexcept {
     return ProxyConnectError{
             .code = code,
             .io_error = io_error,
             .message = message,
+            .observation = std::move(observation),
     };
 }
 
@@ -62,8 +63,15 @@ acquire_proxy_upstream_connection(http::StealableHttp1ConnectionPoolSet &pool, P
     ProxyUpstreamConnection output;
     output.lease = co_await pool.acquire(key);
     if (!output.lease.valid()) {
+        ++output.observation.pool_shutdown;
         co_return std::unexpected(error(ProxyConnectErrorCode::PoolShutdown,
-                                        "upstream connection pool is shutting down", common::IoErr::Canceled));
+                                        "upstream connection pool is shutting down", common::IoErr::Canceled,
+                                        std::move(output.observation)));
+    }
+    if (output.lease.hit()) {
+        ++output.observation.pool_hits;
+    } else {
+        ++output.observation.pool_misses;
     }
     if (output.lease.has_connection()) {
         output.connection = output.lease.get();
@@ -76,20 +84,27 @@ acquire_proxy_upstream_connection(http::StealableHttp1ConnectionPoolSet &pool, P
         addresses = std::span(&key.ip_address(), 1);
     } else {
         if (!dns_resolver.resolve) {
+            ++output.observation.dns_unavailable;
             co_return std::unexpected(error(ProxyConnectErrorCode::Resolve, "upstream DNS resolver is unavailable",
-                                            common::IoErr::NotFound));
+                                            common::IoErr::NotFound, std::move(output.observation)));
         }
         auto result = co_await dns_resolver.resolve(dns_resolver.context, key.host_name());
         if (!result) {
-            co_return std::unexpected(
-                    error(ProxyConnectErrorCode::Resolve, "upstream DNS resolution failed", result.error()));
+            ++output.observation.dns_failure;
+            co_return std::unexpected(error(ProxyConnectErrorCode::Resolve, "upstream DNS resolution failed",
+                                            result.error(), std::move(output.observation)));
         }
         resolved = std::move(*result);
         addresses = resolved;
+        if (addresses.empty()) {
+            ++output.observation.dns_empty;
+        } else {
+            ++output.observation.dns_success;
+        }
     }
     if (addresses.empty()) {
-        co_return std::unexpected(
-                error(ProxyConnectErrorCode::Resolve, "upstream DNS returned no address", common::IoErr::NotFound));
+        co_return std::unexpected(error(ProxyConnectErrorCode::Resolve, "upstream DNS returned no address",
+                                        common::IoErr::NotFound, std::move(output.observation)));
     }
 
     common::IoErr last_error = common::IoErr::NotFound;
@@ -97,8 +112,15 @@ acquire_proxy_upstream_connection(http::StealableHttp1ConnectionPoolSet &pool, P
         if (i > 0) {
             output.lease = co_await pool.acquire(key);
             if (!output.lease.valid()) {
+                ++output.observation.pool_shutdown;
                 co_return std::unexpected(error(ProxyConnectErrorCode::PoolShutdown,
-                                                "upstream connection pool is shutting down", common::IoErr::Canceled));
+                                                "upstream connection pool is shutting down", common::IoErr::Canceled,
+                                                std::move(output.observation)));
+            }
+            if (output.lease.hit()) {
+                ++output.observation.pool_hits;
+            } else {
+                ++output.observation.pool_misses;
             }
             if (output.lease.has_connection()) {
                 output.connection = output.lease.get();
@@ -108,22 +130,29 @@ acquire_proxy_upstream_connection(http::StealableHttp1ConnectionPoolSet &pool, P
 
         auto emplaced = output.lease.emplace_connection(connection_options(key, addresses[i], tls_policy));
         if (!emplaced) {
+            ++output.observation.create_failure;
             last_error = emplaced.error();
             output.lease.reset();
             continue;
         }
         auto connected = co_await (*emplaced)->connect(connect_timeout);
         if (connected) {
+            ++output.observation.connect_success;
             output.connection = *emplaced;
             co_return std::move(output);
         }
         last_error = connected.error();
+        if (identifiable_tls_failure(key, tls_policy, last_error)) {
+            ++output.observation.tls_failure;
+        } else {
+            ++output.observation.connect_failure;
+        }
         output.lease.reset();
     }
     const bool tls_failure = identifiable_tls_failure(key, tls_policy, last_error);
     co_return std::unexpected(error(tls_failure ? ProxyConnectErrorCode::Tls : ProxyConnectErrorCode::Connect,
                                     tls_failure ? "upstream TLS negotiation failed" : "upstream connection failed",
-                                    last_error));
+                                    last_error, std::move(output.observation)));
 }
 
 } // namespace fiber::access_server

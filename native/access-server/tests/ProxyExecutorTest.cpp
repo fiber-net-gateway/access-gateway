@@ -367,6 +367,25 @@ fiber::async::Task<fiber::common::IoResult<std::string>> read_body(Exchange &exc
     }
 }
 
+fiber::async::DetachedTask collect_access_metrics(fiber::access_server::AccessServerMetrics *metrics,
+                                                  std::promise<fiber::common::IoResult<std::string>> *done) {
+    auto collected = co_await metrics->collect(fiber::event::EventLoop::current().io_buf_node_pool());
+    fiber::common::IoErr error = fiber::common::IoErr::None;
+    std::string output;
+    if (collected) {
+        output = consume_chain(std::move(*collected));
+    } else {
+        error = collected.error();
+    }
+    metrics->stop_collecting();
+    co_await metrics->wait_for_idle();
+    if (error == fiber::common::IoErr::None) {
+        done->set_value(std::move(output));
+    } else {
+        done->set_value(std::unexpected(error));
+    }
+}
+
 fiber::async::Task<void> serve_upstream(fiber::http::HttpExchange &exchange, UpstreamState *state) {
     ObservedUpstreamRequest observed;
     observed.method = exchange.method();
@@ -534,7 +553,8 @@ run_downstream(fiber::event::EventLoop *loop, const fiber::access_server::RouteC
                bool hold_open_after_input = false, fiber::cat::CatClient *cat_client = nullptr,
                fiber::access_server::AccessRequestScriptAdapter script_adapter = {},
                fiber::access_server::AccessRequestHandlerOptions handler_options = {}, bool fail_writes = false,
-               std::string_view observed_output = {}, std::promise<void> *output_observed = nullptr) {
+               std::string_view observed_output = {}, std::promise<void> *output_observed = nullptr,
+               fiber::access_server::AccessServerMetrics::Worker *metrics = nullptr) {
     auto transport = std::make_unique<RecordingTransport>(*loop, std::move(request), *output, hold_open_after_input,
                                                           fail_writes, observed_output, output_observed);
     if (transport_ready) {
@@ -545,9 +565,9 @@ run_downstream(fiber::event::EventLoop *loop, const fiber::access_server::RouteC
             fiber::access_server::ClientMetadataResolverOptions{
                     .mode = fiber::access_server::ClientMetadataMode::LegacyHeaders,
             });
-    fiber::http::HttpHandler http_handler = [&handler, cat_client, &client_metadata_resolver](
+    fiber::http::HttpHandler http_handler = [&handler, cat_client, metrics, &client_metadata_resolver](
                                                     fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
-        fiber::access_server::AccessRequestTelemetry telemetry(exchange, nullptr, cat_client, nullptr,
+        fiber::access_server::AccessRequestTelemetry telemetry(exchange, metrics, cat_client, nullptr,
                                                                &client_metadata_resolver);
         co_await handler.handle(exchange, telemetry);
     };
@@ -1811,6 +1831,8 @@ TEST(ProxyExecutorTest, AbortsDownstreamAfterAnUpstreamBodyEndsEarly) {
 
 TEST(ProxyExecutorTest, CancelsUpstreamWhenDownstreamClosesBeforeResponseHeaders) {
     fiber::event::EventLoopGroup group(1);
+    fiber::access_server::AccessServerMetrics metrics(group);
+    ASSERT_TRUE(metrics.valid());
     fiber::http::StealableHttp1ConnectionPoolSet pool(group);
     ASSERT_TRUE(pool.init());
     group.start();
@@ -1851,7 +1873,7 @@ TEST(ProxyExecutorTest, CancelsUpstreamWhenDownstreamClosesBeforeResponseHeaders
                           "Host: api.example.com\r\n\r\n";
     fiber::async::spawn(group.at(0), [&]() {
         return run_downstream(&group.at(0), &store, executor.adapter(), std::move(request), &output, &request_promise,
-                              &transport_promise);
+                              &transport_promise, false, nullptr, {}, {}, false, {}, nullptr, &metrics.worker(0));
     });
 
     RecordingTransport *transport = transport_future.get();
@@ -1861,6 +1883,16 @@ TEST(ProxyExecutorTest, CancelsUpstreamWhenDownstreamClosesBeforeResponseHeaders
     ASSERT_EQ(request_future.wait_for(1s), std::future_status::ready);
     EXPECT_TRUE(output.empty());
     ASSERT_EQ(response_future.wait_for(1s), std::future_status::ready);
+
+    std::promise<fiber::common::IoResult<std::string>> metrics_promise;
+    auto metrics_future = metrics_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() { return collect_access_metrics(&metrics, &metrics_promise); });
+    ASSERT_EQ(metrics_future.wait_for(2s), std::future_status::ready);
+    auto metric_text = metrics_future.get();
+    ASSERT_TRUE(metric_text);
+    EXPECT_NE(metric_text->find("access_server_proxy_executions_total{result=\"canceled\"} 1"), std::string::npos);
+    EXPECT_NE(metric_text->find("access_server_proxy_attempts_total{result=\"aborted\"} 1"), std::string::npos);
+    EXPECT_NE(metric_text->find("access_server_proxy_attempts_inflight 0"), std::string::npos);
 
     std::promise<void> shutdown_promise;
     auto shutdown_future = shutdown_promise.get_future();
@@ -1873,6 +1905,8 @@ TEST(ProxyExecutorTest, CancelsUpstreamWhenDownstreamClosesBeforeResponseHeaders
 
 TEST(ProxyExecutorTest, RelaysWebSocketUpgradeAndRawBytesInBothDirections) {
     fiber::event::EventLoopGroup group(1);
+    fiber::access_server::AccessServerMetrics metrics(group);
+    ASSERT_TRUE(metrics.valid());
     fiber::http::StealableHttp1ConnectionPoolSet pool(group);
     ASSERT_TRUE(pool.init());
     group.start();
@@ -1916,7 +1950,8 @@ TEST(ProxyExecutorTest, RelaysWebSocketUpgradeAndRawBytesInBothDirections) {
                           "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n"
                           "client-frame";
     fiber::async::spawn(group.at(0), [&]() {
-        return run_downstream(&group.at(0), &store, executor.adapter(), std::move(request), &output, &request_promise);
+        return run_downstream(&group.at(0), &store, executor.adapter(), std::move(request), &output, &request_promise,
+                              nullptr, false, nullptr, {}, {}, false, {}, nullptr, &metrics.worker(0));
     });
 
     ASSERT_EQ(response_future.wait_for(2s), std::future_status::ready);
@@ -1934,6 +1969,22 @@ TEST(ProxyExecutorTest, RelaysWebSocketUpgradeAndRawBytesInBothDirections) {
     EXPECT_EQ(output.find("Content-Length:"), std::string::npos);
     EXPECT_EQ(output.find("X-Accel-Buffering:"), std::string::npos);
     EXPECT_NE(output.find("server-frame"), std::string::npos);
+
+    std::promise<fiber::common::IoResult<std::string>> metrics_promise;
+    auto metrics_future = metrics_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() { return collect_access_metrics(&metrics, &metrics_promise); });
+    ASSERT_EQ(metrics_future.wait_for(2s), std::future_status::ready);
+    auto metric_text = metrics_future.get();
+    ASSERT_TRUE(metric_text);
+    EXPECT_NE(metric_text->find("access_server_proxy_executions_total{result=\"completed\"} 1"), std::string::npos);
+    EXPECT_NE(metric_text->find("access_server_proxy_attempts_total{result=\"completed\"} 1"), std::string::npos);
+    EXPECT_NE(metric_text->find("access_server_proxy_attempts_inflight 0"), std::string::npos);
+    EXPECT_NE(metric_text->find("access_server_proxy_pool_acquires_total{result=\"miss\"} 1"), std::string::npos);
+    EXPECT_NE(metric_text->find("access_server_proxy_connect_attempts_total{result=\"success\"} 1"), std::string::npos);
+    EXPECT_NE(metric_text->find("access_server_websocket_handshakes_total{result=\"accepted\"} 1"), std::string::npos);
+    EXPECT_NE(metric_text->find("access_server_websocket_sessions_total{result=\"closed\"} 1"), std::string::npos);
+    EXPECT_NE(metric_text->find("access_server_websocket_sessions_inflight 0"), std::string::npos);
+    EXPECT_EQ(metric_text->find("api.example.com"), std::string::npos);
 
     std::promise<void> shutdown_promise;
     auto shutdown_future = shutdown_promise.get_future();
