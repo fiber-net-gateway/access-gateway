@@ -2,6 +2,7 @@
 #define FIBER_ACCESS_SERVER_ACCESS_SERVICE_DISCOVERY_H
 
 #include "../config/AccessConfig.h"
+#include "../observability/AccessDiscoveryMetrics.h"
 #include "../routing/ProxyAddressSelector.h"
 #include "SmoothWeightedRoundRobin.h"
 
@@ -27,8 +28,10 @@ public:
     AccessServiceState() noexcept;
     ~AccessServiceState() noexcept;
 
-    void initialize(AccessUpstreamSwrr::Options options, std::string_view zone) noexcept;
+    void initialize(AccessUpstreamSwrr::Options options, std::string_view zone,
+                    AccessDiscoveryMetricsObserver metrics_observer = {}) noexcept;
     void update(const nacos::ServiceInfo &snapshot) noexcept;
+    void retire(nacos::ServiceRetireReason reason) noexcept;
 
     [[nodiscard]] std::expected<Selection, SwrrSelectError>
     select(std::string_view cluster, std::span<const std::uint64_t> excluded_selection_tokens) noexcept;
@@ -48,6 +51,7 @@ struct AccessServiceOps {
 
     AccessUpstreamSwrr::Options swrr_options{};
     std::string zone;
+    AccessDiscoveryMetricsObserver metrics_observer;
 };
 
 using AccessServiceDiscovery = nacos::ServiceDiscovery<AccessServiceOps>;
@@ -64,7 +68,8 @@ struct AccessServiceDiscoveryOptions {
 class AccessServiceSelectorFactory final : public common::NonCopyable, public common::NonMovable {
 public:
     AccessServiceSelectorFactory() noexcept = default;
-    AccessServiceSelectorFactory(AccessServiceDiscovery &discovery, AccessServiceDiscoveryOptions options) noexcept;
+    AccessServiceSelectorFactory(AccessServiceDiscovery &discovery, AccessServiceDiscoveryOptions options,
+                                 AccessDiscoveryMetricsObserver metrics_observer = {}) noexcept;
 
     [[nodiscard]] ProxyAddressSelectorFactory adapter() noexcept;
     void begin_compile() noexcept { acquire_error_.reset(); }
@@ -78,6 +83,7 @@ private:
 
     AccessServiceDiscovery *discovery_ = nullptr;
     AccessServiceDiscoveryOptions options_;
+    AccessDiscoveryMetricsObserver metrics_observer_;
     std::optional<nacos::NamingServiceError> acquire_error_;
 };
 

@@ -1,7 +1,7 @@
 #ifndef FIBER_ACCESS_SERVER_ACCESS_SERVER_RUNTIME_H
 #define FIBER_ACCESS_SERVER_ACCESS_SERVER_RUNTIME_H
 
-#include "../observability/AccessConfigMetrics.h"
+#include "../observability/AccessRuntimeMetrics.h"
 #include "AccessConfigCompiler.h"
 #include "AccessConfigWatcher.h"
 #include "AccessScriptRuntime.h"
@@ -148,7 +148,7 @@ private:
     std::unique_ptr<nacos::NamingService> naming_service_;
     AccessScriptRuntime script_runtime_;
     AccessConfigCompiler config_compiler_;
-    AccessConfigMetrics config_metrics_;
+    AccessRuntimeMetrics runtime_metrics_;
     GrayMatchStore gray_store_;
     AccessServiceDiscovery service_discovery_;
     RouteConfigStore route_store_;

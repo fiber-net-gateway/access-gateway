@@ -141,13 +141,14 @@ AccessServerRuntime::AccessServerRuntime(
     access_log_options_(std::move(access_log_options)), http_server_options_(std::move(http_server_options)),
     cat_client_(std::move(cat_client)), nacos_client_(std::move(nacos_client)),
     config_service_(std::move(config_service)), naming_service_(std::move(naming_service)),
-    config_compiler_(compiler_loop), config_metrics_(nacos_loop),
+    config_compiler_(compiler_loop), runtime_metrics_(nacos_loop),
     service_discovery_(nacos_loop, *naming_service_,
                        AccessServiceOps{.swrr_options = service_discovery_options.swrr_options,
-                                        .zone = service_discovery_options.zone}),
-    route_store_({}, service_discovery_, std::move(service_discovery_options)),
+                                        .zone = service_discovery_options.zone,
+                                        .metrics_observer = runtime_metrics_.discovery().observer()}),
+    route_store_({}, service_discovery_, std::move(service_discovery_options), runtime_metrics_.discovery().observer()),
     config_watcher_(nacos_loop, config_compiler_, *config_service_, route_store_, std::move(watcher_options), {},
-                    config_metrics_.observer()),
+                    runtime_metrics_.config().observer()),
     gray_watcher_(nacos_loop, *config_service_, gray_store_, std::move(gray_options)),
     tls_certificate_store_(nacos_loop, http_workers, http_server_options_.http3.enabled),
     tls_certificate_watcher_(nacos_loop, config_compiler_, *config_service_, tls_certificate_store_,
@@ -196,30 +197,40 @@ async::DetachedTask AccessServerRuntime::start_cat() noexcept {
 
 async::DetachedTask AccessServerRuntime::start_nacos() noexcept {
     FIBER_ASSERT(nacos_loop_->in_loop());
+    const AccessDiscoveryMetricsObserver metrics = runtime_metrics_.discovery().observer();
+    metrics.set_lifecycle(AccessNacosComponent::Client, AccessNacosLifecycleState::Starting);
     auto client_started = nacos_client_->start();
     if (!client_started) {
+        metrics.set_lifecycle(AccessNacosComponent::Client, AccessNacosLifecycleState::Failed);
         nacos_start_publisher_->publish(NacosStartStatus{
                 .error = make_io_error(AccessServerRuntimeErrorCode::StartNacosClient, client_started.error()),
         });
         nacos_start_tasks_.done();
         co_return;
     }
+    metrics.set_lifecycle(AccessNacosComponent::Client, AccessNacosLifecycleState::Running);
+    metrics.set_lifecycle(AccessNacosComponent::ConfigService, AccessNacosLifecycleState::Starting);
     auto config_started = config_service_->start();
     if (!config_started) {
+        metrics.set_lifecycle(AccessNacosComponent::ConfigService, AccessNacosLifecycleState::Failed);
         nacos_start_publisher_->publish(NacosStartStatus{
                 .error = make_io_error(AccessServerRuntimeErrorCode::StartConfigService, config_started.error()),
         });
         nacos_start_tasks_.done();
         co_return;
     }
+    metrics.set_lifecycle(AccessNacosComponent::ConfigService, AccessNacosLifecycleState::Running);
+    metrics.set_lifecycle(AccessNacosComponent::NamingService, AccessNacosLifecycleState::Starting);
     auto naming_started = naming_service_->start();
     if (!naming_started) {
+        metrics.set_lifecycle(AccessNacosComponent::NamingService, AccessNacosLifecycleState::Failed);
         nacos_start_publisher_->publish(NacosStartStatus{
                 .error = make_io_error(AccessServerRuntimeErrorCode::StartNamingService, naming_started.error()),
         });
         nacos_start_tasks_.done();
         co_return;
     }
+    metrics.set_lifecycle(AccessNacosComponent::NamingService, AccessNacosLifecycleState::Running);
     auto gray_started = gray_watcher_.start();
     if (!gray_started) {
         nacos_start_publisher_->publish(NacosStartStatus{
@@ -255,6 +266,7 @@ async::DetachedTask AccessServerRuntime::start_nacos() noexcept {
 
 async::DetachedTask AccessServerRuntime::shutdown_nacos() noexcept {
     FIBER_ASSERT(nacos_loop_->in_loop());
+    const AccessDiscoveryMetricsObserver metrics = runtime_metrics_.discovery().observer();
     co_await nacos_start_tasks_.join();
     co_await config_watcher_.shutdown();
     co_await gray_watcher_.shutdown();
@@ -262,9 +274,15 @@ async::DetachedTask AccessServerRuntime::shutdown_nacos() noexcept {
     co_await tls_certificate_store_.shutdown();
     route_store_.clear();
     co_await service_discovery_.shutdown();
+    metrics.set_lifecycle(AccessNacosComponent::NamingService, AccessNacosLifecycleState::Stopping);
     co_await naming_service_->shutdown();
+    metrics.set_lifecycle(AccessNacosComponent::NamingService, AccessNacosLifecycleState::Stopped);
+    metrics.set_lifecycle(AccessNacosComponent::ConfigService, AccessNacosLifecycleState::Stopping);
     co_await config_service_->shutdown();
+    metrics.set_lifecycle(AccessNacosComponent::ConfigService, AccessNacosLifecycleState::Stopped);
+    metrics.set_lifecycle(AccessNacosComponent::Client, AccessNacosLifecycleState::Stopping);
     co_await nacos_client_->shutdown();
+    metrics.set_lifecycle(AccessNacosComponent::Client, AccessNacosLifecycleState::Stopped);
     nacos_stopped_publisher_->publish(true);
 }
 
@@ -449,7 +467,7 @@ async::Task<std::expected<void, AccessServerRuntimeError>> AccessServerRuntime::
                     .client_metadata = client_metadata_options_,
                     .access_log = access_log_options_,
                     .script_adapter = script_runtime_.request_adapter(),
-                    .config_metrics = &config_metrics_,
+                    .runtime_metrics = &runtime_metrics_,
                     .cat_client = cat_client_.get(),
                     .test_mode = test_mode_,
                     .http_server = http_server_options_,

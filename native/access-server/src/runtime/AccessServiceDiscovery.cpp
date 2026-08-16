@@ -127,14 +127,48 @@ bool same_definitions(const std::vector<AccessEndpointDefinition> &left,
     return true;
 }
 
+AccessDiscoveryMetricEvent retire_event(nacos::ServiceRetireReason reason) noexcept {
+    switch (reason) {
+        case nacos::ServiceRetireReason::Released:
+            return AccessDiscoveryMetricEvent::ServiceRetiredReleased;
+        case nacos::ServiceRetireReason::SubscriptionClosed:
+            return AccessDiscoveryMetricEvent::ServiceRetiredSubscriptionClosed;
+        case nacos::ServiceRetireReason::Shutdown:
+            return AccessDiscoveryMetricEvent::ServiceRetiredShutdown;
+    }
+    return AccessDiscoveryMetricEvent::ServiceRetiredShutdown;
+}
+
+AccessDiscoveryMetricEvent acquire_failure_event(nacos::NamingServiceErrorCode code) noexcept {
+    switch (code) {
+        case nacos::NamingServiceErrorCode::InvalidArgument:
+            return AccessDiscoveryMetricEvent::SelectorAcquireInvalidArgument;
+        case nacos::NamingServiceErrorCode::Shutdown:
+            return AccessDiscoveryMetricEvent::SelectorAcquireShutdown;
+        case nacos::NamingServiceErrorCode::AuthenticationUnavailable:
+            return AccessDiscoveryMetricEvent::SelectorAcquireAuthenticationUnavailable;
+        case nacos::NamingServiceErrorCode::Transport:
+            return AccessDiscoveryMetricEvent::SelectorAcquireTransport;
+        case nacos::NamingServiceErrorCode::GrpcStatus:
+            return AccessDiscoveryMetricEvent::SelectorAcquireGrpcStatus;
+        case nacos::NamingServiceErrorCode::Protocol:
+            return AccessDiscoveryMetricEvent::SelectorAcquireProtocol;
+        case nacos::NamingServiceErrorCode::Server:
+            return AccessDiscoveryMetricEvent::SelectorAcquireServer;
+        case nacos::NamingServiceErrorCode::ResponseTooLarge:
+            return AccessDiscoveryMetricEvent::SelectorAcquireResponseTooLarge;
+    }
+    return AccessDiscoveryMetricEvent::SelectorAcquireProtocol;
+}
+
 } // namespace
 
 class AccessServiceState::Impl final : public common::NonCopyable, public common::NonMovable {
 public:
     using Selection = AccessUpstreamSwrr::Selection;
 
-    Impl(AccessUpstreamSwrr::Options options, std::string zone) :
-        options_(std::move(options)), zone_(std::move(zone)) {}
+    Impl(AccessUpstreamSwrr::Options options, std::string zone, AccessDiscoveryMetricsObserver metrics_observer) :
+        options_(std::move(options)), zone_(std::move(zone)), metrics_observer_(metrics_observer) {}
 
     [[nodiscard]] bool update(const nacos::ServiceInfo &snapshot) noexcept {
         std::vector<AccessEndpointDefinition> next_definitions;
@@ -197,9 +231,11 @@ public:
         if (initialized_) {
             if (!checksum_.empty() || !snapshot.checksum.empty()) {
                 if (!checksum_.empty() && checksum_ == snapshot.checksum) {
+                    metrics_observer_.record_event(AccessDiscoveryMetricEvent::ServiceUpdateUnchanged);
                     return false;
                 }
             } else if (same_definitions(definitions_, next_definitions)) {
+                metrics_observer_.record_event(AccessDiscoveryMetricEvent::ServiceUpdateUnchanged);
                 return false;
             }
         }
@@ -243,8 +279,32 @@ public:
         checksum_ = snapshot.checksum;
         definitions_ = std::move(next_definitions);
         clusters_ = std::move(next_clusters);
+        const AccessDiscoveryServiceAggregate next_aggregate{
+                .ready = true,
+                .selectable_endpoints = definitions_.size(),
+                .logical_clusters = clusters_.size(),
+        };
+        metrics_observer_.transition_service(AccessDiscoveryMetricEvent::ServiceUpdateChanged, aggregate_,
+                                             next_aggregate);
+        aggregate_ = next_aggregate;
         initialized_ = true;
         return true;
+    }
+
+    void retire(nacos::ServiceRetireReason reason) noexcept {
+        std::lock_guard guard(mutex_);
+        FIBER_ASSERT(initialized_);
+        FIBER_ASSERT(aggregate_.ready);
+        for (const Cluster &cluster: clusters_) {
+            (void) cluster.preferred->update({});
+            (void) cluster.fallback->update({});
+        }
+        metrics_observer_.transition_service(retire_event(reason), aggregate_, {});
+        aggregate_ = {};
+        checksum_.clear();
+        definitions_.clear();
+        clusters_.clear();
+        initialized_ = false;
     }
 
     [[nodiscard]] std::expected<Selection, SwrrSelectError>
@@ -316,10 +376,12 @@ private:
 
     AccessUpstreamSwrr::Options options_;
     std::string zone_;
+    AccessDiscoveryMetricsObserver metrics_observer_;
     std::mutex mutex_;
     std::string checksum_;
     std::vector<AccessEndpointDefinition> definitions_;
     std::vector<Cluster> clusters_;
+    AccessDiscoveryServiceAggregate aggregate_;
     std::uint64_t next_selection_token_ = 0;
     bool initialized_ = false;
 };
@@ -328,15 +390,21 @@ AccessServiceState::AccessServiceState() noexcept = default;
 
 AccessServiceState::~AccessServiceState() noexcept = default;
 
-void AccessServiceState::initialize(AccessUpstreamSwrr::Options options, std::string_view zone) noexcept {
+void AccessServiceState::initialize(AccessUpstreamSwrr::Options options, std::string_view zone,
+                                    AccessDiscoveryMetricsObserver metrics_observer) noexcept {
     FIBER_ASSERT(impl_ == nullptr);
-    impl_.reset(new (std::nothrow) Impl(std::move(options), std::string(zone)));
+    impl_.reset(new (std::nothrow) Impl(std::move(options), std::string(zone), metrics_observer));
     FIBER_ASSERT(impl_ != nullptr);
 }
 
 void AccessServiceState::update(const nacos::ServiceInfo &snapshot) noexcept {
     FIBER_ASSERT(impl_ != nullptr);
     (void) impl_->update(snapshot);
+}
+
+void AccessServiceState::retire(nacos::ServiceRetireReason reason) noexcept {
+    FIBER_ASSERT(impl_ != nullptr);
+    impl_->retire(reason);
 }
 
 std::expected<AccessServiceState::Selection, SwrrSelectError>
@@ -350,11 +418,16 @@ namespace {
 
 class NacosProxyAddressSelector final : public ProxyAddressSelector {
 public:
-    NacosProxyAddressSelector(AccessServiceDiscovery::Lease lease, std::string cluster) :
-        lease_(std::move(lease)), cluster_(std::move(cluster)) {
+    NacosProxyAddressSelector(AccessServiceDiscovery::Lease lease, std::string cluster,
+                              AccessDiscoveryMetricsObserver metrics_observer) :
+        lease_(std::move(lease)), cluster_(std::move(cluster)), metrics_observer_(metrics_observer) {
         FIBER_ASSERT(lease_);
         FIBER_ASSERT(!cluster_.empty());
+        metrics_observer_.record_event(AccessDiscoveryMetricEvent::SelectorAcquireSucceeded);
+        metrics_observer_.selector_lease(true);
     }
+
+    ~NacosProxyAddressSelector() noexcept override { metrics_observer_.selector_lease(false); }
 
     [[nodiscard]] async::Task<std::expected<void, ProxyAddressReadyError>> wait_ready() noexcept override {
         auto ready = co_await lease_.wait_ready();
@@ -401,12 +474,13 @@ public:
 private:
     AccessServiceDiscovery::Lease lease_;
     std::string cluster_;
+    AccessDiscoveryMetricsObserver metrics_observer_;
 };
 
 } // namespace
 
 void AccessServiceOps::on_init(const nacos::ServiceKeyView &, State &state) noexcept {
-    state.initialize(swrr_options, zone);
+    state.initialize(swrr_options, zone, metrics_observer);
 }
 
 void AccessServiceOps::on_update(const nacos::ServiceKeyView &, State &state,
@@ -415,13 +489,15 @@ void AccessServiceOps::on_update(const nacos::ServiceKeyView &, State &state,
     state.update(*snapshot);
 }
 
-void AccessServiceOps::on_retire(const nacos::ServiceKeyView &, State &state, nacos::ServiceRetireReason) noexcept {
-    state.update(nacos::ServiceInfo{});
+void AccessServiceOps::on_retire(const nacos::ServiceKeyView &, State &state,
+                                 nacos::ServiceRetireReason reason) noexcept {
+    state.retire(reason);
 }
 
 AccessServiceSelectorFactory::AccessServiceSelectorFactory(AccessServiceDiscovery &discovery,
-                                                           AccessServiceDiscoveryOptions options) noexcept :
-    discovery_(&discovery), options_(std::move(options)) {}
+                                                           AccessServiceDiscoveryOptions options,
+                                                           AccessDiscoveryMetricsObserver metrics_observer) noexcept :
+    discovery_(&discovery), options_(std::move(options)), metrics_observer_(metrics_observer) {}
 
 ProxyAddressSelectorFactory AccessServiceSelectorFactory::adapter() noexcept {
     return ProxyAddressSelectorFactory{
@@ -436,12 +512,14 @@ AccessServiceSelectorFactory::create_address_selector(void *context, std::string
     FIBER_ASSERT(self.discovery_ != nullptr);
     auto acquired = self.discovery_->acquire(service, self.options_.group);
     if (!acquired) {
+        self.metrics_observer_.record_event(acquire_failure_event(acquired.error().code));
         if (!self.acquire_error_) {
             self.acquire_error_ = std::move(acquired.error());
         }
         return make_unavailable_service_address_selector(std::move(service), std::move(cluster));
     }
-    return std::make_shared<NacosProxyAddressSelector>(std::move(*acquired), std::move(cluster));
+    return std::make_shared<NacosProxyAddressSelector>(std::move(*acquired), std::move(cluster),
+                                                       self.metrics_observer_);
 }
 
 } // namespace fiber::access_server

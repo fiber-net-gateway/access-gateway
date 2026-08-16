@@ -1,5 +1,5 @@
 #include "AccessServerMetrics.h"
-#include "AccessConfigMetrics.h"
+#include "AccessRuntimeMetrics.h"
 
 #include <algorithm>
 #include <array>
@@ -45,8 +45,8 @@ void AccessServerMetrics::Worker::response_compression_selected(bool compressed)
 
 void AccessServerMetrics::Worker::response_compression_not_acceptable() noexcept { response_compression_[2].inc(); }
 
-AccessServerMetrics::AccessServerMetrics(event::EventLoopGroup &workers, const AccessConfigMetrics *config_metrics) :
-    config_metrics_(config_metrics) {
+AccessServerMetrics::AccessServerMetrics(event::EventLoopGroup &workers, const AccessRuntimeMetrics *runtime_metrics) :
+    runtime_metrics_(runtime_metrics) {
     valid_ = initialize(workers);
 }
 
@@ -160,22 +160,22 @@ AccessServerMetrics::Worker &AccessServerMetrics::worker(std::size_t index) noex
 
 async::Task<common::IoResult<mem::IoBufChain>> AccessServerMetrics::collect(mem::IoBufNodePool &node_pool) noexcept {
     auto collected = co_await registry_.collect_text(node_pool);
-    if (!collected || !config_metrics_) {
+    if (!collected || !runtime_metrics_) {
         co_return collected;
     }
 
-    std::string config_text;
-    config_metrics_->append_prometheus(config_text, event::EventLoop::current().now());
-    if (config_text.empty()) {
+    std::string runtime_text;
+    runtime_metrics_->append_prometheus(runtime_text, event::EventLoop::current().now());
+    if (runtime_text.empty()) {
         co_return collected;
     }
-    mem::IoBuf config_buffer = mem::IoBuf::allocate(config_text.size());
-    if (!config_buffer) {
+    mem::IoBuf runtime_buffer = mem::IoBuf::allocate(runtime_text.size());
+    if (!runtime_buffer) {
         co_return std::unexpected(common::IoErr::NoMem);
     }
-    std::memcpy(config_buffer.writable_data(), config_text.data(), config_text.size());
-    config_buffer.commit(config_text.size());
-    if (!collected->append(std::move(config_buffer))) {
+    std::memcpy(runtime_buffer.writable_data(), runtime_text.data(), runtime_text.size());
+    runtime_buffer.commit(runtime_text.size());
+    if (!collected->append(std::move(runtime_buffer))) {
         co_return std::unexpected(common::IoErr::NoMem);
     }
     co_return collected;

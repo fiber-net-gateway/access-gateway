@@ -20,7 +20,7 @@
 
 namespace fiber::access_server {
 
-class AccessConfigMetrics;
+class AccessRuntimeMetrics;
 
 class AccessServerMetrics final : public common::NonCopyable, public common::NonMovable {
 public:
@@ -43,7 +43,7 @@ public:
         prometheus::GaugeRef inflight_;
     };
 
-    explicit AccessServerMetrics(event::EventLoopGroup &workers, const AccessConfigMetrics *config_metrics = nullptr);
+    explicit AccessServerMetrics(event::EventLoopGroup &workers, const AccessRuntimeMetrics *runtime_metrics = nullptr);
     ~AccessServerMetrics();
 
     [[nodiscard]] bool valid() const noexcept { return valid_; }
@@ -59,7 +59,7 @@ private:
 
     prometheus::MetricsRegistry registry_;
     std::vector<Worker> workers_;
-    const AccessConfigMetrics *config_metrics_ = nullptr;
+    const AccessRuntimeMetrics *runtime_metrics_ = nullptr;
     bool collecting_stopped_ = false;
     bool valid_ = false;
 };

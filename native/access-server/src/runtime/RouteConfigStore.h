@@ -104,7 +104,8 @@ public:
     explicit RouteConfigStore(ScriptCompilerAdapter script_compiler = {},
                               ProxyAddressSelectorFactory selector_factory = {});
     RouteConfigStore(ScriptCompilerAdapter script_compiler, AccessServiceDiscovery &service_discovery,
-                     AccessServiceDiscoveryOptions discovery_options = {});
+                     AccessServiceDiscoveryOptions discovery_options = {},
+                     AccessDiscoveryMetricsObserver metrics_observer = {});
 
     [[nodiscard]] PreparedProjectUpdateOutcome prepare(std::string_view project,
                                                        const std::optional<ProjectConfig> &config);
