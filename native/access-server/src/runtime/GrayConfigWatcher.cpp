@@ -50,11 +50,11 @@ std::string_view error_code_name(AccessConfigErrorCode code) noexcept {
 GrayConfigWatcher::GrayConfigWatcher(event::EventLoop &loop, nacos::ConfigService &config_service,
                                      GrayMatchStore &store, GrayConfigWatcherOptions options,
                                      AccessGrayActivationEvidenceObserver observer) :
-    loop_(&loop), config_service_(&config_service), store_(&store), options_(std::move(options)), observer_(observer) {}
+    loop_(&loop), config_service_(&config_service), store_(&store), options_(std::move(options)), observer_(observer),
+    subscription_(loop) {}
 
-GrayConfigWatcher::~GrayConfigWatcher() {
+GrayConfigWatcher::~GrayConfigWatcher() noexcept {
     FIBER_ASSERT(state_ == GrayConfigWatcherState::Created || state_ == GrayConfigWatcherState::Stopped);
-    FIBER_ASSERT(!subscription_);
 }
 
 std::expected<void, nacos::ConfigServiceError> GrayConfigWatcher::start() {
@@ -67,12 +67,12 @@ std::expected<void, nacos::ConfigServiceError> GrayConfigWatcher::start() {
         });
     }
     state_ = GrayConfigWatcherState::Running;
-    auto subscription = config_service_->subscribe(options_.data_id, options_.group, &on_notify, this);
-    if (!subscription) {
+    auto subscribed = subscription_.subscribe(*config_service_, options_.data_id, options_.group, &on_notify, this);
+    if (!subscribed) {
         state_ = GrayConfigWatcherState::Created;
-        return std::unexpected(std::move(subscription.error()));
+        subscription_.reset_start_failure();
+        return std::unexpected(std::move(subscribed.error()));
     }
-    subscription_.emplace(std::move(*subscription));
     publish_evidence();
     return {};
 }
@@ -83,16 +83,15 @@ async::Task<void> GrayConfigWatcher::shutdown() noexcept {
         co_return;
     }
     if (state_ == GrayConfigWatcherState::Created) {
+        subscription_.stop();
         state_ = GrayConfigWatcherState::Stopped;
         publish_evidence();
         co_return;
     }
     if (state_ == GrayConfigWatcherState::Running) {
         state_ = GrayConfigWatcherState::Stopping;
-        request_stop();
     }
-    request_stop();
-    subscription_.reset();
+    subscription_.stop();
     state_ = GrayConfigWatcherState::Stopped;
     publish_evidence();
 }
@@ -101,6 +100,11 @@ void GrayConfigWatcher::on_notify(void *context, const nacos::SubscriptionResult
     auto &owner = *static_cast<GrayConfigWatcher *>(context);
     if (result.kind == nacos::ResultKind::Closed) {
         if (owner.state_ == GrayConfigWatcherState::Running) {
+            owner.subscription_.fail(nacos::ConfigServiceError{
+                    .code = nacos::ConfigServiceErrorCode::Shutdown,
+                    .io_error = common::IoErr::NotConnected,
+                    .message = "gray configuration subscription closed before shutdown",
+            });
             owner.state_ = GrayConfigWatcherState::Failed;
             ++owner.failed_updates_;
             owner.last_failure_ = GrayConfigWatcherFailure{
@@ -117,10 +121,10 @@ void GrayConfigWatcher::on_notify(void *context, const nacos::SubscriptionResult
             };
             owner.publish_evidence();
         }
-        owner.request_stop();
         return;
     }
     if (result.data && owner.state_ == GrayConfigWatcherState::Running) {
+        (void) owner.subscription_.observe_value();
         owner.apply(*result.data);
     }
 }
@@ -187,12 +191,6 @@ void GrayConfigWatcher::publish_evidence() const noexcept {
         };
     }
     observer_.on_update(observer_.context, evidence);
-}
-
-void GrayConfigWatcher::request_stop() noexcept {
-    if (subscription_) {
-        subscription_->close();
-    }
 }
 
 } // namespace fiber::access_server

@@ -66,6 +66,7 @@ add_library(access_server_core STATIC
     "${CMAKE_CURRENT_LIST_DIR}/src/runtime/AccessServiceDiscovery.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/runtime/AccessWorkerResources.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/runtime/RouteConfigStore.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/runtime/SubscriptionLifecycle.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/runtime/TlsCertificateStore.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/runtime/TlsCertificateWatcher.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/validation/NativeValidatorProtocol.cpp")
@@ -212,6 +213,7 @@ if (FIBER_BUILD_TESTS AND (GTest_FOUND OR TARGET GTest::gtest_main))
         "${CMAKE_CURRENT_LIST_DIR}/tests/RouteConfigStoreTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/SmoothWeightedRoundRobinTest.cpp")
     target_sources(fiber_access_server_tests PRIVATE
+        "${CMAKE_CURRENT_LIST_DIR}/tests/SubscriptionLifecycleTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/TlsCertificateConfigTest.cpp")
     target_link_libraries(fiber_access_server_tests PRIVATE access_server_core GTest::gtest_main zlibstatic)
     target_include_directories(fiber_access_server_tests PRIVATE
