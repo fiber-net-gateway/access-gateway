@@ -862,18 +862,42 @@ Fiber 上游应实现可复用的异步多地址 connector：
 
 **归属：本项目。**
 
-当前类同时构造 Nacos/CAT、脚本 runtime、service discovery、三个 watcher、route/gray/TLS
-store、业务 server，并管理三个 loop 的启动、失败回滚和逆序关停。它作为 composition
-root 合理，但具体依赖过多，生命周期难以使用 fake 完整测试。
+**实施状态：已解决（2026-08-17）。** `AccessServerRuntime` 已从进程级“大对象”收敛为
+112-byte composition-root façade，公开的 `create()`、`start()`、`shutdown()`、`state()`、
+`fd()` 和 `metrics_fd()` 契约保持不变。内部职责按以下边界拆分：
 
-建议拆为：
+- `AccessRuntimeFactory` 只校验进程级 upstream TLS policy，构造 Nacos/CAT 客户端，并把配置
+  投影为 control/data plane options；所有创建失败继续映射到原有 typed runtime error；
+- `AccessControlPlaneSupervisor` 独占 Nacos/CAT、compiler、service discovery、route/gray/TLS
+  store、三个 watcher、activation evidence 和 runtime metrics，所有 Nacos/CAT 操作仍投递到各自
+  owner loop；
+- `AccessDataPlaneService` 独占 script runtime、业务/metrics listener 和 worker resources，借用
+  control plane 已发布的 store、metrics、evidence 与 CAT client；listener 只会在配置与 TLS
+  readiness 成功后创建；
+- `AccessRuntimeCoordinator` 只持有两个平凡可复制的非 owning function-table adapter，以显式
+  `Created -> Starting -> Running -> Stopping -> Stopped` 状态机编排生命周期；该间接调用只发生在
+  进程启动和关闭，不进入请求热路径；
+- `AccessServerRuntimeError` 独立承载稳定 error code、stage name 和 error builder，避免 factory、
+  supervisor 与 data plane 反向依赖 façade 实现。
 
-- `RuntimeFactory`：生产依赖构造；
-- `ControlPlaneSupervisor`：Nacos、watcher、discovery、TLS；
-- `DataPlaneService`：业务 listener、worker resources、metrics listener；
-- `RuntimeCoordinator`：小型显式状态机。
+启动顺序固定为 control plane readiness 后启动 data plane。control plane 启动失败时不会触碰
+data plane；data plane 初始化或任一 bind 失败时先关闭已尝试的数据面，再按 CAT、watcher/TLS
+store/route/discovery、NamingService、ConfigService、Nacos client 的既有顺序回滚。正常关闭同样先
+data plane 后 control plane；未启动实例仍释放其已拥有的 control-plane 客户端。重复或同一 owner
+loop 上并发的 shutdown 由一个有界 lifecycle watch 合并，runtime components 本身没有共享所有权。
+TLS bootstrap 临时文件仍在业务 listener 完成证书加载后立即关闭。
 
-避免为每个依赖引入虚基类；优先使用小 adapter、factory 和可注入的 concrete test fake。
+新增的 concrete fake 测试覆盖成功启动顺序、control-plane 失败、data-plane 失败逆序回滚、未启动
+关闭，以及两个并发 shutdown 与后续重复 shutdown；另有结构约束锁定 façade 不超过 128 bytes、
+无多态，以及两个 adapter 的 trivially-copyable 性质。原有 loopback/runtime 测试继续覆盖真实
+worker 初始化、业务/metrics bind、TLS、Nacos/CAT owner-loop 和完整 shutdown。
+
+拆分刻意没有引入虚基类、`std::function`、锁、runtime component 的共享所有权或请求级分配。
+对象布局合计从 7,544 bytes 增至 7,712 bytes（+168，约 +2.2%），并增加两个仅在启动期发生的
+component allocation；相同 Release ThinLTO 构建中最终二进制 text 从 6,914,601 增至
+6,931,001 bytes（+16,400，约 +0.237%），文件大小增加 26,344 bytes（约 +0.149%）。这是为隔离
+translation unit 和可替换 lifecycle seam 支付的冷路径成本，请求处理对象、coroutine 层数及热路径
+保持不变。
 
 ### 8.2 C-01：`AccessServer`
 
