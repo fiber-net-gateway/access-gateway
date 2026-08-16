@@ -9,11 +9,9 @@
 #include <cstdint>
 #include <expected>
 #include <memory>
-#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
-#include <utility>
 
 #include <fiber/common/NonCopyable.h>
 #include <fiber/common/NonMovable.h>
@@ -65,9 +63,9 @@ struct AccessServiceDiscoveryOptions {
     AccessUpstreamSwrr::Options swrr_options{};
 };
 
-// Synchronous adapter used only while compiling one project snapshot. Each
-// service route acquires its own Lease; ServiceDiscovery performs key-level
-// subscription deduplication.
+// Synchronous owner-loop adapter used while binding one compiled project
+// snapshot. Each service route acquires its own Lease; ServiceDiscovery
+// performs key-level subscription deduplication.
 class AccessServiceSelectorFactory final : public common::NonCopyable, public common::NonMovable {
 public:
     AccessServiceSelectorFactory() noexcept = default;
@@ -75,19 +73,14 @@ public:
                                  AccessDiscoveryMetricsObserver metrics_observer = {}) noexcept;
 
     [[nodiscard]] ProxyAddressSelectorFactory adapter() noexcept;
-    void begin_compile() noexcept { acquire_error_.reset(); }
-    [[nodiscard]] std::optional<nacos::NamingServiceError> take_error() noexcept {
-        return std::exchange(acquire_error_, std::nullopt);
-    }
 
 private:
-    [[nodiscard]] static std::shared_ptr<ProxyAddressSelector>
-    create_address_selector(void *context, std::string service, std::string cluster);
+    [[nodiscard]] static ProxyAddressSelectorFactory::Result create_address_selector(void *context, std::string service,
+                                                                                     std::string cluster);
 
     AccessServiceDiscovery *discovery_ = nullptr;
     AccessServiceDiscoveryOptions options_;
     AccessDiscoveryMetricsObserver metrics_observer_;
-    std::optional<nacos::NamingServiceError> acquire_error_;
 };
 
 } // namespace fiber::access_server

@@ -1,14 +1,14 @@
 #ifndef FIBER_ACCESS_SERVER_ROUTE_CONFIG_STORE_H
 #define FIBER_ACCESS_SERVER_ROUTE_CONFIG_STORE_H
 
-#include "../routing/AccessRouteSnapshot.h"
+#include "../routing/ProjectConfigCompiler.h"
 #include "AccessServiceDiscovery.h"
+#include "ProjectSnapshotRegistry.h"
+#include "RouteSnapshotPublisher.h"
 
-#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <expected>
-#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -142,35 +142,17 @@ public:
 
     [[nodiscard]] std::optional<std::int32_t> current_version(std::string_view project) const noexcept;
 
-    [[nodiscard]] std::shared_ptr<const AccessRouteSnapshot> pin() const noexcept {
-#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
-        return published_.load(std::memory_order_acquire);
-#else
-        return std::atomic_load_explicit(&published_, std::memory_order_acquire);
-#endif
-    }
+    [[nodiscard]] std::shared_ptr<const AccessRouteSnapshot> pin() const noexcept { return publisher_.pin(); }
 
 private:
-    struct ProjectRecord {
-        std::optional<std::int32_t> version;
-        std::shared_ptr<const ProjectRouteSnapshot> snapshot;
-    };
-
-    [[nodiscard]] std::vector<std::shared_ptr<const ProjectRouteSnapshot>> current_projects() const;
     static void apply_to_candidate(std::vector<std::shared_ptr<const ProjectRouteSnapshot>> &candidate,
                                    const ReadyProjectUpdate &ready);
-    void publish_snapshot(std::shared_ptr<const AccessRouteSnapshot> snapshot) noexcept;
 
-    std::map<std::string, ProjectRecord, std::less<>> projects_;
-    ScriptCompilerAdapter script_compiler_;
+    ProjectConfigCompiler project_compiler_;
     AccessServiceSelectorFactory service_selector_factory_;
     ProxyAddressSelectorFactory selector_factory_;
-    bool uses_service_discovery_ = false;
-#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
-    std::atomic<std::shared_ptr<const AccessRouteSnapshot>> published_;
-#else
-    std::shared_ptr<const AccessRouteSnapshot> published_;
-#endif
+    ProjectSnapshotRegistry registry_;
+    RouteSnapshotPublisher publisher_;
 };
 
 } // namespace fiber::access_server

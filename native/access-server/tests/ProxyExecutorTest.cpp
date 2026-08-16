@@ -737,10 +737,11 @@ private:
     std::string cluster_;
 };
 
-std::shared_ptr<fiber::access_server::ProxyAddressSelector>
-make_test_service_selector(void *context, std::string service, std::string cluster) {
-    return std::make_shared<TestServiceAddressSelector>(*static_cast<ServiceSelectorState *>(context),
-                                                        std::move(service), std::move(cluster));
+fiber::access_server::ProxyAddressSelectorFactory::Result make_test_service_selector(void *context, std::string service,
+                                                                                     std::string cluster) {
+    std::shared_ptr<fiber::access_server::ProxyAddressSelector> selector = std::make_shared<TestServiceAddressSelector>(
+            *static_cast<ServiceSelectorState *>(context), std::move(service), std::move(cluster));
+    return selector;
 }
 
 std::size_t count_status(std::string_view response, std::string_view status) {

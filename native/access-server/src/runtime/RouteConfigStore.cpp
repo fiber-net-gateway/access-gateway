@@ -125,26 +125,14 @@ async::Task<ReadyProjectUpdateOutcome> PreparedProjectUpdate::wait_ready_impl(Pr
 
 RouteConfigStore::RouteConfigStore(ScriptCompilerAdapter script_compiler,
                                    ProxyAddressSelectorFactory selector_factory) :
-    script_compiler_(script_compiler), selector_factory_(selector_factory) {
-#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
-    published_.store(std::make_shared<const AccessRouteSnapshot>(), std::memory_order_relaxed);
-#else
-    std::atomic_store_explicit(&published_, std::make_shared<const AccessRouteSnapshot>(), std::memory_order_relaxed);
-#endif
-}
+    project_compiler_(script_compiler), selector_factory_(selector_factory) {}
 
 RouteConfigStore::RouteConfigStore(ScriptCompilerAdapter script_compiler, AccessServiceDiscovery &service_discovery,
                                    AccessServiceDiscoveryOptions discovery_options,
                                    AccessDiscoveryMetricsObserver metrics_observer) :
-    script_compiler_(script_compiler),
+    project_compiler_(script_compiler),
     service_selector_factory_(service_discovery, std::move(discovery_options), metrics_observer),
-    selector_factory_(service_selector_factory_.adapter()), uses_service_discovery_(true) {
-#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
-    published_.store(std::make_shared<const AccessRouteSnapshot>(), std::memory_order_relaxed);
-#else
-    std::atomic_store_explicit(&published_, std::make_shared<const AccessRouteSnapshot>(), std::memory_order_relaxed);
-#endif
-}
+    selector_factory_(service_selector_factory_.adapter()) {}
 
 PreparedProjectUpdateOutcome RouteConfigStore::prepare(std::string_view project,
                                                        const std::optional<ProjectConfig> &config) {
@@ -157,7 +145,7 @@ PreparedProjectUpdateOutcome RouteConfigStore::prepare(std::string_view project,
         return PreparedProjectUpdate(ConfigUpdateStatus::VersionUnchanged, std::string(project), config->version, {});
     }
 
-    auto compiled = compile_project_config(project, *config, script_compiler_);
+    auto compiled = project_compiler_.compile(project, *config);
     if (!compiled) {
         return std::unexpected(std::move(compiled.error()));
     }
@@ -194,23 +182,9 @@ PreparedProjectUpdateOutcome RouteConfigStore::prepare_compiled(std::string_view
         return PreparedProjectUpdate(ConfigUpdateStatus::Unloaded, std::string(project), *version, {});
     }
 
-    if (uses_service_discovery_) {
-        service_selector_factory_.begin_compile();
-    }
     auto bound = bind_project_service_selectors(*project_snapshot, selector_factory_);
-    std::optional<nacos::NamingServiceError> acquire_error;
-    if (uses_service_discovery_) {
-        acquire_error = service_selector_factory_.take_error();
-    }
     if (!bound) {
         return std::unexpected(std::move(bound.error()));
-    }
-    if (acquire_error) {
-        return std::unexpected(AccessConfigError{
-                .code = AccessConfigErrorCode::InvalidCombination,
-                .field = "service",
-                .message = std::move(acquire_error->message),
-        });
     }
 
     return PreparedProjectUpdate(ConfigUpdateStatus::Published, std::string(project), *version,
@@ -244,7 +218,7 @@ ConfigUpdateOutcome RouteConfigStore::commit(ReadyProjectUpdate ready) {
     }
     FIBER_ASSERT(ready.status_ == ConfigUpdateStatus::Published || ready.status_ == ConfigUpdateStatus::Unloaded);
 
-    std::vector<std::shared_ptr<const ProjectRouteSnapshot>> candidate = current_projects();
+    std::vector<std::shared_ptr<const ProjectRouteSnapshot>> candidate = registry_.loaded_snapshots();
     apply_to_candidate(candidate, ready);
     std::chrono::nanoseconds global_build_duration{};
     auto snapshot = build_candidate(candidate, global_build_duration);
@@ -257,19 +231,12 @@ ConfigUpdateOutcome RouteConfigStore::commit(ReadyProjectUpdate ready) {
     auto published = std::make_shared<const AccessRouteSnapshot>(std::move(*snapshot));
     if (ready.status_ == ConfigUpdateStatus::Published) {
         FIBER_ASSERT(ready.project_snapshot_ != nullptr);
-        ProjectRecord &record = projects_[ready.project_];
-        record.version = ready.version_;
-        record.snapshot = std::move(ready.project_snapshot_);
+        registry_.replace(ready.project_, ready.version_, std::move(ready.project_snapshot_));
     } else {
-        const auto existing = projects_.find(ready.project_);
-        if (existing != projects_.end()) {
-            // Java ListenerWrap leaves its last successful non-empty ProjectConf
-            // version unchanged when an empty Host map unloads a project.
-            existing->second.snapshot.reset();
-        }
+        registry_.unload(ready.project_);
     }
     ready.valid_ = false;
-    publish_snapshot(published);
+    publisher_.publish(published);
     const std::chrono::nanoseconds publish_duration =
             std::chrono::duration_cast<std::chrono::nanoseconds>(SteadyClock::now() - publish_started);
     return ConfigUpdateResult{
@@ -309,7 +276,7 @@ ConfigBatchUpdateOutcome RouteConfigStore::commit_batch(std::vector<ReadyProject
 
     std::vector<bool> accepted(ready.size(), true);
     std::vector<std::optional<AccessConfigError>> failures(ready.size());
-    std::vector<std::shared_ptr<const ProjectRouteSnapshot>> candidate = current_projects();
+    std::vector<std::shared_ptr<const ProjectRouteSnapshot>> candidate = registry_.loaded_snapshots();
     std::size_t loaded_projects = candidate.size();
     std::size_t host_capacity = 0;
     for (const std::shared_ptr<const ProjectRouteSnapshot> &project: candidate) {
@@ -337,9 +304,7 @@ ConfigBatchUpdateOutcome RouteConfigStore::commit_batch(std::vector<ReadyProject
             continue;
         }
 
-        const auto existing = projects_.find(update.project_);
-        const std::shared_ptr<const ProjectRouteSnapshot> previous =
-                existing == projects_.end() ? nullptr : existing->second.snapshot;
+        const ProjectRouteSnapshot *previous = registry_.find_snapshot(update.project_);
         if (previous) {
             FIBER_ASSERT(loaded_projects != 0);
             --loaded_projects;
@@ -410,17 +375,12 @@ ConfigBatchUpdateOutcome RouteConfigStore::commit_batch(std::vector<ReadyProject
             }
             if (update.status_ == ConfigUpdateStatus::Published) {
                 FIBER_ASSERT(update.project_snapshot_ != nullptr);
-                ProjectRecord &record = projects_[update.project_];
-                record.version = update.version_;
-                record.snapshot = std::move(update.project_snapshot_);
+                registry_.replace(update.project_, update.version_, std::move(update.project_snapshot_));
             } else if (update.status_ == ConfigUpdateStatus::Unloaded) {
-                const auto existing = projects_.find(update.project_);
-                if (existing != projects_.end()) {
-                    existing->second.snapshot.reset();
-                }
+                registry_.unload(update.project_);
             }
         }
-        publish_snapshot(published);
+        publisher_.publish(published);
         result.publish_duration =
                 std::chrono::duration_cast<std::chrono::nanoseconds>(SteadyClock::now() - publish_started);
         result.published = true;
@@ -449,7 +409,7 @@ ConfigBatchUpdateOutcome RouteConfigStore::commit_batch(std::vector<ReadyProject
 }
 
 ConfigUpdateOutcome RouteConfigStore::remove_project(std::string_view project) {
-    std::vector<std::shared_ptr<const ProjectRouteSnapshot>> candidate = current_projects();
+    std::vector<std::shared_ptr<const ProjectRouteSnapshot>> candidate = registry_.loaded_snapshots();
     const auto existing = std::lower_bound(candidate.begin(), candidate.end(), project,
                                            [](const std::shared_ptr<const ProjectRouteSnapshot> &entry,
                                               std::string_view name) { return entry->project() < name; });
@@ -465,11 +425,8 @@ ConfigUpdateOutcome RouteConfigStore::remove_project(std::string_view project) {
 
     const SteadyClock::time_point publish_started = SteadyClock::now();
     auto published = std::make_shared<const AccessRouteSnapshot>(std::move(*snapshot));
-    const auto record = projects_.find(project);
-    if (record != projects_.end()) {
-        projects_.erase(record);
-    }
-    publish_snapshot(published);
+    registry_.remove(project);
+    publisher_.publish(published);
     const std::chrono::nanoseconds publish_duration =
             std::chrono::duration_cast<std::chrono::nanoseconds>(SteadyClock::now() - publish_started);
     return ConfigUpdateResult{
@@ -481,25 +438,12 @@ ConfigUpdateOutcome RouteConfigStore::remove_project(std::string_view project) {
 }
 
 void RouteConfigStore::clear() noexcept {
-    projects_.clear();
-    publish_snapshot(std::make_shared<const AccessRouteSnapshot>());
+    registry_.clear();
+    publisher_.publish(std::make_shared<const AccessRouteSnapshot>());
 }
 
 std::optional<std::int32_t> RouteConfigStore::current_version(std::string_view project) const noexcept {
-    const auto existing = projects_.find(project);
-    return existing == projects_.end() ? std::nullopt : existing->second.version;
-}
-
-std::vector<std::shared_ptr<const ProjectRouteSnapshot>> RouteConfigStore::current_projects() const {
-    std::vector<std::shared_ptr<const ProjectRouteSnapshot>> result;
-    result.reserve(projects_.size());
-    for (const auto &[project, record]: projects_) {
-        (void) project;
-        if (record.snapshot) {
-            result.push_back(record.snapshot);
-        }
-    }
-    return result;
+    return registry_.current_version(project);
 }
 
 void RouteConfigStore::apply_to_candidate(std::vector<std::shared_ptr<const ProjectRouteSnapshot>> &candidate,
@@ -523,14 +467,6 @@ void RouteConfigStore::apply_to_candidate(std::vector<std::shared_ptr<const Proj
     } else {
         candidate.insert(existing, ready.project_snapshot_);
     }
-}
-
-void RouteConfigStore::publish_snapshot(std::shared_ptr<const AccessRouteSnapshot> snapshot) noexcept {
-#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
-    published_.store(std::move(snapshot), std::memory_order_release);
-#else
-    std::atomic_store_explicit(&published_, std::move(snapshot), std::memory_order_release);
-#endif
 }
 
 } // namespace fiber::access_server

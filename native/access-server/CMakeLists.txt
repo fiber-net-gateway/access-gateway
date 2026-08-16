@@ -45,6 +45,7 @@ add_library(access_server_core STATIC
     "${CMAKE_CURRENT_LIST_DIR}/src/routing/CompiledHeaderTemplates.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/routing/CompiledTemplate.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/routing/HostMatcher.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/routing/ProjectConfigCompiler.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/routing/ProjectRouteSnapshot.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/routing/ProxyAddressSelector.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/runtime/AccessActivationEndpoint.cpp"
@@ -65,7 +66,9 @@ add_library(access_server_core STATIC
     "${CMAKE_CURRENT_LIST_DIR}/src/runtime/GrayMatchStore.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/runtime/AccessServiceDiscovery.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/runtime/AccessWorkerResources.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/runtime/ProjectSnapshotRegistry.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/runtime/RouteConfigStore.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/runtime/RouteSnapshotPublisher.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/runtime/SubscriptionLifecycle.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/runtime/TlsCertificateStore.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/runtime/TlsCertificateWatcher.cpp"
@@ -211,6 +214,7 @@ if (FIBER_BUILD_TESTS AND (GTest_FOUND OR TARGET GTest::gtest_main))
         "${CMAKE_CURRENT_LIST_DIR}/tests/ResponseExecutionTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/RoutePolicyEvaluatorTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/RouteConfigStoreTest.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/tests/RouteSnapshotComponentsTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/SmoothWeightedRoundRobinTest.cpp")
     target_sources(fiber_access_server_tests PRIVATE
         "${CMAKE_CURRENT_LIST_DIR}/tests/SubscriptionLifecycleTest.cpp"

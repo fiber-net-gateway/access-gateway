@@ -35,7 +35,8 @@ the Nacos loop never waits on a future, mutex, condition variable, or worker thr
 
 ## Project route compilation
 
-`AccessConfigCompiler` performs these operations on the compiler loop:
+`AccessConfigCompiler` delegates the bounded Project model build to the concrete,
+CPU-only `ProjectConfigCompiler` on the compiler loop:
 
 - route JSON decoding and structural validation;
 - Host/Path, method, CIDR, address, header, and relationship compilation;
@@ -44,10 +45,11 @@ the Nacos loop never waits on a future, mutex, condition variable, or worker thr
 - construction of a complete `ProjectRouteSnapshot` candidate.
 
 Pure compilation represents a service route with an unavailable selector that retains only its
-normalized service and cluster metadata. After the candidate returns, `RouteConfigStore` replaces
-those placeholders on the Nacos loop. This is the only stage that calls
-`ServiceDiscovery::acquire()`, preserving Fiber's owner-loop contract. Service readiness is then
-awaited before commit as before.
+normalized service and cluster metadata. After the candidate returns, `RouteConfigStore` binds
+those placeholders on the Nacos loop. The selector factory returns an explicit result; it carries
+each `ServiceDiscovery::acquire()` failure directly instead of storing a begin/take error side
+channel. Binding is the only stage that calls `ServiceDiscovery::acquire()`, preserving Fiber's
+owner-loop contract. Service readiness is then awaited before commit as before.
 
 The move-only publication states and their compatibility semantics are specified in
 [`config-publication-typestate.md`](config-publication-typestate.md).

@@ -16,6 +16,7 @@
 #include "routing/AccessRouteSnapshot.h"
 #include "routing/Cidr.h"
 #include "routing/HostMatcher.h"
+#include "routing/ProjectConfigCompiler.h"
 #include "routing/ProjectRouteSnapshot.h"
 #include "runtime/AccessScriptRuntime.h"
 

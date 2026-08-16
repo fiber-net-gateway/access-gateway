@@ -2,7 +2,7 @@
 #define FIBER_ACCESS_SERVER_ACCESS_SCRIPT_RUNTIME_H
 
 #include "../execution/AccessRequestHandler.h"
-#include "../routing/ProjectRouteSnapshot.h"
+#include "../routing/ProjectConfigCompiler.h"
 
 #include <span>
 #include <string>

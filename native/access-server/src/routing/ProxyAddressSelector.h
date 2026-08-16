@@ -97,7 +97,13 @@ public:
 };
 
 struct ProxyAddressSelectorFactory {
-    using Function = std::shared_ptr<ProxyAddressSelector> (*)(void *context, std::string service, std::string cluster);
+    struct Error {
+        std::string field;
+        std::string message;
+    };
+
+    using Result = std::expected<std::shared_ptr<ProxyAddressSelector>, Error>;
+    using Function = Result (*)(void *context, std::string service, std::string cluster);
 
     void *context = nullptr;
     Function create_service = nullptr;

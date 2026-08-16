@@ -4,7 +4,6 @@
 #include <fiber/common/util/RoutePathMatcher.h>
 #include "../config/AccessConfig.h"
 #include "../config/AccessConfigError.h"
-#include "../config/AccessConfigLimits.h"
 #include "Cidr.h"
 #include "CompiledHeaderTemplates.h"
 #include "HostMatcher.h"
@@ -95,17 +94,7 @@ struct PathVariable {
     std::string_view value;
 };
 
-struct ScriptCompilerAdapter {
-    using Result = std::expected<script::Script, std::string>;
-    using Function = Result (*)(void *context, http_script::ConstPackage::Builder &constants,
-                                std::string_view expression, std::span<const std::string> path_variable_names);
-    using RouteFunction = Result (*)(void *context, http_script::ConstPackage::Builder &constants,
-                                     std::string_view source, std::span<const std::string> path_variable_names);
-
-    void *context = nullptr;
-    Function compile_expression = nullptr;
-    RouteFunction compile_route_script = nullptr;
-};
+class ProjectConfigCompiler;
 
 class ProjectRouteSnapshot {
 public:
@@ -132,9 +121,7 @@ public:
     [[nodiscard]] bool ready_for_publish() const noexcept;
 
 private:
-    friend std::expected<std::optional<ProjectRouteSnapshot>, AccessConfigError>
-    compile_project_config(std::string_view project, const ProjectConfig &config, ScriptCompilerAdapter compiler,
-                           ProxyAddressSelectorFactory selector_factory, const AccessConfigLimits &limits);
+    friend class ProjectConfigCompiler;
     friend std::expected<void, AccessConfigError>
     bind_project_service_selectors(ProjectRouteSnapshot &snapshot, ProxyAddressSelectorFactory selector_factory);
 
@@ -151,24 +138,6 @@ private:
     std::size_t static_response_bytes_ = 0;
     std::size_t compiled_program_count_ = 0;
 };
-
-using ProjectSnapshotResult = std::expected<std::optional<ProjectRouteSnapshot>, AccessConfigError>;
-
-// A missing/empty host map is the Java watcher unload signal and returns
-// std::nullopt without compiling routes.
-[[nodiscard]] ProjectSnapshotResult compile_project_config(std::string_view project, const ProjectConfig &config);
-[[nodiscard]] ProjectSnapshotResult compile_project_config(std::string_view project, const ProjectConfig &config,
-                                                           ScriptCompilerAdapter compiler);
-[[nodiscard]] ProjectSnapshotResult compile_project_config(std::string_view project, const ProjectConfig &config,
-                                                           ScriptCompilerAdapter compiler,
-                                                           ProxyAddressSelectorFactory selector_factory,
-                                                           const AccessConfigLimits &limits = kAccessConfigLimits);
-
-// Pure project compilation represents service routes with unavailable selectors
-// carrying their service/cluster metadata. Runtime callers bind those selectors
-// on the NamingService owner EventLoop before waiting for readiness or publishing.
-[[nodiscard]] std::expected<void, AccessConfigError>
-bind_project_service_selectors(ProjectRouteSnapshot &snapshot, ProxyAddressSelectorFactory selector_factory);
 
 } // namespace fiber::access_server
 

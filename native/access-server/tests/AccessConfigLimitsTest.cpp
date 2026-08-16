@@ -7,7 +7,7 @@
 
 #include "config/AccessConfigCodec.h"
 #include "config/AccessConfigLimits.h"
-#include "routing/ProjectRouteSnapshot.h"
+#include "routing/ProjectConfigCompiler.h"
 
 namespace {
 
