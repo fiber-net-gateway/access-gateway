@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <atomic>
 #include <expected>
 #include <map>
 #include <memory>
@@ -8,10 +9,12 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #include <fiber/async/Spawn.h>
 #include <fiber/async/Yield.h>
 #include <fiber/event/EventLoop.h>
+#include <fiber/event/EventLoopGroup.h>
 #include <fiber/nacos/NamingService.h>
 #include <fiber/nacos/Subscription.h>
 
@@ -125,6 +128,185 @@ std::string selected_host(const fiber::access_server::ProxyUpstreamEndpoint &end
         return endpoint.connection_key->ip_address().to_string();
     }
     return std::string(endpoint.connection_key->host_name());
+}
+
+fiber::nacos::Instance service_instance(std::string ip, std::string cluster = "sh-default", double weight = 1.0) {
+    return fiber::nacos::Instance{
+            .ip = std::move(ip),
+            .port = 8080,
+            .weight = weight,
+            .cluster_name = std::move(cluster),
+    };
+}
+
+std::shared_ptr<const fiber::nacos::ServiceInfo> service_snapshot(std::string checksum,
+                                                                  std::vector<fiber::nacos::Instance> hosts) {
+    return fiber::tests::make_service_info(fiber::tests::ServiceInfoTestData{
+            .name = "orders",
+            .group_name = "DEFAULT_GROUP",
+            .hosts = std::move(hosts),
+            .checksum = std::move(checksum),
+    });
+}
+
+TEST(AccessServiceStateTest, PublishesAndRetiresImmutableClusterDirectory) {
+    fiber::event::EventLoop loop;
+    fiber::access_server::AccessServiceState state;
+    state.initialize({}, "sh");
+    bool completed = false;
+
+    fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
+        auto unavailable = state.select("default", {});
+        EXPECT_FALSE(unavailable);
+        if (!unavailable) {
+            EXPECT_EQ(unavailable.error(), fiber::access_server::SwrrSelectError::NoConfiguredInstance);
+        }
+
+        const auto first = service_snapshot("one", {service_instance("10.0.0.1")});
+        state.update(*first);
+        auto pinned = state.select("default", {});
+        EXPECT_TRUE(pinned);
+        if (!pinned) {
+            state.retire(fiber::nacos::ServiceRetireReason::Released);
+            completed = true;
+            loop.stop();
+            co_return;
+        }
+        const std::uint64_t stable_token = pinned->selection_token();
+        EXPECT_EQ(pinned->instance().authority, "10.0.0.1:8080");
+
+        const auto reweighted = service_snapshot(
+                "two", {service_instance("10.0.0.1", "sh-default", 5.0), service_instance("10.0.0.3", "sh-gray")});
+        state.update(*reweighted);
+        auto stable = state.select("default", {});
+        EXPECT_TRUE(stable);
+        if (stable) {
+            EXPECT_EQ(stable->selection_token(), stable_token);
+            EXPECT_EQ(stable->instance().authority, "10.0.0.1:8080");
+        }
+        auto gray = state.select("gray", {});
+        EXPECT_TRUE(gray);
+        if (gray) {
+            EXPECT_EQ(gray->instance().authority, "10.0.0.3:8080");
+        }
+
+        const auto replaced = service_snapshot("three", {service_instance("10.0.0.2")});
+        state.update(*replaced);
+        EXPECT_EQ(pinned->instance().authority, "10.0.0.1:8080");
+        pinned->report(false);
+        auto current = state.select("default", {});
+        EXPECT_TRUE(current);
+        if (current) {
+            EXPECT_EQ(current->instance().authority, "10.0.0.2:8080");
+            EXPECT_NE(current->selection_token(), stable_token);
+        }
+        auto removed = state.select("gray", {});
+        EXPECT_FALSE(removed);
+        if (!removed) {
+            EXPECT_EQ(removed.error(), fiber::access_server::SwrrSelectError::NoConfiguredInstance);
+        }
+
+        state.retire(fiber::nacos::ServiceRetireReason::Released);
+        auto retired = state.select("default", {});
+        EXPECT_FALSE(retired);
+        if (!retired) {
+            EXPECT_EQ(retired.error(), fiber::access_server::SwrrSelectError::NoConfiguredInstance);
+        }
+
+        completed = true;
+        loop.stop();
+        co_return;
+    });
+
+    loop.run();
+    EXPECT_TRUE(completed);
+}
+
+TEST(AccessServiceStateTest, SelectsWhileOwnerPublishesChangingDirectories) {
+    constexpr std::size_t worker_count = 4;
+    constexpr std::size_t update_count = 512;
+    constexpr std::size_t minimum_selections_per_worker = 2'000;
+
+    fiber::access_server::AccessServiceState state;
+    state.initialize({}, "sh");
+    const auto initial = service_snapshot("initial", {service_instance("10.0.0.1")});
+    state.update(*initial);
+
+    fiber::event::EventLoopGroup workers(worker_count);
+    workers.start();
+    std::atomic<std::size_t> ready{0};
+    std::atomic<std::size_t> done{0};
+    std::atomic<std::size_t> invalid_results{0};
+    std::atomic<std::size_t> total_selections{0};
+    std::atomic<bool> start{false};
+    std::atomic<bool> updates_complete{false};
+
+    for (std::size_t worker = 0; worker < worker_count; ++worker) {
+        fiber::async::spawn(workers.at(worker), [&]() -> fiber::async::DetachedTask {
+            ready.fetch_add(1, std::memory_order_release);
+            ready.notify_all();
+            while (!start.load(std::memory_order_acquire)) {
+                co_await fiber::async::yield();
+            }
+
+            std::size_t selected_count = 0;
+            std::size_t local_invalid = 0;
+            while (!updates_complete.load(std::memory_order_acquire) ||
+                   selected_count < minimum_selections_per_worker) {
+                auto selected = state.select("default", {});
+                if (!selected || selected->selection_token() == 0 ||
+                    (selected->instance().authority != "10.0.0.1:8080" &&
+                     selected->instance().authority != "10.0.0.2:8080")) {
+                    ++local_invalid;
+                } else {
+                    selected->report(true);
+                }
+                ++selected_count;
+                if ((selected_count & 63U) == 0) {
+                    co_await fiber::async::yield();
+                }
+            }
+
+            invalid_results.fetch_add(local_invalid, std::memory_order_relaxed);
+            total_selections.fetch_add(selected_count, std::memory_order_relaxed);
+            done.fetch_add(1, std::memory_order_release);
+            done.notify_all();
+            co_return;
+        });
+    }
+
+    std::size_t ready_count = ready.load(std::memory_order_acquire);
+    while (ready_count != worker_count) {
+        ready.wait(ready_count, std::memory_order_acquire);
+        ready_count = ready.load(std::memory_order_acquire);
+    }
+    start.store(true, std::memory_order_release);
+
+    for (std::size_t update = 0; update < update_count; ++update) {
+        std::vector<fiber::nacos::Instance> instances;
+        instances.push_back(service_instance(update % 2 == 0 ? "10.0.0.1" : "10.0.0.2"));
+        if (update % 2 == 0) {
+            instances.push_back(service_instance("10.1.0.1", "sh-alpha"));
+            instances.push_back(service_instance("10.1.0.2", "sh-zulu"));
+        } else {
+            instances.push_back(service_instance("10.1.0.3", "sh-middle"));
+        }
+        const auto snapshot = service_snapshot(std::to_string(update), std::move(instances));
+        state.update(*snapshot);
+    }
+    updates_complete.store(true, std::memory_order_release);
+
+    std::size_t done_count = done.load(std::memory_order_acquire);
+    while (done_count != worker_count) {
+        done.wait(done_count, std::memory_order_acquire);
+        done_count = done.load(std::memory_order_acquire);
+    }
+    workers.stop();
+    workers.join();
+
+    EXPECT_EQ(invalid_results.load(std::memory_order_relaxed), 0u);
+    EXPECT_GE(total_selections.load(std::memory_order_relaxed), worker_count * minimum_selections_per_worker);
+    state.retire(fiber::nacos::ServiceRetireReason::Released);
 }
 
 TEST(AccessServiceDiscoveryTest, WaitsBeforePublishAndPinsDiscoveryGeneration) {

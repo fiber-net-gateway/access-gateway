@@ -19,6 +19,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(FIBER_BUILD_TESTS "Build Fiber and access-server tests" ON)
 option(FIBER_FETCH_DEPS "Allow CMake to download third-party dependencies" ON)
+option(ACCESS_SERVER_BUILD_BENCHMARKS "Build access-server microbenchmarks" OFF)
 
 # Keep all generated dependency state in the build tree, never in the submodule.
 set(FIBER_DEPS_DIR "${CMAKE_BINARY_DIR}/_deps" CACHE PATH "Fiber dependency directory" FORCE)
