@@ -1,15 +1,20 @@
 #include <gtest/gtest.h>
 
+#include <array>
+#include <atomic>
+#include <cstdint>
 #include <expected>
 #include <map>
 #include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <fiber/async/Spawn.h>
 #include <fiber/async/Yield.h>
 #include <fiber/event/EventLoop.h>
+#include <fiber/event/EventLoopGroup.h>
 #include <fiber/nacos/ConfigService.h>
 #include <fiber/nacos/Subscription.h>
 
@@ -91,6 +96,46 @@ fiber::access_server::ClientMetadata metadata_for(const fiber::net::IpAddress &a
     return metadata;
 }
 
+std::uint64_t mix_expected_random(std::uint64_t value) noexcept {
+    value ^= value >> 30U;
+    value *= 0xbf58476d1ce4e5b9ULL;
+    value ^= value >> 27U;
+    value *= 0x94d049bb133111ebULL;
+    value ^= value >> 31U;
+    return value;
+}
+
+std::uint32_t next_expected_sample(std::uint64_t &sequence) noexcept {
+    sequence += 0x9e3779b97f4a7c15ULL;
+    return static_cast<std::uint32_t>(mix_expected_random(sequence) % 10000U);
+}
+
+std::vector<std::vector<std::uint8_t>> collect_worker_matches(fiber::event::EventLoopGroup &workers,
+                                                              fiber::access_server::ProxyClusterMatcher matcher,
+                                                              std::string_view entry,
+                                                              const fiber::access_server::ClientMetadata &metadata,
+                                                              std::size_t sample_count) {
+    std::vector<std::vector<std::uint8_t>> results(workers.size(), std::vector<std::uint8_t>(sample_count));
+    std::atomic<std::size_t> done{0};
+    for (std::size_t worker = 0; worker < workers.size(); ++worker) {
+        fiber::async::spawn(workers.at(worker), [&, worker]() -> fiber::async::DetachedTask {
+            for (std::size_t sample = 0; sample < sample_count; ++sample) {
+                results[worker][sample] = matcher.matches(matcher.context, entry, metadata) ? 1 : 0;
+            }
+            done.fetch_add(1, std::memory_order_acq_rel);
+            done.notify_all();
+            co_return;
+        });
+    }
+
+    std::size_t completed = done.load(std::memory_order_acquire);
+    while (completed != workers.size()) {
+        done.wait(completed, std::memory_order_acquire);
+        completed = done.load(std::memory_order_acquire);
+    }
+    return results;
+}
+
 TEST(GrayConfigTest, DecodesJavaMapAndAppliesRatioAndCidrRules) {
     auto decoded =
             fiber::access_server::parse_gray_match_config(R"({"vdi":{"ratio":1000,"cidrs":["10.0.0.0/8","bad"]},)"
@@ -103,6 +148,7 @@ TEST(GrayConfigTest, DecodesJavaMapAndAppliesRatioAndCidrRules) {
     auto applied = store.apply(*decoded);
     ASSERT_TRUE(applied);
     EXPECT_EQ(store.rule_count(), 2u);
+    EXPECT_EQ(store.generation(), 1u);
 
     const auto inside = metadata_for(fiber::net::IpAddress::v4({10, 1, 2, 3}));
     const auto outside = metadata_for(fiber::net::IpAddress::v4({192, 0, 2, 1}));
@@ -117,6 +163,7 @@ TEST(GrayConfigTest, DecodesJavaMapAndAppliesRatioAndCidrRules) {
     EXPECT_FALSE(*empty_wire);
     EXPECT_EQ(store.apply(*empty_wire), fiber::access_server::GrayMatchUpdateStatus::IgnoredEmpty);
     EXPECT_EQ(store.rule_count(), 2u);
+    EXPECT_EQ(store.generation(), 1u);
 
     auto clear = fiber::access_server::parse_gray_match_config("null");
     ASSERT_TRUE(clear);
@@ -124,6 +171,87 @@ TEST(GrayConfigTest, DecodesJavaMapAndAppliesRatioAndCidrRules) {
     EXPECT_TRUE((*clear)->empty());
     EXPECT_EQ(store.apply(*clear), fiber::access_server::GrayMatchUpdateStatus::Published);
     EXPECT_EQ(store.rule_count(), 0u);
+    EXPECT_EQ(store.generation(), 2u);
+}
+
+TEST(GrayConfigTest, AppliesEveryBasisPointRatioExactly) {
+    auto decoded =
+            fiber::access_server::parse_gray_match_config(R"({"vdi":{"ratio":1},"desktop":{"ratio":2500},)"
+                                                          R"("internet":{"ratio":9999},"custom":{"ratio":10000}})");
+    ASSERT_TRUE(decoded);
+    ASSERT_TRUE(*decoded);
+
+    fiber::access_server::GrayMatchStore store;
+    ASSERT_TRUE(store.apply(*decoded));
+    const auto outside = metadata_for(fiber::net::IpAddress::v4({192, 0, 2, 1}));
+    std::array<std::size_t, 4> matched{};
+    constexpr std::array<std::string_view, 4> entries{"vdi", "desktop", "internet", "custom"};
+    for (std::uint32_t sample = 0; sample < 10000; ++sample) {
+        for (std::size_t entry = 0; entry < entries.size(); ++entry) {
+            matched[entry] += store.matches(entries[entry], outside, sample) ? 1 : 0;
+        }
+    }
+    EXPECT_EQ(matched, (std::array<std::size_t, 4>{1, 2500, 9999, 10000}));
+}
+
+TEST(GrayConfigTest, UsesDeterministicIndependentWorkerSnapshotsAndPrng) {
+    constexpr std::uint64_t random_seed = 0x123456789abcdef0ULL;
+    constexpr std::size_t sample_count = 64;
+    auto half = fiber::access_server::parse_gray_match_config(R"({"custom":{"ratio":5000}})");
+    auto all = fiber::access_server::parse_gray_match_config(R"({"custom":{"ratio":10000}})");
+    auto clear = fiber::access_server::parse_gray_match_config("null");
+    ASSERT_TRUE(half);
+    ASSERT_TRUE(*half);
+    ASSERT_TRUE(all);
+    ASSERT_TRUE(*all);
+    ASSERT_TRUE(clear);
+    ASSERT_TRUE(*clear);
+    const auto outside = metadata_for(fiber::net::IpAddress::v4({192, 0, 2, 1}));
+
+    for (const std::size_t worker_count: std::array<std::size_t, 3>{1, 2, 4}) {
+        fiber::event::EventLoopGroup workers(worker_count);
+        fiber::access_server::GrayMatchStore store(
+                workers, fiber::access_server::GrayMatchStoreOptions{.random_seed = random_seed});
+        EXPECT_EQ(store.generation(), 0u);
+        const fiber::access_server::ProxyClusterMatcher matcher = store.adapter();
+        EXPECT_FALSE(matcher.matches(matcher.context, "custom", outside));
+        workers.start();
+        const auto initial = collect_worker_matches(workers, matcher, "custom", outside, 1);
+        for (const auto &worker: initial) {
+            EXPECT_EQ(worker, std::vector<std::uint8_t>(1, 0));
+        }
+
+        ASSERT_TRUE(store.apply(*half));
+        EXPECT_EQ(store.generation(), 1u);
+
+        const auto sampled = collect_worker_matches(workers, matcher, "custom", outside, sample_count);
+        for (std::size_t worker = 0; worker < worker_count; ++worker) {
+            std::uint64_t sequence = mix_expected_random(random_seed ^ (0x9e3779b97f4a7c15ULL * (worker + 1)));
+            (void) next_expected_sample(sequence); // The initial empty-snapshot request still consumes a sample.
+            for (std::size_t sample = 0; sample < sample_count; ++sample) {
+                EXPECT_EQ(sampled[worker][sample], next_expected_sample(sequence) < 5000U ? 1 : 0);
+            }
+        }
+        if (worker_count > 1) {
+            EXPECT_NE(sampled[0], sampled[1]);
+        }
+
+        ASSERT_TRUE(store.apply(*all));
+        EXPECT_EQ(store.generation(), 2u);
+        const auto fully_matched = collect_worker_matches(workers, matcher, "custom", outside, 8);
+        for (const auto &worker: fully_matched) {
+            EXPECT_EQ(worker, std::vector<std::uint8_t>(8, 1));
+        }
+
+        ASSERT_TRUE(store.apply(*clear));
+        EXPECT_EQ(store.generation(), 3u);
+        const auto cleared = collect_worker_matches(workers, matcher, "custom", outside, 8);
+        for (const auto &worker: cleared) {
+            EXPECT_EQ(worker, std::vector<std::uint8_t>(8, 0));
+        }
+        workers.stop();
+        workers.join();
+    }
 }
 
 TEST(GrayConfigTest, WatcherRetainsOnEmptyAndInvalidThenAcceptsClear) {
