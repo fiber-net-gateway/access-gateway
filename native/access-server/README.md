@@ -84,9 +84,9 @@ connection pool，以及 Nacos、CAT、Prometheus 组件。迁移不要求这些
   header；解析 `tracestate` 的 `bnrc` GMP Base62 context 并绑定 `$context`，route
   context 更新后在 upstream 发送前保留其他 vendor member 并重建 `bnrc`；CAT 不可用时
   仍由请求级 telemetry 保持上述传播状态；
-- 已接入独立 Prometheus listener，默认 `0.0.0.0:16689`，请求完成计数、inflight
-  和 duration 全部使用 worker 预绑定的固定 schema；动态 project/route/cluster
-  不作为指标 label，避免测试 header 或热更新配置形成无限时序；
+- 已接入独立 Prometheus listener，默认 `0.0.0.0:16689`；请求完成计数、inflight、
+  duration，以及配置结果/readiness/全局 route snapshot 规模和 age 均使用固定 schema；
+  动态 project/route/cluster/Host/Data ID 不作为指标 label，避免配置和请求输入形成无限时序；
 - 已接入共享异步 logging 生命周期，访问日志在 `access_server.access` 以结构化
   key/value 输出 trace、请求、路由、上游、结果、耗时和字节数；队列满时丢弃新日志，
   不反向影响请求执行；
@@ -250,6 +250,8 @@ listener 只在 Nacos client/config/naming、project/gray watcher、项目列表
   发布和有序关闭契约；
 - `docs/config-publication-typestate.md`：Project 候选从 Prepared 到 Ready 再到 commit 的
   move-only 类型状态、取消和兼容语义；
+- `docs/bounded-metrics.md`：请求与配置指标的固定 label 集、readiness/snapshot 语义、
+  并发成本及仍待实现的 O-02 范围；
 - `docs/script-corpus-differential.md`：现网 condition/template/rewrite 的脱敏统计、
   Java golden、C++ 差分结果和私有 corpus 复跑方式；
 - `docs/optimization-analysis.md`：代码职责、生命周期、性能、安全和可观测性优化分析，

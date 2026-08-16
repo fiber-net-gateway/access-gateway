@@ -633,8 +633,10 @@ listener。订阅暂态失败采用封顶指数退避，非法首值被记录为
   不改变 CAT、Prometheus 或 HTTP 结果；
 - Prometheus 在独立 listener 输出固定 `result` 标签的请求总数、inflight 和 duration；
   gzip-enabled RESPONSE 另输出 `access_server_response_compression_total`，其有界 `result`
-  仅为 `gzip`、`identity` 或 `not_acceptable`。结构化 access log 和 CAT data 同时记录选择结果。
-  project/route/cluster 属于动态控制面或请求输入，不建立无限增长的 label series；
+  仅为 `gzip`、`identity` 或 `not_acceptable`。配置更新、readiness 和 route snapshot 规模/age
+  也只输出预注册的 `resource`、`result`、`reason`、`state` 聚合；完整 schema 见
+  [`bounded-metrics.md`](bounded-metrics.md)。结构化 access log 和 CAT data 同时记录选择结果。
+  project/route/cluster/Host/Data ID 属于动态控制面或请求输入，不建立无限增长的 label series；
 - CAT、指标或日志记录失败均为 best effort，不得改写 Java 兼容 HTTP 结果。
 
 上述接入只约束 access-server 可见的 trace/header、维度和值，不比较 CAT 编码、

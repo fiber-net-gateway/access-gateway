@@ -335,6 +335,7 @@ in English and Simplified Chinese:
 - [Compatibility contract](native/access-server/docs/compatibility-contract.md)
 - [Configuration compiler thread model](native/access-server/docs/config-compilation.md)
 - [Project publication typestate](native/access-server/docs/config-publication-typestate.md)
+- [Bounded access-server metrics](native/access-server/docs/bounded-metrics.md)
 - [Migration plan](native/access-server/docs/migration-plan.md)
 - [Script-corpus differential status](native/access-server/docs/script-corpus-differential.md)
 - [Upstream provenance](native/access-server/UPSTREAM.md)

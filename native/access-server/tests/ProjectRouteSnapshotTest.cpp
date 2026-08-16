@@ -799,6 +799,12 @@ TEST(AccessRouteSnapshotTest, SelectsProjectsThroughOneGlobalHostTree) {
     };
     auto snapshot = AccessRouteSnapshot::build(projects);
     ASSERT_TRUE(snapshot) << snapshot.error().message;
+    EXPECT_EQ(snapshot->projects().size(), 2u);
+    EXPECT_EQ(snapshot->host_count(), 2u);
+    EXPECT_EQ(snapshot->route_count(), 2u);
+    EXPECT_EQ(snapshot->compiled_program_count(), 0u);
+    EXPECT_GT(snapshot->estimated_memory_bytes(), 0u);
+    EXPECT_EQ(snapshot->static_response_bytes(), 0u);
 
     auto exact = snapshot->match_host("API.EXAMPLE.COM:443");
     ASSERT_TRUE(exact);

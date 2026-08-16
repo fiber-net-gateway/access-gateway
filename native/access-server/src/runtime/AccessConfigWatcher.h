@@ -1,6 +1,7 @@
 #ifndef FIBER_ACCESS_SERVER_ACCESS_CONFIG_WATCHER_H
 #define FIBER_ACCESS_SERVER_ACCESS_CONFIG_WATCHER_H
 
+#include "../observability/AccessConfigMetrics.h"
 #include "AccessConfigCompiler.h"
 #include "RouteConfigStore.h"
 
@@ -128,7 +129,7 @@ class AccessConfigWatcher final : public common::NonCopyable, public common::Non
 public:
     AccessConfigWatcher(event::EventLoop &loop, AccessConfigCompiler &compiler, nacos::ConfigService &config_service,
                         RouteConfigStore &store, AccessConfigWatcherOptions options = {},
-                        RouteSnapshotObserver observer = {});
+                        RouteSnapshotObserver observer = {}, AccessConfigMetricsObserver metrics_observer = {});
     ~AccessConfigWatcher();
 
     [[nodiscard]] std::expected<void, nacos::ConfigServiceError> start();
@@ -186,6 +187,7 @@ private:
     void settle_project(const std::shared_ptr<ProjectEntry> &entry, AccessProjectConfigState state) noexcept;
     void publish_readiness();
     void set_unavailable(std::string data_id, common::IoErr io_error, std::string message);
+    void observe_metric_event(AccessConfigMetricEvent event) const noexcept;
     void publish_observer(const std::shared_ptr<const AccessRouteSnapshot> &snapshot) const noexcept;
     void report_failure(const std::shared_ptr<ProjectEntry> &entry, AccessConfigWatcherFailureStage stage,
                         std::string data_id, std::string md5, common::IoErr io_error, AccessConfigError error);
@@ -198,6 +200,7 @@ private:
     RouteConfigStore *store_ = nullptr;
     AccessConfigWatcherOptions options_;
     RouteSnapshotObserver observer_;
+    AccessConfigMetricsObserver metrics_observer_;
     std::unique_ptr<ProjectListEntry> project_list_;
     std::map<std::string, std::shared_ptr<ProjectEntry>, std::less<>> projects_;
     std::deque<std::shared_ptr<ProjectEntry>> compile_queue_;

@@ -88,9 +88,10 @@ struct AccessConfigWatcher::ProjectCompileJob final : public common::NonCopyable
 
 AccessConfigWatcher::AccessConfigWatcher(event::EventLoop &loop, AccessConfigCompiler &compiler,
                                          nacos::ConfigService &config_service, RouteConfigStore &store,
-                                         AccessConfigWatcherOptions options, RouteSnapshotObserver observer) :
+                                         AccessConfigWatcherOptions options, RouteSnapshotObserver observer,
+                                         AccessConfigMetricsObserver metrics_observer) :
     loop_(&loop), compiler_(&compiler), config_service_(&config_service), store_(&store), options_(std::move(options)),
-    observer_(observer) {
+    observer_(observer), metrics_observer_(metrics_observer) {
     FIBER_ASSERT(loop_ != &compiler_->loop());
     readiness_publisher_ = readiness_.acquire_publisher();
     FIBER_ASSERT(readiness_publisher_.has_value());
@@ -128,6 +129,7 @@ std::expected<void, nacos::ConfigServiceError> AccessConfigWatcher::start() {
     auto subscription = config_service_->subscribe(options_.project_list_data_id, options_.project_route_group,
                                                    &project_list_notify, project_list_.get());
     if (!subscription) {
+        observe_metric_event(AccessConfigMetricEvent::ProjectListSubscriptionFailed);
         project_list_.reset();
         state_ = AccessConfigWatcherState::Created;
         return std::unexpected(std::move(subscription.error()));
@@ -232,6 +234,7 @@ void AccessConfigWatcher::apply_project_list(const nacos::ConfigData &data) {
     }
     project_list_failure_.reset();
     reconcile_projects(std::move(*parsed));
+    observe_metric_event(AccessConfigMetricEvent::ProjectListAccepted);
     publish_readiness();
 }
 
@@ -250,6 +253,7 @@ void AccessConfigWatcher::apply_project(const std::shared_ptr<ProjectEntry> &ent
     if (data->state == nacos::ConfigState::NotFound || data->content.empty()) {
         auto ignored = store_->prepare(entry->project, std::nullopt);
         FIBER_ASSERT(ignored.has_value());
+        observe_metric_event(AccessConfigMetricEvent::ProjectRouteIgnoredEmpty);
         settle_project(entry, AccessProjectConfigState::Accepted);
         return;
     }
@@ -407,6 +411,7 @@ void AccessConfigWatcher::apply_compiled_project(ProjectCompileJob &job) {
     entry->observed_version = result->version;
     if (result->compilation_skipped) {
         if (result->version && store_->current_version(entry->project) == result->version) {
+            observe_metric_event(AccessConfigMetricEvent::ProjectRouteVersionUnchanged);
             settle_project(entry, AccessProjectConfigState::Accepted);
         } else {
             enqueue_project_compile(entry, job.data, true);
@@ -454,6 +459,23 @@ void AccessConfigWatcher::commit_ready_project(const std::shared_ptr<ProjectEntr
         ++successful_updates_;
         entry->published_generation = generation;
         publish_observer(updated->snapshot);
+    }
+    switch (updated->status) {
+        case ConfigUpdateStatus::IgnoredEmpty:
+            observe_metric_event(AccessConfigMetricEvent::ProjectRouteIgnoredEmpty);
+            break;
+        case ConfigUpdateStatus::VersionUnchanged:
+            observe_metric_event(AccessConfigMetricEvent::ProjectRouteVersionUnchanged);
+            break;
+        case ConfigUpdateStatus::Published:
+            observe_metric_event(AccessConfigMetricEvent::ProjectRoutePublished);
+            break;
+        case ConfigUpdateStatus::Unloaded:
+            observe_metric_event(AccessConfigMetricEvent::ProjectRouteUnloaded);
+            break;
+        case ConfigUpdateStatus::ProjectRemoved:
+            FIBER_ASSERT(false);
+            break;
     }
     settle_project(entry, AccessProjectConfigState::Accepted);
 }
@@ -565,6 +587,7 @@ void AccessConfigWatcher::remove_project(std::string_view project) {
     auto removed = store_->remove_project(project);
     FIBER_ASSERT(removed.has_value());
     ++successful_updates_;
+    observe_metric_event(AccessConfigMetricEvent::ProjectRouteRemoved);
     publish_observer(removed->snapshot);
     publish_readiness();
 }
@@ -739,6 +762,36 @@ void AccessConfigWatcher::publish_readiness() {
         return;
     }
     published_readiness_ = next;
+    if (metrics_observer_.on_readiness) {
+        AccessConfigMetricReadinessState state = AccessConfigMetricReadinessState::WaitingForProjectList;
+        switch (next.state) {
+            case AccessConfigReadinessState::WaitingForProjectList:
+                state = AccessConfigMetricReadinessState::WaitingForProjectList;
+                break;
+            case AccessConfigReadinessState::SynchronizingProjects:
+                state = AccessConfigMetricReadinessState::SynchronizingProjects;
+                break;
+            case AccessConfigReadinessState::Ready:
+                state = AccessConfigMetricReadinessState::Ready;
+                break;
+            case AccessConfigReadinessState::Unavailable:
+                state = AccessConfigMetricReadinessState::Unavailable;
+                break;
+            case AccessConfigReadinessState::Stopped:
+                state = AccessConfigMetricReadinessState::Stopped;
+                break;
+        }
+        metrics_observer_.on_readiness(metrics_observer_.context,
+                                       AccessConfigMetricReadiness{
+                                               .state = state,
+                                               .desired_projects = next.desired_projects,
+                                               .subscribed_projects = next.subscribed_projects,
+                                               .synchronized_projects = next.synchronized_projects,
+                                               .retrying_projects = next.retrying_projects,
+                                               .processing_projects = next.processing_projects,
+                                               .rejected_projects = next.rejected_projects,
+                                       });
+    }
     readiness_publisher_->publish(std::move(next));
 }
 
@@ -754,9 +807,18 @@ void AccessConfigWatcher::set_unavailable(std::string data_id, common::IoErr io_
     publish_readiness();
 }
 
+void AccessConfigWatcher::observe_metric_event(AccessConfigMetricEvent event) const noexcept {
+    if (metrics_observer_.on_event) {
+        metrics_observer_.on_event(metrics_observer_.context, event);
+    }
+}
+
 void AccessConfigWatcher::publish_observer(const std::shared_ptr<const AccessRouteSnapshot> &snapshot) const noexcept {
     if (observer_.on_update) {
         observer_.on_update(observer_.context, snapshot);
+    }
+    if (metrics_observer_.on_snapshot) {
+        metrics_observer_.on_snapshot(metrics_observer_.context, *snapshot);
     }
 }
 
@@ -764,6 +826,31 @@ void AccessConfigWatcher::report_failure(const std::shared_ptr<ProjectEntry> &en
                                          AccessConfigWatcherFailureStage stage, std::string data_id, std::string md5,
                                          common::IoErr io_error, AccessConfigError error) {
     ++failed_updates_;
+    if (!entry) {
+        FIBER_ASSERT(stage == AccessConfigWatcherFailureStage::Subscription ||
+                     stage == AccessConfigWatcherFailureStage::Decode);
+        observe_metric_event(stage == AccessConfigWatcherFailureStage::Decode
+                                     ? AccessConfigMetricEvent::ProjectListDecodeFailed
+                                     : AccessConfigMetricEvent::ProjectListSubscriptionFailed);
+    } else {
+        switch (stage) {
+            case AccessConfigWatcherFailureStage::Subscription:
+                observe_metric_event(AccessConfigMetricEvent::ProjectRouteSubscriptionFailed);
+                break;
+            case AccessConfigWatcherFailureStage::Decode:
+                observe_metric_event(AccessConfigMetricEvent::ProjectRouteDecodeFailed);
+                break;
+            case AccessConfigWatcherFailureStage::Compile:
+                observe_metric_event(AccessConfigMetricEvent::ProjectRouteCompileFailed);
+                break;
+            case AccessConfigWatcherFailureStage::ServiceReady:
+                observe_metric_event(AccessConfigMetricEvent::ProjectRouteServiceReadyFailed);
+                break;
+            case AccessConfigWatcherFailureStage::Publish:
+                observe_metric_event(AccessConfigMetricEvent::ProjectRoutePublishFailed);
+                break;
+        }
+    }
     AccessConfigWatcherFailure failure{
             .stage = stage,
             .data_id = std::move(data_id),

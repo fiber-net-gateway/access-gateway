@@ -36,8 +36,13 @@ AccessRouteSnapshot::build(std::span<const std::shared_ptr<const ProjectRouteSna
             }
         }
         host_count += project->hosts().size();
+        snapshot.route_count_ += project->routes().size();
+        snapshot.compiled_program_count_ += project->compiled_program_count();
+        snapshot.estimated_memory_bytes_ += project->estimated_memory_bytes();
+        snapshot.static_response_bytes_ += project->static_response_bytes();
         snapshot.projects_.push_back(project);
     }
+    snapshot.host_count_ = host_count;
 
     std::vector<HostPattern> patterns;
     patterns.reserve(host_count);

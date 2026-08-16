@@ -3,6 +3,7 @@
 
 #include "ProjectRouteSnapshot.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <memory>
@@ -30,6 +31,11 @@ public:
     [[nodiscard]] const std::vector<std::shared_ptr<const ProjectRouteSnapshot>> &projects() const noexcept {
         return projects_;
     }
+    [[nodiscard]] std::size_t host_count() const noexcept { return host_count_; }
+    [[nodiscard]] std::size_t route_count() const noexcept { return route_count_; }
+    [[nodiscard]] std::size_t compiled_program_count() const noexcept { return compiled_program_count_; }
+    [[nodiscard]] std::size_t estimated_memory_bytes() const noexcept { return estimated_memory_bytes_; }
+    [[nodiscard]] std::size_t static_response_bytes() const noexcept { return static_response_bytes_; }
 
 private:
     struct HostTarget {
@@ -40,6 +46,11 @@ private:
     std::vector<std::shared_ptr<const ProjectRouteSnapshot>> projects_;
     std::vector<HostTarget> host_targets_;
     HostMatcher host_matcher_;
+    std::size_t host_count_ = 0;
+    std::size_t route_count_ = 0;
+    std::size_t compiled_program_count_ = 0;
+    std::size_t estimated_memory_bytes_ = 0;
+    std::size_t static_response_bytes_ = 0;
 };
 
 } // namespace fiber::access_server

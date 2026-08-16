@@ -764,11 +764,19 @@ activation。在协议实现前 activation 保持 `unknown`。
 
 **归属：本项目。Fiber 已提供部分原始统计。**
 
+**实施状态：部分解决（2026-08-17）。** 当前提交新增 Nacos owner loop 单写、metrics worker
+无锁读取的 `AccessConfigMetrics`。Project List/route 的 success、ignored、failure stage 使用
+编译期固定 `resource/result/reason` 表；readiness 使用固定 one-hot state 和六个 Project 聚合；
+每次实际发布同时更新 process-local snapshot generation、age、Project/Host/route/program 数量、
+估算内存和静态响应字节。配置值、Data ID、MD5、Project、Host、route 和 service 均不进入 label。
+具体 schema、并发模型和非 activation 语义见 [`bounded-metrics.md`](bounded-metrics.md)。
+
+本阶段尚未覆盖 Nacos/Naming 连接状态、service/endpoint、DNS/pool/proxy/WebSocket、TLS、异步
+日志和 CAT drop；以下清单保留为后续独立提交：
+
 建议增加：
 
-- config update result：resource kind + bounded reason；
 - Nacos config/naming connected 和 subscription state；
-- active project/host/route 数量和 snapshot age；
 - service/endpoint 聚合数量；
 - proxy phase/outcome/attempt、pool hit、DNS outcome；
 - TLS rotation/reclaim；
