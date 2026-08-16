@@ -240,6 +240,38 @@ TEST(HostMatcherTest, RejectsDuplicateAndUnsupportedWildcardPatterns) {
     EXPECT_FALSE(malformed);
 }
 
+TEST(HostMatcherTest, MatchesUnsortedHighFanoutWithJavaFoldAndWildcardRules) {
+    constexpr std::size_t kFanout = 256;
+    std::vector<std::string> storage;
+    storage.reserve(kFanout + 2);
+    for (std::size_t offset = 0; offset < kFanout; ++offset) {
+        const std::size_t index = kFanout - offset;
+        storage.push_back("tenant-" + std::to_string(index) + ".fanout.example");
+    }
+    storage.emplace_back("@.fanout.example");
+    storage.emplace_back("*.fanout.example");
+
+    std::vector<HostPattern> patterns;
+    patterns.reserve(storage.size());
+    for (std::size_t offset = 0; offset < kFanout; ++offset) {
+        patterns.push_back(HostPattern{
+                .pattern = storage[offset],
+                .handler = static_cast<std::uint32_t>(kFanout - offset),
+        });
+    }
+    patterns.push_back(HostPattern{.pattern = storage[kFanout], .handler = 1000});
+    patterns.push_back(HostPattern{.pattern = storage[kFanout + 1], .handler = 2000});
+
+    auto built = HostMatcher::build(patterns);
+    ASSERT_TRUE(built) << built.error().message;
+    for (std::uint32_t handler = 1; handler <= static_cast<std::uint32_t>(kFanout); ++handler) {
+        EXPECT_EQ(built->match("TENANT-" + std::to_string(handler) + ".FANOUT.EXAMPLE"), handler) << handler;
+    }
+    EXPECT_EQ(built->match("`.fanout.example"), 1000);
+    EXPECT_EQ(built->match("missing.fanout.example"), 2000);
+    EXPECT_FALSE(built->match("x.tenant-128.fanout.example"));
+}
+
 TEST(CidrTest, ParsesMatchesAndRemovesContainedNetworks) {
     const std::array<std::string_view, 3> values{"192.168.34.4/32", "192.168.0.1/16", "2001:db8::/32"};
     auto parsed = Cidr::parse_list(values, "allows");
