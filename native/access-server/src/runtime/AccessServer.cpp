@@ -1,14 +1,7 @@
 #include "AccessServer.h"
-#include "../observability/AccessRequestTelemetry.h"
 #include "../observability/AccessRuntimeMetrics.h"
 
-#include <fiber/async/Spawn.h>
-#include <fiber/cat/CatClient.h>
 #include <fiber/common/Assert.h>
-#include <fiber/event/EventLoop.h>
-#include <fiber/http/HttpBodySpec.h>
-#include <fiber/http/HttpExchange.h>
-#include <fiber/http/HttpHeaders.h>
 
 namespace fiber::access_server {
 namespace {
@@ -23,58 +16,41 @@ http::HttpServerOptions make_http_options(http::HttpServerOptions options = {}) 
 AccessServer::AccessServer(event::EventLoop &accept_loop, event::EventLoopGroup &workers,
                            const RouteConfigStore &config_store, ProxyClusterMatcher cluster_matcher,
                            AccessServerOptions options) :
-    accept_loop_(&accept_loop), workers_(&workers), client_metadata_resolver_([&options]() {
-        ClientMetadataResolverOptions client_metadata = std::move(options.client_metadata);
-        client_metadata.connection_secure = options.http_server.tls.enabled;
-        return client_metadata;
-    }()),
-    access_log_policy_(std::move(options.access_log)), pool_(workers),
-    executor_(pool_, cluster_matcher, dns_.adapter(), options.executor),
-    handler_(config_store, options.script_adapter,
-             AccessRequestHandlerOptions{
-                     .default_max_request_body_size = options.default_max_request_body_size,
-                     .test_mode = options.test_mode,
-             },
-             executor_.adapter()),
-    metrics_(workers, options.runtime_metrics),
-    activation_endpoint_(options.activation_evidence,
-                         options.runtime_metrics ? &options.runtime_metrics->discovery() : nullptr,
-                         std::move(options.activation_endpoint)),
-    cat_client_(options.cat_client),
+    accept_loop_(&accept_loop),
+    worker_resources_(workers, config_store, cluster_matcher,
+                      AccessWorkerResourcesOptions{
+                              .default_max_request_body_size = options.default_max_request_body_size,
+                              .client_metadata = std::move(options.client_metadata),
+                              .connection_secure = options.http_server.tls.enabled,
+                              .access_log = std::move(options.access_log),
+                              .script_adapter = options.script_adapter,
+                              .executor = std::move(options.executor),
+                              .runtime_metrics = options.runtime_metrics,
+                              .cat_client = options.cat_client,
+                              .test_mode = options.test_mode,
+                              .http3_alt_svc = std::move(options.http3_alt_svc),
+                      }),
     server_(
-            accept_loop, [this](http::HttpExchange &exchange) { return handle(exchange); },
+            accept_loop, [this](http::HttpExchange &exchange) { return worker_resources_.handle(exchange); },
             make_http_options(std::move(options.http_server)), &workers),
-    metrics_server_(
-            accept_loop, [this](http::HttpExchange &exchange) { return handle_metrics(exchange); }, make_http_options(),
-            &workers),
-    http3_alt_svc_(std::move(options.http3_alt_svc)) {
-    FIBER_ASSERT(workers.size() > 0);
-}
+    metrics_endpoint_(
+            accept_loop, workers, worker_resources_.metrics(),
+            AccessMetricsEndpointOptions{
+                    .activation_evidence = options.activation_evidence,
+                    .discovery_metrics = options.runtime_metrics ? &options.runtime_metrics->discovery() : nullptr,
+                    .activation = std::move(options.activation_endpoint),
+            }) {}
 
-AccessServer::~AccessServer() {
-    metrics_.stop_collecting();
-    FIBER_ASSERT(!initialized_);
-    FIBER_ASSERT(cat_detach_tasks_.empty());
-}
+AccessServer::~AccessServer() { FIBER_ASSERT(!initialized_); }
 
 async::Task<common::IoResult<void>> AccessServer::initialize() noexcept {
     FIBER_ASSERT(accept_loop_->in_loop());
     if (initialized_) {
         co_return std::unexpected(common::IoErr::Already);
     }
-    if (!metrics_.valid()) {
-        co_return std::unexpected(common::IoErr::NoMem);
-    }
-    auto access_log_initialized = access_log_policy_.initialize();
-    if (!access_log_initialized) {
-        co_return std::unexpected(access_log_initialized.error());
-    }
-    if (!co_await dns_.init(*workers_)) {
-        co_return std::unexpected(common::IoErr::NoMem);
-    }
-    if (!pool_.init()) {
-        co_await dns_.shutdown();
-        co_return std::unexpected(common::IoErr::NoMem);
+    auto initialized = co_await worker_resources_.initialize();
+    if (!initialized) {
+        co_return std::unexpected(initialized.error());
     }
     initialized_ = true;
     co_return common::IoResult<void>{};
@@ -90,101 +66,19 @@ common::IoResult<void> AccessServer::bind_metrics(const net::SocketAddress &addr
                                                   const net::ListenOptions &options) {
     FIBER_ASSERT(accept_loop_->in_loop());
     FIBER_ASSERT(initialized_);
-    auto bound = metrics_server_.bind(address, options);
-    if (bound) {
-        metrics_bound_ = true;
-    }
-    return bound;
+    return metrics_endpoint_.bind(address, options);
 }
 
 async::DetachedTask AccessServer::serve() { return server_.serve(); }
 
-async::DetachedTask AccessServer::serve_metrics() { return metrics_server_.serve(); }
+async::DetachedTask AccessServer::serve_metrics() { return metrics_endpoint_.serve(); }
 
 async::Task<void> AccessServer::shutdown_and_wait() noexcept {
     FIBER_ASSERT(accept_loop_->in_loop());
-    if (metrics_bound_) {
-        co_await metrics_server_.shutdown_and_wait();
-        metrics_bound_ = false;
-    }
+    co_await metrics_endpoint_.shutdown_and_wait();
     server_.close();
-    metrics_.stop_collecting();
-    co_await metrics_.wait_for_idle();
-    co_await detach_cat_workers();
-    co_await pool_.shutdown_async();
-    if (initialized_) {
-        co_await dns_.shutdown();
-    }
+    co_await worker_resources_.shutdown();
     initialized_ = false;
-}
-
-async::Task<void> AccessServer::handle(http::HttpExchange &exchange) noexcept {
-    AccessServerMetrics::Worker &worker = metrics_.worker(event::EventLoop::current().group_index());
-    AccessRequestTelemetry telemetry(exchange, &worker, cat_client_, &access_log_policy_, &client_metadata_resolver_);
-    if (!http3_alt_svc_.empty()) {
-        (void) telemetry.response_headers().set("Alt-Svc", http3_alt_svc_);
-    }
-    co_await handler_.handle(exchange, telemetry);
-}
-
-async::Task<void> AccessServer::handle_metrics(http::HttpExchange &exchange) noexcept {
-    if (exchange.uri().path != "/metrics") {
-        co_await activation_endpoint_.handle(exchange);
-        co_return;
-    }
-    auto collected = co_await metrics_.collect(event::EventLoop::current().io_buf_node_pool());
-    if (!collected) {
-        constexpr std::string_view kBusy = "metrics unavailable\n";
-        http::HttpHeaders headers(exchange.pool());
-        headers.set_view("Content-Type", "text/plain; charset=utf-8");
-        auto sent = co_await exchange.send_header({
-                .kind = http::OutgoingHeaderKind::Final,
-                .status_code = collected.error() == common::IoErr::Busy ? 503 : 500,
-                .headers = &headers,
-                .body = http::HttpBodySpec::ContentLength(kBusy.size()),
-                .connection_mode = http::ResponseConnectionMode::Auto,
-                .end_stream = false,
-        });
-        if (sent) {
-            (void) co_await exchange.write_all(reinterpret_cast<const std::uint8_t *>(kBusy.data()), kBusy.size(),
-                                               true);
-        }
-        co_return;
-    }
-
-    http::HttpHeaders headers(exchange.pool());
-    headers.set_view("Content-Type", "text/plain; version=0.0.4; charset=utf-8");
-    const std::size_t size = collected->readable_bytes();
-    auto sent = co_await exchange.send_header({
-            .kind = http::OutgoingHeaderKind::Final,
-            .status_code = 200,
-            .headers = &headers,
-            .body = http::HttpBodySpec::ContentLength(size),
-            .connection_mode = http::ResponseConnectionMode::Auto,
-            .end_stream = size == 0,
-    });
-    if (sent && size != 0) {
-        collected->mark_complete();
-        (void) co_await exchange.write_all(std::move(*collected));
-    }
-}
-
-async::DetachedTask AccessServer::detach_cat_worker() noexcept {
-    if (cat_client_) {
-        (void) co_await cat_client_->detach_current_event_loop();
-    }
-    cat_detach_tasks_.done();
-}
-
-async::Task<void> AccessServer::detach_cat_workers() noexcept {
-    if (!cat_client_ || cat_client_->state() != cat::CatClientState::Running) {
-        co_return;
-    }
-    cat_detach_tasks_.add(workers_->size());
-    for (std::size_t i = 0; i < workers_->size(); ++i) {
-        async::spawn(workers_->at(i), [this]() { return detach_cat_worker(); });
-    }
-    co_await cat_detach_tasks_.join();
 }
 
 } // namespace fiber::access_server
