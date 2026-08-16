@@ -8,7 +8,6 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
-#include <variant>
 #include <vector>
 
 namespace fiber::http {
@@ -18,21 +17,18 @@ class HttpHeaders;
 namespace fiber::access_server {
 
 struct EvaluatedHeader {
-    std::string name;
-    std::string value;
+    std::string_view name;
+    std::string_view lowcase_name;
+    std::uint64_t name_hash = 0;
+    EvaluatedTemplate value;
 };
 
 struct PreparedResponse {
     int status = 0;
     std::vector<EvaluatedHeader> headers;
-    std::variant<std::string_view, std::string> body{std::string_view{}};
+    EvaluatedTemplate body;
 
-    [[nodiscard]] std::string_view body_view() const noexcept {
-        if (const auto *view = std::get_if<std::string_view>(&body)) {
-            return *view;
-        }
-        return std::get<std::string>(body);
-    }
+    [[nodiscard]] std::string_view body_view() const noexcept { return body.view(); }
 };
 
 enum class ResponseContentCoding : std::uint8_t {

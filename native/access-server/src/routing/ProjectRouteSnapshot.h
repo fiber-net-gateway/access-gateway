@@ -32,6 +32,15 @@ enum class ResponseBodyKind : std::uint8_t {
     Template,
 };
 
+struct CompiledResponseHeaderTemplate {
+    CompiledResponseHeaderTemplate(std::string original_name, CompiledTemplate compiled_value);
+
+    std::string name;
+    std::string lowcase_name;
+    std::uint64_t name_hash = 0;
+    CompiledTemplate value;
+};
+
 struct CompiledResponseRoute {
     std::int32_t status = 0;
     ResponseBodyKind body_kind = ResponseBodyKind::Empty;
@@ -43,7 +52,7 @@ struct CompiledResponseRoute {
     std::optional<std::uint8_t> gzip_level;
     std::string gzip_body;
     std::optional<CompiledTemplate> body_template;
-    std::vector<CompiledTemplateEntry> response_headers;
+    std::vector<CompiledResponseHeaderTemplate> response_headers;
 };
 
 struct CompiledProxyRoute {
@@ -101,6 +110,7 @@ struct ScriptCompilerAdapter {
 class ProjectRouteSnapshot {
 public:
     [[nodiscard]] std::string_view project() const noexcept { return project_; }
+    [[nodiscard]] std::string_view call_source() const noexcept { return call_source_; }
     [[nodiscard]] std::int32_t version() const noexcept { return version_; }
     [[nodiscard]] const std::vector<CompiledHost> &hosts() const noexcept { return hosts_; }
     [[nodiscard]] const std::vector<CompiledRoute> &routes() const noexcept { return routes_; }
@@ -129,6 +139,7 @@ private:
     bind_project_service_selectors(ProjectRouteSnapshot &snapshot, ProxyAddressSelectorFactory selector_factory);
 
     std::string project_;
+    std::string call_source_;
     std::int32_t version_ = 0;
     std::vector<CompiledHost> hosts_;
     std::vector<CompiledRoute> routes_;

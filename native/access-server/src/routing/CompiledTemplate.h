@@ -23,6 +23,7 @@ struct CompiledTemplate {
     std::vector<CompiledTemplateExpression> expressions;
     std::string trailing_literal;
     std::size_t literal_size = 0;
+    std::size_t output_reserve_size = 0;
 
     [[nodiscard]] bool dynamic() const noexcept { return !expressions.empty(); }
 };

@@ -29,6 +29,8 @@ class AccessRequestTelemetry;
 struct AccessRequestScriptAdapter {
     using ConditionFunction = bool (*)(void *context, http_script::ScriptExchangeCtx &script_context,
                                        const script::Script &program) noexcept;
+    // Template callbacks append to output and must preserve bytes already
+    // emitted by earlier literal/expression segments.
     using TemplateFunction = Result<void> (*)(void *context, http_script::ScriptExchangeCtx &script_context,
                                               const script::Script &program, std::string_view expression,
                                               std::string &output) noexcept;
@@ -49,7 +51,7 @@ struct AccessRequestHandlerOptions {
 };
 
 struct ProxyExecutionInput {
-    std::string_view project;
+    std::string_view call_source;
     std::string_view initial_context_cluster;
     std::string_view origin_host;
     TemplateEvaluator template_evaluator;

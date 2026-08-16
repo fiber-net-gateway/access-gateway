@@ -2,6 +2,7 @@
 #include "../execution/GzipEncoder.h"
 
 #include <fiber/common/util/Base64.h>
+#include <fiber/http/HttpHeaderHash.h>
 
 #include <bit>
 #include <charconv>
@@ -13,6 +14,17 @@ namespace fiber::access_server {
 namespace {
 
 constexpr std::string_view kDefaultServiceCluster = "default";
+constexpr std::string_view kCallSourceSuffix = ".unifiedAccess";
+
+std::string lowcase_header_name(std::string_view name) {
+    std::string result(name);
+    for (char &ch: result) {
+        if (ch >= 'A' && ch <= 'Z') {
+            ch = static_cast<char>(ch - 'A' + 'a');
+        }
+    }
+    return result;
+}
 
 std::string route_path(std::size_t route_index, std::string_view field) {
     std::string path = "routes[";
@@ -59,7 +71,7 @@ public:
 
     [[nodiscard]] std::expected<void, AccessConfigError> account_config(std::string_view project,
                                                                         const ProjectConfig &config) {
-        auto base = add_bytes(sizeof(ProjectRouteSnapshot) + project.size(), "project");
+        auto base = add_bytes(sizeof(ProjectRouteSnapshot) + project.size() * 2U + kCallSourceSuffix.size(), "project");
         if (!base) {
             return base;
         }
@@ -310,6 +322,25 @@ std::expected<std::vector<CompiledTemplateEntry>, AccessConfigError> compile_tem
     return result;
 }
 
+std::expected<std::vector<CompiledResponseHeaderTemplate>, AccessConfigError>
+compile_response_header_templates(const StringConfigMap &input, std::size_t route_index, std::string_view field,
+                                  ProjectCompileBudget &budget) {
+    std::vector<CompiledResponseHeaderTemplate> result;
+    result.reserve(input.size());
+    for (const StringConfigEntry &entry: input) {
+        if (!entry.value) {
+            return std::unexpected(
+                    route_error(AccessConfigErrorCode::InvalidField, route_index, field, "invalid template"));
+        }
+        auto value = compile_template(*entry.value, route_index, field, budget);
+        if (!value) {
+            return std::unexpected(std::move(value.error()));
+        }
+        result.emplace_back(entry.name, std::move(*value));
+    }
+    return result;
+}
+
 std::expected<CompiledHeaderTemplates::Builder, AccessConfigError>
 compile_header_templates(const StringConfigMap &input, std::size_t route_index, std::string_view field,
                          ProjectCompileBudget &budget) {
@@ -367,9 +398,9 @@ std::expected<void, AccessConfigError> compile_route_scripts(CompiledRoute &rout
         }
         return {};
     };
-    auto compile_entries = [&](std::span<CompiledTemplateEntry> entries,
-                               std::string_view field) -> std::expected<void, AccessConfigError> {
-        for (CompiledTemplateEntry &entry: entries) {
+    auto compile_entries = [&]<typename Entry>(std::span<Entry> entries,
+                                               std::string_view field) -> std::expected<void, AccessConfigError> {
+        for (Entry &entry: entries) {
             auto compiled = compile_template(entry.value, field);
             if (!compiled) {
                 return compiled;
@@ -434,7 +465,7 @@ std::expected<void, AccessConfigError> compile_route_scripts(CompiledRoute &rout
                 return compiled;
             }
         }
-        return compile_entries(route.response->response_headers, "response_headers");
+        return compile_entries(std::span(route.response->response_headers), "response_headers");
     }
 
     auto proxy_headers = compile_entries(pending.proxy_headers.entries(), "proxy_headers");
@@ -445,7 +476,7 @@ std::expected<void, AccessConfigError> compile_route_scripts(CompiledRoute &rout
     if (!response_headers) {
         return response_headers;
     }
-    auto context = compile_entries(route.proxy->context, "context");
+    auto context = compile_entries(std::span(route.proxy->context), "context");
     if (!context) {
         return context;
     }
@@ -749,7 +780,8 @@ std::expected<CompiledRoute, AccessConfigError> compile_route(const RouteConfig 
             }
         }
 
-        auto headers = compile_templates(source.response_headers, route_index, "response_headers", budget);
+        auto headers =
+                compile_response_header_templates(source.response_headers, route_index, "response_headers", budget);
         if (!headers) {
             return std::unexpected(std::move(headers.error()));
         }
@@ -965,6 +997,11 @@ private:
 
 } // namespace
 
+CompiledResponseHeaderTemplate::CompiledResponseHeaderTemplate(std::string original_name,
+                                                               CompiledTemplate compiled_value) :
+    name(std::move(original_name)), lowcase_name(lowcase_header_name(name)),
+    name_hash(http::http_header_name_hash(name)), value(std::move(compiled_value)) {}
+
 const CompiledHost *ProjectRouteSnapshot::match_host(std::string_view host) const noexcept {
     const std::optional<std::uint32_t> index = host_matcher_.match(host);
     if (!index) {
@@ -1035,6 +1072,9 @@ ProjectSnapshotResult compile_project_config(std::string_view project, const Pro
     ProjectRouteSnapshot snapshot;
     http_script::ConstPackage::Builder constants;
     snapshot.project_ = project;
+    snapshot.call_source_.reserve(project.size() + kCallSourceSuffix.size());
+    snapshot.call_source_.append(project);
+    snapshot.call_source_.append(kCallSourceSuffix);
     snapshot.version_ = config.version;
     snapshot.routes_.reserve(config.routes->size());
     std::vector<PendingRouteCompile> pending;

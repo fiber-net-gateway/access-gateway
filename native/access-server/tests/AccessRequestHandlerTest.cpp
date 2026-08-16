@@ -296,16 +296,15 @@ Result<void> evaluate_template(void *, fiber::http_script::ScriptExchangeCtx &sc
         }));
     }
     if (expression == "$req.method") {
-        output.assign(script_context.exchange().method_view());
+        output.append(script_context.exchange().method_view());
         return {};
     }
     if (expression == "$path.id") {
         const std::string_view path = script_context.exchange().uri().path;
         const std::size_t slash = path.rfind('/');
-        output.assign(slash == std::string_view::npos ? path : path.substr(slash + 1));
+        output.append(slash == std::string_view::npos ? path : path.substr(slash + 1));
         return {};
     }
-    output.clear();
     return {};
 }
 
@@ -347,14 +346,14 @@ Result<void> evaluate_with_shared_context(void *opaque, fiber::http_script::Scri
     auto &state = *static_cast<SharedScriptContextState *>(opaque);
     record_script_context(state, context);
     ++state.template_calls;
-    output = "shared";
+    output.append("shared");
     return {};
 }
 
 struct CapturedProxyRequest {
     std::string service;
     std::optional<std::string> cluster;
-    std::string project;
+    std::string call_source;
     std::string initial_context_cluster;
     std::string origin_host;
     fiber::http::HttpMethod method = fiber::http::HttpMethod::Unknown;
@@ -383,7 +382,7 @@ capture_proxy_request(void *context, fiber::http::HttpExchange &exchange,
     } else {
         capture.cluster.reset();
     }
-    capture.project.assign(input.project);
+    capture.call_source.assign(input.call_source);
     capture.initial_context_cluster.assign(input.initial_context_cluster);
     capture.origin_host.assign(input.origin_host);
     capture.method = exchange.method();
@@ -1142,7 +1141,7 @@ TEST(AccessRequestHandlerTest, PassesPinnedProxyRouteAndExecutionInputToAdapter)
     EXPECT_EQ(capture.service, "orders");
     ASSERT_TRUE(capture.cluster);
     EXPECT_EQ(*capture.cluster, "stable");
-    EXPECT_EQ(capture.project, "orders");
+    EXPECT_EQ(capture.call_source, "orders.unifiedAccess");
     EXPECT_TRUE(capture.initial_context_cluster.empty());
     EXPECT_TRUE(capture.origin_host.empty());
     EXPECT_EQ(capture.method, fiber::http::HttpMethod::Post);

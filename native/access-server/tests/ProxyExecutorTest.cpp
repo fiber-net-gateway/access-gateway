@@ -107,7 +107,7 @@ fiber::access_server::Result<void> evaluate_counted_template(void *context, fibe
                                                              std::string &output) noexcept {
     ++static_cast<TemplateEvaluationState *>(context)->count;
     if (expression == "'attempt'") {
-        output = "evaluated-once";
+        output.append("evaluated-once");
         return {};
     }
     if (expression == "'fail'") {

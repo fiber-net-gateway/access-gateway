@@ -1,5 +1,6 @@
 #include "CompiledTemplate.h"
 
+#include <limits>
 #include <utility>
 
 namespace fiber::access_server {
@@ -62,6 +63,15 @@ std::expected<CompiledTemplate, TemplateParseError> parse_template(std::string_v
     }
     result.literal_size += literal.size();
     result.trailing_literal = std::move(literal);
+    // Bound speculative request memory while covering common IDs, methods,
+    // trace values, and small JSON scalars without a second growth allocation.
+    constexpr std::size_t kEstimatedExpressionBytes = 64;
+    if (result.expressions.size() <=
+        (std::numeric_limits<std::size_t>::max() - result.literal_size) / kEstimatedExpressionBytes) {
+        result.output_reserve_size = result.literal_size + result.expressions.size() * kEstimatedExpressionBytes;
+    } else {
+        result.output_reserve_size = result.literal_size;
+    }
     return result;
 }
 

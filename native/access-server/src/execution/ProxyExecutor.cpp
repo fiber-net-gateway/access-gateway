@@ -23,6 +23,7 @@
 #include <optional>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace fiber::access_server {
 namespace {
@@ -31,7 +32,9 @@ constexpr std::string_view kTraceCluster = "HI-TRACE-CLUSTER";
 constexpr std::string_view kTraceParentHeader = "traceparent";
 constexpr std::uint64_t kTraceParentHeaderHash = http::http_header_name_hash(kTraceParentHeader);
 constexpr std::string_view kCallSourceHeader = "x-ploto-source-app";
+constexpr std::uint64_t kCallSourceHeaderHash = http::http_header_name_hash(kCallSourceHeader);
 constexpr std::string_view kOriginHostHeader = "ploto-origin-host";
+constexpr std::uint64_t kOriginHostHeaderHash = http::http_header_name_hash(kOriginHostHeader);
 constexpr std::size_t kMaxJavaAttempts = 4;
 
 enum class ProxyHostBinding : std::uint8_t {
@@ -228,20 +231,21 @@ bool is_java_filtered_proxy_request_header(std::string_view name) noexcept {
     return is_header(name, "host") || is_java_filtered_response_header(name);
 }
 
-std::string preserved_request_target(const http::HttpExchange &exchange) {
+std::string_view preserved_request_target(const http::HttpExchange &exchange, std::string &storage) {
     if (!exchange.uri().unparsed_uri.empty()) {
-        return std::string(exchange.uri().unparsed_uri);
+        return exchange.uri().unparsed_uri;
     }
-    std::string storage;
+    storage.clear();
+    storage.reserve(exchange.uri().path.size() + (exchange.uri().query.empty() ? 0U : exchange.uri().query.size() + 1));
     storage.assign(exchange.uri().path);
     if (!exchange.uri().query.empty()) {
         storage.push_back('?');
         storage.append(exchange.uri().query);
     }
-    return storage;
+    return std::string_view(storage);
 }
 
-std::string java_escape_uri(std::string_view value) {
+void java_escape_uri(std::string_view value, std::string &result) {
     constexpr std::array<std::uint32_t, 8> kEscape{
             0xFFFF'FFFFU, 0xD000'002DU, 0x5000'0000U, 0xB800'0001U,
             0xFFFF'FFFFU, 0xFFFF'FFFFU, 0xFFFF'FFFFU, 0xFFFF'FFFFU,
@@ -254,7 +258,7 @@ std::string java_escape_uri(std::string_view value) {
             escaped_size += 2;
         }
     }
-    std::string result;
+    result.clear();
     result.reserve(escaped_size);
     for (const unsigned char byte: value) {
         if ((kEscape[byte >> 5U] & (1U << (byte & 0x1FU))) == 0) {
@@ -265,25 +269,30 @@ std::string java_escape_uri(std::string_view value) {
         result.push_back(kHex[byte >> 4U]);
         result.push_back(kHex[byte & 0x0FU]);
     }
-    return result;
 }
 
-Result<std::string> resolve_request_target(const http::HttpExchange &exchange, const CompiledProxyRoute &proxy,
-                                           TemplateEvaluator evaluator) {
+Result<std::string_view> resolve_request_target(const http::HttpExchange &exchange, const CompiledProxyRoute &proxy,
+                                                TemplateEvaluator evaluator, std::string &storage) {
     if (!proxy.rewrite) {
-        return preserved_request_target(exchange);
+        return preserved_request_target(exchange, storage);
     }
 
     auto rewritten = evaluate_template(*proxy.rewrite, evaluator);
     if (!rewritten) {
         return std::unexpected(rewritten.error());
     }
-    std::string result = rewritten->empty() ? std::string("/") : java_escape_uri(*rewritten);
-    if (!exchange.uri().query.empty()) {
-        result.push_back('?');
-        result.append(exchange.uri().query);
+    const std::string_view rewritten_view = rewritten->view();
+    if (rewritten_view.empty()) {
+        storage.assign("/");
+    } else {
+        java_escape_uri(rewritten_view, storage);
     }
-    return result;
+    if (!exchange.uri().query.empty()) {
+        storage.reserve(storage.size() + exchange.uri().query.size() + 1);
+        storage.push_back('?');
+        storage.append(exchange.uri().query);
+    }
+    return std::string_view(storage);
 }
 
 Result<std::optional<std::string>> evaluate_proxy_context(std::span<const CompiledTemplateEntry> context,
@@ -302,19 +311,20 @@ Result<std::optional<std::string>> evaluate_proxy_context(std::span<const Compil
         if (!value) {
             return std::unexpected(value.error());
         }
-        if (value->empty()) {
+        const std::string_view value_view = value->view();
+        if (value_view.empty()) {
             telemetry.remove_trace_context(entry.name);
         } else {
-            auto stored = telemetry.put_trace_context(entry.name, *value);
+            auto stored = telemetry.put_trace_context(entry.name, value_view);
             if (!stored) {
                 return std::unexpected(Err::from_error(stored.error()));
             }
         }
         if (entry.name == kTraceCluster) {
-            if (value->empty()) {
+            if (value_view.empty()) {
                 cluster.reset();
             } else {
-                cluster = std::move(*value);
+                cluster = std::move(*value).into_string();
             }
         }
     }
@@ -354,7 +364,8 @@ Err request_head_build_error() noexcept { return Err::from_error(common::IoErr::
 Result<ProxyHostBinding> build_request_headers(const ProxyUpstreamEndpoint &endpoint,
                                                const http::HttpExchange &exchange, const CompiledProxyRoute &proxy,
                                                const ProxyExecutionInput &input, bool websocket,
-                                               const AccessRequestTelemetry &telemetry, http::HttpHeaders &headers) {
+                                               const AccessRequestTelemetry &telemetry, http::HttpHeaders &headers,
+                                               std::vector<EvaluatedTemplate> &evaluated_values) {
     if (!headers.set("Host", endpoint.host_header)) {
         return std::unexpected(request_head_build_error());
     }
@@ -369,13 +380,18 @@ Result<ProxyHostBinding> build_request_headers(const ProxyUpstreamEndpoint &endp
         if (!value) {
             return std::unexpected(value.error());
         }
-        if (value->empty() || is_java_filtered_response_header(header.name())) {
+        std::string_view value_view = value->view();
+        if (value_view.empty() || is_java_filtered_response_header(header.name())) {
             continue;
         }
-        if (!is_valid_http_header_name(header.name()) || !is_valid_http_header_value(*value)) {
+        if (!is_valid_http_header_name(header.name()) || !is_valid_http_header_value(value_view)) {
             return std::unexpected(Err::from_exception(Exception::unknown("invalid proxy request header")));
         }
-        if (!headers.set(header.name(), *value)) {
+        if (value->owns_storage()) {
+            evaluated_values.push_back(std::move(*value));
+            value_view = evaluated_values.back().view();
+        }
+        if (!headers.set_view(header.name(), value_view, header.lowcase_name().data(), header.hash())) {
             return std::unexpected(request_head_build_error());
         }
         if (is_header(header.name(), "Host")) {
@@ -400,12 +416,11 @@ Result<ProxyHostBinding> build_request_headers(const ProxyUpstreamEndpoint &endp
         return std::unexpected(request_head_build_error());
     }
 
-    std::string source(input.project);
-    source.append(".unifiedAccess");
-    if (!headers.set(kCallSourceHeader, source)) {
+    if (!headers.set_view(kCallSourceHeader, input.call_source, kCallSourceHeader.data(), kCallSourceHeaderHash)) {
         return std::unexpected(request_head_build_error());
     }
-    if (!input.origin_host.empty() && !headers.set(kOriginHostHeader, input.origin_host)) {
+    if (!input.origin_host.empty() &&
+        !headers.set_view(kOriginHostHeader, input.origin_host, kOriginHostHeader.data(), kOriginHostHeaderHash)) {
         return std::unexpected(request_head_build_error());
     }
     return host_binding;
@@ -455,7 +470,7 @@ bool build_downstream_headers(http::HttpExchange &downstream, const CompiledProx
         }
     }
     for (const EvaluatedHeader &header: custom_headers) {
-        if (!output.add(header.name, header.value)) {
+        if (!output.add_view(header.name, header.value.view(), header.lowcase_name.data(), header.name_hash)) {
             return false;
         }
     }
@@ -614,8 +629,12 @@ async::Task<Result<void>> ProxyExecutor::execute_impl(http::HttpExchange &exchan
             websocket_upgrade && proxy.websocket_timeout_millis ? *proxy.websocket_timeout_millis : 0;
     const http::HttpBodySpec request_body = request_body_spec(exchange, websocket_upgrade);
     const std::optional<std::uint64_t> max_response_body_size = normalized_max_response_body(proxy);
-    std::optional<std::string> request_target;
+    bool request_prepared = false;
+    std::string request_target_storage;
+    std::string_view request_target;
     http::HttpHeaders request_headers(exchange.pool());
+    std::vector<EvaluatedTemplate> request_header_values;
+    request_header_values.reserve(proxy.proxy_headers.dynamic_size());
     std::optional<ProxyHostBinding> host_binding;
 
     std::array<std::uint64_t, kMaxJavaAttempts> excluded_selection_tokens{};
@@ -649,19 +668,21 @@ async::Task<Result<void>> ProxyExecutor::execute_impl(http::HttpExchange &exchan
             selection_reported = true;
         };
 
-        if (!request_target) {
-            auto resolved_target = resolve_request_target(exchange, proxy, input.template_evaluator);
+        if (!request_prepared) {
+            auto resolved_target =
+                    resolve_request_target(exchange, proxy, input.template_evaluator, request_target_storage);
             if (!resolved_target) {
                 co_return std::unexpected(resolved_target.error());
             }
-            request_target.emplace(std::move(*resolved_target));
+            request_target = *resolved_target;
 
             auto built_headers = build_request_headers(*selected, exchange, proxy, input, websocket_upgrade, telemetry,
-                                                       request_headers);
+                                                       request_headers, request_header_values);
             if (!built_headers) {
                 co_return std::unexpected(built_headers.error());
             }
             host_binding = *built_headers;
+            request_prepared = true;
         } else if (*host_binding == ProxyHostBinding::SelectedEndpoint &&
                    !request_headers.set("Host", selected->host_header)) {
             co_return std::unexpected(request_head_build_error());
@@ -671,7 +692,7 @@ async::Task<Result<void>> ProxyExecutor::execute_impl(http::HttpExchange &exchan
                 request_body.is_none() || (request_body.is_content_length() && request_body.content_length() == 0);
         const http::Http1RequestHead request_head{
                 .method = exchange.method(),
-                .target = *request_target,
+                .target = request_target,
                 .headers = &request_headers,
                 .body = request_body,
         };

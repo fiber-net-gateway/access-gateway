@@ -170,22 +170,30 @@ EvaluatedHeader *find_header(std::vector<EvaluatedHeader> &headers, std::string_
 void merge_vary_accept_encoding(std::vector<EvaluatedHeader> &headers) {
     EvaluatedHeader *vary = find_header(headers, "Vary");
     if (!vary) {
-        headers.push_back({.name = "Vary", .value = "Accept-Encoding"});
+        constexpr std::string_view kName = "Vary";
+        constexpr std::string_view kLowcaseName = "vary";
+        headers.push_back({
+                .name = kName,
+                .lowcase_name = kLowcaseName,
+                .name_hash = http::http_header_name_hash(kLowcaseName),
+                .value = EvaluatedTemplate::borrowed("Accept-Encoding"),
+        });
         return;
     }
-    if (has_vary_token(vary->value, "Accept-Encoding")) {
+    if (has_vary_token(vary->value.view(), "Accept-Encoding")) {
         return;
     }
-    if (!vary->value.empty()) {
-        vary->value.append(", ");
+    std::string &value = vary->value.materialize();
+    if (!value.empty()) {
+        value.append(", ");
     }
-    vary->value.append("Accept-Encoding");
+    value.append("Accept-Encoding");
 }
 
 void weaken_strong_etag(std::vector<EvaluatedHeader> &headers) {
     EvaluatedHeader *etag = find_header(headers, "ETag");
-    if (etag && !etag->value.empty() && etag->value.front() == '"') {
-        etag->value.insert(0, "W/");
+    if (etag && !etag->value.view().empty() && etag->value.view().front() == '"') {
+        etag->value.materialize().insert(0, "W/");
     }
 }
 
@@ -249,13 +257,15 @@ PreparedResponseResult prepare_response(const CompiledResponseRoute &response, T
     prepared.status = response.status;
 
     prepared.headers.reserve(response.response_headers.size() + (response.gzip_level ? 2U : 0U));
-    for (const CompiledTemplateEntry &header: response.response_headers) {
+    for (const CompiledResponseHeaderTemplate &header: response.response_headers) {
         auto value = evaluate_template(header.value, evaluator);
         if (!value) {
             return std::unexpected(value.error());
         }
         prepared.headers.push_back(EvaluatedHeader{
                 .name = header.name,
+                .lowcase_name = header.lowcase_name,
+                .name_hash = header.name_hash,
                 .value = std::move(*value),
         });
     }
@@ -266,7 +276,7 @@ PreparedResponseResult prepare_response(const CompiledResponseRoute &response, T
         if (is_java_filtered_response_header(header.name)) {
             continue;
         }
-        if (!is_valid_http_header_name(header.name) || !is_valid_http_header_value(header.value)) {
+        if (!is_valid_http_header_name(header.name) || !is_valid_http_header_value(header.value.view())) {
             return std::unexpected(Err::from_exception(Exception::unknown("invalid response header")));
         }
         if (committed != index) {
@@ -290,7 +300,7 @@ PreparedResponseResult prepare_response(const CompiledResponseRoute &response, T
         }
         prepared.body = std::move(*body);
     } else {
-        prepared.body = std::string_view(response.body);
+        prepared.body = EvaluatedTemplate::borrowed(response.body);
     }
     return prepared;
 }
@@ -336,8 +346,15 @@ Result<ResponseContentCoding> apply_response_gzip(const CompiledResponseRoute &r
     merge_vary_accept_encoding(prepared.headers);
     weaken_strong_etag(prepared.headers);
     if (coding == ResponseContentCoding::Gzip) {
-        prepared.headers.push_back({.name = "Content-Encoding", .value = "gzip"});
-        prepared.body = std::string_view(response.gzip_body);
+        constexpr std::string_view kName = "Content-Encoding";
+        constexpr std::string_view kLowcaseName = "content-encoding";
+        prepared.headers.push_back({
+                .name = kName,
+                .lowcase_name = kLowcaseName,
+                .name_hash = http::http_header_name_hash(kLowcaseName),
+                .value = EvaluatedTemplate::borrowed("gzip"),
+        });
+        prepared.body = EvaluatedTemplate::borrowed(response.gzip_body);
     }
     return coding;
 }

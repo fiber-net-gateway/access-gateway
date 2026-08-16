@@ -17,7 +17,7 @@ enum class BodyDiscardStatus : std::uint8_t {
 
 bool apply_headers(http::HttpHeaders &headers, std::span<const EvaluatedHeader> values) noexcept {
     for (const EvaluatedHeader &header: values) {
-        if (!headers.set(header.name, header.value)) {
+        if (!headers.set_view(header.name, header.value.view(), header.lowcase_name.data(), header.name_hash)) {
             return false;
         }
     }
