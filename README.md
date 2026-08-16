@@ -311,6 +311,19 @@ compiled before immutable publication; invalid candidates retain the previous ac
 
 ## Documentation
 
+### User guide
+
+The [complete user guide index](docs/user-guide/README.md) and its maintained topics are available
+in English and Simplified Chinese:
+
+| Topic                    | English                                                                     | 简体中文                                                         |
+| ------------------------ | --------------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| Route rules and usage    | [Route rules and usage](docs/user-guide/en/routing.md)                      | [路由规则与详细用法](docs/user-guide/zh-CN/routing.md)           |
+| Script route usage       | [Script route usage](docs/user-guide/en/script-routing.md)                  | [脚本路由用法](docs/user-guide/zh-CN/script-routing.md)          |
+| Script language and APIs | [Script language and API reference](docs/user-guide/en/script-reference.md) | [脚本语法与 API 参考](docs/user-guide/zh-CN/script-reference.md) |
+
+### Engineering documentation
+
 - [Console product requirements](docs/console-requirements.md)
 - [Console detailed design](docs/console-detailed-design.md)
 - [Network policy and certificate design](docs/network-policy-and-certificate-design.md)

@@ -266,6 +266,18 @@ leaf DNS SAN 无锁选择证书。快照缺失、证书过期、私钥不匹配�
 
 ## 文档
 
+### 用户文档
+
+[完整用户文档索引](docs/user-guide/README.md)及当前维护的主题均提供简体中文和英文版本：
+
+| 主题           | 简体中文                                                         | English                                                                     |
+| -------------- | ---------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| 路由规则与用法 | [路由规则与详细用法](docs/user-guide/zh-CN/routing.md)           | [Route rules and usage](docs/user-guide/en/routing.md)                      |
+| 脚本路由用法   | [脚本路由用法](docs/user-guide/zh-CN/script-routing.md)          | [Script route usage](docs/user-guide/en/script-routing.md)                  |
+| 脚本语言与 API | [脚本语法与 API 参考](docs/user-guide/zh-CN/script-reference.md) | [Script language and API reference](docs/user-guide/en/script-reference.md) |
+
+### 工程文档
+
 - [Console 产品需求](docs/console-requirements.md)
 - [Console 详细设计](docs/console-detailed-design.md)
 - [固定工作区与安全监听器设计](docs/fixed-workspace-and-secure-listener-design.md)
