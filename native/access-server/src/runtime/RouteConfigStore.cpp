@@ -7,6 +7,68 @@
 
 namespace fiber::access_server {
 
+ReadyProjectUpdate::ReadyProjectUpdate(ReadyProjectUpdate &&other) noexcept :
+    status_(other.status_), project_(std::move(other.project_)), version_(other.version_),
+    project_snapshot_(std::move(other.project_snapshot_)), valid_(std::exchange(other.valid_, false)) {}
+
+ReadyProjectUpdate &ReadyProjectUpdate::operator=(ReadyProjectUpdate &&other) noexcept {
+    if (this == &other) {
+        return *this;
+    }
+    status_ = other.status_;
+    project_ = std::move(other.project_);
+    version_ = other.version_;
+    project_snapshot_ = std::move(other.project_snapshot_);
+    valid_ = std::exchange(other.valid_, false);
+    return *this;
+}
+
+PreparedProjectUpdate::PreparedProjectUpdate(PreparedProjectUpdate &&other) noexcept :
+    status_(other.status_), project_(std::move(other.project_)), version_(other.version_),
+    project_snapshot_(std::move(other.project_snapshot_)), valid_(std::exchange(other.valid_, false)) {}
+
+PreparedProjectUpdate &PreparedProjectUpdate::operator=(PreparedProjectUpdate &&other) noexcept {
+    if (this == &other) {
+        return *this;
+    }
+    status_ = other.status_;
+    project_ = std::move(other.project_);
+    version_ = other.version_;
+    project_snapshot_ = std::move(other.project_snapshot_);
+    valid_ = std::exchange(other.valid_, false);
+    return *this;
+}
+
+ReadyProjectUpdate PreparedProjectUpdate::into_ready() && noexcept {
+    FIBER_ASSERT(valid_);
+    valid_ = false;
+    return ReadyProjectUpdate(status_, std::move(project_), version_, std::move(project_snapshot_));
+}
+
+std::optional<ReadyProjectUpdate> PreparedProjectUpdate::try_ready() && noexcept {
+    FIBER_ASSERT(valid_);
+    if (project_snapshot_ && !project_snapshot_->ready_for_publish()) {
+        return std::nullopt;
+    }
+    return std::move(*this).into_ready();
+}
+
+async::Task<ReadyProjectUpdateOutcome> PreparedProjectUpdate::wait_ready() && noexcept {
+    FIBER_ASSERT(valid_);
+    return wait_ready_impl(std::move(*this));
+}
+
+async::Task<ReadyProjectUpdateOutcome> PreparedProjectUpdate::wait_ready_impl(PreparedProjectUpdate prepared) noexcept {
+    FIBER_ASSERT(prepared.valid_);
+    if (prepared.project_snapshot_) {
+        auto ready = co_await prepared.project_snapshot_->wait_ready();
+        if (!ready) {
+            co_return ReadyProjectUpdateOutcome(std::unexpected(ready.error()));
+        }
+    }
+    co_return ReadyProjectUpdateOutcome(std::in_place, std::move(prepared).into_ready());
+}
+
 RouteConfigStore::RouteConfigStore(ScriptCompilerAdapter script_compiler,
                                    ProxyAddressSelectorFactory selector_factory) :
     script_compiler_(script_compiler), selector_factory_(selector_factory) {
@@ -28,19 +90,15 @@ RouteConfigStore::RouteConfigStore(ScriptCompilerAdapter script_compiler, Access
 #endif
 }
 
-PreparedConfigUpdateOutcome RouteConfigStore::prepare(std::string_view project,
-                                                      const std::optional<ProjectConfig> &config) {
+PreparedProjectUpdateOutcome RouteConfigStore::prepare(std::string_view project,
+                                                       const std::optional<ProjectConfig> &config) {
     if (!config) {
         return prepare_compiled(project, std::nullopt, std::nullopt);
     }
 
     const std::optional<std::int32_t> current_version = this->current_version(project);
     if (current_version && *current_version == config->version) {
-        return PreparedConfigUpdate{
-                .status = ConfigUpdateStatus::VersionUnchanged,
-                .project = std::string(project),
-                .version = config->version,
-        };
+        return PreparedProjectUpdate(ConfigUpdateStatus::VersionUnchanged, std::string(project), config->version, {});
     }
 
     auto compiled = compile_project_config(project, *config, script_compiler_);
@@ -50,31 +108,34 @@ PreparedConfigUpdateOutcome RouteConfigStore::prepare(std::string_view project,
     return prepare_compiled(project, config->version, std::move(*compiled));
 }
 
-PreparedConfigUpdateOutcome RouteConfigStore::prepare_compiled(std::string_view project,
-                                                               std::optional<std::int32_t> version,
-                                                               std::optional<ProjectRouteSnapshot> project_snapshot) {
+PreparedProjectUpdateOutcome RouteConfigStore::prepare_compiled(std::string_view project,
+                                                                std::optional<std::int32_t> version,
+                                                                std::optional<ProjectRouteSnapshot> project_snapshot) {
     if (!version) {
-        return PreparedConfigUpdate{
-                .status = ConfigUpdateStatus::IgnoredEmpty,
-                .project = std::string(project),
-        };
+        return PreparedProjectUpdate(ConfigUpdateStatus::IgnoredEmpty, std::string(project), 0, {});
     }
 
     const std::optional<std::int32_t> published = current_version(project);
     if (published && *published == *version) {
-        return PreparedConfigUpdate{
-                .status = ConfigUpdateStatus::VersionUnchanged,
-                .project = std::string(project),
-                .version = *version,
-        };
+        return PreparedProjectUpdate(ConfigUpdateStatus::VersionUnchanged, std::string(project), *version, {});
     }
 
+    if (project_snapshot && project_snapshot->project() != project) {
+        return std::unexpected(AccessConfigError{
+                .code = AccessConfigErrorCode::InvalidCombination,
+                .field = "project",
+                .message = "compiled snapshot project does not match the prepared update",
+        });
+    }
+    if (project_snapshot && project_snapshot->version() != *version) {
+        return std::unexpected(AccessConfigError{
+                .code = AccessConfigErrorCode::InvalidCombination,
+                .field = "version",
+                .message = "compiled snapshot version does not match the prepared update",
+        });
+    }
     if (!project_snapshot) {
-        return PreparedConfigUpdate{
-                .status = ConfigUpdateStatus::Unloaded,
-                .project = std::string(project),
-                .version = *version,
-        };
+        return PreparedProjectUpdate(ConfigUpdateStatus::Unloaded, std::string(project), *version, {});
     }
 
     if (uses_service_discovery_) {
@@ -96,12 +157,8 @@ PreparedConfigUpdateOutcome RouteConfigStore::prepare_compiled(std::string_view 
         });
     }
 
-    return PreparedConfigUpdate{
-            .status = ConfigUpdateStatus::Published,
-            .project = std::string(project),
-            .version = *version,
-            .project_snapshot = std::make_shared<const ProjectRouteSnapshot>(std::move(*project_snapshot)),
-    };
+    return PreparedProjectUpdate(ConfigUpdateStatus::Published, std::string(project), *version,
+                                 std::make_shared<const ProjectRouteSnapshot>(std::move(*project_snapshot)));
 }
 
 ConfigUpdateOutcome RouteConfigStore::apply(std::string_view project, const std::optional<ProjectConfig> &config) {
@@ -109,34 +166,37 @@ ConfigUpdateOutcome RouteConfigStore::apply(std::string_view project, const std:
     if (!prepared) {
         return std::unexpected(std::move(prepared.error()));
     }
-    if (prepared->project_snapshot && !prepared->project_snapshot->ready_for_publish()) {
+    auto ready = std::move(*prepared).try_ready();
+    if (!ready) {
         return std::unexpected(AccessConfigError{
                 .code = AccessConfigErrorCode::InvalidCombination,
                 .field = "service",
                 .message = "service routes must complete wait_ready before publication",
         });
     }
-    return commit(std::move(*prepared));
+    return commit(std::move(*ready));
 }
 
-ConfigUpdateOutcome RouteConfigStore::commit(PreparedConfigUpdate prepared) {
-    if (!prepared.needs_publish()) {
+ConfigUpdateOutcome RouteConfigStore::commit(ReadyProjectUpdate ready) {
+    FIBER_ASSERT(ready.valid_);
+    if (ready.status_ == ConfigUpdateStatus::IgnoredEmpty || ready.status_ == ConfigUpdateStatus::VersionUnchanged) {
         return ConfigUpdateResult{
-                .status = prepared.status,
+                .status = ready.status_,
                 .snapshot = pin(),
         };
     }
+    FIBER_ASSERT(ready.status_ == ConfigUpdateStatus::Published || ready.status_ == ConfigUpdateStatus::Unloaded);
 
     std::vector<std::shared_ptr<const ProjectRouteSnapshot>> candidate = projects_;
     std::size_t existing = candidate.size();
     for (std::size_t i = 0; i < candidate.size(); ++i) {
-        if (candidate[i]->project() == prepared.project) {
+        if (candidate[i]->project() == ready.project_) {
             existing = i;
             break;
         }
     }
 
-    if (prepared.status == ConfigUpdateStatus::Unloaded) {
+    if (ready.status_ == ConfigUpdateStatus::Unloaded) {
         if (existing != candidate.size()) {
             candidate.erase(candidate.begin() + static_cast<std::ptrdiff_t>(existing));
         }
@@ -145,16 +205,16 @@ ConfigUpdateOutcome RouteConfigStore::commit(PreparedConfigUpdate prepared) {
         return publish_candidate(std::move(candidate), ConfigUpdateStatus::Unloaded);
     }
 
-    FIBER_ASSERT(prepared.project_snapshot != nullptr);
+    FIBER_ASSERT(ready.project_snapshot_ != nullptr);
     if (existing == candidate.size()) {
-        candidate.push_back(std::move(prepared.project_snapshot));
+        candidate.push_back(std::move(ready.project_snapshot_));
     } else {
-        candidate[existing] = std::move(prepared.project_snapshot);
+        candidate[existing] = std::move(ready.project_snapshot_);
     }
 
     auto published = publish_candidate(std::move(candidate), ConfigUpdateStatus::Published);
     if (published) {
-        set_published_version(prepared.project, prepared.version);
+        set_published_version(ready.project_, ready.version_);
     }
     return published;
 }

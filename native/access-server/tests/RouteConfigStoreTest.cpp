@@ -2,6 +2,8 @@
 
 #include <optional>
 #include <string>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "runtime/AccessScriptRuntime.h"
@@ -11,15 +13,27 @@ namespace {
 
 using fiber::access_server::AccessScriptRuntime;
 using fiber::access_server::BodyType;
+using fiber::access_server::compile_project_config;
 using fiber::access_server::ConfigUpdateStatus;
 using fiber::access_server::HostConfigEntry;
 using fiber::access_server::HostStrategyConfig;
+using fiber::access_server::PreparedProjectUpdate;
 using fiber::access_server::ProjectConfig;
+using fiber::access_server::ReadyProjectUpdate;
 using fiber::access_server::ResponseGzipConfig;
 using fiber::access_server::RouteBodyConfig;
 using fiber::access_server::RouteConfig;
 using fiber::access_server::RouteConfigStore;
 using fiber::access_server::RouteType;
+
+static_assert(!std::is_default_constructible_v<PreparedProjectUpdate>);
+static_assert(!std::is_copy_constructible_v<PreparedProjectUpdate>);
+static_assert(std::is_move_constructible_v<PreparedProjectUpdate>);
+static_assert(!std::is_default_constructible_v<ReadyProjectUpdate>);
+static_assert(!std::is_copy_constructible_v<ReadyProjectUpdate>);
+static_assert(std::is_move_constructible_v<ReadyProjectUpdate>);
+static_assert(!std::is_invocable_v<decltype(&RouteConfigStore::commit), RouteConfigStore &, PreparedProjectUpdate>);
+static_assert(std::is_invocable_v<decltype(&RouteConfigStore::commit), RouteConfigStore &, ReadyProjectUpdate>);
 
 ProjectConfig project_config(std::int32_t version, std::string host, std::string path) {
     RouteConfig route;
@@ -36,6 +50,42 @@ ProjectConfig project_config(std::int32_t version, std::string host, std::string
     };
     config.routes = std::vector<std::optional<RouteConfig>>{std::move(route)};
     return config;
+}
+
+TEST(RouteConfigStoreTest, CommitsAfterCheckedReadyTransition) {
+    RouteConfigStore store;
+    auto prepared = store.prepare("demo", project_config(1, "one.example.com", "/one"));
+    ASSERT_TRUE(prepared);
+    EXPECT_TRUE(store.pin()->projects().empty());
+
+    auto ready = std::move(*prepared).try_ready();
+    ASSERT_TRUE(ready);
+    auto published = store.commit(std::move(*ready));
+
+    ASSERT_TRUE(published);
+    EXPECT_EQ(published->status, ConfigUpdateStatus::Published);
+    EXPECT_TRUE(store.pin()->match_host("one.example.com"));
+}
+
+TEST(RouteConfigStoreTest, RejectsMismatchedCompiledCandidateBeforeTypestateTransition) {
+    RouteConfigStore store;
+    ProjectConfig config = project_config(7, "one.example.com", "/one");
+    auto compiled = compile_project_config("source", config);
+    ASSERT_TRUE(compiled);
+    ASSERT_TRUE(*compiled);
+
+    auto wrong_project = store.prepare_compiled("target", 7, std::move(**compiled));
+    ASSERT_FALSE(wrong_project);
+    EXPECT_EQ(wrong_project.error().field, "project");
+    EXPECT_TRUE(store.pin()->projects().empty());
+
+    compiled = compile_project_config("source", config);
+    ASSERT_TRUE(compiled);
+    ASSERT_TRUE(*compiled);
+    auto wrong_version = store.prepare_compiled("source", 8, std::move(**compiled));
+    ASSERT_FALSE(wrong_version);
+    EXPECT_EQ(wrong_version.error().field, "version");
+    EXPECT_TRUE(store.pin()->projects().empty());
 }
 
 TEST(RouteConfigStoreTest, PublishesCompleteSnapshotsAndKeepsPinnedOldVersion) {

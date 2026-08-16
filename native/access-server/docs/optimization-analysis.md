@@ -276,9 +276,23 @@ context 也只在该 worker 构造。队列容量、取消和“新 generation �
 
 **归属：本项目。**
 
+**实施状态：已解决（2026-08-17）。** `RouteConfigStore` 现在以不可复制、不可默认构造的
+`PreparedProjectUpdate` 和 `ReadyProjectUpdate` 表达发布状态。前者只能通过逐 selector 的
+`try_ready() &&` 或 `wait_ready() &&` 单向转换为后者，`commit()` 只接受 Ready 类型；字段均为
+private，move 会转移有效性标记，未 ready、伪造或重复消费候选无法进入正常提交路径。
+`prepare_compiled()` 还会在新版本候选进入 Prepared 前校验 snapshot 内嵌 project/version
+与请求一致；同版本候选仍按兼容规则直接忽略。
+
+watcher 把 Prepared 所有权移入 readiness 协程，与 Project revision 竞速；新 generation
+获胜会销毁候选并释放 NamingService lease。ready 成功后仍重新检查 watcher、Project identity
+和 generation，再统一经 `commit_ready_project()` 更新 snapshot、计数、observer 和
+`published_generation`。同步 `apply()` 也必须先通过 `try_ready()`，不再拥有绕过路径。
+
+完整类型不变量、转换、状态表及取消语义见
+[`config-publication-typestate.md`](config-publication-typestate.md)。改造前，
 `ProjectRouteSnapshot::wait_ready()` 是异步 readiness，而 Nacos selector 的
-`ready_for_publish()` 恒为 false。watcher 等待成功后直接调用 `commit()`，从而绕过
-`RouteConfigStore::apply()` 的同步检查。这种 API 容易被新的调用方误用。
+`ready_for_publish()` 恒为 false；watcher 等待成功后直接调用接受 Prepared 的 `commit()`，
+容易被新调用方误用。
 
 代码位置：
 
@@ -286,17 +300,18 @@ context 也只在该 worker 构造。队列容量、取消和“新 generation �
 - [`AccessServiceDiscovery.cpp`](../src/runtime/AccessServiceDiscovery.cpp#L351)；
 - [`RouteConfigStore.cpp`](../src/runtime/RouteConfigStore.cpp#L84)。
 
-建议把状态表达为不同类型或只暴露单向状态转换：
+实现后的状态转换为：
 
 ```text
-ParsedProjectConfig
-  -> CompiledProjectUpdate
+ProjectConfig (parsed)
+  -> CompiledProjectConfig
+  -> PreparedProjectUpdate
   -> ReadyProjectUpdate
   -> PublishedRouteSnapshot
 ```
 
-`commit()` 只接受 ready 类型；同版本忽略、空 Host 卸载、无效候选保旧等兼容语义保持
-不变。
+同版本忽略、空 Host 卸载、无效候选保旧等兼容语义保持不变。本项没有修改 Fiber 或 TLS
+store；TLS Prepared 候选没有外部异步 readiness，且 commit 会在 owner loop 重判版本/digest。
 
 ### 5.6 L-06：系统 DNS 配置和多 nameserver
 

@@ -142,6 +142,7 @@ TEST(AccessServiceDiscoveryTest, WaitsBeforePublishAndPinsDiscoveryGeneration) {
         EXPECT_TRUE(store.pin()->projects().empty());
         EXPECT_EQ(discovery.size(), 1u);
         EXPECT_EQ(naming.subscriptions("orders"), 1u);
+        EXPECT_FALSE(std::move(*prepared).try_ready());
 
         fiber::tests::ServiceInfoTestData info;
         info.name = "orders";
@@ -177,15 +178,15 @@ TEST(AccessServiceDiscoveryTest, WaitsBeforePublishAndPinsDiscoveryGeneration) {
                 },
         };
         naming.push("orders", std::move(info));
-        auto ready = co_await prepared->project_snapshot->wait_ready();
+        EXPECT_FALSE(std::move(*prepared).try_ready());
+        auto ready = co_await std::move(*prepared).wait_ready();
         EXPECT_TRUE(ready);
         if (!ready) {
-            prepared = std::unexpected(fiber::access_server::AccessConfigError{});
             co_await discovery.shutdown();
             loop.stop();
             co_return;
         }
-        auto committed = store.commit(std::move(*prepared));
+        auto committed = store.commit(std::move(*ready));
         EXPECT_TRUE(committed);
         if (!committed) {
             store.clear();
@@ -312,10 +313,9 @@ TEST(AccessServiceDiscoveryTest, ClosedBeforeInitialUpdateRejectsCandidate) {
                 co_await fiber::async::yield();
                 co_await discovery.shutdown();
             });
-            auto ready = co_await prepared->project_snapshot->wait_ready();
+            auto ready = co_await std::move(*prepared).wait_ready();
             EXPECT_FALSE(ready);
             EXPECT_TRUE(store.pin()->projects().empty());
-            prepared = std::unexpected(fiber::access_server::AccessConfigError{});
         }
         co_await discovery.shutdown();
         completed = true;

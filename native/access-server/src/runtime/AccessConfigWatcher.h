@@ -165,11 +165,13 @@ private:
     void dispatch_project_compile();
     void cancel_project_compile(const std::shared_ptr<ProjectEntry> &entry) noexcept;
     void apply_compiled_project(ProjectCompileJob &job);
-    void apply_prepared_project(const std::shared_ptr<ProjectEntry> &entry, PreparedConfigUpdate prepared,
+    void apply_prepared_project(const std::shared_ptr<ProjectEntry> &entry, PreparedProjectUpdate prepared,
                                 std::uint64_t generation, std::uint64_t revision_version, std::string data_id,
                                 std::string md5);
-    [[nodiscard]] async::DetachedTask apply_ready_project(std::shared_ptr<ProjectEntry> entry,
-                                                          PreparedConfigUpdate prepared, std::uint64_t generation,
+    void commit_ready_project(const std::shared_ptr<ProjectEntry> &entry, ReadyProjectUpdate ready,
+                              std::uint64_t generation, std::string data_id, std::string md5);
+    [[nodiscard]] async::DetachedTask await_ready_project(std::shared_ptr<ProjectEntry> entry,
+                                                          PreparedProjectUpdate prepared, std::uint64_t generation,
                                                           std::uint64_t revision_version, std::string data_id,
                                                           std::string md5) noexcept;
     [[nodiscard]] async::DetachedTask retry_project_subscription(std::shared_ptr<ProjectEntry> entry,
