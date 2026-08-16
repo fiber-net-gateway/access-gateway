@@ -102,7 +102,7 @@ std::expected<std::unique_ptr<AccessServerRuntime>, AccessServerRuntimeError>
 AccessServerRuntime::create(event::EventLoop &accept_loop, event::EventLoop &nacos_loop,
                             event::EventLoop &compiler_loop, event::EventLoop &cat_loop,
                             event::EventLoopGroup &http_workers, const AccessServerConfig &config,
-                            const net::ListenOptions &listen_options) {
+                            const net::ListenOptions &listen_options, AccessProcessMetricsSources process_metrics) {
     auto upstream_tls_validated = validate_upstream_tls_client_policy(config.upstream_tls_client_policy());
     if (!upstream_tls_validated) {
         return std::unexpected(make_io_error(AccessServerRuntimeErrorCode::InitializeUpstreamTls,
@@ -135,6 +135,7 @@ AccessServerRuntime::create(event::EventLoop &accept_loop, event::EventLoop &nac
         }
         cat_client = std::move(*created);
     }
+    process_metrics.cat_client = cat_client.get();
 
     auto runtime = std::unique_ptr<AccessServerRuntime>(new (std::nothrow) AccessServerRuntime(
             accept_loop, nacos_loop, compiler_loop, cat_loop, http_workers, config.listen_address(),
@@ -143,7 +144,8 @@ AccessServerRuntime::create(event::EventLoop &accept_loop, event::EventLoop &nac
             config.default_max_request_body_size(), config.test_mode(), config.client_metadata_options(),
             config.access_log_options(), config.upstream_tls_client_policy(), config.watcher_options(),
             config.gray_watcher_options(), config.tls_certificate_watcher_options(), config.service_discovery_options(),
-            std::move(cat_client), std::move(*client), std::move(*config_service), std::move(*naming_service)));
+            process_metrics, std::move(cat_client), std::move(*client), std::move(*config_service),
+            std::move(*naming_service)));
     if (!runtime) {
         return std::unexpected(AccessServerRuntimeError{
                 .code = AccessServerRuntimeErrorCode::AllocateRuntime,
@@ -162,8 +164,9 @@ AccessServerRuntime::AccessServerRuntime(
         ClientMetadataResolverOptions client_metadata_options, AccessLogOptions access_log_options,
         UpstreamTlsClientPolicy upstream_tls_client_policy, AccessConfigWatcherOptions watcher_options,
         GrayConfigWatcherOptions gray_options, TlsCertificateWatcherOptions tls_certificate_options,
-        AccessServiceDiscoveryOptions service_discovery_options, std::unique_ptr<cat::CatClient> cat_client,
-        std::unique_ptr<nacos::NacosClient> nacos_client, std::unique_ptr<nacos::ConfigService> config_service,
+        AccessServiceDiscoveryOptions service_discovery_options, AccessProcessMetricsSources process_metrics,
+        std::unique_ptr<cat::CatClient> cat_client, std::unique_ptr<nacos::NacosClient> nacos_client,
+        std::unique_ptr<nacos::ConfigService> config_service,
         std::unique_ptr<nacos::NamingService> naming_service) noexcept :
     accept_loop_(&accept_loop), nacos_loop_(&nacos_loop), compiler_loop_(&compiler_loop), cat_loop_(&cat_loop),
     http_workers_(&http_workers), listen_address_(std::move(listen_address)),
@@ -175,7 +178,7 @@ AccessServerRuntime::AccessServerRuntime(
     activation_endpoint_options_(activation_endpoint_options), http_server_options_(std::move(http_server_options)),
     cat_client_(std::move(cat_client)), nacos_client_(std::move(nacos_client)),
     config_service_(std::move(config_service)), naming_service_(std::move(naming_service)),
-    config_compiler_(compiler_loop), runtime_metrics_(nacos_loop),
+    config_compiler_(compiler_loop), runtime_metrics_(nacos_loop, process_metrics),
     activation_evidence_(nacos_loop, activation_identity(activation_endpoint_options)), gray_store_(http_workers),
     service_discovery_(nacos_loop, *naming_service_,
                        AccessServiceOps{.swrr_options = service_discovery_options.swrr_options,

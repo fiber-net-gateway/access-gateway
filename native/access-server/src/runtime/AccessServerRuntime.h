@@ -82,7 +82,7 @@ public:
     [[nodiscard]] static std::expected<std::unique_ptr<AccessServerRuntime>, AccessServerRuntimeError>
     create(event::EventLoop &accept_loop, event::EventLoop &nacos_loop, event::EventLoop &compiler_loop,
            event::EventLoop &cat_loop, event::EventLoopGroup &http_workers, const AccessServerConfig &config,
-           const net::ListenOptions &listen_options = {});
+           const net::ListenOptions &listen_options = {}, AccessProcessMetricsSources process_metrics = {});
 
     ~AccessServerRuntime();
 
@@ -115,7 +115,8 @@ private:
                         AccessConfigWatcherOptions watcher_options, GrayConfigWatcherOptions gray_options,
                         TlsCertificateWatcherOptions tls_certificate_options,
                         AccessServiceDiscoveryOptions service_discovery_options,
-                        std::unique_ptr<cat::CatClient> cat_client, std::unique_ptr<nacos::NacosClient> nacos_client,
+                        AccessProcessMetricsSources process_metrics, std::unique_ptr<cat::CatClient> cat_client,
+                        std::unique_ptr<nacos::NacosClient> nacos_client,
                         std::unique_ptr<nacos::ConfigService> config_service,
                         std::unique_ptr<nacos::NamingService> naming_service) noexcept;
 
