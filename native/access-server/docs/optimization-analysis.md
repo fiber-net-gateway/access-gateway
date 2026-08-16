@@ -721,21 +721,62 @@ Fiber、没有新增 Fiber Issue，也没有更新 gitlink。
 
 **归属：本项目。**
 
-每个项目 commit 都复制全部 project snapshot 并重建全局 Host matcher；全局 snapshot
-构建还用嵌套循环检查重复项目。数百项目逐个到达时，会反复处理越来越大的项目集合。
+**实施状态：已解决（2026-08-17）。** 改造前每个项目 commit 都复制全部 project snapshot
+并重建全局 Host matcher；全局 snapshot 构建还用嵌套循环检查重复项目。数百项目逐个到达时，
+会反复处理越来越大的项目集合。
 
 代码位置：
 
 - [`RouteConfigStore.cpp`](../src/runtime/RouteConfigStore.cpp#L99)；
 - [`AccessRouteSnapshot.cpp`](../src/routing/AccessRouteSnapshot.cpp#L18)。
 
-建议：
+实现后的职责和状态边界如下：
 
-- owner-loop registry 通过 map/sorted index 保证 project 唯一；
-- 初始同步期间 batch/coalesce 已完成准备的项目；
-- 一次构建全局 Host matcher 后发布；
-- 正常热更新仍保留按候选原子发布和失败保旧；
-- 分别记录单项目 compile、service ready、global build 和 publish 时间。
+- `RouteConfigStore` 的 owner-loop registry 改为按 project 排序的透明比较 `map`，一条 record 同时
+  持有最后成功版本和可选 loaded snapshot。project 唯一性由 registry 保证，版本查询从线性扫描
+  改为 O(log N)；unload 只清除 snapshot 并保留最后成功非空版本，project-list remove 才删除
+  record；
+- 新增 `commit_batch(vector<ReadyProjectUpdate>)`。它仍只接受完成 compile、selector bind 和
+  service-ready 的 move-only typestate token；按 project 名确定性排序，组装完整候选后只调用一次
+  `AccessRouteSnapshot::build()`，成功后只做一次 atomic shared snapshot publish；
+- 批量提交先用与 `HostMatcher` 完全相同的 Java byte-fold identity 做线性 Host ownership 校验。
+  一个候选冲突时恢复该 project 的旧 Host 所有权和旧 snapshot，其他合法候选仍进入最终批次；
+  因此错误输入也不会退化回 N 次全局 rebuild，且保留失败候选不替换旧 snapshot 的语义；
+- `AccessConfigWatcher` 只在启动时 store 为空的首轮同步开启 initial batch。项目进入显式
+  `ReadyToPublish` 状态并暂存在对应 `ProjectEntry`；当前 project-list 的每个项目取得首个终态后
+  才统一 commit。`AccessServerRuntime` 本来就要等待同一 readiness 才启动 listener，因此不会增加
+  对外可用延迟，也不会暴露半套初始路由；
+- 同步期间同项目新 generation、project-list remove、subscription close 和 shutdown 都通过
+  `ProjectEntry::advance()` 销毁 staged token。首轮结束后恢复逐候选热更新；same-version、invalid
+  candidate、unload/remove 和失败保旧行为不变；
+- `AccessRouteSnapshot::build()` 的防御性 project 去重由嵌套循环改为局部 hash set，即使绕过
+  store 直接调用仍会校验唯一性，但复杂度降为期望 O(N)；
+- readiness/Prometheus 新增 bounded `ready_to_publish` 数量；配置阶段指标只使用固定的
+  `project_compile`、`service_ready`、`global_build`、`publish` 四个 label，分别输出 observation、
+  累计纳秒和最大纳秒，不包含 project、Host 或 Data ID。
+
+新增默认关闭的 `fiber_access_route_publication_benchmark`。每轮在计时外完成相同 project
+snapshot 的 compile/prepare，然后比较逐项目 commit 控制路径与一次 batch commit；逐项路径等价于
+旧启动发布方式，但已经享受新 registry 和 O(N) 去重，因此结果是保守对照：
+
+```bash
+cmake -S native -B native/build -DACCESS_SERVER_BUILD_BENCHMARKS=ON
+cmake --build native/build \
+  --target fiber_access_route_publication_benchmark --parallel
+native/build/access-server/fiber_access_route_publication_benchmark
+```
+
+2026-08-17 在 Release+ThinLTO、Clang 22、WSL 的同一构建树中连续运行三轮；下表取三轮各自
+7 个 sample 中位数的再次中位数。未绑核且未隔离系统负载，数值只用于扩展趋势，不是生产容量：
+
+| projects | 逐项 commit median | batch median | 约加速 | snapshot publications |
+| ---: | ---: | ---: | ---: | ---: |
+| 10 | 10.3 us | 4.1 us | 2.5x | 10 → 1 |
+| 100 | 1,280.9 us | 66.3 us | 19.3x | 100 → 1 |
+| 500 | 74,696.4 us | 660.5 us | 113.1x | 500 → 1 |
+
+本项是 access-server 的配置编排、Java Host 兼容和发布策略，完全由本项目实现；没有修改 Fiber、
+没有新增 Fiber Issue，也没有更新 gitlink。
 
 ### 7.7 P-07：Host matcher 高 fan-out
 

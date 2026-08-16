@@ -413,6 +413,8 @@ async::Task<std::expected<void, AccessServerRuntimeError>> AccessServerRuntime::
                 message.append(std::to_string(current->retrying_projects));
                 message.append(", processing=");
                 message.append(std::to_string(current->processing_projects));
+                message.append(", ready_to_publish=");
+                message.append(std::to_string(current->ready_to_publish_projects));
                 message.append(", rejected=");
                 message.append(std::to_string(current->rejected_projects));
                 message.push_back(')');

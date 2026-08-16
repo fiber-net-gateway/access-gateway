@@ -46,6 +46,14 @@ enum class AccessConfigMetricReadinessState : std::uint8_t {
     Stopped,
 };
 
+enum class AccessConfigMetricStage : std::uint8_t {
+    ProjectCompile,
+    ServiceReady,
+    GlobalBuild,
+    Publish,
+    Count,
+};
+
 struct AccessConfigMetricReadiness {
     AccessConfigMetricReadinessState state = AccessConfigMetricReadinessState::WaitingForProjectList;
     std::uint64_t desired_projects = 0;
@@ -53,6 +61,7 @@ struct AccessConfigMetricReadiness {
     std::uint64_t synchronized_projects = 0;
     std::uint64_t retrying_projects = 0;
     std::uint64_t processing_projects = 0;
+    std::uint64_t ready_to_publish_projects = 0;
     std::uint64_t rejected_projects = 0;
 };
 
@@ -60,11 +69,14 @@ struct AccessConfigMetricsObserver {
     using EventFunction = void (*)(void *context, AccessConfigMetricEvent event) noexcept;
     using ReadinessFunction = void (*)(void *context, const AccessConfigMetricReadiness &readiness) noexcept;
     using SnapshotFunction = void (*)(void *context, const AccessRouteSnapshot &snapshot) noexcept;
+    using DurationFunction = void (*)(void *context, AccessConfigMetricStage stage,
+                                      std::chrono::nanoseconds duration) noexcept;
 
     void *context = nullptr;
     EventFunction on_event = nullptr;
     ReadinessFunction on_readiness = nullptr;
     SnapshotFunction on_snapshot = nullptr;
+    DurationFunction on_duration = nullptr;
 };
 
 // The Nacos EventLoop is the sole writer. Metrics workers take lock-free,
@@ -78,6 +90,7 @@ public:
 
 private:
     static constexpr std::size_t kEventCount = static_cast<std::size_t>(AccessConfigMetricEvent::Count);
+    static constexpr std::size_t kStageCount = static_cast<std::size_t>(AccessConfigMetricStage::Count);
 
     struct Snapshot {
         AccessConfigMetricReadiness readiness;
@@ -94,8 +107,11 @@ private:
     static void observe_event(void *context, AccessConfigMetricEvent event) noexcept;
     static void observe_readiness(void *context, const AccessConfigMetricReadiness &readiness) noexcept;
     static void observe_snapshot(void *context, const AccessRouteSnapshot &snapshot) noexcept;
+    static void observe_duration(void *context, AccessConfigMetricStage stage,
+                                 std::chrono::nanoseconds duration) noexcept;
 
     void record_event(AccessConfigMetricEvent event) noexcept;
+    void record_duration(AccessConfigMetricStage stage, std::chrono::nanoseconds duration) noexcept;
     void update_readiness(const AccessConfigMetricReadiness &readiness) noexcept;
     void update_snapshot(const AccessRouteSnapshot &snapshot) noexcept;
     void begin_update() noexcept;
@@ -104,6 +120,9 @@ private:
 
     event::EventLoop *owner_ = nullptr;
     std::array<std::atomic<std::uint64_t>, kEventCount> events_{};
+    std::array<std::atomic<std::uint64_t>, kStageCount> duration_observations_{};
+    std::array<std::atomic<std::uint64_t>, kStageCount> duration_nanoseconds_{};
+    std::array<std::atomic<std::uint64_t>, kStageCount> duration_max_nanoseconds_{};
     std::atomic<std::uint64_t> sequence_{0};
     std::atomic<std::uint8_t> readiness_state_{
             static_cast<std::uint8_t>(AccessConfigMetricReadinessState::WaitingForProjectList)};
@@ -112,6 +131,7 @@ private:
     std::atomic<std::uint64_t> synchronized_projects_{0};
     std::atomic<std::uint64_t> retrying_projects_{0};
     std::atomic<std::uint64_t> processing_projects_{0};
+    std::atomic<std::uint64_t> ready_to_publish_projects_{0};
     std::atomic<std::uint64_t> rejected_projects_{0};
     std::atomic<std::uint64_t> snapshot_generation_{0};
     std::atomic<std::uint64_t> snapshot_projects_{0};

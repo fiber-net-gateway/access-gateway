@@ -101,6 +101,30 @@ std::optional<std::size_t> validated_host_end(std::string_view host) noexcept {
 
 } // namespace
 
+std::size_t host_pattern_identity_hash(std::string_view pattern) noexcept {
+    constexpr std::size_t kOffset =
+            sizeof(std::size_t) == sizeof(std::uint64_t) ? 14695981039346656037ULL : 2166136261U;
+    constexpr std::size_t kPrime = sizeof(std::size_t) == sizeof(std::uint64_t) ? 1099511628211ULL : 16777619U;
+    std::size_t hash = kOffset;
+    for (const char ch: pattern) {
+        hash ^= static_cast<unsigned char>(java_host_fold(ch));
+        hash *= kPrime;
+    }
+    return hash;
+}
+
+bool host_pattern_identity_equals(std::string_view left, std::string_view right) noexcept {
+    if (left.size() != right.size()) {
+        return false;
+    }
+    for (std::size_t index = 0; index < left.size(); ++index) {
+        if (java_host_fold(left[index]) != java_host_fold(right[index])) {
+            return false;
+        }
+    }
+    return true;
+}
+
 HostMatcher::HostMatcher() { nodes_.emplace_back(); }
 
 std::expected<HostMatcher, AccessConfigError> HostMatcher::build(std::span<const HostPattern> patterns) {

@@ -81,6 +81,9 @@ TEST(AccessConfigMetricsTest, RendersFixedEventsReadinessAndSnapshotAggregates) 
         observer.on_event(observer.context, AccessConfigMetricEvent::ProjectRoutePublished);
         observer.on_event(observer.context, AccessConfigMetricEvent::ProjectRoutePublished);
         observer.on_event(observer.context, AccessConfigMetricEvent::ProjectListDecodeFailed);
+        observer.on_duration(observer.context, AccessConfigMetricStage::ProjectCompile, std::chrono::nanoseconds(7));
+        observer.on_duration(observer.context, AccessConfigMetricStage::ProjectCompile, std::chrono::nanoseconds(5));
+        observer.on_duration(observer.context, AccessConfigMetricStage::ServiceReady, std::chrono::nanoseconds(11));
         observer.on_readiness(observer.context, AccessConfigMetricReadiness{
                                                         .state = AccessConfigMetricReadinessState::Ready,
                                                         .desired_projects = 3,
@@ -101,9 +104,18 @@ TEST(AccessConfigMetricsTest, RendersFixedEventsReadinessAndSnapshotAggregates) 
     EXPECT_NE(output.find("access_server_config_updates_total{resource=\"project_list\",result=\"failure\",reason="
                           "\"decode\"} 1"),
               std::string::npos);
+    EXPECT_NE(output.find("access_server_config_stage_duration_nanoseconds_total{stage=\"project_compile\"} 12"),
+              std::string::npos);
+    EXPECT_NE(output.find("access_server_config_stage_duration_observations_total{stage=\"project_compile\"} 2"),
+              std::string::npos);
+    EXPECT_NE(output.find("access_server_config_stage_duration_max_nanoseconds{stage=\"project_compile\"} 7"),
+              std::string::npos);
+    EXPECT_NE(output.find("access_server_config_stage_duration_nanoseconds_total{stage=\"service_ready\"} 11"),
+              std::string::npos);
     EXPECT_NE(output.find("access_server_config_readiness{state=\"ready\"} 1"), std::string::npos);
     EXPECT_NE(output.find("access_server_config_readiness{state=\"unavailable\"} 0"), std::string::npos);
     EXPECT_NE(output.find("access_server_config_projects{state=\"desired\"} 3"), std::string::npos);
+    EXPECT_NE(output.find("access_server_config_projects{state=\"ready_to_publish\"} 0"), std::string::npos);
     EXPECT_NE(output.find("access_server_config_projects{state=\"rejected\"} 1"), std::string::npos);
     EXPECT_NE(output.find("access_server_route_snapshot_resources{resource=\"project\"} 1"), std::string::npos);
     EXPECT_NE(output.find("access_server_route_snapshot_resources{resource=\"host\"} 1"), std::string::npos);
