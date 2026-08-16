@@ -993,9 +993,31 @@ Clang 22 `-O3` 布局复测中，四个成员分别为 432、112、184、136 byt
 
 **归属：本项目。**
 
-先按通用 scalar coercion、project/route、gray、field-path error builder 分区。不要为了
-缩短文件直接采用反射式 codec，也不要在没有内存 profile 时重写成流式 parser；Java
-标量转换、duplicate/unknown/null 和错误 offset 属于兼容契约。
+**实施状态：已解决（2026-08-17）。** 公共 `AccessConfigCodec.h`、三个解析入口和返回类型保持
+不变，原先 1,136 行的单实现文件已按 wire contract 职责拆分：
+
+- `AccessConfigJson` 只负责将 Fiber tokenizer 物化为 pool-backed、trivially-copyable JSON 树，
+  保留浮点数原始 token spelling 和 parser byte offset；
+- `AccessConfigErrorBuilder` 统一构造 error code、脱敏消息、子字段路径和数组下标；其非模板
+  `DecodeFailure` 避免不同 codec translation unit 重复实例化整套 error builder；
+- `AccessConfigCoercion` 集中实现 Java/Jackson scalar coercion、duration/data-size、gzip、enum，
+  以及 project 与 gray 共用的 string map/set；
+- `ProjectConfigCodec` 独占 project、host、route、body 模型解码，`GrayMatchConfigCodec` 独占 gray
+  rule 解码；`AccessConfigCodec.cpp` 只保留分号分隔的 project-list wire codec。
+
+拆分继续使用一次 `BufPool` 和一棵借用输入/pool storage 的 JSON 树，所有模型转换都在 pool
+析构前同步完成；没有改成反射式 codec 或未经 profile 的流式 parser。兼容不变量包括：空内容与
+JSON `null` 的资源级差异、unknown field 忽略、duplicate field 按输入顺序处理且 last-wins、Java
+int/Boolean/String/enum coercion、duration int overflow、data-size long bit behavior，以及原始 JSON
+错误 offset 和嵌套 field path。新增测试锁定 malformed JSON offset 11、
+`routes[0].proxy_headers.X`，以及 gray duplicate/unknown/null/scalar 行为；既有 Java fixture、limits、
+watcher 和 validator 测试继续覆盖完整入口。
+
+配置 decode/compile 已在此前的 C-02 中移出 Nacos owner loop，本次没有触碰请求热路径，也没有
+新增反射、虚调用、`std::function`、共享所有权、锁或 coroutine。Clang 22 `-O3` 无 LTO 对象
+text 从单对象 85,717 bytes 变为六个对象合计 89,675 bytes（+3,958，约 +4.6%，主要是独立 TU
+边界）；实际 Release ThinLTO access-server text 从 6,914,941 降至 6,914,601 bytes（-340，约
+-0.005%），文件大小增加 400 bytes（约 +0.002%）。
 
 ## 9. 可观测性和实例激活证据
 

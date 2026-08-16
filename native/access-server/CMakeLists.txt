@@ -5,7 +5,12 @@ endif()
 
 add_library(access_server_core STATIC
     "${CMAKE_CURRENT_LIST_DIR}/src/config/AccessConfigCodec.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/config/AccessConfigCoercion.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/config/AccessConfigErrorBuilder.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/config/AccessConfigJson.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/config/AccessConfigLimits.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/config/GrayMatchConfigCodec.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/config/ProjectConfigCodec.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/config/TlsCertificateConfig.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/execution/AccessResult.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/execution/ClientMetadata.cpp"
