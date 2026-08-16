@@ -11,7 +11,10 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
+
+#include <fiber/async/Task.h>
 
 namespace fiber::access_server {
 
@@ -30,18 +33,69 @@ struct ConfigUpdateResult {
 
 using ConfigUpdateOutcome = std::expected<ConfigUpdateResult, AccessConfigError>;
 
-struct PreparedConfigUpdate {
-    ConfigUpdateStatus status = ConfigUpdateStatus::IgnoredEmpty;
-    std::string project;
-    std::int32_t version = 0;
-    std::shared_ptr<const ProjectRouteSnapshot> project_snapshot;
+class PreparedProjectUpdate;
 
-    [[nodiscard]] bool needs_publish() const noexcept {
-        return status == ConfigUpdateStatus::Published || status == ConfigUpdateStatus::Unloaded;
-    }
+// Proof that a prepared Project candidate completed every required readiness
+// transition. Only PreparedProjectUpdate can create this move-only type.
+class ReadyProjectUpdate final {
+public:
+    ReadyProjectUpdate(const ReadyProjectUpdate &) = delete;
+    ReadyProjectUpdate &operator=(const ReadyProjectUpdate &) = delete;
+    ReadyProjectUpdate(ReadyProjectUpdate &&other) noexcept;
+    ReadyProjectUpdate &operator=(ReadyProjectUpdate &&other) noexcept;
+    ~ReadyProjectUpdate() = default;
+
+private:
+    friend class PreparedProjectUpdate;
+    friend class RouteConfigStore;
+
+    ReadyProjectUpdate(ConfigUpdateStatus status, std::string project, std::int32_t version,
+                       std::shared_ptr<const ProjectRouteSnapshot> project_snapshot) noexcept :
+        status_(status), project_(std::move(project)), version_(version),
+        project_snapshot_(std::move(project_snapshot)) {}
+
+    ConfigUpdateStatus status_ = ConfigUpdateStatus::IgnoredEmpty;
+    std::string project_;
+    std::int32_t version_ = 0;
+    std::shared_ptr<const ProjectRouteSnapshot> project_snapshot_;
+    bool valid_ = true;
 };
 
-using PreparedConfigUpdateOutcome = std::expected<PreparedConfigUpdate, AccessConfigError>;
+using ReadyProjectUpdateOutcome = std::expected<ReadyProjectUpdate, ProxyAddressReadyError>;
+
+// Owns a fully compiled and selector-bound Project candidate. It cannot be
+// committed until one of its checked one-way transitions produces ReadyProjectUpdate.
+class PreparedProjectUpdate final {
+public:
+    PreparedProjectUpdate(const PreparedProjectUpdate &) = delete;
+    PreparedProjectUpdate &operator=(const PreparedProjectUpdate &) = delete;
+    PreparedProjectUpdate(PreparedProjectUpdate &&other) noexcept;
+    PreparedProjectUpdate &operator=(PreparedProjectUpdate &&other) noexcept;
+    ~PreparedProjectUpdate() = default;
+
+    [[nodiscard]] std::optional<ReadyProjectUpdate> try_ready() && noexcept;
+    [[nodiscard]] async::Task<ReadyProjectUpdateOutcome> wait_ready() && noexcept;
+
+private:
+    friend class RouteConfigStore;
+
+    PreparedProjectUpdate(ConfigUpdateStatus status, std::string project, std::int32_t version,
+                          std::shared_ptr<const ProjectRouteSnapshot> project_snapshot) noexcept :
+        status_(status), project_(std::move(project)), version_(version),
+        project_snapshot_(std::move(project_snapshot)) {}
+
+    [[nodiscard]] ReadyProjectUpdate into_ready() && noexcept;
+    [[nodiscard]] static async::Task<ReadyProjectUpdateOutcome>
+    wait_ready_impl(PreparedProjectUpdate prepared) noexcept;
+
+    ConfigUpdateStatus status_ = ConfigUpdateStatus::IgnoredEmpty;
+    std::string project_;
+    std::int32_t version_ = 0;
+    std::shared_ptr<const ProjectRouteSnapshot> project_snapshot_;
+    bool valid_ = true;
+};
+
+using PreparedProjectUpdateOutcome = std::expected<PreparedProjectUpdate, AccessConfigError>;
 
 // Mutation is serialized by the runtime owner EventLoop. Requests may pin the
 // immutable published snapshot from any serving thread.
@@ -52,13 +106,13 @@ public:
     RouteConfigStore(ScriptCompilerAdapter script_compiler, AccessServiceDiscovery &service_discovery,
                      AccessServiceDiscoveryOptions discovery_options = {});
 
-    [[nodiscard]] PreparedConfigUpdateOutcome prepare(std::string_view project,
-                                                      const std::optional<ProjectConfig> &config);
-    [[nodiscard]] PreparedConfigUpdateOutcome prepare_compiled(std::string_view project,
-                                                               std::optional<std::int32_t> version,
-                                                               std::optional<ProjectRouteSnapshot> project_snapshot);
+    [[nodiscard]] PreparedProjectUpdateOutcome prepare(std::string_view project,
+                                                       const std::optional<ProjectConfig> &config);
+    [[nodiscard]] PreparedProjectUpdateOutcome prepare_compiled(std::string_view project,
+                                                                std::optional<std::int32_t> version,
+                                                                std::optional<ProjectRouteSnapshot> project_snapshot);
     [[nodiscard]] ConfigUpdateOutcome apply(std::string_view project, const std::optional<ProjectConfig> &config);
-    [[nodiscard]] ConfigUpdateOutcome commit(PreparedConfigUpdate prepared);
+    [[nodiscard]] ConfigUpdateOutcome commit(ReadyProjectUpdate ready);
     [[nodiscard]] ConfigUpdateOutcome remove_project(std::string_view project);
     void clear() noexcept;
 

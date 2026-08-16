@@ -426,42 +426,45 @@ void AccessConfigWatcher::apply_compiled_project(ProjectCompileJob &job) {
 }
 
 void AccessConfigWatcher::apply_prepared_project(const std::shared_ptr<ProjectEntry> &entry,
-                                                 PreparedConfigUpdate prepared, std::uint64_t generation,
+                                                 PreparedProjectUpdate prepared, std::uint64_t generation,
                                                  std::uint64_t revision_version, std::string data_id, std::string md5) {
-    if (!prepared.needs_publish()) {
-        settle_project(entry, AccessProjectConfigState::Accepted);
+    auto ready = std::move(prepared).try_ready();
+    if (ready) {
+        commit_ready_project(entry, std::move(*ready), generation, std::move(data_id), std::move(md5));
         return;
     }
-    if (prepared.status == ConfigUpdateStatus::Unloaded) {
-        auto updated = store_->commit(std::move(prepared));
-        if (!updated) {
-            report_failure(entry, AccessConfigWatcherFailureStage::Publish, std::move(data_id), std::move(md5),
-                           common::IoErr::Invalid, std::move(updated.error()));
-            settle_project(entry, AccessProjectConfigState::Rejected);
-            return;
-        }
-        ++successful_updates_;
-        entry->published_generation = generation;
-        publish_observer(updated->snapshot);
-        settle_project(entry, AccessProjectConfigState::Accepted);
-        return;
-    }
-
     background_tasks_.add();
     async::spawn([this, entry, prepared = std::move(prepared), generation, revision_version,
                   data_id = std::move(data_id), md5 = std::move(md5)]() mutable {
-        return apply_ready_project(std::move(entry), std::move(prepared), generation, revision_version,
+        return await_ready_project(std::move(entry), std::move(prepared), generation, revision_version,
                                    std::move(data_id), std::move(md5));
     });
 }
 
-async::DetachedTask AccessConfigWatcher::apply_ready_project(std::shared_ptr<ProjectEntry> entry,
-                                                             PreparedConfigUpdate prepared, std::uint64_t generation,
+void AccessConfigWatcher::commit_ready_project(const std::shared_ptr<ProjectEntry> &entry, ReadyProjectUpdate ready,
+                                               std::uint64_t generation, std::string data_id, std::string md5) {
+    auto updated = store_->commit(std::move(ready));
+    if (!updated) {
+        report_failure(entry, AccessConfigWatcherFailureStage::Publish, std::move(data_id), std::move(md5),
+                       common::IoErr::Invalid, std::move(updated.error()));
+        settle_project(entry, AccessProjectConfigState::Rejected);
+        return;
+    }
+    if (updated->status == ConfigUpdateStatus::Published || updated->status == ConfigUpdateStatus::Unloaded) {
+        ++successful_updates_;
+        entry->published_generation = generation;
+        publish_observer(updated->snapshot);
+    }
+    settle_project(entry, AccessProjectConfigState::Accepted);
+}
+
+async::DetachedTask AccessConfigWatcher::await_ready_project(std::shared_ptr<ProjectEntry> entry,
+                                                             PreparedProjectUpdate prepared, std::uint64_t generation,
                                                              std::uint64_t revision_version, std::string data_id,
                                                              std::string md5) noexcept {
     auto revisions = entry->revisions.subscribe();
     auto ready_or_replaced =
-            co_await async::when_any([&prepared]() { return prepared.project_snapshot->wait_ready().select(); },
+            co_await async::when_any([&prepared]() { return std::move(prepared).wait_ready().select(); },
                                      [&revisions, revision_version]() { return revisions.next(revision_version); });
 
     if (ready_or_replaced.is<0>()) {
@@ -480,17 +483,7 @@ async::DetachedTask AccessConfigWatcher::apply_ready_project(std::shared_ptr<Pro
                            });
             settle_project(entry, AccessProjectConfigState::Rejected);
         } else if (current) {
-            auto updated = store_->commit(std::move(prepared));
-            if (!updated) {
-                report_failure(entry, AccessConfigWatcherFailureStage::Publish, std::move(data_id), std::move(md5),
-                               common::IoErr::Invalid, std::move(updated.error()));
-                settle_project(entry, AccessProjectConfigState::Rejected);
-            } else {
-                ++successful_updates_;
-                entry->published_generation = generation;
-                publish_observer(updated->snapshot);
-                settle_project(entry, AccessProjectConfigState::Accepted);
-            }
+            commit_ready_project(entry, std::move(*ready), generation, std::move(data_id), std::move(md5));
         }
     } else {
         std::move(ready_or_replaced).get<1>();

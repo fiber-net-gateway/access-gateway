@@ -24,8 +24,8 @@ compiler loop
 Nacos owner loop
   -> reject stale generation results
   -> bind NamingService leases where required
-  -> wait for service readiness
-  -> atomically publish, or retain the previous snapshot on failure
+  -> transition PreparedProjectUpdate to ReadyProjectUpdate
+  -> commit only the Ready type, or retain the previous snapshot on failure
 ```
 
 Only immutable Nacos data and a job result cross loops. Watcher maps, readiness state,
@@ -48,6 +48,9 @@ normalized service and cluster metadata. After the candidate returns, `RouteConf
 those placeholders on the Nacos loop. This is the only stage that calls
 `ServiceDiscovery::acquire()`, preserving Fiber's owner-loop contract. Service readiness is then
 awaited before commit as before.
+
+The move-only publication states and their compatibility semantics are specified in
+[`config-publication-typestate.md`](config-publication-typestate.md).
 
 The compiler owns a separate `AccessScriptRuntime`, constructed lazily on the compiler loop. Its
 extension data remains alive for the lifetime of runtime snapshots; request workers only execute
