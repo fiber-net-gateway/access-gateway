@@ -17,6 +17,7 @@
 
 #include "NacosSnapshotTestBuilder.h"
 #include "NacosSubscriptionStub.h"
+#include "observability/AccessConfigMetrics.h"
 #include "runtime/AccessConfigWatcher.h"
 
 namespace {
@@ -172,6 +173,7 @@ TEST(AccessConfigWatcherTest, ReconcilesProjectsAndRetainsLastValidSnapshots) {
     fiber::access_server::AccessConfigCompiler compiler(compiler_group.at(0));
     FakeConfigService service;
     fiber::access_server::RouteConfigStore store;
+    fiber::access_server::AccessConfigMetrics config_metrics(loop);
     std::size_t observer_updates = 0;
     fiber::access_server::RouteSnapshotObserver observer{
             .context = &observer_updates,
@@ -180,7 +182,8 @@ TEST(AccessConfigWatcherTest, ReconcilesProjectsAndRetainsLastValidSnapshots) {
                         ++*static_cast<std::size_t *>(context);
                     },
     };
-    fiber::access_server::AccessConfigWatcher watcher(loop, compiler, service, store, {}, observer);
+    fiber::access_server::AccessConfigWatcher watcher(loop, compiler, service, store, {}, observer,
+                                                      config_metrics.observer());
     bool completed = false;
 
     compiler_group.start();
@@ -306,6 +309,33 @@ TEST(AccessConfigWatcherTest, ReconcilesProjectsAndRetainsLastValidSnapshots) {
     compiler_group.join();
     EXPECT_TRUE(completed);
     EXPECT_EQ(watcher.state(), fiber::access_server::AccessConfigWatcherState::Stopped);
+    std::string metrics;
+    config_metrics.append_prometheus(metrics, std::chrono::steady_clock::now());
+    EXPECT_NE(metrics.find("access_server_config_updates_total{resource=\"project_list\",result=\"success\",reason="
+                           "\"accepted\"} 5"),
+              std::string::npos);
+    EXPECT_NE(metrics.find("access_server_config_updates_total{resource=\"project_list\",result=\"failure\",reason="
+                           "\"decode\"} 1"),
+              std::string::npos);
+    EXPECT_NE(metrics.find("access_server_config_updates_total{resource=\"project_route\",result=\"success\",reason="
+                           "\"published\"} 2"),
+              std::string::npos);
+    EXPECT_NE(metrics.find("access_server_config_updates_total{resource=\"project_route\",result=\"ignored\",reason="
+                           "\"version_unchanged\"} 1"),
+              std::string::npos);
+    EXPECT_NE(metrics.find("access_server_config_updates_total{resource=\"project_route\",result=\"ignored\",reason="
+                           "\"empty\"} 2"),
+              std::string::npos);
+    EXPECT_NE(metrics.find("access_server_config_updates_total{resource=\"project_route\",result=\"success\",reason="
+                           "\"removed\"} 3"),
+              std::string::npos);
+    EXPECT_NE(metrics.find("access_server_config_updates_total{resource=\"project_route\",result=\"failure\",reason="
+                           "\"decode\"} 1"),
+              std::string::npos);
+    EXPECT_NE(metrics.find("access_server_config_readiness{state=\"stopped\"} 1"), std::string::npos);
+    EXPECT_NE(metrics.find("access_server_route_snapshot_resources{resource=\"project\"} 0"), std::string::npos);
+    EXPECT_EQ(metrics.find("ploto.unified-access"), std::string::npos);
+    EXPECT_EQ(metrics.find("example.com"), std::string::npos);
 }
 
 TEST(AccessConfigWatcherTest, KeepsOwnerLoopResponsiveAndCoalescesQueuedGenerations) {

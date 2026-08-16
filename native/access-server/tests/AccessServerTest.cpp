@@ -25,6 +25,8 @@
 #include <fiber/event/EventLoop.h>
 #include <fiber/event/EventLoopGroup.h>
 
+#include "../src/observability/AccessConfigMetrics.h"
+
 namespace fiber::access_server {
 namespace {
 
@@ -203,9 +205,11 @@ TEST(AccessServerTest, ServesPublishedSnapshotAndShutsDownWorkerResources) {
 
     event::EventLoop accept_loop;
     event::EventLoopGroup workers(1);
+    AccessConfigMetrics config_metrics(accept_loop);
     AccessServer server(accept_loop, workers, store, {},
                         AccessServerOptions{
                                 .access_log = AccessLogOptions{.query_hash_enabled = true},
+                                .config_metrics = &config_metrics,
                         });
     std::promise<std::pair<std::uint16_t, std::uint16_t>> port_promise;
     auto port = port_promise.get_future();
@@ -216,6 +220,15 @@ TEST(AccessServerTest, ServesPublishedSnapshotAndShutsDownWorkerResources) {
     testing::internal::CaptureStderr();
     workers.start();
     async::spawn(accept_loop, [&]() -> async::DetachedTask {
+        const AccessConfigMetricsObserver config_observer = config_metrics.observer();
+        config_observer.on_event(config_observer.context, AccessConfigMetricEvent::ProjectRoutePublished);
+        config_observer.on_readiness(config_observer.context, AccessConfigMetricReadiness{
+                                                                      .state = AccessConfigMetricReadinessState::Ready,
+                                                                      .desired_projects = 1,
+                                                                      .subscribed_projects = 1,
+                                                                      .synchronized_projects = 1,
+                                                              });
+        config_observer.on_snapshot(config_observer.context, *store.pin());
         auto initialized = co_await server.initialize();
         if (!initialized) {
             port_promise.set_value({0, 0});
@@ -298,6 +311,12 @@ TEST(AccessServerTest, ServesPublishedSnapshotAndShutsDownWorkerResources) {
     EXPECT_NE(metrics_response.find("access_server_response_compression_total{result=\"identity\"} 1"),
               std::string::npos);
     EXPECT_NE(metrics_response.find("access_server_response_compression_total{result=\"not_acceptable\"} 1"),
+              std::string::npos);
+    EXPECT_NE(metrics_response.find("access_server_config_updates_total{resource=\"project_route\",result=\"success\","
+                                    "reason=\"published\"} 1"),
+              std::string::npos);
+    EXPECT_NE(metrics_response.find("access_server_config_readiness{state=\"ready\"} 1"), std::string::npos);
+    EXPECT_NE(metrics_response.find("access_server_route_snapshot_resources{resource=\"project\"} 1"),
               std::string::npos);
     EXPECT_EQ(access_logs.find("integration-secret"), std::string::npos);
     EXPECT_NE(access_logs.find("path=\"/\" query=\"\""), std::string::npos);

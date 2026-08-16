@@ -1,11 +1,16 @@
 #include "AccessServerMetrics.h"
+#include "AccessConfigMetrics.h"
 
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cstring>
+#include <string>
 #include <string_view>
+#include <utility>
 
 #include <fiber/common/Assert.h>
+#include <fiber/event/EventLoop.h>
 
 namespace fiber::access_server {
 namespace {
@@ -40,7 +45,10 @@ void AccessServerMetrics::Worker::response_compression_selected(bool compressed)
 
 void AccessServerMetrics::Worker::response_compression_not_acceptable() noexcept { response_compression_[2].inc(); }
 
-AccessServerMetrics::AccessServerMetrics(event::EventLoopGroup &workers) { valid_ = initialize(workers); }
+AccessServerMetrics::AccessServerMetrics(event::EventLoopGroup &workers, const AccessConfigMetrics *config_metrics) :
+    config_metrics_(config_metrics) {
+    valid_ = initialize(workers);
+}
 
 AccessServerMetrics::~AccessServerMetrics() { FIBER_ASSERT(!valid_ || collecting_stopped_); }
 
@@ -151,7 +159,26 @@ AccessServerMetrics::Worker &AccessServerMetrics::worker(std::size_t index) noex
 }
 
 async::Task<common::IoResult<mem::IoBufChain>> AccessServerMetrics::collect(mem::IoBufNodePool &node_pool) noexcept {
-    co_return co_await registry_.collect_text(node_pool);
+    auto collected = co_await registry_.collect_text(node_pool);
+    if (!collected || !config_metrics_) {
+        co_return collected;
+    }
+
+    std::string config_text;
+    config_metrics_->append_prometheus(config_text, event::EventLoop::current().now());
+    if (config_text.empty()) {
+        co_return collected;
+    }
+    mem::IoBuf config_buffer = mem::IoBuf::allocate(config_text.size());
+    if (!config_buffer) {
+        co_return std::unexpected(common::IoErr::NoMem);
+    }
+    std::memcpy(config_buffer.writable_data(), config_text.data(), config_text.size());
+    config_buffer.commit(config_text.size());
+    if (!collected->append(std::move(config_buffer))) {
+        co_return std::unexpected(common::IoErr::NoMem);
+    }
+    co_return collected;
 }
 
 void AccessServerMetrics::stop_collecting() noexcept {
