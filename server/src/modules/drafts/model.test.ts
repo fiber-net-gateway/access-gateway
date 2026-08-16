@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { normalizeStoredProjectRoutesModel } from './model.js'
+import { fallbackAccessConfigLimits } from '../../integrations/native-validator/limits.js'
+import { isProjectRoutesModel, normalizeStoredProjectRoutesModel } from './model.js'
 
 test('upgrades legacy whole-project JSON revisions to stable YAML route items', () => {
   const legacy = {
@@ -105,4 +106,53 @@ test('upgrades schema v4 YAML items with an explicit format discriminator', () =
     format: 'yaml',
     source: 'path: /',
   })
+})
+
+test('checks mixed route source limits in UTF-8 bytes', () => {
+  const limits = {
+    ...fallbackAccessConfigLimits,
+    projectRoute: {
+      ...fallbackAccessConfigLimits.projectRoute,
+      maxScriptBytes: 3,
+      maxPayloadBytes: 32,
+    },
+  }
+  assert.equal(
+    isProjectRoutesModel(
+      {
+        schemaVersion: 5,
+        kind: 'project_routes_yaml',
+        networkPolicy: {
+          source: 'route',
+          httpsRedirect: 'off',
+          allowedCidrs: [],
+          deniedCidrs: [],
+        },
+        routes: [
+          {
+            id: '00000000-0000-4000-8000-000000000001',
+            format: 'js',
+            path: '/',
+            source: '返回',
+          },
+        ],
+      },
+      limits,
+    ),
+    false,
+  )
+})
+
+test('rejects oversized legacy route collections before normalization', () => {
+  assert.equal(
+    normalizeStoredProjectRoutesModel({
+      schemaVersion: 1,
+      kind: 'project_route',
+      hosts: [],
+      routes: Array.from({ length: fallbackAccessConfigLimits.projectRoute.maxRoutes + 1 }, () => ({
+        path: '/',
+      })),
+    }),
+    null,
+  )
 })

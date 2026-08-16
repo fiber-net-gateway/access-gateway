@@ -3,6 +3,11 @@ import { isIP } from 'node:net'
 
 import { isAlias, isMap, isScalar, LineCounter, parseDocument, visit } from 'yaml'
 
+import {
+  fallbackAccessConfigLimits,
+  utf8Bytes,
+} from '../../integrations/native-validator/limits.js'
+import type { AccessConfigLimits } from '../../integrations/native-validator/model.js'
 import { canonicalJson } from '../../shared/json.js'
 import type { HttpsRedirect, ProjectRoutesModel, RouteItemModel } from './model.js'
 
@@ -29,7 +34,7 @@ const routeFields = new Set([
   'allows',
 ])
 
-export const ROUTE_COMPILER_REVISION = 'project-routes-mixed-v5-response-gzip'
+export const ROUTE_COMPILER_REVISION = 'project-routes-mixed-v6-native-limits'
 
 const networkPolicyRouteId = '00000000-0000-4000-8000-000000000099'
 
@@ -90,6 +95,92 @@ function issue(
   }
 }
 
+function limitIssue(
+  routeId: string,
+  path: string,
+  resource: string,
+  maximum: number,
+): RouteValidationIssue {
+  return {
+    routeId,
+    path,
+    line: 1,
+    column: 1,
+    code: 'limit_exceeded',
+    message: `${resource} exceeds the native limit of ${maximum}`,
+  }
+}
+
+function validateModelLimits(
+  domain: string,
+  model: ProjectRoutesModel,
+  limits: AccessConfigLimits,
+): RouteValidationIssue[] {
+  const routeLimits = limits.projectRoute
+  const fallbackRouteId = model.routes[0]?.id ?? networkPolicyRouteId
+  if (utf8Bytes(domain) > routeLimits.maxHostPatternBytes) {
+    return [limitIssue(fallbackRouteId, 'host', 'Host pattern', routeLimits.maxHostPatternBytes)]
+  }
+  if (model.routes.length > routeLimits.maxRoutes) {
+    return [limitIssue(fallbackRouteId, 'routes', 'Route count', routeLimits.maxRoutes)]
+  }
+  const cidrs = [
+    ...model.networkPolicy.allowedCidrs.map((value, index) => ({
+      value,
+      path: `networkPolicy.allowedCidrs.${index}`,
+    })),
+    ...model.networkPolicy.deniedCidrs.map((value, index) => ({
+      value,
+      path: `networkPolicy.deniedCidrs.${index}`,
+    })),
+  ]
+  if (cidrs.length > routeLimits.maxCidrsPerRoute) {
+    return [
+      limitIssue(
+        networkPolicyRouteId,
+        'networkPolicy',
+        'Project network policy CIDR count',
+        routeLimits.maxCidrsPerRoute,
+      ),
+    ]
+  }
+  for (const cidr of cidrs) {
+    if (utf8Bytes(cidr.value) > routeLimits.maxCidrBytes) {
+      return [
+        limitIssue(
+          networkPolicyRouteId,
+          cidr.path,
+          'Project network policy CIDR',
+          routeLimits.maxCidrBytes,
+        ),
+      ]
+    }
+  }
+
+  let totalSourceBytes = 0
+  for (const route of model.routes) {
+    const sourceBytes = utf8Bytes(route.source)
+    const sourceLimit =
+      route.format === 'js' ? routeLimits.maxScriptBytes : routeLimits.maxPayloadBytes
+    if (sourceBytes > sourceLimit) {
+      return [limitIssue(route.id, 'source', 'Route source', sourceLimit)]
+    }
+    totalSourceBytes += sourceBytes
+    if (totalSourceBytes > routeLimits.maxPayloadBytes) {
+      return [limitIssue(route.id, 'source', 'Combined Route source', routeLimits.maxPayloadBytes)]
+    }
+    if (route.format === 'js') {
+      if (utf8Bytes(route.path) > routeLimits.maxPathBytes) {
+        return [limitIssue(route.id, 'path', 'Route path', routeLimits.maxPathBytes)]
+      }
+      if (route.method && utf8Bytes(route.method) > routeLimits.maxMethodBytes) {
+        return [limitIssue(route.id, 'method', 'Route method', routeLimits.maxMethodBytes)]
+      }
+    }
+  }
+  return []
+}
+
 function findFieldOffset(document: ReturnType<typeof parseDocument>, field: string): number {
   if (!isMap(document.contents)) return 0
   const pair = document.contents.items.find(
@@ -126,6 +217,120 @@ function isScalarMap(value: unknown): boolean {
 
 function isScalarList(value: unknown): boolean {
   return value === null || (Array.isArray(value) && value.every(isScalarValue))
+}
+
+function scalarText(value: unknown): string | null {
+  if (typeof value === 'string') return value
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  return null
+}
+
+function validateCompiledRouteLimits(
+  route: RouteItemModel,
+  value: Readonly<Record<string, unknown>>,
+  limits: AccessConfigLimits,
+): RouteValidationIssue[] {
+  const routeLimits = limits.projectRoute
+  const issues: RouteValidationIssue[] = []
+  const stringFields = [
+    ['path', 'Route path', routeLimits.maxPathBytes],
+    ['method', 'Route method', routeLimits.maxMethodBytes],
+    ['service', 'Route service', routeLimits.maxServiceBytes],
+    ['cluster', 'Route cluster', routeLimits.maxClusterBytes],
+    ['condition', 'Route condition', routeLimits.maxConditionBytes],
+    ['rewrite', 'Route rewrite template', routeLimits.maxTemplateBytes],
+    ['script', 'Route script', routeLimits.maxScriptBytes],
+  ] as const
+  for (const [field, resource, maximum] of stringFields) {
+    const text = scalarText(value[field])
+    if (text !== null && utf8Bytes(text) > maximum) {
+      issues.push(limitIssue(route.id, field, resource, maximum))
+    }
+  }
+  const service = scalarText(value.service)
+  if (service !== null) {
+    const slash = service.indexOf('/')
+    if (
+      slash > 0 &&
+      slash + 1 < service.length &&
+      utf8Bytes(service.slice(slash + 1)) > routeLimits.maxClusterBytes
+    ) {
+      issues.push(
+        limitIssue(route.id, 'service', 'Route service cluster', routeLimits.maxClusterBytes),
+      )
+    }
+  }
+
+  for (const [field, resource, maxItems, maxBytes] of [
+    ['addresses', 'Route address', routeLimits.maxAddressesPerRoute, routeLimits.maxAddressBytes],
+    ['allows', 'Route CIDR', routeLimits.maxCidrsPerRoute, routeLimits.maxCidrBytes + 1],
+  ] as const) {
+    const entries = value[field]
+    if (!Array.isArray(entries)) continue
+    if (entries.length > maxItems) {
+      issues.push(limitIssue(route.id, field, `${resource} count`, maxItems))
+      continue
+    }
+    entries.forEach((entry, index) => {
+      const text = scalarText(entry)
+      if (text !== null && utf8Bytes(text) > maxBytes) {
+        issues.push(limitIssue(route.id, `${field}.${index}`, resource, maxBytes))
+      }
+    })
+  }
+
+  for (const field of ['proxy_headers', 'response_headers', 'context'] as const) {
+    const entries = value[field]
+    if (typeof entries !== 'object' || entries === null || Array.isArray(entries)) continue
+    const pairs = Object.entries(entries)
+    if (pairs.length > routeLimits.maxHeaderEntries) {
+      issues.push(
+        limitIssue(route.id, field, 'Header or context entry count', routeLimits.maxHeaderEntries),
+      )
+      continue
+    }
+    pairs.forEach(([name, entry], index) => {
+      if (utf8Bytes(name) > routeLimits.maxHeaderNameBytes) {
+        issues.push(
+          limitIssue(
+            route.id,
+            `${field}.${index}.name`,
+            'Header or context name',
+            routeLimits.maxHeaderNameBytes,
+          ),
+        )
+      }
+      const text = scalarText(entry)
+      if (text !== null && utf8Bytes(text) > routeLimits.maxHeaderValueBytes) {
+        issues.push(
+          limitIssue(
+            route.id,
+            `${field}.${index}.value`,
+            'Header or context value',
+            routeLimits.maxHeaderValueBytes,
+          ),
+        )
+      }
+    })
+  }
+
+  const body = value.body
+  if (typeof body === 'object' && body !== null && !Array.isArray(body)) {
+    const bodyValue = body as Readonly<Record<string, unknown>>
+    const content = scalarText(bodyValue.content)
+    if (content !== null) {
+      const maximum =
+        bodyValue.type === 'TEXT'
+          ? routeLimits.maxStaticResponseBodyBytes
+          : bodyValue.type === 'BASE64'
+            ? Math.ceil(routeLimits.maxStaticResponseBodyBytes / 3) * 4
+            : routeLimits.maxTemplateBytes
+      if (utf8Bytes(content) > maximum) {
+        issues.push(limitIssue(route.id, 'body.content', 'Response body', maximum))
+      }
+    }
+  }
+  return issues
 }
 
 function validateRouteFieldShapes(
@@ -514,7 +719,10 @@ export function compileProjectRoutes(
   domain: string,
   model: ProjectRoutesModel,
   version = 1,
+  limits: AccessConfigLimits = fallbackAccessConfigLimits,
 ): ProjectRoutesCompileResult {
+  const limitIssues = validateModelLimits(domain, model, limits)
+  if (limitIssues.length > 0) return { compiled: null, issues: limitIssues }
   const routes: Readonly<Record<string, unknown>>[] = []
   const issues: RouteValidationIssue[] = validateNetworkPolicy(model)
   for (const route of model.routes) {
@@ -563,6 +771,7 @@ export function compileProjectRoutes(
           })()
     issues.push(...parsed.issues)
     if (parsed.value) {
+      let compiledRoute: Readonly<Record<string, unknown>> | null = null
       if (model.networkPolicy.source === 'project' && 'allows' in parsed.value) {
         issues.push({
           routeId: route.id,
@@ -577,9 +786,14 @@ export function compileProjectRoutes(
           ...model.networkPolicy.allowedCidrs,
           ...model.networkPolicy.deniedCidrs.map((cidr) => `!${cidr}`),
         ]
-        routes.push(allows.length > 0 ? { ...parsed.value, allows } : parsed.value)
+        compiledRoute = allows.length > 0 ? { ...parsed.value, allows } : parsed.value
       } else {
-        routes.push(parsed.value)
+        compiledRoute = parsed.value
+      }
+      if (compiledRoute) {
+        const compiledLimitIssues = validateCompiledRouteLimits(route, compiledRoute, limits)
+        issues.push(...compiledLimitIssues)
+        if (compiledLimitIssues.length === 0) routes.push(compiledRoute)
       }
     }
   }
@@ -595,6 +809,19 @@ export function compileProjectRoutes(
     routes,
   })
   const payload = Buffer.from(payloadText, 'utf8')
+  if (payload.byteLength > limits.projectRoute.maxPayloadBytes) {
+    return {
+      compiled: null,
+      issues: [
+        limitIssue(
+          model.routes.at(-1)?.id ?? networkPolicyRouteId,
+          'payload',
+          'Compiled project route payload',
+          limits.projectRoute.maxPayloadBytes,
+        ),
+      ],
+    }
+  }
   return {
     compiled: {
       payload,

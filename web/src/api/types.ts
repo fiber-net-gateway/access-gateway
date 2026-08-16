@@ -13,6 +13,48 @@ export interface CapabilityView {
   detail: string
 }
 
+export interface AccessConfigLimits {
+  schemaVersion: 1
+  projectList: {
+    maxPayloadBytes: number
+    maxProjects: number
+    maxProjectNameBytes: number
+  }
+  projectRoute: {
+    maxPayloadBytes: number
+    maxHosts: number
+    maxRoutes: number
+    maxHostPatternBytes: number
+    maxPathBytes: number
+    maxMethodBytes: number
+    maxServiceBytes: number
+    maxClusterBytes: number
+    maxConditionBytes: number
+    maxScriptBytes: number
+    maxTemplateBytes: number
+    maxHeaderEntries: number
+    maxHeaderNameBytes: number
+    maxHeaderValueBytes: number
+    maxCidrsPerRoute: number
+    maxCidrBytes: number
+    maxAddressesPerRoute: number
+    maxAddressBytes: number
+    maxStaticResponseBodyBytes: number
+    maxStaticResponseBytes: number
+    maxPathVariables: number
+    maxTemplateExpressions: number
+    maxCompiledPrograms: number
+    maxEstimatedSnapshotBytes: number
+  }
+  grayRules: {
+    maxPayloadBytes: number
+    maxRules: number
+    maxEntryBytes: number
+    maxCidrsPerRule: number
+    maxCidrBytes: number
+  }
+}
+
 export interface SystemStatusResponse {
   status: 'ready' | 'degraded'
   service: 'access-gateway-console-api'
@@ -20,7 +62,11 @@ export interface SystemStatusResponse {
     database: CapabilityView
     schema: CapabilityView
     authentication: CapabilityView
-    nativeValidator: CapabilityView & { contractVersion: number; revision: string | null }
+    nativeValidator: CapabilityView & {
+      contractVersion: number
+      revision: string | null
+      limits: AccessConfigLimits | null
+    }
     publicationWorker: CapabilityView
     activationCollector: CapabilityView
   }

@@ -1,4 +1,5 @@
 import type { NativeValidator } from '../../integrations/native-validator/model.js'
+import { fallbackAccessConfigLimits } from '../../integrations/native-validator/limits.js'
 import { badRequest, forbidden, notFound, unavailable } from '../../shared/errors.js'
 import { bufferToPublicId } from '../../shared/ids.js'
 import type { Actor } from '../auth/model.js'
@@ -48,8 +49,8 @@ export interface ConfigurationVersionService {
   ): Promise<ValidatedConfigurationVersion>
 }
 
-function parseModel(value: unknown): ProjectRoutesModel {
-  if (!isProjectRoutesModel(value)) {
+function parseModel(value: unknown, limits = fallbackAccessConfigLimits): ProjectRoutesModel {
+  if (!isProjectRoutesModel(value, limits)) {
     throw badRequest(
       'INVALID_CONFIGURATION_MODEL',
       'The configuration does not match project_routes_yaml schema version 5',
@@ -59,9 +60,13 @@ function parseModel(value: unknown): ProjectRoutesModel {
   return value
 }
 
-function parseSavableModel(domain: string, value: unknown): ProjectRoutesModel {
-  const model = parseModel(value)
-  const result = compileProjectRoutes(domain, model)
+function parseSavableModel(
+  domain: string,
+  value: unknown,
+  limits = fallbackAccessConfigLimits,
+): ProjectRoutesModel {
+  const model = parseModel(value, limits)
+  const result = compileProjectRoutes(domain, model, 1, limits)
   if (!result.compiled) {
     const routeIndexes = new Map(model.routes.map((route, index) => [route.id, index]))
     throw badRequest(
@@ -205,7 +210,11 @@ export class DefaultConfigurationVersionService implements ConfigurationVersionS
       changeSummary: parseSummary(input.changeSummary),
       forceSameContent: input.forceSameContent,
       idempotencyKey: input.idempotencyKey,
-      model: parseSavableModel(project.name, input.model),
+      model: parseSavableModel(
+        project.name,
+        input.model,
+        this.#validator.limits ?? fallbackAccessConfigLimits,
+      ),
       requestId,
     })
   }
@@ -232,6 +241,7 @@ export class DefaultConfigurationVersionService implements ConfigurationVersionS
       model: parseSavableModel(
         project.name,
         input.model === undefined ? source.model : input.model,
+        this.#validator.limits ?? fallbackAccessConfigLimits,
       ),
       restoredFromVersionId: source.id,
       requestId,

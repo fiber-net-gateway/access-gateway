@@ -462,6 +462,7 @@ Restoration 请求中的路径 `versionId` 是历史编辑来源，`baseVersionI
 | `CONFIG_VERSION_CONFLICT`         | 409  | base version 或 ETag 已过期           |
 | `CONFIG_VERSION_UNCHANGED`        | 409  | 相同内容且未确认强制保存              |
 | `CONFIG_VERSION_NOT_PUBLISHABLE`  | 422  | 所选版本校验失败                      |
+| `PROJECT_LIST_LIMIT_EXCEEDED`     | 422  | Project List 超出 native 资源上限     |
 | `CONFIG_VERSION_PROJECT_MISMATCH` | 404  | source version 不属于当前授权 Project |
 | `NATIVE_VALIDATOR_UNAVAILABLE`    | 503  | 权威校验不可用或 contract 不匹配      |
 | `WIRE_VERSION_EXHAUSTED`          | 409  | native 支持的整数版本空间耗尽         |

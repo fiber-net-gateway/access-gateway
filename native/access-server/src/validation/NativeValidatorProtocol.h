@@ -17,6 +17,10 @@ inline constexpr int kNativeValidatorContractVersion = 1;
 
 [[nodiscard]] std::string native_validator_input_too_large_response();
 
+// Returns the versioned, machine-readable limits enforced by both the runtime
+// and this validator. It contains no deployment configuration or secrets.
+[[nodiscard]] std::string native_validator_config_limits_response();
+
 } // namespace fiber::access_server
 
 #endif // FIBER_ACCESS_SERVER_NATIVE_VALIDATOR_PROTOCOL_H

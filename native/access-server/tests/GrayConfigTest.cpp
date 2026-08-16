@@ -143,6 +143,24 @@ TEST(GrayConfigTest, WatcherRetainsOnEmptyAndInvalidThenAcceptsClear) {
                 metadata_for(fiber::net::IpAddress::v6({0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1})),
                 9999));
 
+        std::string too_many_rules = "{";
+        for (std::size_t index = 0; index <= fiber::access_server::kAccessConfigLimits.gray_rules.max_rules; ++index) {
+            if (index != 0) {
+                too_many_rules.push_back(',');
+            }
+            too_many_rules.append("\"rule");
+            too_many_rules.append(std::to_string(index));
+            too_many_rules.append("\":{}");
+        }
+        too_many_rules.push_back('}');
+        service.push(std::move(too_many_rules), "limited");
+        co_await yield_updates();
+        EXPECT_EQ(store.rule_count(), 1u);
+        EXPECT_TRUE(watcher.last_failure());
+        if (watcher.last_failure()) {
+            EXPECT_EQ(watcher.last_failure()->error.code, fiber::access_server::AccessConfigErrorCode::LimitExceeded);
+        }
+
         service.push("", "empty");
         co_await yield_updates();
         EXPECT_EQ(store.rule_count(), 1u);
@@ -150,7 +168,7 @@ TEST(GrayConfigTest, WatcherRetainsOnEmptyAndInvalidThenAcceptsClear) {
         service.push("{", "invalid");
         co_await yield_updates();
         EXPECT_EQ(store.rule_count(), 1u);
-        EXPECT_EQ(watcher.failed_updates(), 1u);
+        EXPECT_EQ(watcher.failed_updates(), 2u);
         EXPECT_TRUE(watcher.last_failure());
 
         service.push("{}", "clear");

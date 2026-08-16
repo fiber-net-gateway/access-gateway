@@ -201,9 +201,16 @@ project-list 首值”。
 
 **归属：本项目，且必须同步 native runtime、validator、server 和 web。**
 
-项目 route codec 会直接解析完整 payload，但当前没有统一的 payload、项目、route、
-host、header、CIDR、address、script、template 和预压缩 body 上限。TLS codec 已经有
-较完整的限制，可以作为实现范式。
+**实施状态：已解决（2026-08-16）。** `AccessConfigLimits` 现在是 native runtime 和离线
+Validator 的固定、版本化 source of truth。raw payload 在 JSON tokenization 前检查，codec
+检查 container/string，snapshot compiler 检查 path variable、template expression、compiled
+program、静态 body 和近似内存预算。Project route、Project List 和 gray 候选超限都返回稳定的
+`LimitExceeded` 并保留旧状态；非法 Project List 不再触发订阅 reconcile 或项目卸载。
+
+Validator 的 `--describe-config-limits` 输出 strict schema version 1 JSON。server 启动时探测并
+校验该 schema，draft/compiler/Release 使用探测结果，`/api/system/status` 向 web 提供同一份限制；
+编辑器展示 route/source/CIDR 配额并在明显超限时阻止保存。发布要求可用的 Validator revision
+及其探测限制，不能用 server fallback 推断发布安全或实例激活。
 
 代码位置：
 
@@ -211,8 +218,9 @@ host、header、CIDR、address、script、template 和预压缩 body 上限。TL
 - [`ProjectRouteSnapshot.cpp`](../src/routing/ProjectRouteSnapshot.cpp#L785)；
 - [`TlsCertificateConfig.h`](../src/config/TlsCertificateConfig.h#L13)；
 - [`NativeValidatorProtocol.h`](../src/validation/NativeValidatorProtocol.h#L10)。
+- [`config-resource-limits.md`](config-resource-limits.md)。
 
-建议增加共享的 `AccessConfigLimits`，至少包含：
+共享的 `AccessConfigLimits` 包含：
 
 - project-list 总字节、项目数和项目名长度；
 - 单项目 route snapshot 原始字节；
@@ -223,7 +231,8 @@ host、header、CIDR、address、script、template 和预压缩 body 上限。TL
 - 编译后 snapshot 的近似内存预算。
 
 超限必须返回稳定的 `LimitExceeded`、字段路径和脱敏消息，保留旧快照。Console validator
-和运行时必须引用同一份 native 限制，避免控制面接受数据面必然拒绝的内容。
+和运行时引用同一份 native 限制，避免控制面接受数据面必然拒绝的内容。具体 schema version 1
+数值和 snapshot 估算边界见上面的独立限制文档。
 
 ### 5.4 L-04：配置编译移出 Nacos owner loop
 

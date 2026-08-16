@@ -189,14 +189,21 @@ void AccessConfigWatcher::project_notify(void *context,
 
 void AccessConfigWatcher::apply_project_list(const nacos::ConfigData &data) {
     FIBER_ASSERT(loop_->in_loop());
-    if (data.state == nacos::ConfigState::NotFound) {
-        reconcile_projects({});
-    } else {
-        reconcile_projects(data.content);
-    }
     if (!initial_project_list_received_) {
         initial_project_list_received_ = true;
     }
+    ProjectListResult parsed = data.state == nacos::ConfigState::NotFound
+                                       ? ProjectListResult(std::vector<std::string>{})
+                                       : parse_project_list(data.content);
+    if (!parsed) {
+        report_failure(nullptr, AccessConfigWatcherFailureStage::Decode, options_.project_list_data_id,
+                       std::string(data.md5), common::IoErr::Invalid, std::move(parsed.error()));
+        project_list_failure_ = last_failure_;
+        publish_readiness();
+        return;
+    }
+    project_list_failure_.reset();
+    reconcile_projects(std::move(*parsed));
     publish_readiness();
 }
 
@@ -334,11 +341,10 @@ async::DetachedTask AccessConfigWatcher::retry_project_subscription(std::shared_
     background_tasks_.done();
 }
 
-void AccessConfigWatcher::reconcile_projects(std::string_view content) {
+void AccessConfigWatcher::reconcile_projects(std::vector<std::string> requested) {
     FIBER_ASSERT(loop_->in_loop());
     FIBER_ASSERT(!defer_readiness_updates_);
     defer_readiness_updates_ = true;
-    std::vector<std::string> requested = parse_project_list(content);
     std::set<std::string, std::less<>> unique;
     for (std::string &project: requested) {
         if (unique.emplace(project).second && !projects_.contains(project)) {
@@ -517,6 +523,10 @@ void AccessConfigWatcher::publish_readiness() {
         next.state = AccessConfigReadinessState::Unavailable;
         next.io_error = unavailable_failure_->io_error;
         next.message = unavailable_failure_->error.message;
+    } else if (project_list_failure_) {
+        next.state = AccessConfigReadinessState::Unavailable;
+        next.io_error = project_list_failure_->io_error;
+        next.message = project_list_failure_->error.message;
     } else if (!initial_project_list_received_) {
         next.state = AccessConfigReadinessState::WaitingForProjectList;
     } else {

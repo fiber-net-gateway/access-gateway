@@ -2,7 +2,10 @@ import type { DatabasePool } from '../../database/types.js'
 import { checkDatabase } from '../../database/pool.js'
 import { currentSchemaVersion, expectedSchemaVersion } from '../../database/schema.js'
 import type { AuthService } from '../auth/model.js'
-import type { NativeValidator } from '../../integrations/native-validator/model.js'
+import type {
+  AccessConfigLimits,
+  NativeValidator,
+} from '../../integrations/native-validator/model.js'
 
 export type CapabilityStatus = 'ready' | 'unconfigured' | 'unavailable'
 
@@ -18,7 +21,11 @@ export interface SystemStatusView {
     database: CapabilityView
     schema: CapabilityView
     authentication: CapabilityView
-    nativeValidator: CapabilityView & { contractVersion: number; revision: string | null }
+    nativeValidator: CapabilityView & {
+      contractVersion: number
+      revision: string | null
+      limits: AccessConfigLimits | null
+    }
     publicationWorker: CapabilityView
     activationCollector: CapabilityView
   }
@@ -95,6 +102,7 @@ export class DefaultSystemStatusService implements SystemStatusService {
         detail: this.#validatorDetail,
         contractVersion: this.#validator.contractVersion,
         revision: this.#validator.revision,
+        limits: this.#validator.limits,
       },
       publicationWorker: {
         status: this.#publicationConfigured ? 'ready' : 'unconfigured',

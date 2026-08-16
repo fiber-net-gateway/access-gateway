@@ -17,8 +17,10 @@ function parseLines(value: string): readonly string[] {
     .filter(Boolean)
 }
 
+const utf8Encoder = new TextEncoder()
+
 export function ProjectNetworkPolicyPage() {
-  const { project, refreshProject } = useProjectContext()
+  const { project, refreshProject, systemStatus } = useProjectContext()
   const [model, setModel] = useState<ProjectRoutesModel>(initialRouteModel)
   const [baseVersionId, setBaseVersionId] = useState<string | null>(null)
   const [baseVersionNumber, setBaseVersionNumber] = useState<number | null>(null)
@@ -43,6 +45,15 @@ export function ProjectNetworkPolicyPage() {
     [allowedCidrs, deniedCidrs, model.networkPolicy.httpsRedirect, model.networkPolicy.source],
   )
   const dirty = !loading && JSON.stringify(policy) !== JSON.stringify(savedPolicy)
+  const cidrLimits = systemStatus?.dependencies.nativeValidator.limits?.projectRoute ?? null
+  const cidrs = [...policy.allowedCidrs, ...policy.deniedCidrs]
+  const cidrLimitMessage = cidrLimits
+    ? cidrs.length > cidrLimits.maxCidrsPerRoute
+      ? `CIDR 合计超过 Native 上限 ${cidrLimits.maxCidrsPerRoute}`
+      : cidrs.some((cidr) => utf8Encoder.encode(cidr).byteLength > cidrLimits.maxCidrBytes)
+        ? `单条 CIDR 超过 Native 上限 ${cidrLimits.maxCidrBytes} UTF-8 bytes`
+        : null
+    : null
   useUnsavedChangesGuard(dirty)
 
   useEffect(() => {
@@ -76,6 +87,7 @@ export function ProjectNetworkPolicyPage() {
     setSaving(true)
     setErrorMessage(null)
     try {
+      if (cidrLimitMessage) throw new Error(cidrLimitMessage)
       const submitted = { ...model, networkPolicy: policy }
       const saved = await saveConfigurationVersion(
         project.id,
@@ -121,6 +133,15 @@ export function ProjectNetworkPolicyPage() {
         <div className="error-banner" role="alert">
           <strong>操作未完成</strong>
           <span>{errorMessage}</span>
+        </div>
+      ) : null}
+
+      {cidrLimitMessage ? (
+        <div className="project-validation-errors" role="alert">
+          <p>
+            <strong>limit_exceeded</strong>
+            <span>{cidrLimitMessage}</span>
+          </p>
         </div>
       ) : null}
 
@@ -232,7 +253,9 @@ export function ProjectNetworkPolicyPage() {
               value={allowedCidrs}
               onChange={(event) => setAllowedCidrs(event.target.value)}
             />
-            <small>非空时，请求源地址必须匹配至少一项。</small>
+            <small>
+              非空时，请求源地址必须匹配至少一项。当前 {policy.allowedCidrs.length} 条。
+            </small>
           </label>
           <label>
             拒绝 CIDR（每行一项）
@@ -244,7 +267,9 @@ export function ProjectNetworkPolicyPage() {
               value={deniedCidrs}
               onChange={(event) => setDeniedCidrs(event.target.value)}
             />
-            <small>拒绝规则优先；发布时编译为 native `!CIDR` 形式。</small>
+            <small>
+              拒绝规则优先；发布时编译为 native `!CIDR` 形式。当前 {policy.deniedCidrs.length} 条。
+            </small>
           </label>
         </div>
 
@@ -259,7 +284,11 @@ export function ProjectNetworkPolicyPage() {
         </label>
         <div className="form-actions">
           <span>空允许/拒绝列表表示公开访问；服务端会拒绝无效或重复 CIDR。</span>
-          <button className="button-primary" disabled={!dirty || saving || loading} type="submit">
+          <button
+            className="button-primary"
+            disabled={!dirty || saving || loading || Boolean(cidrLimitMessage)}
+            type="submit"
+          >
             {saving
               ? '保存中…'
               : `保存为${baseVersionNumber ? ` V${baseVersionNumber + 1}` : ' V1'}`}

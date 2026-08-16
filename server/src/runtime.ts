@@ -10,6 +10,7 @@ import { requireCurrentSchema } from './database/schema.js'
 import type { DatabasePool } from './database/types.js'
 import type { NativeValidator } from './integrations/native-validator/model.js'
 import {
+  loadNativeValidatorLimits,
   SubprocessNativeValidator,
   UnavailableNativeValidator,
 } from './integrations/native-validator/subprocess.js'
@@ -62,6 +63,14 @@ async function createNativeValidator(config: ServerConfig): Promise<{
     await access(path, constants.R_OK | constants.X_OK)
     const binary = await readFile(path)
     const revision = createHash('sha256').update(binary).digest('hex').slice(0, 64)
+    const limits = await loadNativeValidatorLimits(
+      path,
+      config.nativeValidator.timeoutMillis,
+      config.nativeValidator.maxOutputBytes,
+    )
+    if (config.nativeValidator.maxInputBytes < limits.projectRoute.maxPayloadBytes) {
+      throw new Error('Native Validator input limit is below its project route payload limit')
+    }
     return {
       validator: new SubprocessNativeValidator({
         path,
@@ -70,13 +79,14 @@ async function createNativeValidator(config: ServerConfig): Promise<{
         timeoutMillis: config.nativeValidator.timeoutMillis,
         maxInputBytes: config.nativeValidator.maxInputBytes,
         maxOutputBytes: config.nativeValidator.maxOutputBytes,
+        limits,
       }),
-      detail: `configured revision ${revision}`,
+      detail: `configured revision ${revision}; config limits schema ${limits.schemaVersion}`,
     }
   } catch {
     return {
       validator: new UnavailableNativeValidator(config.nativeValidator.contractVersion),
-      detail: 'configured Native Validator binary cannot be read',
+      detail: 'configured Native Validator binary or config limits probe is unavailable',
     }
   }
 }

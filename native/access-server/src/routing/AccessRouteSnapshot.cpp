@@ -5,9 +5,10 @@
 namespace fiber::access_server {
 namespace {
 
-AccessConfigError snapshot_error(std::string_view field, std::string_view message) {
+AccessConfigError snapshot_error(std::string_view field, std::string_view message,
+                                 AccessConfigErrorCode code = AccessConfigErrorCode::Conflict) {
     return AccessConfigError{
-            .code = AccessConfigErrorCode::Conflict,
+            .code = code,
             .field = std::string(field),
             .message = std::string(message),
     };
@@ -17,6 +18,10 @@ AccessConfigError snapshot_error(std::string_view field, std::string_view messag
 
 std::expected<AccessRouteSnapshot, AccessConfigError>
 AccessRouteSnapshot::build(std::span<const std::shared_ptr<const ProjectRouteSnapshot>> projects) {
+    if (projects.size() > kAccessConfigLimits.project_list.max_projects) {
+        return std::unexpected(snapshot_error("projects", "project count exceeds the configured limit",
+                                              AccessConfigErrorCode::LimitExceeded));
+    }
     AccessRouteSnapshot snapshot;
     snapshot.projects_.reserve(projects.size());
 

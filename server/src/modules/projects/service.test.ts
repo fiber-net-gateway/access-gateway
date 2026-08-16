@@ -8,9 +8,14 @@ import { EnvironmentRepository } from '../environments/repository.js'
 import { ProjectRepository } from './repository.js'
 import { ConfigurationVersionRepository } from '../versions/repository.js'
 import type { NativeValidator } from '../../integrations/native-validator/model.js'
+import { fallbackAccessConfigLimits } from '../../integrations/native-validator/limits.js'
 import type { BeginDecommissionReleaseInput } from '../releases/repository.js'
 import { ReleaseRepository } from '../releases/repository.js'
-import { compileDecommissionProjectList, DefaultReleaseService } from '../releases/service.js'
+import {
+  compileDecommissionProjectList,
+  DefaultReleaseService,
+  validateProjectListTarget,
+} from '../releases/service.js'
 import { normalizeProjectDomain } from './service.js'
 
 test('normalizes project domains to their lower-case ASCII form', () => {
@@ -50,6 +55,40 @@ test('compiles a deterministic Project List target without rewriting an already 
     ' z.example.com ; a.example.com ',
   )
   assert.equal(compileDecommissionProjectList(null, 'api.example.com'), '')
+})
+
+test('rejects Project List targets that exceed native entry and UTF-8 name limits', () => {
+  assert.equal(
+    validateProjectListTarget('a;b;', {
+      ...fallbackAccessConfigLimits,
+      projectList: { ...fallbackAccessConfigLimits.projectList, maxProjects: 2 },
+    }),
+    'a;b;',
+  )
+  assert.throws(
+    () =>
+      validateProjectListTarget('a;b;c', {
+        ...fallbackAccessConfigLimits,
+        projectList: { ...fallbackAccessConfigLimits.projectList, maxProjects: 2 },
+      }),
+    (error: unknown) => error instanceof AppError && error.code === 'PROJECT_LIST_LIMIT_EXCEEDED',
+  )
+  assert.throws(
+    () =>
+      validateProjectListTarget('返回', {
+        ...fallbackAccessConfigLimits,
+        projectList: { ...fallbackAccessConfigLimits.projectList, maxProjectNameBytes: 3 },
+      }),
+    (error: unknown) => error instanceof AppError && error.code === 'PROJECT_LIST_LIMIT_EXCEEDED',
+  )
+  assert.throws(
+    () =>
+      validateProjectListTarget('\u2003a', {
+        ...fallbackAccessConfigLimits,
+        projectList: { ...fallbackAccessConfigLimits.projectList, maxProjectNameBytes: 2 },
+      }),
+    (error: unknown) => error instanceof AppError && error.code === 'PROJECT_LIST_LIMIT_EXCEEDED',
+  )
 })
 
 const actor: Actor = {
@@ -144,7 +183,12 @@ function decommissionService(overrides: { role?: string; available?: boolean } =
     {} as ConfigurationVersionRepository,
     projects,
     environments,
-    {} as NativeValidator,
+    {
+      available: true,
+      contractVersion: 1,
+      revision: 'test-validator',
+      limits: fallbackAccessConfigLimits,
+    } as NativeValidator,
     nacos,
   )
   return { service, prepared: () => prepared, reads: () => reads }

@@ -1,6 +1,7 @@
 import type {
   CertificateView,
   CertificateVersionView,
+  AccessConfigLimits,
   ConfigurationVersionDetail,
   ConfigurationVersionListResult,
   DraftRevisionView,
@@ -62,13 +63,79 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+function hasPositiveIntegers(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  return keys.every(
+    (key) =>
+      typeof value[key] === 'number' &&
+      Number.isSafeInteger(value[key]) &&
+      (value[key] as number) > 0,
+  )
+}
+
+function isAccessConfigLimits(value: unknown): value is AccessConfigLimits {
+  if (
+    !isRecord(value) ||
+    value.schemaVersion !== 1 ||
+    !isRecord(value.projectList) ||
+    !isRecord(value.projectRoute) ||
+    !isRecord(value.grayRules)
+  ) {
+    return false
+  }
+  return (
+    hasPositiveIntegers(value.projectList, [
+      'maxPayloadBytes',
+      'maxProjects',
+      'maxProjectNameBytes',
+    ]) &&
+    hasPositiveIntegers(value.projectRoute, [
+      'maxPayloadBytes',
+      'maxHosts',
+      'maxRoutes',
+      'maxHostPatternBytes',
+      'maxPathBytes',
+      'maxMethodBytes',
+      'maxServiceBytes',
+      'maxClusterBytes',
+      'maxConditionBytes',
+      'maxScriptBytes',
+      'maxTemplateBytes',
+      'maxHeaderEntries',
+      'maxHeaderNameBytes',
+      'maxHeaderValueBytes',
+      'maxCidrsPerRoute',
+      'maxCidrBytes',
+      'maxAddressesPerRoute',
+      'maxAddressBytes',
+      'maxStaticResponseBodyBytes',
+      'maxStaticResponseBytes',
+      'maxPathVariables',
+      'maxTemplateExpressions',
+      'maxCompiledPrograms',
+      'maxEstimatedSnapshotBytes',
+    ]) &&
+    hasPositiveIntegers(value.grayRules, [
+      'maxPayloadBytes',
+      'maxRules',
+      'maxEntryBytes',
+      'maxCidrsPerRule',
+      'maxCidrBytes',
+    ])
+  )
+}
+
 function isSystemStatus(value: unknown): value is SystemStatusResponse {
   if (!isRecord(value) || !isRecord(value.dependencies)) return false
+  const nativeValidator = value.dependencies.nativeValidator
   return (
     (value.status === 'ready' || value.status === 'degraded') &&
     value.service === 'access-gateway-console-api' &&
     isRecord(value.dependencies.database) &&
-    typeof value.dependencies.database.status === 'string'
+    typeof value.dependencies.database.status === 'string' &&
+    isRecord(nativeValidator) &&
+    typeof nativeValidator.contractVersion === 'number' &&
+    (nativeValidator.revision === null || typeof nativeValidator.revision === 'string') &&
+    (nativeValidator.limits === null || isAccessConfigLimits(nativeValidator.limits))
   )
 }
 

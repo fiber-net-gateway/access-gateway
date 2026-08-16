@@ -336,12 +336,17 @@ TEST(AccessConfigCodecTest, DistinguishesEmptyContentNullAndInvalidRoot) {
 }
 
 TEST(AccessConfigCodecTest, MatchesJavaProjectListSplitSemantics) {
-    EXPECT_TRUE(parse_project_list("").empty());
-    EXPECT_EQ(parse_project_list(" a;b "), (std::vector<std::string>{"a", "b"}));
-    EXPECT_EQ(parse_project_list("a; b"), (std::vector<std::string>{"a", " b"}));
-    EXPECT_EQ(parse_project_list("a;;b;"), (std::vector<std::string>{"a", "", "b"}));
-    EXPECT_TRUE(parse_project_list(";").empty());
-    EXPECT_EQ(parse_project_list(" "), (std::vector<std::string>{""}));
+    const auto expect_projects = [](std::string_view input, std::vector<std::string> expected) {
+        auto parsed = parse_project_list(input);
+        ASSERT_TRUE(parsed) << parsed.error().message;
+        EXPECT_EQ(*parsed, expected);
+    };
+    expect_projects("", {});
+    expect_projects(" a;b ", {"a", "b"});
+    expect_projects("a; b", {"a", " b"});
+    expect_projects("a;;b;", {"a", "", "b"});
+    expect_projects(";", {});
+    expect_projects(" ", {""});
 }
 
 } // namespace

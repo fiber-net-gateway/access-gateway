@@ -3,8 +3,16 @@
 #include <array>
 #include <iostream>
 #include <string>
+#include <string_view>
 
-int main() {
+int main(int argc, char **argv) {
+    if (argc == 2 && std::string_view(argv[1]) == "--describe-config-limits") {
+        std::cout << fiber::access_server::native_validator_config_limits_response() << '\n';
+        return std::cout.good() ? 0 : 1;
+    }
+    if (argc != 1) {
+        return 2;
+    }
     std::string input;
     std::array<char, 4096> buffer{};
     bool too_large = false;

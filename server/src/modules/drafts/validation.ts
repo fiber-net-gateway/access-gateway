@@ -1,4 +1,5 @@
 import type { NativeValidator } from '../../integrations/native-validator/model.js'
+import { fallbackAccessConfigLimits } from '../../integrations/native-validator/limits.js'
 import type { ProjectRoutesModel } from './model.js'
 import { compileProjectRoutes, type RouteValidationIssue } from './compiler.js'
 
@@ -22,7 +23,12 @@ export async function validateProjectRoutesCandidate(
   version = 1,
   signal?: AbortSignal,
 ): Promise<ProjectRoutesValidationView> {
-  const result = compileProjectRoutes(domain, model, version)
+  const result = compileProjectRoutes(
+    domain,
+    model,
+    version,
+    validator.limits ?? fallbackAccessConfigLimits,
+  )
   if (!result.compiled) {
     return {
       valid: false,

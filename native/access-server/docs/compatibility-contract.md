@@ -88,6 +88,12 @@ subscription；已发布请求快照保持不可变，可由 worker 继续 pin�
 - `host` 缺失或为空表示卸载该项目的 Host/route；
 - route 与 Host 映射必须作为同一不可变候选发布。
 
+仓库自有 C++ runtime 还在 Java wire 兼容层外施加版本化资源上限。schema version 1 将
+Project List/route/gray raw payload、container、UTF-8 string、编译程序、静态响应和 snapshot
+内存预算限制在确定边界内；超限返回 `LimitExceeded` 并保留旧快照。它是 C++ 运行安全边界，
+不是对 Java 接受无限配置的兼容承诺。精确数值见
+[`config-resource-limits.md`](config-resource-limits.md)。
+
 当 `host` 非空而 `routes` 为 null 时，Java 在构建 route matcher 时失败；不能把 null
 静默归一为空 route 集合后发布一个可用项目。
 
