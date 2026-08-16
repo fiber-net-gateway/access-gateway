@@ -176,27 +176,28 @@ matcher's structural priority.
 
 ## 6. YAML Route field reference
 
-| Field                  | Route types    | Rule and default                                                       |
-| ---------------------- | -------------- | ---------------------------------------------------------------------- |
-| `path`                 | All            | Required, non-empty ASCII Path pattern                                 |
-| `method`               | All            | Optional; missing/`null` matches all, otherwise exact                  |
-| `type`                 | All            | YAML must use `RESPONSE` or `PROXY`                                    |
-| `condition`            | YAML           | Optional synchronous expression                                        |
-| `service`              | PROXY          | Named service, optionally `service/cluster`                            |
-| `cluster`              | PROXY          | Explicit cluster overriding the service suffix                         |
-| `addresses`            | PROXY          | Static HTTP(S) authorities used when `service` is absent               |
-| `proxy_headers`        | PROXY          | Header templates sent upstream                                         |
-| `response_headers`     | RESPONSE/PROXY | Header templates sent to the client                                    |
-| `context`              | PROXY          | Trace/CAT context templates                                            |
-| `rewrite`              | PROXY          | Upstream path template; original query is appended                     |
-| `status`               | RESPONSE       | Required; native accepts 100–999; use standard HTTP statuses           |
-| `body`                 | RESPONSE       | Optional; missing means an empty body                                  |
-| `timeout`              | PROXY          | Response-header timeout; default 60000 ms, minimum 5 ms                |
-| `max_client_body_size` | RESPONSE/PROXY | Request limit; missing or numeric 0 uses the server default            |
-| `max_proxy_body_size`  | PROXY          | Non-zero value overrides the upstream-response limit                   |
-| `websocket_timeout`    | PROXY          | Positive value enables WebSocket tunneling and sets tunnel I/O timeout |
-| `flush`                | PROXY          | `true` reduces local buffering and adds `X-Accel-Buffering: no`        |
-| `allows`               | All            | CIDR allow/deny sequence; `!` prefixes deny entries                    |
+| Field                  | Route types    | Rule and default                                                         |
+| ---------------------- | -------------- | ------------------------------------------------------------------------ |
+| `path`                 | All            | Required, non-empty ASCII Path pattern                                   |
+| `method`               | All            | Optional; missing/`null` matches all, otherwise exact                    |
+| `type`                 | All            | YAML must use `RESPONSE` or `PROXY`                                      |
+| `condition`            | YAML           | Optional synchronous expression                                          |
+| `service`              | PROXY          | Named service, optionally `service/cluster`                              |
+| `cluster`              | PROXY          | Explicit cluster overriding the service suffix                           |
+| `addresses`            | PROXY          | Static HTTP(S) authorities used when `service` is absent                 |
+| `proxy_headers`        | PROXY          | Header templates sent upstream                                           |
+| `response_headers`     | RESPONSE/PROXY | Header templates sent to the client                                      |
+| `context`              | PROXY          | Trace/CAT context templates                                              |
+| `rewrite`              | PROXY          | Upstream path template; original query is appended                       |
+| `status`               | RESPONSE       | Required; native accepts 100–999; use standard HTTP statuses             |
+| `body`                 | RESPONSE       | Optional; missing means an empty body                                    |
+| `gzip`                 | RESPONSE       | Optional; `true` uses level 6, `1`–`9` selects a level, `false` disables |
+| `timeout`              | PROXY          | Response-header timeout; default 60000 ms, minimum 5 ms                  |
+| `max_client_body_size` | RESPONSE/PROXY | Request limit; missing or numeric 0 uses the server default              |
+| `max_proxy_body_size`  | PROXY          | Non-zero value overrides the upstream-response limit                     |
+| `websocket_timeout`    | PROXY          | Positive value enables WebSocket tunneling and sets tunnel I/O timeout   |
+| `flush`                | PROXY          | `true` reduces local buffering and adds `X-Accel-Buffering: no`          |
+| `allows`               | All            | CIDR allow/deny sequence; `!` prefixes deny entries                      |
 
 Durations accept integer milliseconds or case-insensitive strings such as `500`, `500ms`, and `5s`.
 Data sizes accept integer bytes or binary units such as `64k`, `4m`, and `1g`. New configuration should
@@ -218,6 +219,7 @@ status: 200
 body:
     type: TEXT
     content: ok
+gzip: true
 response_headers:
     Content-Type: text/plain; charset=utf-8
     Cache-Control: no-store
@@ -275,6 +277,23 @@ Connection, Content-Length, Proxy-Connection, Keep-Alive,
 Proxy-Authenticate, Proxy-Authorization, TE, Trailer,
 Transfer-Encoding, Upgrade
 ```
+
+### 7.4 Gzip content negotiation
+
+Omitting `gzip` or setting it to `false` disables compression. `true` uses the default compression level
+6; an integer from `1` through `9` selects that level. The first implementation supports only non-empty
+`TEXT` and `BASE64` bodies. access-server freezes both identity and gzip bytes before publishing the
+candidate snapshot, so the request hot path selects an existing representation without compressing it.
+`TEMPLATE` bodies do not support gzip yet.
+
+When enabled, access-server negotiates `gzip`, `identity`, `*`, and `q` weights from `Accept-Encoding`.
+A request without that header receives identity; explicitly rejecting both available representations
+returns 406 `NOT_ACCEPTABLE`. Every negotiated response merges `Vary: Accept-Encoding`; a selected gzip
+variant carries `Content-Encoding: gzip` and its own `Content-Length`. A configured strong ETag is
+weakened. HEAD performs the same coding selection and sends its headers without a body.
+
+Configuration compilation rejects `gzip` on a PROXY Route, an empty or `TEMPLATE` body, a
+1xx/204/205/206/304 status, or a simultaneous `response_headers.Content-Encoding` value.
 
 ## 8. PROXY Routes
 

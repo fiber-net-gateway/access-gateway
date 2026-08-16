@@ -37,6 +37,10 @@ struct CompiledResponseRoute {
     // TEXT and decoded BASE64 contain response bytes. TEMPLATE uses
     // body_template and leaves this string empty.
     std::string body;
+    // Present only for a gzip-enabled static TEXT/BASE64 body. Requests pin
+    // the immutable snapshot and select this variant without recompression.
+    std::optional<std::uint8_t> gzip_level;
+    std::string gzip_body;
     std::optional<CompiledTemplate> body_template;
     std::vector<CompiledTemplateEntry> response_headers;
 };

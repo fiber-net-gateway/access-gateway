@@ -10,10 +10,13 @@
 namespace {
 
 using fiber::access_server::AccessScriptRuntime;
+using fiber::access_server::BodyType;
 using fiber::access_server::ConfigUpdateStatus;
 using fiber::access_server::HostConfigEntry;
 using fiber::access_server::HostStrategyConfig;
 using fiber::access_server::ProjectConfig;
+using fiber::access_server::ResponseGzipConfig;
+using fiber::access_server::RouteBodyConfig;
 using fiber::access_server::RouteConfig;
 using fiber::access_server::RouteConfigStore;
 using fiber::access_server::RouteType;
@@ -105,6 +108,28 @@ TEST(RouteConfigStoreTest, RejectsInvalidLocalScriptWithoutReplacingPublishedSna
 
     ASSERT_FALSE(rejected);
     EXPECT_EQ(rejected.error().field, "routes[0].condition");
+    EXPECT_EQ(store.pin(), before);
+    EXPECT_TRUE(store.pin()->match_host("api.example.com"));
+    EXPECT_FALSE(store.pin()->match_host("new.example.com"));
+}
+
+TEST(RouteConfigStoreTest, RejectsInvalidGzipCandidateWithoutReplacingPublishedSnapshot) {
+    RouteConfigStore store;
+    ASSERT_TRUE(store.apply("demo", project_config(1, "api.example.com", "/one")));
+    auto before = store.pin();
+
+    ProjectConfig invalid = project_config(2, "new.example.com", "/compressed");
+    RouteConfig &route = *(*invalid.routes)[0];
+    route.type = RouteType::Response;
+    route.service.reset();
+    route.status = 200;
+    route.body = RouteBodyConfig{.type = BodyType::Template, .content = "dynamic"};
+    route.gzip = ResponseGzipConfig{.enabled = true};
+
+    auto rejected = store.apply("demo", invalid);
+
+    ASSERT_FALSE(rejected);
+    EXPECT_EQ(rejected.error().field, "routes[0].gzip");
     EXPECT_EQ(store.pin(), before);
     EXPECT_TRUE(store.pin()->match_host("api.example.com"));
     EXPECT_FALSE(store.pin()->match_host("new.example.com"));

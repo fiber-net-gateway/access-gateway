@@ -9,6 +9,7 @@ add_library(access_server_core STATIC
     "${CMAKE_CURRENT_LIST_DIR}/src/execution/AccessResult.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/execution/AccessRequestHandler.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/execution/ErrorResponder.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/execution/GzipEncoder.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/execution/ProxyExecutor.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/execution/ProxyResponsePlan.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/execution/ProxyUpstreamConnection.cpp"
@@ -39,7 +40,9 @@ add_library(access_server_core STATIC
     "${CMAKE_CURRENT_LIST_DIR}/src/runtime/TlsCertificateWatcher.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/validation/NativeValidatorProtocol.cpp")
 target_include_directories(access_server_core PUBLIC "${CMAKE_CURRENT_LIST_DIR}/src")
-target_link_libraries(access_server_core PUBLIC fiber_lib fiber::nacos fiber::cat fiber::prometheus)
+target_link_libraries(access_server_core
+    PUBLIC fiber_lib fiber::nacos fiber::cat fiber::prometheus
+    PRIVATE zlibstatic)
 set_target_properties(access_server_core PROPERTIES FOLDER "native/access-server")
 
 if (FIBER_ENABLE_LTO AND FIBER_IPO_SUPPORTED)
@@ -84,7 +87,7 @@ if (FIBER_BUILD_TESTS AND (GTest_FOUND OR TARGET GTest::gtest_main))
         "${CMAKE_CURRENT_LIST_DIR}/tests/SmoothWeightedRoundRobinTest.cpp")
     target_sources(fiber_access_server_tests PRIVATE
         "${CMAKE_CURRENT_LIST_DIR}/tests/TlsCertificateConfigTest.cpp")
-    target_link_libraries(fiber_access_server_tests PRIVATE access_server_core GTest::gtest_main)
+    target_link_libraries(fiber_access_server_tests PRIVATE access_server_core GTest::gtest_main zlibstatic)
     target_include_directories(fiber_access_server_tests PRIVATE
         "${ACCESS_GATEWAY_FIBER_SOURCE_DIR}/tests")
     target_compile_definitions(fiber_access_server_tests PRIVATE

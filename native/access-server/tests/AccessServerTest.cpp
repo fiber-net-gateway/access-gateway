@@ -7,13 +7,16 @@
 #include <chrono>
 #include <cstring>
 #include <future>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <zlib.h>
 
 #include <fiber/async/Spawn.h>
 #include <fiber/cat/CatClient.h>
@@ -35,7 +38,7 @@ std::uint16_t listener_port(int fd) {
     return ntohs(address.sin_port);
 }
 
-std::string request(std::uint16_t port) {
+std::string request(std::uint16_t port, std::string_view extra_headers = {}, std::string_view method = "GET") {
     const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
         return {};
@@ -49,9 +52,10 @@ std::string request(std::uint16_t port) {
         return {};
     }
 
-    constexpr std::string_view payload = "GET / HTTP/1.1\r\n"
-                                         "Host: api.example.com\r\n"
-                                         "Connection: close\r\n\r\n";
+    std::string payload(method);
+    payload.append(" / HTTP/1.1\r\nHost: api.example.com\r\n");
+    payload.append(extra_headers);
+    payload.append("Connection: close\r\n\r\n");
     std::size_t sent = 0;
     while (sent < payload.size()) {
         const ssize_t size = ::send(fd, payload.data() + sent, payload.size() - sent, 0);
@@ -82,6 +86,38 @@ std::string request(std::uint16_t port) {
     return response;
 }
 
+std::optional<std::string> gunzip_response_body(std::string_view response) {
+    const std::size_t body_start = response.find("\r\n\r\n");
+    if (body_start == std::string_view::npos) {
+        return std::nullopt;
+    }
+    response.remove_prefix(body_start + 4);
+
+    z_stream stream{};
+    if (inflateInit2(&stream, MAX_WBITS + 16) != Z_OK) {
+        return std::nullopt;
+    }
+    stream.next_in = reinterpret_cast<Bytef *>(const_cast<char *>(response.data()));
+    stream.avail_in = static_cast<uInt>(response.size());
+    std::array<unsigned char, 4096> buffer{};
+    std::string output;
+    int result = Z_OK;
+    do {
+        stream.next_out = buffer.data();
+        stream.avail_out = static_cast<uInt>(buffer.size());
+        result = inflate(&stream, Z_NO_FLUSH);
+        if (result != Z_OK && result != Z_STREAM_END) {
+            (void) inflateEnd(&stream);
+            return std::nullopt;
+        }
+        output.append(reinterpret_cast<const char *>(buffer.data()), buffer.size() - stream.avail_out);
+    } while (result != Z_STREAM_END);
+    if (inflateEnd(&stream) != Z_OK) {
+        return std::nullopt;
+    }
+    return output;
+}
+
 ProjectConfig response_config() {
     ProjectConfig config;
     config.version = 1;
@@ -99,6 +135,7 @@ ProjectConfig response_config() {
             .type = BodyType::Text,
             .content = "ok",
     };
+    route.gzip = ResponseGzipConfig{.enabled = true};
     config.routes = std::vector<std::optional<RouteConfig>>{std::move(route)};
     return config;
 }
@@ -147,11 +184,17 @@ TEST(AccessServerTest, ServesPublishedSnapshotAndShutsDownWorkerResources) {
     });
 
     std::string response;
+    std::string gzip_response;
+    std::string gzip_head_response;
+    std::string unacceptable_response;
     std::string metrics_response;
     std::thread client([&]() {
         const auto [bound_port, metrics_port] = port.get();
         if (bound_port != 0 && metrics_port != 0) {
             response = request(bound_port);
+            gzip_response = request(bound_port, "Accept-Encoding: gzip\r\n");
+            gzip_head_response = request(bound_port, "Accept-Encoding: gzip\r\n", "HEAD");
+            unacceptable_response = request(bound_port, "Accept-Encoding: gzip;q=0, identity;q=0\r\n");
             metrics_response = request(metrics_port);
         }
         async::spawn(accept_loop, [&]() -> async::DetachedTask {
@@ -171,10 +214,27 @@ TEST(AccessServerTest, ServesPublishedSnapshotAndShutsDownWorkerResources) {
 
     ASSERT_TRUE(startup_ok);
     EXPECT_NE(response.find("HTTP/1.1 200"), std::string::npos);
+    EXPECT_NE(response.find("Vary: Accept-Encoding"), std::string::npos);
+    EXPECT_EQ(response.find("Content-Encoding: gzip"), std::string::npos);
     EXPECT_TRUE(response.ends_with("\r\n\r\nok"));
+    EXPECT_NE(gzip_response.find("HTTP/1.1 200"), std::string::npos);
+    EXPECT_NE(gzip_response.find("Content-Encoding: gzip"), std::string::npos);
+    EXPECT_EQ(gunzip_response_body(gzip_response), "ok");
+    EXPECT_NE(gzip_head_response.find("HTTP/1.1 200"), std::string::npos);
+    EXPECT_NE(gzip_head_response.find("Content-Encoding: gzip"), std::string::npos);
+    EXPECT_TRUE(gzip_head_response.ends_with("\r\n\r\n"));
+    EXPECT_NE(unacceptable_response.find("HTTP/1.1 406"), std::string::npos);
+    EXPECT_NE(unacceptable_response.find("Vary: Accept-Encoding"), std::string::npos);
+    EXPECT_EQ(unacceptable_response.find("Content-Encoding: gzip"), std::string::npos);
     EXPECT_NE(metrics_response.find("HTTP/1.1 200"), std::string::npos);
-    EXPECT_NE(metrics_response.find("access_server_requests_total{result=\"success\"} 1"), std::string::npos);
-    EXPECT_NE(metrics_response.find("access_server_request_duration_seconds_count 1"), std::string::npos);
+    EXPECT_NE(metrics_response.find("access_server_requests_total{result=\"success\"} 3"), std::string::npos);
+    EXPECT_NE(metrics_response.find("access_server_requests_total{result=\"client_error\"} 1"), std::string::npos);
+    EXPECT_NE(metrics_response.find("access_server_request_duration_seconds_count 4"), std::string::npos);
+    EXPECT_NE(metrics_response.find("access_server_response_compression_total{result=\"gzip\"} 2"), std::string::npos);
+    EXPECT_NE(metrics_response.find("access_server_response_compression_total{result=\"identity\"} 1"),
+              std::string::npos);
+    EXPECT_NE(metrics_response.find("access_server_response_compression_total{result=\"not_acceptable\"} 1"),
+              std::string::npos);
 }
 
 TEST(AccessServerTest, ReturnsCatTraceIdFromTheUnifiedRequestContext) {

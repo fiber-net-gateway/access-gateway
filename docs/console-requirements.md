@@ -254,6 +254,7 @@ status: 200
 body:
   type: TEXT
   content: ok
+gzip: true
 response_headers:
   Content-Type: text/plain; charset=utf-8
 ```
@@ -291,7 +292,9 @@ allows:
 公共字段至少覆盖 `path`、`type`、`condition`、`max_client_body_size`、`allows` 和
 `response_headers`。
 
-RESPONSE Route 至少覆盖 `status` 与 `body`（TEXT、BASE64、TEMPLATE）。PROXY Route 至少覆盖
+RESPONSE Route 至少覆盖 `status` 与 `body`（TEXT、BASE64、TEMPLATE）。静态 TEXT/BASE64 body
+支持 `gzip: true|false|1..9`；启用时 Console 必须拒绝
+TEMPLATE、空 body、1xx/204/205/206/304 和显式 `Content-Encoding` 组合。PROXY Route 至少覆盖
 `service`/`addresses`、`cluster`、`proxy_headers`、`context`、`rewrite`、`timeout`、
 `max_proxy_body_size`、`websocket_timeout` 和 `flush`。
 

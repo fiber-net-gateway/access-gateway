@@ -298,11 +298,28 @@ AccessRequestTelemetry::~AccessRequestTelemetry() {
                           << " path=" << log::quoted(exchange.uri().unparsed_uri)
                           << " project=" << log::quoted(project_) << " route=" << log::quoted(route_)
                           << " cluster=" << log::quoted(cluster_) << " upstream=" << log::quoted(upstream_)
+                          << " response_compression=" << log::quoted(response_compression_)
                           << " status=" << response.status_code << " result=" << response_result(response)
                           << " error=" << log::quoted(error_)
                           << " duration_us=" << std::max<std::int64_t>(duration.count(), 0)
                           << " response_bytes=" << response.body_bytes_sent
                           << " io_error=" << common::io_err_name(response.terminal_error);
+}
+
+void AccessRequestTelemetry::record_response_compression(bool compressed) noexcept {
+    response_compression_ = compressed ? std::string_view("gzip") : std::string_view("identity");
+    add_root_data("responseCompression", response_compression_);
+    if (metrics_) {
+        metrics_->response_compression_selected(compressed);
+    }
+}
+
+void AccessRequestTelemetry::record_response_compression_not_acceptable() noexcept {
+    response_compression_ = "not_acceptable";
+    add_root_data("responseCompression", response_compression_);
+    if (metrics_) {
+        metrics_->response_compression_not_acceptable();
+    }
 }
 
 std::string_view AccessRequestTelemetry::copy_to_request_pool(std::string_view value) noexcept {

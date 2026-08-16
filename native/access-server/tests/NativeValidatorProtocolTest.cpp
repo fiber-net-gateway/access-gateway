@@ -24,7 +24,8 @@ TEST(NativeValidatorProtocolTest, CompilesProjectPayloadWithAccessServerCore) {
             "path": "/health",
             "type": "RESPONSE",
             "status": 200,
-            "body": {"type": "TEXT", "content": "ok"}
+            "body": {"type": "TEXT", "content": "ok"},
+            "gzip": true
         }]
     })";
 
@@ -34,6 +35,26 @@ TEST(NativeValidatorProtocolTest, CompilesProjectPayloadWithAccessServerCore) {
     EXPECT_NE(response.find(R"("projectVersion":3)"), std::string::npos) << response;
     EXPECT_NE(response.find(R"("hostCount":1)"), std::string::npos) << response;
     EXPECT_NE(response.find(R"("routeCount":1)"), std::string::npos) << response;
+}
+
+TEST(NativeValidatorProtocolTest, RejectsUnsupportedResponseGzipCombination) {
+    constexpr std::string_view payload = R"({
+        "version": 4,
+        "host": {"example.com": {}},
+        "routes": [{
+            "path": "/dynamic",
+            "type": "RESPONSE",
+            "status": 200,
+            "body": {"type": "TEMPLATE", "content": "dynamic"},
+            "gzip": true
+        }]
+    })";
+
+    const std::string response =
+            fiber::access_server::process_native_validator_request(request("project_route", "example", payload));
+    EXPECT_NE(response.find(R"("valid":false)"), std::string::npos) << response;
+    EXPECT_NE(response.find(R"("code":"invalid_combination")"), std::string::npos) << response;
+    EXPECT_NE(response.find(R"("field":"routes[0].gzip")"), std::string::npos) << response;
 }
 
 TEST(NativeValidatorProtocolTest, ReturnsStructuredCompiledModelErrors) {

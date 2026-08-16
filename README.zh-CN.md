@@ -13,7 +13,8 @@ Access Gateway 是由 C++23 数据面与 Web 管理控制台组成的高性能�
 
 - **Access Server**：原生运行时已支持默认开启的 HTTPS、HTTP/2 与 HTTP/3、Nacos 驱动的原子
   TLS 证书快照、项目与路由配置、Host/Path/条件
-  匹配、RESPONSE 与 PROXY 执行、WebSocket 隧道、服务发现、灰度路由、CAT 链路追踪、
+  匹配、带静态响应 gzip 协商的 RESPONSE 执行、PROXY 执行、WebSocket 隧道、服务发现、
+  灰度路由、CAT 链路追踪、
   Prometheus 指标和结构化访问日志。生产脚本语料差分验证与最终切流门槛仍在推进中。
 - **Console**：首个基于 MySQL 的纵向链路已经可用，包括确定性 migration、开发身份与固定
   部署 RBAC、不含环境参数的域名 Project API、加密的不可变配置版本、乐观锁、审计

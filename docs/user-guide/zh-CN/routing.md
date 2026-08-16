@@ -183,6 +183,7 @@ matcher 的结构优先级。
 | `rewrite`              | PROXY          | upstream path 模板；原 query 会重新拼接                    |
 | `status`               | RESPONSE       | 必填；native 接受 100–999，实际应使用标准 HTTP status      |
 | `body`                 | RESPONSE       | 可选；缺失表示空 body                                      |
+| `gzip`                 | RESPONSE       | 可选；`true` 使用级别 6，`1`–`9` 指定级别，`false` 关闭    |
 | `timeout`              | PROXY          | response header timeout；默认 60000 ms，配置值至少 5 ms    |
 | `max_client_body_size` | RESPONSE/PROXY | Route 请求体限制；缺失或数值 0 使用 server 默认值          |
 | `max_proxy_body_size`  | PROXY          | 非零时覆盖 upstream response body 限制                     |
@@ -209,6 +210,7 @@ status: 200
 body:
     type: TEXT
     content: ok
+gzip: true
 response_headers:
     Content-Type: text/plain; charset=utf-8
     Cache-Control: no-store
@@ -263,6 +265,20 @@ Connection, Content-Length, Proxy-Connection, Keep-Alive,
 Proxy-Authenticate, Proxy-Authorization, TE, Trailer,
 Transfer-Encoding, Upgrade
 ```
+
+### 7.4 Gzip 内容协商
+
+`gzip` 缺失或为 `false` 时不压缩；`true` 使用默认压缩级别 6，整数 `1`–`9` 指定压缩级别。
+首版只支持非空 `TEXT` 和 `BASE64` body：access-server 在候选快照发布前同时固化 identity 与 gzip
+字节，请求热路径只选择已有表示，不执行压缩。`TEMPLATE` body 暂不支持 gzip。
+
+启用后，access-server 根据 `Accept-Encoding` 中的 `gzip`、`identity`、`*` 和 `q` 权重选择表示；
+未发送该 header 时返回 identity，两个表示都被显式拒绝时返回 406 `NOT_ACCEPTABLE`。响应总是合并
+`Vary: Accept-Encoding`；选择 gzip 时写 `Content-Encoding: gzip` 和对应 `Content-Length`。
+配置的强 ETag 会降为弱 ETag，HEAD 执行相同的编码选择并发送对应 header，但不发送 body。
+
+以下组合会在配置编译阶段被拒绝：PROXY Route 上出现 `gzip` 字段、空 body、`TEMPLATE` body、
+1xx/204/205/206/304 status，以及同时配置 `response_headers.Content-Encoding`。
 
 ## 8. PROXY Route
 

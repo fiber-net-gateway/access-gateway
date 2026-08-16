@@ -20,6 +20,7 @@ const routeFields = new Set([
   'rewrite',
   'status',
   'body',
+  'gzip',
   'timeout',
   'max_client_body_size',
   'max_proxy_body_size',
@@ -28,7 +29,7 @@ const routeFields = new Set([
   'allows',
 ])
 
-export const ROUTE_COMPILER_REVISION = 'project-routes-mixed-v5-method-script'
+export const ROUTE_COMPILER_REVISION = 'project-routes-mixed-v5-response-gzip'
 
 const networkPolicyRouteId = '00000000-0000-4000-8000-000000000099'
 
@@ -171,6 +172,128 @@ function validateRouteFieldShapes(
     }
   }
   if ('body' in value && !isScalarMap(value.body)) addTypeIssue('body', 'an object or null')
+}
+
+function validateResponseGzip(
+  route: RouteItemModel,
+  lineCounter: LineCounter,
+  document: ReturnType<typeof parseDocument>,
+  value: Readonly<Record<string, unknown>>,
+  issues: RouteValidationIssue[],
+): void {
+  if (!('gzip' in value)) return
+
+  const offset = findFieldOffset(document, 'gzip')
+  const gzip = value.gzip
+  const valid =
+    typeof gzip === 'boolean' ||
+    (typeof gzip === 'number' && Number.isInteger(gzip) && gzip >= 1 && gzip <= 9)
+  if (!valid) {
+    issues.push(
+      issue(
+        route,
+        lineCounter,
+        'INVALID_ROUTE_GZIP',
+        'gzip must be true, false, or an integer compression level from 1 to 9',
+        'gzip',
+        offset,
+      ),
+    )
+    return
+  }
+  if (value.type !== 'RESPONSE') {
+    if (value.type === 'PROXY') {
+      issues.push(
+        issue(
+          route,
+          lineCounter,
+          'ROUTE_GZIP_TYPE_CONFLICT',
+          'gzip is only valid for RESPONSE routes',
+          'gzip',
+          offset,
+        ),
+      )
+    }
+    return
+  }
+  if (gzip === false) return
+
+  const body = value.body
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+    issues.push(
+      issue(
+        route,
+        lineCounter,
+        'ROUTE_GZIP_BODY_CONFLICT',
+        'Enabled gzip requires a non-empty TEXT or BASE64 response body',
+        'gzip',
+        offset,
+      ),
+    )
+  } else {
+    const bodyValue = body as Readonly<Record<string, unknown>>
+    if (
+      (bodyValue.type !== 'TEXT' && bodyValue.type !== 'BASE64') ||
+      typeof bodyValue.content !== 'string' ||
+      bodyValue.content.length === 0
+    ) {
+      issues.push(
+        issue(
+          route,
+          lineCounter,
+          'ROUTE_GZIP_BODY_CONFLICT',
+          'Enabled gzip requires a non-empty TEXT or BASE64 response body',
+          'gzip',
+          offset,
+        ),
+      )
+    }
+  }
+
+  const status =
+    typeof value.status === 'number'
+      ? value.status
+      : typeof value.status === 'string' && /^[+-]?\d+$/u.test(value.status)
+        ? Number(value.status)
+        : null
+  if (
+    status !== null &&
+    ((status >= 100 && status < 200) ||
+      status === 204 ||
+      status === 205 ||
+      status === 206 ||
+      status === 304)
+  ) {
+    issues.push(
+      issue(
+        route,
+        lineCounter,
+        'ROUTE_GZIP_STATUS_CONFLICT',
+        'gzip is not supported for informational, 204, 205, 206, or 304 responses',
+        'gzip',
+        offset,
+      ),
+    )
+  }
+
+  const responseHeaders = value.response_headers
+  if (
+    typeof responseHeaders === 'object' &&
+    responseHeaders !== null &&
+    !Array.isArray(responseHeaders) &&
+    Object.keys(responseHeaders).some((name) => name.toLowerCase() === 'content-encoding')
+  ) {
+    issues.push(
+      issue(
+        route,
+        lineCounter,
+        'ROUTE_GZIP_CONTENT_ENCODING_CONFLICT',
+        'Remove response_headers.Content-Encoding when gzip is enabled',
+        'gzip',
+        offset,
+      ),
+    )
+  }
 }
 
 const httpMethodPattern = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/u
@@ -330,6 +453,7 @@ function parseRoute(route: RouteItemModel): {
   )
   if (methodIssue) issues.push(methodIssue)
   validateRouteFieldShapes(route, lineCounter, document, value, issues)
+  validateResponseGzip(route, lineCounter, document, value, issues)
   return { value: issues.length === 0 ? value : null, issues }
 }
 

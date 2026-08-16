@@ -28,6 +28,15 @@ enum class BodyType : std::uint8_t {
     Template,
 };
 
+inline constexpr std::uint8_t kDefaultGzipLevel = 6;
+
+struct ResponseGzipConfig {
+    bool enabled = false;
+    std::uint8_t level = kDefaultGzipLevel;
+
+    bool operator==(const ResponseGzipConfig &) const = default;
+};
+
 enum class HttpsStrategy : std::uint16_t {
     NotRequired = 0,
     Redirect301 = 301,
@@ -92,6 +101,7 @@ struct RouteConfig {
     std::optional<std::string> rewrite;
     std::int32_t status = 0;
     std::optional<RouteBodyConfig> body;
+    std::optional<ResponseGzipConfig> gzip;
     std::optional<std::int64_t> timeout_millis;
     std::optional<std::int64_t> max_client_body_size;
     std::optional<std::int64_t> max_proxy_body_size;

@@ -448,6 +448,14 @@ service: report-service/stable
       <td>Optional; missing means an empty body</td>
     </tr>
     <tr>
+      <td><code>gzip</code></td>
+      <td>RESPONSE</td>
+      <td>
+        Optional; <code>true</code> uses level 6, <code>1</code>–<code>9</code> selects a level,
+        <code>false</code> disables
+      </td>
+    </tr>
+    <tr>
       <td><code>timeout</code></td>
       <td>PROXY</td>
       <td>Response-header timeout; default 60000 ms, minimum 5 ms</td>
@@ -510,6 +518,7 @@ status: 200
 body:
     type: TEXT
     content: ok
+gzip: true
 response_headers:
     Content-Type: text/plain; charset=utf-8
     Cache-Control: no-store
@@ -577,6 +586,36 @@ response_headers:
 Proxy-Authenticate, Proxy-Authorization, TE, Trailer,
 Transfer-Encoding, Upgrade
 </code></pre>
+<h3 id="7-4-gzip-content-negotiation">
+  7.4 Gzip content negotiation<a
+    class="documentation-heading-anchor"
+    href="#7-4-gzip-content-negotiation"
+    aria-label="Link to 7.4 Gzip content negotiation"
+    >#</a
+  >
+</h3>
+<p>
+  Omitting <code>gzip</code> or setting it to <code>false</code> disables compression.
+  <code>true</code> uses the default compression level 6; an integer from <code>1</code> through
+  <code>9</code> selects that level. The first implementation supports only non-empty
+  <code>TEXT</code> and <code>BASE64</code> bodies. access-server freezes both identity and gzip
+  bytes before publishing the candidate snapshot, so the request hot path selects an existing
+  representation without compressing it. <code>TEMPLATE</code> bodies do not support gzip yet.
+</p>
+<p>
+  When enabled, access-server negotiates <code>gzip</code>, <code>identity</code>, <code>*</code>,
+  and <code>q</code> weights from <code>Accept-Encoding</code>. A request without that header
+  receives identity; explicitly rejecting both available representations returns 406
+  <code>NOT_ACCEPTABLE</code>. Every negotiated response merges <code>Vary: Accept-Encoding</code>;
+  a selected gzip variant carries <code>Content-Encoding: gzip</code> and its own
+  <code>Content-Length</code>. A configured strong ETag is weakened. HEAD performs the same coding
+  selection and sends its headers without a body.
+</p>
+<p>
+  Configuration compilation rejects <code>gzip</code> on a PROXY Route, an empty or
+  <code>TEMPLATE</code> body, a 1xx/204/205/206/304 status, or a simultaneous
+  <code>response_headers.Content-Encoding</code> value.
+</p>
 <h2 id="8-proxy-routes">
   8. PROXY Routes<a
     class="documentation-heading-anchor"

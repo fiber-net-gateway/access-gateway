@@ -14,7 +14,8 @@ The repository is under active development in two first-class areas:
 
 - **Access Server** — the native runtime supports HTTPS, HTTP/2, and HTTP/3 enabled by default,
   Nacos-driven atomic TLS certificate snapshots plus project and route configuration,
-  Host/Path/condition matching, RESPONSE and PROXY execution, WebSocket tunneling, service
+  Host/Path/condition matching, RESPONSE execution with negotiated static gzip, PROXY execution,
+  WebSocket tunneling, service
   discovery, gray routing, CAT tracing, Prometheus metrics, and structured access logs. Production
   script-corpus differential verification and final cutover gates are still in progress.
 - **Console** — the first MySQL-backed vertical slice is available: deterministic migrations,
