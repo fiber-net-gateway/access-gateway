@@ -8,7 +8,7 @@
 - 实现基线：Configuration Version API 与历史 UI、按当前/历史版本创建 Release、Native Validator
   重校验、rnacos publication worker、逐资源回读证据和 Docker demo 已实现；版本 diff、资源级重试、
   Project 网络策略、可更新逻辑证书、不可变版本、SAN 派生 SNI 索引和 Project Settings 下线
-  Release 已实现；崩溃后自动重新领取 running job、证书动态交付和实例激活采集尚未实现
+  Release 与实例激活采集已实现；崩溃后自动重新领取 running publication job 和 OIDC 尚未实现
 
 ## 1. 设计目标
 
@@ -685,7 +685,7 @@ rnacos adapter 未配置时保持 unavailable，UI 不模拟发布成功。
 6. 已完成 rnacos adapter、publication worker 和逐资源证据；资源级重试与崩溃恢复待实现；
 7. 已完成 Project Settings、Project List 下线 Release 和发布成功后的归档；route Data ID 清理仍为
    后续独立可选动作；
-8. 增加实例 typed activation evidence；能力缺失期间保持 Activation unknown；
+8. 已增加实例 typed activation evidence；目标缺失或证据过期时保持 Activation unknown；
 9. 完成 disposable rnacos E2E、native compatibility matrix 和运维文档。
 
 每个增量都必须保持“能保存版本但不能伪发布”的安全退化路径。仅完成版本 UI 而无 worker 时，

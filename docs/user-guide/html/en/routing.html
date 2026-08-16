@@ -99,6 +99,12 @@
   per-instance evidence does not exist, the Console must show activation as unknown rather than
   rendering Published as Active.
 </p>
+<p>
+  For a published Release, the Console reports <code>active</code> only when every required instance
+  provides a fresh exact MD5/version match. A not-yet-active candidate is <code>pending</code>, an
+  explicit rejection or poll failure is <code>degraded</code>, and missing or expired evidence is
+  <code>unknown</code>. Instance details are loaded from the Release page on demand.
+</p>
 <h3 id="2-2-console-editing-model">
   2.2 Console editing model<a
     class="documentation-heading-anchor"
@@ -704,6 +710,15 @@ timeout: 20s
   fallback. Omit <code>service</code> to use static addresses. Without a scheme, port 443 implies
   HTTPS and other ports imply HTTP. Explicitly specify <code>http://</code> or
   <code>https://</code> to avoid port-dependent meaning.
+</p>
+<p>
+  Outbound HTTPS trust is process-wide: <code>ACCESS_SERVER_UPSTREAM_TLS_MODE</code> is
+  <code>legacy_insecure</code> by default, or can be set to <code>system_ca</code> or
+  <code>custom_ca</code> (with <code>ACCESS_SERVER_UPSTREAM_TLS_CA_FILE</code>). Secure modes verify
+  the endpoint hostname or IP identity, and an invalid trust store prevents startup. Route-specific
+  CA, SNI, and verification-name overrides are not currently accepted because the pinned connection
+  pool cannot yet isolate connections by TLS transport profile. Changing CA bundle contents requires
+  a rolling restart so existing connections established under the previous trust store are drained.
 </p>
 <h3 id="8-3-request-and-response-forwarding">
   8.3 Request and response forwarding<a

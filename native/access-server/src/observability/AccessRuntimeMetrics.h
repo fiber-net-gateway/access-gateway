@@ -21,6 +21,7 @@ public:
 
     [[nodiscard]] AccessConfigMetrics &config() noexcept { return config_; }
     [[nodiscard]] AccessDiscoveryMetrics &discovery() noexcept { return discovery_; }
+    [[nodiscard]] const AccessDiscoveryMetrics &discovery() const noexcept { return discovery_; }
     [[nodiscard]] AccessTlsMetrics &tls() noexcept { return tls_; }
 
     void append_prometheus(std::string &output, std::chrono::steady_clock::time_point now) const;

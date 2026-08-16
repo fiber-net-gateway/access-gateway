@@ -1,5 +1,6 @@
 #include "AccessServer.h"
 #include "../observability/AccessRequestTelemetry.h"
+#include "../observability/AccessRuntimeMetrics.h"
 
 #include <fiber/async/Spawn.h>
 #include <fiber/cat/CatClient.h>
@@ -35,7 +36,11 @@ AccessServer::AccessServer(event::EventLoop &accept_loop, event::EventLoopGroup 
                      .test_mode = options.test_mode,
              },
              executor_.adapter()),
-    metrics_(workers, options.runtime_metrics), cat_client_(options.cat_client),
+    metrics_(workers, options.runtime_metrics),
+    activation_endpoint_(options.activation_evidence,
+                         options.runtime_metrics ? &options.runtime_metrics->discovery() : nullptr,
+                         std::move(options.activation_endpoint)),
+    cat_client_(options.cat_client),
     server_(
             accept_loop, [this](http::HttpExchange &exchange) { return handle(exchange); },
             make_http_options(std::move(options.http_server)), &workers),
@@ -123,6 +128,10 @@ async::Task<void> AccessServer::handle(http::HttpExchange &exchange) noexcept {
 }
 
 async::Task<void> AccessServer::handle_metrics(http::HttpExchange &exchange) noexcept {
+    if (exchange.uri().path != "/metrics") {
+        co_await activation_endpoint_.handle(exchange);
+        co_return;
+    }
     auto collected = co_await metrics_.collect(event::EventLoop::current().io_buf_node_pool());
     if (!collected) {
         constexpr std::string_view kBusy = "metrics unavailable\n";

@@ -1,6 +1,7 @@
 #ifndef FIBER_ACCESS_SERVER_ACCESS_CONFIG_WATCHER_H
 #define FIBER_ACCESS_SERVER_ACCESS_CONFIG_WATCHER_H
 
+#include "../observability/AccessActivationEvidence.h"
 #include "../observability/AccessConfigMetrics.h"
 #include "AccessConfigCompiler.h"
 #include "RouteConfigStore.h"
@@ -58,6 +59,7 @@ struct AccessConfigWatcherFailure {
     std::string md5;
     common::IoErr io_error = common::IoErr::None;
     AccessConfigError error;
+    std::int64_t observed_at_unix_millis = 0;
 };
 
 enum class AccessProjectSubscriptionState : std::uint8_t {
@@ -85,8 +87,9 @@ enum class AccessConfigReadinessState : std::uint8_t {
 };
 
 struct AccessConfigReadiness {
-    // Ready means the current subscription graph has reached a terminal first result. Rejected projects are
-    // counted separately and Ready is not evidence that their candidate was published or activated.
+    // Ready means the current subscription graph has reached a terminal first
+    // result. Rejected projects are counted separately and Ready is not evidence
+    // that their candidate was published or activated.
     AccessConfigReadinessState state = AccessConfigReadinessState::WaitingForProjectList;
     std::size_t desired_projects = 0;
     std::size_t subscribed_projects = 0;
@@ -131,7 +134,8 @@ class AccessConfigWatcher final : public common::NonCopyable, public common::Non
 public:
     AccessConfigWatcher(event::EventLoop &loop, AccessConfigCompiler &compiler, nacos::ConfigService &config_service,
                         RouteConfigStore &store, AccessConfigWatcherOptions options = {},
-                        RouteSnapshotObserver observer = {}, AccessConfigMetricsObserver metrics_observer = {});
+                        RouteSnapshotObserver observer = {}, AccessConfigMetricsObserver metrics_observer = {},
+                        AccessRouteActivationEvidenceObserver activation_observer = {});
     ~AccessConfigWatcher();
 
     [[nodiscard]] std::expected<void, nacos::ConfigServiceError> start();
@@ -191,12 +195,13 @@ private:
                                      nacos::ConfigServiceError error);
     void settle_project(const std::shared_ptr<ProjectEntry> &entry, AccessProjectConfigState state) noexcept;
     void publish_readiness();
+    void publish_activation_evidence(const AccessConfigReadiness &readiness) const noexcept;
     void set_unavailable(std::string data_id, common::IoErr io_error, std::string message);
     void observe_metric_event(AccessConfigMetricEvent event) const noexcept;
     void observe_metric_duration(AccessConfigMetricStage stage, std::chrono::nanoseconds duration) const noexcept;
     void observe_publication_timing(std::chrono::nanoseconds global_build, std::chrono::nanoseconds publish,
                                     bool published = true) const noexcept;
-    void publish_observer(const std::shared_ptr<const AccessRouteSnapshot> &snapshot) const noexcept;
+    void publish_observer(const std::shared_ptr<const AccessRouteSnapshot> &snapshot) noexcept;
     void report_failure(const std::shared_ptr<ProjectEntry> &entry, AccessConfigWatcherFailureStage stage,
                         std::string data_id, std::string md5, common::IoErr io_error, AccessConfigError error);
     [[nodiscard]] std::chrono::milliseconds retry_delay(std::uint32_t attempt) const noexcept;
@@ -209,6 +214,7 @@ private:
     AccessConfigWatcherOptions options_;
     RouteSnapshotObserver observer_;
     AccessConfigMetricsObserver metrics_observer_;
+    AccessRouteActivationEvidenceObserver activation_observer_;
     std::unique_ptr<ProjectListEntry> project_list_;
     std::map<std::string, std::shared_ptr<ProjectEntry>, std::less<>> projects_;
     std::deque<std::shared_ptr<ProjectEntry>> compile_queue_;
@@ -223,6 +229,13 @@ private:
     bool initial_project_list_received_ = false;
     bool initial_batch_active_ = false;
     bool defer_readiness_updates_ = false;
+    AccessActivationCandidateStatus project_list_candidate_status_ = AccessActivationCandidateStatus::Awaiting;
+    std::string project_list_observed_md5_;
+    std::string project_list_active_md5_;
+    std::int64_t project_list_observed_at_unix_millis_ = 0;
+    std::int64_t project_list_active_at_unix_millis_ = 0;
+    std::uint64_t snapshot_generation_ = 0;
+    std::int64_t snapshot_published_at_unix_millis_ = 0;
     std::size_t active_compiler_jobs_ = 0;
     std::uint64_t successful_updates_ = 0;
     std::uint64_t failed_updates_ = 0;

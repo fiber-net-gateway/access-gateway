@@ -1,3 +1,4 @@
+import type { ActivationStatus, ActivationSummary } from '../activation/model.js'
 import type { ReleaseStatus } from '../releases/state.js'
 
 export interface TlsCertificateReleaseView {
@@ -19,7 +20,8 @@ export interface TlsCertificateReleaseView {
     jobId: string | null
     state: string | null
   }
-  activationStatus: 'unknown'
+  activationStatus: ActivationStatus
+  activation: ActivationSummary
   createdAt: string
   publishedAt: string | null
 }

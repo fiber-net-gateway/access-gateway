@@ -3,7 +3,7 @@
 - 状态：Implemented v7（含 native trusted proxy/client metadata）
 - 日期：2026-08-12
 - 适用范围：`server/`、`web/`、配置版本编译器和既有 native HostStrategy/`allows` 兼容能力
-- 明确未完成：逐实例证书/配置激活证据，以及生产脚本语料差分和最终切流门槛
+- 已完成逐实例证书/配置激活证据；生产脚本语料差分和最终切流门槛仍未完成
 
 ## 1. 目标与边界
 
@@ -22,7 +22,7 @@ SAN 派生索引不属于 Project、不进入 route payload；Console 通过独�
 Project，两个输入允许不同且不得在控制面中隐式绑定。
 
 access-server 已监听独立 TLS 快照并原子热切换。Nacos 写入/readback 只证明 Release Published；
-逐实例证据仍未实现，所以 UI 必须把 activation 显示为 unknown。证书版本保存、TLS Release
+逐实例证据已实现；目标缺失或证据过期时 UI 必须把 activation 显示为 unknown。证书版本保存、TLS Release
 Published 和实例 Active 继续是三个不同事实。
 
 ## 2. 细化需求
@@ -64,7 +64,7 @@ Published 和实例 Active 继续是三个不同事实。
 | CON-CERT-009 | P0     | 更新创建新版本并原子切换 current version 和 SAN 索引；范围变化必须显式确认      |
 | CON-CERT-010 | P0     | 事实状态区分 valid、30 天内 expiring、expired、superseded 和 activation unknown |
 | CON-CERT-011 | P0     | 创建逻辑证书和新增版本写入脱敏审计，审计不保存 PEM 或私钥                       |
-| CON-CERT-012 | P0/P1  | Nacos 完整快照原子热更新已完成；逐实例指纹证据仍为 P1                           |
+| CON-CERT-012 | P0/P1  | Nacos 完整快照原子热更新和逐实例版本/摘要证据已完成；外部终止器证明仍为 P1      |
 | CON-CERT-013 | P0     | 证书内容校验不使用业务流量灰度；运行时部署灰度与证书是否合法是两个独立问题      |
 
 上传不接受尚未生效或已经过期的证书；当前版本随时间可变为 `expiring`/`expired`。续期在同一
@@ -155,8 +155,9 @@ body。跨 workspace 或无权对象继续返回 404，防止枚举。
 
 ## 5. Web 交互
 
-- 顶层 TLS 页面展示独立逻辑证书、当前版本 DNS SAN、当前/历史版本和 activation unknown，并提供
-  新建、版本更新、默认证书选择和 TLS 快照发布入口。
+- 顶层 TLS 页面展示独立逻辑证书、当前版本 DNS SAN、当前/历史版本，并提供新建、版本更新、
+  默认证书选择和 TLS 快照发布入口。逻辑证书库存本身不推断部署状态；TLS Release 单独展示
+  `unknown`、`pending`、`active`、`degraded` 聚合及分页实例证据。
 - 同一页面提供只读 SNI 解析预览，不提供规则创建、切换或删除。SAN 范围变化时展示新增/停止覆盖
   的域名并要求确认。
 - Project 列表、详情 DTO、导航和页面不再包含证书字段或证书入口。
@@ -179,7 +180,7 @@ body。跨 workspace 或无权对象继续返回 404，防止枚举。
   same-version/different-content 都保留旧快照。
 - ClientHello 热路径只做原子读、ASCII 无分配比较与有序数组二分查找；每 worker 预分配 hazard
   slot 延长旧快照到 Fiber 完成 `SSL_set_SSL_CTX`，不使用 mutex、shared_ptr refcount 或字符串分配。
-- 逐实例 fingerprint 回执仍未实现，因此 Release Published 后 activation 仍为 unknown。
+- 逐实例 fingerprint 回执已实现；Release Published 后仍等待精确 active MD5/version，缺失或过期为 unknown。
 - native 已实现 `direct`/`trusted_proxy`/`legacy_headers` 三种明确来源模式；Route CIDR、gray、
   redirect、日志和 trace 共享同一解析结果。生产若使用 Ingress/LB，必须选择 `trusted_proxy` 并仅
   列出实际代理 CIDR；`legacy_headers` 不得暴露给非受信网络。
@@ -200,8 +201,8 @@ body。跨 workspace 或无权对象继续返回 404，防止枚举。
 - 相同 SAN 续期直接成功；SAN 范围变化未确认时失败且旧版本、旧索引保持不变；
 - SNI exact 优先于单层 wildcard，重复 selector fail closed，不按顺序选择；
 - 私钥不出现在响应模型、审计 summary、日志或 readback 证据；只存在于加密文档和专用 Nacos payload；
-- Web 保存 HTTPS/CIDR 网络策略时创建新版本；TLS 页面把库存预览、Release Published 与 activation unknown 分开显示，
-  Project 页面没有证书耦合。
+- Web 保存 HTTPS/CIDR 网络策略时创建新版本；TLS 页面把库存预览、Release Published 与逐实例
+  activation 聚合分开显示，Project 页面没有证书耦合。
 
 本增量必须执行 console 全矩阵以及 native configure/build/focused CTest，并验证 Compose 配置渲染
 和 TLS 握手。上述测试不能替代生产脚本语料差分与最终切流门槛。

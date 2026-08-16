@@ -15,6 +15,8 @@ test('loadServerConfig uses safe local development defaults', () => {
   assert.equal(config.auth.mode, 'development')
   assert.equal(config.nativeValidator.path, null)
   assert.equal(config.publication.enabled, false)
+  assert.equal(config.activation.enabled, false)
+  assert.deepEqual(config.activation.targets, [])
 })
 
 test('loadServerConfig parses explicit database and validator values', () => {
@@ -90,6 +92,88 @@ test('loadServerConfig rejects invalid ports, log levels, and database secrets',
 
 test('loadServerConfig rejects unsafe production development authentication', () => {
   assert.throws(() => loadServerConfig({ NODE_ENV: 'production' }), /AUTH_MODE=development/u)
+})
+
+test('loadServerConfig validates bounded activation collector targets', () => {
+  const token = '0123456789abcdef0123456789abcdef'
+  const config = loadServerConfig({
+    ACTIVATION_COLLECTOR_ENABLED: 'true',
+    ACTIVATION_TARGETS_JSON: JSON.stringify([
+      {
+        environmentCode: 'prod-cn',
+        instanceKey: 'access-0',
+        endpoint: 'https://access-0.internal:16689/v1/activation-evidence',
+        token,
+      },
+    ]),
+  })
+  assert.equal(config.activation.enabled, true)
+  assert.equal(config.activation.targets[0]?.instanceKey, 'access-0')
+  assert.equal(config.activation.targets[0]?.token, token)
+
+  assert.throws(
+    () =>
+      loadServerConfig({
+        ACTIVATION_TARGETS_JSON: JSON.stringify([
+          {
+            environmentCode: 'prod',
+            instanceKey: 'access-0',
+            endpoint: 'http://access-0/v1/activation-evidence',
+            token,
+          },
+        ]),
+      }),
+    /ACTIVATION_TARGETS_JSON/u,
+  )
+  assert.throws(
+    () =>
+      loadServerConfig({
+        ACTIVATION_COLLECTOR_ENABLED: 'true',
+        ACTIVATION_TARGETS_JSON: JSON.stringify([
+          {
+            environmentCode: 'prod',
+            instanceKey: 'access-0',
+            endpoint: 'https://user:secret@access-0/v1/activation-evidence',
+            token,
+          },
+        ]),
+      }),
+    /endpoint/u,
+  )
+
+  assert.throws(() => loadServerConfig({ ACTIVATION_CONCURRENCY: '65' }), /ACTIVATION_CONCURRENCY/u)
+  assert.throws(
+    () =>
+      loadServerConfig({
+        ACTIVATION_POLL_INTERVAL_MILLIS: '5000',
+        ACTIVATION_EVIDENCE_TTL_MILLIS: '5000',
+      }),
+    /ACTIVATION_EVIDENCE_TTL_MILLIS/u,
+  )
+  assert.throws(
+    () =>
+      loadServerConfig({
+        ACTIVATION_REQUEST_TIMEOUT_MILLIS: '5000',
+        ACTIVATION_LEASE_MILLIS: '5000',
+      }),
+    /ACTIVATION_LEASE_MILLIS/u,
+  )
+  assert.throws(
+    () =>
+      loadServerConfig({
+        ACTIVATION_REQUEST_TIMEOUT_MILLIS: '5000',
+        ACTIVATION_LEASE_MILLIS: '9000',
+      }),
+    /ACTIVATION_LEASE_MILLIS/u,
+  )
+  assert.throws(
+    () =>
+      loadServerConfig({
+        ACTIVATION_MAX_PAGES: '1',
+        ACTIVATION_MAX_PROJECTS: '257',
+      }),
+    /ACTIVATION_MAX_PAGES/u,
+  )
 })
 
 test('loadServerConfig rejects an explicitly empty or malformed host', () => {

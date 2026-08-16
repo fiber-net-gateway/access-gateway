@@ -479,6 +479,14 @@ export class PublicationWorker {
       )
       if (status === 'published') {
         await transaction.execute(
+          `INSERT INTO release_activation_targets (release_id, instance_id, required_target)
+           SELECT ?, instance_record.id, TRUE
+           FROM access_server_instances instance_record
+           WHERE instance_record.environment_id = ? AND instance_record.enabled = TRUE
+           ON DUPLICATE KEY UPDATE required_target = TRUE`,
+          [claim.releaseInternalId, claim.environmentInternalId],
+        )
+        await transaction.execute(
           `UPDATE releases previous
            INNER JOIN release_items previous_item
              ON previous_item.release_id = previous.id AND previous_item.kind = 'project_route'

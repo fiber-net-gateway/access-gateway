@@ -23,8 +23,8 @@ Access Gateway 是由 C++23 数据面与 Web 管理控制台组成的高性能�
   fail-closed Native Validator 适配器、当前/历史版本 Release 创建和带 lease/回读证据的 rnacos
   发布 Worker 已经落地；Project 级版本化网络策略、独立加密 TLS 库存、不可变证书版本、基于
   DNS SAN 的 ClientHello SNI 自动选择与解析预览也已实现，并支持 TLS 快照 Release、发布与回读
-  证据。Project 仍按 HTTP Host/`:authority` 选择，不与 SNI 绑定。OIDC、资源级发布重试与恢复和
-  实例级生效采集仍待实现。
+  证据。Project 仍按 HTTP Host/`:authority` 选择，不与 SNI 绑定。Project/TLS Release 的认证、
+  有界逐实例生效证据和带租约采集器已经实现；OIDC、资源级发布重试与恢复仍待实现。
 
 因此，对于尚无配套工作流的状态，控制台会明确显示“不可用”或“未知”，不会伪造发布或
 生效成功。
@@ -36,8 +36,11 @@ flowchart LR
     User[运维人员] --> Web[React Console]
     Web --> API[Node.js / Fastify API]
     API --> DB[(控制面数据库)]
-    API --> Nacos[(Nacos / rnacos)]
+    Worker[发布 Worker] <--> DB
+    Collector[生效证据采集器] <--> DB
+    Worker --> Nacos[(Nacos / rnacos)]
     Nacos --> Access[原生 Access Server]
+    Access --> Collector
     Discovery[Nacos NamingService] --> Access
     Client[网关客户端] --> Access
     Access --> Upstream[上游服务]
@@ -173,7 +176,7 @@ MySQL migration，通过 Console API 幂等创建演示项目与 Configuration V
 将 Release 写入 R-Nacos 并回读校验，成功后再启动 Access Server。
 
 Fastify 在同一个 Console 容器中同时提供 `/api/*` 接口和 React 单页应用。完整环境因此包含
-5 个长期运行容器和 3 个 migration/bootstrap 一次性容器。
+6 个长期运行容器和 3 个 migration/bootstrap 一次性容器。
 
 全部服务就绪后可访问：
 
@@ -192,7 +195,8 @@ HTTP/3，可在 WSL 运行 `hostname -I` 取得 WSL 地址，在 Windows hosts �
 `.env` 设置 `ACCESS_SERVER_PUBLISHED_HOST=127.0.0.1` 收紧监听范围。
 浏览器只有在信任该演示证书时才会协商 QUIC；不要在生产环境信任或复用这个本机自签名证书。
 demo bootstrap 通过 Console API 创建 Configuration Version 和 Release，发布 Worker 负责写入
-R-Nacos 并回读校验。由于实例激活证据采集尚未实现，UI 仍会如实显示“激活未知”。可使用
+R-Nacos 并回读校验。独立采集器随后认证访问 demo Access Server，并单独报告精确的 route/TLS
+生效版本；缺少或过期证据仍如实显示“激活未知”。可使用
 `npm run demo:ps`、`npm run demo:logs` 和 `npm run demo:down`
 管理演示环境。只有在确定要删除全部演示数据时，才为 `docker compose down` 添加 `--volumes`。
 

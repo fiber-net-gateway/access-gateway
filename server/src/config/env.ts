@@ -46,6 +46,26 @@ export interface PublicationConfig {
   leaseMillis: number
 }
 
+export interface ActivationTargetConfig {
+  environmentCode: string
+  instanceKey: string
+  endpoint: string
+  token: string
+}
+
+export interface ActivationCollectorConfig {
+  enabled: boolean
+  targets: readonly ActivationTargetConfig[]
+  requestTimeoutMillis: number
+  maxResponseBytes: number
+  pollIntervalMillis: number
+  evidenceTtlMillis: number
+  leaseMillis: number
+  maxPages: number
+  maxProjects: number
+  concurrency: number
+}
+
 export interface ServerConfig {
   host: string
   port: number
@@ -57,6 +77,7 @@ export interface ServerConfig {
   auth: AuthConfig
   nativeValidator: NativeValidatorConfig
   publication: PublicationConfig
+  activation: ActivationCollectorConfig
 }
 
 function isLogLevel(value: string): value is LogLevel {
@@ -102,6 +123,20 @@ function parsePositiveInteger(
   const parsed = Number(value)
   if (!Number.isSafeInteger(parsed) || parsed < 1) {
     throw new Error(`${name} must be a positive integer`)
+  }
+  return parsed
+}
+
+function parseBoundedPositiveInteger(
+  value: string | undefined,
+  name: string,
+  defaultValue: number,
+  minimum: number,
+  maximum: number,
+): number {
+  const parsed = parsePositiveInteger(value, name, defaultValue)
+  if (parsed < minimum || parsed > maximum) {
+    throw new Error(`${name} must be an integer between ${minimum} and ${maximum}`)
   }
   return parsed
 }
@@ -164,6 +199,102 @@ function parseOptionalHttpEndpoint(value: string | undefined, name: string): str
   return endpoint.origin
 }
 
+function parseActivationTargets(value: string | undefined): readonly ActivationTargetConfig[] {
+  const raw = value?.trim()
+  if (!raw) return []
+  if (Buffer.byteLength(raw, 'utf8') > 131_072) {
+    throw new Error('ACTIVATION_TARGETS_JSON exceeds 131072 bytes')
+  }
+
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    throw new Error('ACTIVATION_TARGETS_JSON must be valid JSON')
+  }
+  if (!Array.isArray(parsed) || parsed.length < 1 || parsed.length > 64) {
+    throw new Error('ACTIVATION_TARGETS_JSON must contain 1-64 targets')
+  }
+
+  const identities = new Set<string>()
+  return parsed.map((candidate, index) => {
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
+      throw new Error(`ACTIVATION_TARGETS_JSON[${index}] must be an object`)
+    }
+    const record = candidate as Record<string, unknown>
+    const keys = Object.keys(record).sort()
+    if (
+      keys.length !== 4 ||
+      !['endpoint', 'environmentCode', 'instanceKey', 'token'].every((key) => keys.includes(key))
+    ) {
+      throw new Error(
+        `ACTIVATION_TARGETS_JSON[${index}] must contain only environmentCode, instanceKey, endpoint, and token`,
+      )
+    }
+    const environmentCode = record.environmentCode
+    const instanceKey = record.instanceKey
+    const endpointText = record.endpoint
+    const token = record.token
+    if (typeof environmentCode !== 'string' || !/^[a-z][a-z0-9-]{0,63}$/u.test(environmentCode)) {
+      throw new Error(`ACTIVATION_TARGETS_JSON[${index}].environmentCode is invalid`)
+    }
+    if (
+      typeof instanceKey !== 'string' ||
+      instanceKey.length < 1 ||
+      instanceKey.length > 255 ||
+      !/^[A-Za-z0-9._:-]+$/u.test(instanceKey)
+    ) {
+      throw new Error(`ACTIVATION_TARGETS_JSON[${index}].instanceKey is invalid`)
+    }
+    if (
+      typeof token !== 'string' ||
+      token.length < 32 ||
+      token.length > 512 ||
+      !/^[\x21-\x7e]+$/u.test(token)
+    ) {
+      throw new Error(`ACTIVATION_TARGETS_JSON[${index}].token is invalid`)
+    }
+    if (typeof endpointText !== 'string') {
+      throw new Error(`ACTIVATION_TARGETS_JSON[${index}].endpoint is invalid`)
+    }
+    if (Buffer.byteLength(endpointText, 'utf8') > 2_048) {
+      throw new Error(`ACTIVATION_TARGETS_JSON[${index}].endpoint exceeds 2048 bytes`)
+    }
+    let endpoint: URL
+    try {
+      endpoint = new URL(endpointText)
+    } catch {
+      throw new Error(`ACTIVATION_TARGETS_JSON[${index}].endpoint is invalid`)
+    }
+    if (
+      !['http:', 'https:'].includes(endpoint.protocol) ||
+      endpoint.username ||
+      endpoint.password ||
+      endpoint.search ||
+      endpoint.hash ||
+      endpoint.pathname !== '/v1/activation-evidence'
+    ) {
+      throw new Error(
+        `ACTIVATION_TARGETS_JSON[${index}].endpoint must be an HTTP(S) activation-evidence URL without credentials or query data`,
+      )
+    }
+    if (Buffer.byteLength(endpoint.href, 'utf8') > 2_048) {
+      throw new Error(`ACTIVATION_TARGETS_JSON[${index}].endpoint exceeds 2048 bytes`)
+    }
+    const identity = `${environmentCode}\n${instanceKey}`
+    if (identities.has(identity)) {
+      throw new Error(`ACTIVATION_TARGETS_JSON contains a duplicate target at index ${index}`)
+    }
+    identities.add(identity)
+    return {
+      environmentCode,
+      instanceKey,
+      endpoint: endpoint.href,
+      token,
+    }
+  })
+}
+
 function parseLogLevel(value: string | undefined): LogLevel {
   if (value === undefined) {
     return 'info'
@@ -221,6 +352,88 @@ export function loadServerConfig(env: NodeJS.ProcessEnv = process.env): ServerCo
   const staticRoot = env.CONSOLE_STATIC_ROOT?.trim() || null
   if (staticRoot && !isAbsolute(staticRoot)) {
     throw new Error('CONSOLE_STATIC_ROOT must be an absolute path')
+  }
+  const activationEnabled = parseBoolean(
+    env.ACTIVATION_COLLECTOR_ENABLED,
+    'ACTIVATION_COLLECTOR_ENABLED',
+    false,
+  )
+  const activationTargets = parseActivationTargets(env.ACTIVATION_TARGETS_JSON)
+  if (!activationEnabled && activationTargets.length > 0) {
+    throw new Error('ACTIVATION_TARGETS_JSON is only valid when ACTIVATION_COLLECTOR_ENABLED=true')
+  }
+  const activation: ActivationCollectorConfig = {
+    enabled: activationEnabled,
+    targets: activationTargets,
+    requestTimeoutMillis: parseBoundedPositiveInteger(
+      env.ACTIVATION_REQUEST_TIMEOUT_MILLIS,
+      'ACTIVATION_REQUEST_TIMEOUT_MILLIS',
+      5_000,
+      100,
+      60_000,
+    ),
+    maxResponseBytes: parseBoundedPositiveInteger(
+      env.ACTIVATION_MAX_RESPONSE_BYTES,
+      'ACTIVATION_MAX_RESPONSE_BYTES',
+      1_048_576,
+      4_096,
+      16_777_216,
+    ),
+    pollIntervalMillis: parseBoundedPositiveInteger(
+      env.ACTIVATION_POLL_INTERVAL_MILLIS,
+      'ACTIVATION_POLL_INTERVAL_MILLIS',
+      5_000,
+      100,
+      3_600_000,
+    ),
+    evidenceTtlMillis: parseBoundedPositiveInteger(
+      env.ACTIVATION_EVIDENCE_TTL_MILLIS,
+      'ACTIVATION_EVIDENCE_TTL_MILLIS',
+      15_000,
+      1_000,
+      86_400_000,
+    ),
+    leaseMillis: parseBoundedPositiveInteger(
+      env.ACTIVATION_LEASE_MILLIS,
+      'ACTIVATION_LEASE_MILLIS',
+      30_000,
+      1_000,
+      3_600_000,
+    ),
+    maxPages: parseBoundedPositiveInteger(
+      env.ACTIVATION_MAX_PAGES,
+      'ACTIVATION_MAX_PAGES',
+      16,
+      1,
+      256,
+    ),
+    maxProjects: parseBoundedPositiveInteger(
+      env.ACTIVATION_MAX_PROJECTS,
+      'ACTIVATION_MAX_PROJECTS',
+      1_024,
+      1,
+      65_536,
+    ),
+    concurrency: parseBoundedPositiveInteger(
+      env.ACTIVATION_CONCURRENCY,
+      'ACTIVATION_CONCURRENCY',
+      4,
+      1,
+      64,
+    ),
+  }
+  if (activation.evidenceTtlMillis <= activation.pollIntervalMillis) {
+    throw new Error('ACTIVATION_EVIDENCE_TTL_MILLIS must exceed ACTIVATION_POLL_INTERVAL_MILLIS')
+  }
+  if (activation.leaseMillis < activation.requestTimeoutMillis * 2) {
+    throw new Error(
+      'ACTIVATION_LEASE_MILLIS must be at least twice ACTIVATION_REQUEST_TIMEOUT_MILLIS',
+    )
+  }
+  if (activation.maxProjects > activation.maxPages * 256) {
+    throw new Error(
+      'ACTIVATION_MAX_PAGES must cover ACTIVATION_MAX_PROJECTS at 256 Projects per page',
+    )
   }
 
   return {
@@ -319,5 +532,6 @@ export function loadServerConfig(env: NodeJS.ProcessEnv = process.env): ServerCo
         30_000,
       ),
     },
+    activation,
   }
 }

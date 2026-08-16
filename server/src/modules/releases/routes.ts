@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify'
 
 import { badRequest } from '../../shared/errors.js'
+import { activationSummarySchema } from '../activation/routes.js'
 import { requireActor } from '../auth/http.js'
 import type { AuthService } from '../auth/model.js'
 import type { ReleaseService } from './service.js'
@@ -108,6 +109,7 @@ const releaseSchema = {
     'resources',
     'publication',
     'activationStatus',
+    'activation',
     'createdAt',
     'publishedAt',
   ],
@@ -168,7 +170,8 @@ const releaseSchema = {
         state: { anyOf: [{ type: 'string' }, { type: 'null' }] },
       },
     },
-    activationStatus: { type: 'string', const: 'unknown' },
+    activationStatus: { type: 'string', enum: ['unknown', 'pending', 'active', 'degraded'] },
+    activation: activationSummarySchema,
     createdAt: { type: 'string', format: 'date-time' },
     publishedAt: { anyOf: [{ type: 'string', format: 'date-time' }, { type: 'null' }] },
   },

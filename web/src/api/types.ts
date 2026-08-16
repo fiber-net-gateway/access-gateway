@@ -72,6 +72,42 @@ export interface SystemStatusResponse {
   }
 }
 
+export type ActivationStatus = 'unknown' | 'pending' | 'active' | 'degraded'
+
+export interface ActivationSummary {
+  status: ActivationStatus
+  targetCount: number
+  activeCount: number
+  pendingCount: number
+  degradedCount: number
+  unknownCount: number
+  evaluatedAt: string | null
+}
+
+export interface ActivationInstanceView {
+  id: string
+  instanceKey: string
+  status: ActivationStatus
+  buildVersion: string | null
+  buildRevision: string | null
+  evidenceRevision: string | null
+  routeSnapshotGeneration: string | null
+  routeSnapshotFingerprintSha256: string | null
+  candidateStatus: string | null
+  candidateErrorCode: string | null
+  activeMd5: string | null
+  activeVersion: string | null
+  observedAt: string | null
+  expiresAt: string | null
+}
+
+export interface ActivationInstanceList {
+  releaseId: string
+  summary: ActivationSummary
+  items: readonly ActivationInstanceView[]
+  nextCursor: string | null
+}
+
 export interface ProjectView {
   id: string
   domain: string
@@ -84,7 +120,7 @@ export interface ProjectView {
     lockVersion: string
   } | null
   publishedVersion: number | null
-  activationStatus: 'unknown'
+  activationStatus: ActivationStatus
   createdAt: string
   updatedAt: string
 }
@@ -224,7 +260,8 @@ export interface ProjectReleaseView {
     status: string
   }[]
   publication: { jobId: string | null; state: string | null }
-  activationStatus: 'unknown'
+  activationStatus: ActivationStatus
+  activation: ActivationSummary
   createdAt: string
   publishedAt: string | null
 }
@@ -292,7 +329,8 @@ export interface TlsCertificateReleaseView {
     verifiedAt: string | null
   }
   publication: { jobId: string | null; state: string | null }
-  activationStatus: 'unknown'
+  activationStatus: ActivationStatus
+  activation: ActivationSummary
   createdAt: string
   publishedAt: string | null
 }

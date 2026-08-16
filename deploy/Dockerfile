@@ -4,6 +4,7 @@ FROM mirror.gcr.io/library/debian:trixie-slim AS native-build
 
 ARG CMAKE_VERSION=4.1.2
 ARG NATIVE_BUILD_JOBS=2
+ARG ACCESS_GATEWAY_BUILD_REVISION=unknown
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
@@ -25,6 +26,7 @@ RUN cmake -S native -B native/build -G Ninja \
         -DFIBER_BUILD_TESTS=OFF \
         -DFIBER_ENABLE_HTTP3=ON \
         -DFIBER_ENABLE_LTO=OFF \
+        -DACCESS_GATEWAY_BUILD_REVISION="${ACCESS_GATEWAY_BUILD_REVISION}" \
     && cmake --build native/build \
         --target fiber_app_access_server fiber_app_access_gateway_validator \
         --parallel "${NATIVE_BUILD_JOBS}" \

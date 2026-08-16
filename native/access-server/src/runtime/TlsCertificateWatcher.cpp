@@ -9,6 +9,55 @@
 #include <fiber/common/Assert.h>
 
 namespace fiber::access_server {
+namespace {
+
+std::string_view watcher_state_name(TlsCertificateWatcherState state) noexcept {
+    switch (state) {
+        case TlsCertificateWatcherState::Created:
+            return "created";
+        case TlsCertificateWatcherState::Running:
+            return "running";
+        case TlsCertificateWatcherState::Failed:
+            return "failed";
+        case TlsCertificateWatcherState::Stopping:
+            return "stopping";
+        case TlsCertificateWatcherState::Stopped:
+            return "stopped";
+    }
+    return "created";
+}
+
+std::string_view error_code_name(TlsCertificateConfigErrorCode code) noexcept {
+    switch (code) {
+        case TlsCertificateConfigErrorCode::InvalidJson:
+            return "invalid_json";
+        case TlsCertificateConfigErrorCode::InvalidRoot:
+            return "invalid_root";
+        case TlsCertificateConfigErrorCode::InvalidField:
+            return "invalid_field";
+        case TlsCertificateConfigErrorCode::MissingField:
+            return "missing_field";
+        case TlsCertificateConfigErrorCode::DuplicateField:
+            return "duplicate_field";
+        case TlsCertificateConfigErrorCode::LimitExceeded:
+            return "limit_exceeded";
+        case TlsCertificateConfigErrorCode::InvalidCertificate:
+            return "invalid_certificate";
+        case TlsCertificateConfigErrorCode::InvalidPrivateKey:
+            return "invalid_private_key";
+        case TlsCertificateConfigErrorCode::InvalidDnsName:
+            return "invalid_dns_name";
+        case TlsCertificateConfigErrorCode::DuplicateDnsName:
+            return "duplicate_dns_name";
+        case TlsCertificateConfigErrorCode::DefaultCertificateNotFound:
+            return "default_certificate_not_found";
+        case TlsCertificateConfigErrorCode::VersionConflict:
+            return "version_conflict";
+    }
+    return "invalid_tls_configuration";
+}
+
+} // namespace
 
 struct TlsCertificateWatcher::CompileJob final : public common::NonCopyable, public common::NonMovable {
     TlsCertificateWatcher *owner = nullptr;
@@ -26,8 +75,10 @@ struct TlsCertificateWatcher::CompileJob final : public common::NonCopyable, pub
 
 TlsCertificateWatcher::TlsCertificateWatcher(event::EventLoop &loop, AccessConfigCompiler &compiler,
                                              nacos::ConfigService &config_service, TlsCertificateStore &store,
-                                             TlsCertificateWatcherOptions options) :
-    loop_(&loop), compiler_(&compiler), config_service_(&config_service), store_(&store), options_(std::move(options)) {
+                                             TlsCertificateWatcherOptions options,
+                                             AccessTlsActivationEvidenceObserver observer) :
+    loop_(&loop), compiler_(&compiler), config_service_(&config_service), store_(&store), options_(std::move(options)),
+    observer_(observer) {
     FIBER_ASSERT(loop_ != &compiler_->loop());
     ready_publisher_ = ready_.acquire_publisher();
     FIBER_ASSERT(ready_publisher_.has_value());
@@ -59,6 +110,7 @@ std::expected<void, nacos::ConfigServiceError> TlsCertificateWatcher::start() {
         return std::unexpected(std::move(subscription.error()));
     }
     subscription_.emplace(std::move(*subscription));
+    publish_evidence();
     return {};
 }
 
@@ -69,6 +121,7 @@ async::Task<void> TlsCertificateWatcher::shutdown() noexcept {
     }
     if (state_ == TlsCertificateWatcherState::Created) {
         state_ = TlsCertificateWatcherState::Stopped;
+        publish_evidence();
         co_return;
     }
     state_ = TlsCertificateWatcherState::Stopping;
@@ -80,6 +133,7 @@ async::Task<void> TlsCertificateWatcher::shutdown() noexcept {
     publish_processing(false);
     subscription_.reset();
     state_ = TlsCertificateWatcherState::Stopped;
+    publish_evidence();
 }
 
 void TlsCertificateWatcher::on_notify(void *context,
@@ -90,6 +144,21 @@ void TlsCertificateWatcher::on_notify(void *context,
             FIBER_ASSERT(owner.generation_ != std::numeric_limits<std::uint64_t>::max());
             ++owner.generation_;
             owner.cancel_compile();
+            owner.state_ = TlsCertificateWatcherState::Failed;
+            ++owner.failed_updates_;
+            owner.last_failure_ = TlsCertificateWatcherFailure{
+                    .stage = "subscription",
+                    .code = "subscription_closed",
+                    .md5 = owner.observed_md5_,
+                    .error =
+                            TlsCertificateConfigError{
+                                    .code = TlsCertificateConfigErrorCode::InvalidField,
+                                    .field = "subscription",
+                                    .message = "TLS certificate subscription closed before shutdown",
+                            },
+                    .observed_at_unix_millis = access_activation_unix_millis(*owner.loop_),
+            };
+            owner.publish_evidence();
         }
         owner.request_stop();
         return;
@@ -105,7 +174,14 @@ void TlsCertificateWatcher::apply(std::shared_ptr<const nacos::ConfigData> data)
     FIBER_ASSERT(generation_ != std::numeric_limits<std::uint64_t>::max());
     ++generation_;
     cancel_compile();
+    observed_md5_ = std::string(data->md5);
+    observed_at_unix_millis_ = access_activation_unix_millis(*loop_);
+    candidate_status_ = AccessActivationCandidateStatus::Processing;
+    last_failure_.reset();
+    publish_evidence();
     if (data->state == nacos::ConfigState::NotFound || data->content.empty()) {
+        candidate_status_ = AccessActivationCandidateStatus::Accepted;
+        publish_evidence();
         return;
     }
     if (data->content.size() > kMaxTlsSnapshotBytes) {
@@ -217,10 +293,15 @@ void TlsCertificateWatcher::publish_processing(bool processing) {
 
 void TlsCertificateWatcher::report_failure(std::string md5, TlsCertificateConfigError error) {
     ++failed_updates_;
+    candidate_status_ = AccessActivationCandidateStatus::Rejected;
     last_failure_ = TlsCertificateWatcherFailure{
+            .stage = "compile",
+            .code = std::string(error_code_name(error.code)),
             .md5 = std::move(md5),
             .error = std::move(error),
+            .observed_at_unix_millis = access_activation_unix_millis(*loop_),
     };
+    publish_evidence();
 }
 
 void TlsCertificateWatcher::apply_result(CompileJob &job) {
@@ -232,6 +313,8 @@ void TlsCertificateWatcher::apply_result(CompileJob &job) {
         return;
     }
     if (!result->version) {
+        candidate_status_ = AccessActivationCandidateStatus::Accepted;
+        publish_evidence();
         return;
     }
 
@@ -247,8 +330,15 @@ void TlsCertificateWatcher::apply_result(CompileJob &job) {
         }
         if (**classified == TlsCertificateUpdateStatus::Published) {
             ++successful_updates_;
+            active_md5_ = std::string(job.data->md5);
+            active_at_unix_millis_ = access_activation_unix_millis(*loop_);
             ready_publisher_->publish(true);
+        } else if (**classified == TlsCertificateUpdateStatus::VersionUnchanged) {
+            active_md5_ = std::string(job.data->md5);
+            active_at_unix_millis_ = access_activation_unix_millis(*loop_);
         }
+        candidate_status_ = AccessActivationCandidateStatus::Accepted;
+        publish_evidence();
         return;
     }
     if (!result->prepared) {
@@ -266,8 +356,44 @@ void TlsCertificateWatcher::apply_result(CompileJob &job) {
     }
     if (*updated == TlsCertificateUpdateStatus::Published) {
         ++successful_updates_;
+        active_md5_ = std::string(job.data->md5);
+        active_at_unix_millis_ = access_activation_unix_millis(*loop_);
         ready_publisher_->publish(true);
     }
+    candidate_status_ = AccessActivationCandidateStatus::Accepted;
+    publish_evidence();
+}
+
+void TlsCertificateWatcher::publish_evidence() const noexcept {
+    if (!observer_.on_update) {
+        return;
+    }
+    AccessTlsActivationEvidence evidence{
+            .enabled = true,
+            .watcher_state = std::string(watcher_state_name(state_)),
+            .resource =
+                    AccessActivationResourceEvidence{
+                            .data_id = options_.data_id,
+                            .group = options_.group,
+                            .candidate_status = candidate_status_,
+                            .observed_md5 = observed_md5_,
+                            .active_md5 = active_md5_,
+                            .observed_at_unix_millis = observed_at_unix_millis_,
+                            .active_at_unix_millis = active_at_unix_millis_,
+                    },
+            .version = store_->version(),
+            .certificate_count = store_->certificate_count(),
+    };
+    if (last_failure_) {
+        evidence.resource.failure = AccessActivationFailure{
+                .stage = last_failure_->stage,
+                .code = last_failure_->code,
+                .field = last_failure_->error.field,
+                .offset = last_failure_->error.offset,
+                .observed_at_unix_millis = last_failure_->observed_at_unix_millis,
+        };
+    }
+    observer_.on_update(observer_.context, evidence);
 }
 
 void TlsCertificateWatcher::request_stop() noexcept {

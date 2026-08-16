@@ -1,5 +1,6 @@
 #include "AccessServerRuntime.h"
 
+#include <chrono>
 #include <new>
 #include <utility>
 
@@ -11,6 +12,28 @@
 #include <fiber/common/Assert.h>
 
 namespace fiber::access_server {
+namespace {
+
+#ifndef FIBER_ACCESS_SERVER_BUILD_VERSION
+#define FIBER_ACCESS_SERVER_BUILD_VERSION "unknown"
+#endif
+
+#ifndef FIBER_ACCESS_SERVER_BUILD_REVISION
+#define FIBER_ACCESS_SERVER_BUILD_REVISION "unknown"
+#endif
+
+AccessActivationEvidenceIdentity activation_identity(const AccessActivationEndpointOptions &options) {
+    return AccessActivationEvidenceIdentity{
+            .instance_id = options.instance_id,
+            .build_version = FIBER_ACCESS_SERVER_BUILD_VERSION,
+            .build_revision = FIBER_ACCESS_SERVER_BUILD_REVISION,
+            .started_at_unix_millis = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                              std::chrono::system_clock::now().time_since_epoch())
+                                              .count(),
+    };
+}
+
+} // namespace
 
 std::string_view access_server_runtime_stage_name(AccessServerRuntimeErrorCode code) noexcept {
     switch (code) {
@@ -116,11 +139,11 @@ AccessServerRuntime::create(event::EventLoop &accept_loop, event::EventLoop &nac
     auto runtime = std::unique_ptr<AccessServerRuntime>(new (std::nothrow) AccessServerRuntime(
             accept_loop, nacos_loop, compiler_loop, cat_loop, http_workers, config.listen_address(),
             config.http_server_options(), config.metrics_listen_address(), listen_options,
-            config.initial_config_timeout(), config.default_max_request_body_size(), config.test_mode(),
-            config.client_metadata_options(), config.access_log_options(), config.upstream_tls_client_policy(),
-            config.watcher_options(), config.gray_watcher_options(), config.tls_certificate_watcher_options(),
-            config.service_discovery_options(), std::move(cat_client), std::move(*client), std::move(*config_service),
-            std::move(*naming_service)));
+            config.activation_endpoint_options(), config.initial_config_timeout(),
+            config.default_max_request_body_size(), config.test_mode(), config.client_metadata_options(),
+            config.access_log_options(), config.upstream_tls_client_policy(), config.watcher_options(),
+            config.gray_watcher_options(), config.tls_certificate_watcher_options(), config.service_discovery_options(),
+            std::move(cat_client), std::move(*client), std::move(*config_service), std::move(*naming_service)));
     if (!runtime) {
         return std::unexpected(AccessServerRuntimeError{
                 .code = AccessServerRuntimeErrorCode::AllocateRuntime,
@@ -134,8 +157,8 @@ AccessServerRuntime::AccessServerRuntime(
         event::EventLoop &accept_loop, event::EventLoop &nacos_loop, event::EventLoop &compiler_loop,
         event::EventLoop &cat_loop, event::EventLoopGroup &http_workers, net::SocketAddress listen_address,
         http::HttpServerOptions http_server_options, net::SocketAddress metrics_listen_address,
-        net::ListenOptions listen_options, std::chrono::milliseconds initial_config_timeout,
-        std::size_t default_max_request_body_size, bool test_mode,
+        net::ListenOptions listen_options, AccessActivationEndpointOptions activation_endpoint_options,
+        std::chrono::milliseconds initial_config_timeout, std::size_t default_max_request_body_size, bool test_mode,
         ClientMetadataResolverOptions client_metadata_options, AccessLogOptions access_log_options,
         UpstreamTlsClientPolicy upstream_tls_client_policy, AccessConfigWatcherOptions watcher_options,
         GrayConfigWatcherOptions gray_options, TlsCertificateWatcherOptions tls_certificate_options,
@@ -149,22 +172,29 @@ AccessServerRuntime::AccessServerRuntime(
     test_mode_(test_mode), client_metadata_options_(std::move(client_metadata_options)),
     access_log_options_(std::move(access_log_options)),
     upstream_tls_client_policy_(std::move(upstream_tls_client_policy)),
-    http_server_options_(std::move(http_server_options)), cat_client_(std::move(cat_client)),
-    nacos_client_(std::move(nacos_client)), config_service_(std::move(config_service)),
-    naming_service_(std::move(naming_service)), config_compiler_(compiler_loop), runtime_metrics_(nacos_loop),
-    gray_store_(http_workers),
+    activation_endpoint_options_(activation_endpoint_options), http_server_options_(std::move(http_server_options)),
+    cat_client_(std::move(cat_client)), nacos_client_(std::move(nacos_client)),
+    config_service_(std::move(config_service)), naming_service_(std::move(naming_service)),
+    config_compiler_(compiler_loop), runtime_metrics_(nacos_loop),
+    activation_evidence_(nacos_loop, activation_identity(activation_endpoint_options)), gray_store_(http_workers),
     service_discovery_(nacos_loop, *naming_service_,
                        AccessServiceOps{.swrr_options = service_discovery_options.swrr_options,
                                         .zone = service_discovery_options.zone,
                                         .metrics_observer = runtime_metrics_.discovery().observer()}),
     route_store_({}, service_discovery_, std::move(service_discovery_options), runtime_metrics_.discovery().observer()),
     config_watcher_(nacos_loop, config_compiler_, *config_service_, route_store_, std::move(watcher_options), {},
-                    runtime_metrics_.config().observer()),
-    gray_watcher_(nacos_loop, *config_service_, gray_store_, std::move(gray_options)),
+                    runtime_metrics_.config().observer(),
+                    activation_endpoint_options.enabled ? activation_evidence_.route_observer()
+                                                        : AccessRouteActivationEvidenceObserver{}),
+    gray_watcher_(nacos_loop, *config_service_, gray_store_, std::move(gray_options),
+                  activation_endpoint_options.enabled ? activation_evidence_.gray_observer()
+                                                      : AccessGrayActivationEvidenceObserver{}),
     tls_certificate_store_(nacos_loop, http_workers, http_server_options_.http3.enabled,
                            runtime_metrics_.tls().observer()),
     tls_certificate_watcher_(nacos_loop, config_compiler_, *config_service_, tls_certificate_store_,
-                             std::move(tls_certificate_options)) {
+                             std::move(tls_certificate_options),
+                             activation_endpoint_options.enabled ? activation_evidence_.tls_observer()
+                                                                 : AccessTlsActivationEvidenceObserver{}) {
     FIBER_ASSERT(accept_loop_ != nacos_loop_);
     FIBER_ASSERT(accept_loop_ != compiler_loop_);
     FIBER_ASSERT(accept_loop_ != cat_loop_);
@@ -486,6 +516,8 @@ async::Task<std::expected<void, AccessServerRuntimeError>> AccessServerRuntime::
                                     .upstream_tls = std::move(upstream_tls_client_policy_),
                             },
                     .runtime_metrics = &runtime_metrics_,
+                    .activation_evidence = &activation_evidence_,
+                    .activation_endpoint = std::move(activation_endpoint_options_),
                     .cat_client = cat_client_.get(),
                     .test_mode = test_mode_,
                     .http_server = http_server_options_,

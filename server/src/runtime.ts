@@ -15,6 +15,11 @@ import {
   UnavailableNativeValidator,
 } from './integrations/native-validator/subprocess.js'
 import { HttpNacosClient, UnavailableNacosClient } from './integrations/nacos/http.js'
+import { ActivationReadRepository } from './modules/activation/read-repository.js'
+import {
+  DefaultActivationService,
+  UnavailableActivationService,
+} from './modules/activation/service.js'
 import { AuthRepository } from './modules/auth/repository.js'
 import { FixedActorAuthService, UnavailableAuthService } from './modules/auth/service.js'
 import { CertificateRepository } from './modules/certificates/repository.js'
@@ -108,6 +113,7 @@ function unavailableServices(
       : new UnavailableAuthService()
   return {
     auth,
+    activation: new UnavailableActivationService(),
     certificates: new UnavailableCertificateService(),
     environments: new UnavailableEnvironmentService(),
     projects: new UnavailableProjectService(),
@@ -121,6 +127,7 @@ function unavailableServices(
       validatorDetail,
       config.nativeValidator.path !== null,
       config.publication.enabled,
+      config.activation.enabled,
     ),
     tlsSni: new UnavailableTlsSniService(),
     tlsReleases: new UnavailableTlsCertificateReleaseService(),
@@ -153,7 +160,8 @@ export async function createApplicationRuntime(config: ServerConfig): Promise<Ap
     )
     const auth = new FixedActorAuthService(actor)
     const environments = new EnvironmentRepository(pool)
-    const projects = new ProjectRepository(pool)
+    const activationRead = new ActivationReadRepository(pool)
+    const projects = new ProjectRepository(pool, undefined, activationRead)
     const documents = new DocumentRepository(
       new LocalEnvelopeDocumentCipher(
         config.documentEncryption.keyId,
@@ -169,12 +177,18 @@ export async function createApplicationRuntime(config: ServerConfig): Promise<Ap
           endpointOverride: config.publication.endpointOverride,
         })
       : new UnavailableNacosClient()
-    const releases = new ReleaseRepository(pool, documents)
+    const releases = new ReleaseRepository(pool, documents, undefined, activationRead)
     const certificates = new CertificateRepository(pool, documents)
     const tlsSni = new TlsSniRepository(pool)
-    const tlsReleases = new TlsCertificateReleaseRepository(pool, documents)
+    const tlsReleases = new TlsCertificateReleaseRepository(
+      pool,
+      documents,
+      undefined,
+      activationRead,
+    )
     const services: ApplicationServices = {
       auth,
+      activation: new DefaultActivationService(activationRead),
       certificates: new DefaultCertificateService(certificates, environments),
       environments: new DefaultEnvironmentService(environments),
       projects: new DefaultProjectService(projects, environments),
@@ -195,6 +209,7 @@ export async function createApplicationRuntime(config: ServerConfig): Promise<Ap
         validatorDetail,
         config.nativeValidator.path !== null,
         config.publication.enabled,
+        config.activation.enabled,
       ),
       tlsSni: new DefaultTlsSniService(tlsSni, environments),
       tlsReleases: new DefaultTlsCertificateReleaseService(tlsReleases, environments, nacos),

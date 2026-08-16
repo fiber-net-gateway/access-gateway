@@ -157,6 +157,15 @@ function decommissionService(overrides: { role?: string; available?: boolean } =
     resources: [],
     publication: { jobId: null, state: null },
     activationStatus: 'unknown' as const,
+    activation: {
+      status: 'unknown' as const,
+      targetCount: 0,
+      activeCount: 0,
+      pendingCount: 0,
+      degradedCount: 0,
+      unknownCount: 0,
+      evaluatedAt: null,
+    },
     createdAt: '2026-08-13T00:00:00.000Z',
     publishedAt: null,
   }

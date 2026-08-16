@@ -92,6 +92,11 @@
   rnacos 写入成功或 readback 一致只证明“已发布”，不证明任何实例已经激活。当前没有实例级证据时，
   Console 必须显示“未知”，不能把 Published 渲染成 Active。
 </p>
+<p>
+  对于已发布 Release，只有全部必需实例都提供未过期且 MD5/version 精确匹配的证据时才显示
+  <code>active</code>；候选尚未进入 active snapshot 为 <code>pending</code>，明确拒绝或采集失败为
+  <code>degraded</code>，缺失或 过期为 <code>unknown</code>。可在 Release 页面按需加载逐实例详情。
+</p>
 <h3 id="2-2-console-编辑模型">
   2.2 Console 编辑模型<a
     class="documentation-heading-anchor"
@@ -682,6 +687,15 @@ timeout: 20s
   fallback。希望使用静态地址时应 省略 <code>service</code>。未写 scheme 时，端口 443 推导为
   HTTPS，其他端口推导为 HTTP；建议始终显式写 <code>http://</code> 或
   <code>https://</code>，避免配置含义依赖端口。
+</p>
+<p>
+  出站 HTTPS 信任策略当前为进程级：<code>ACCESS_SERVER_UPSTREAM_TLS_MODE</code> 默认是
+  <code>legacy_insecure</code>，也可设为 <code>system_ca</code> 或
+  <code>custom_ca</code>（后者同时配置
+  <code>ACCESS_SERVER_UPSTREAM_TLS_CA_FILE</code>）。安全模式会验证 endpoint 的 hostname 或 IP
+  identity， trust store 无效则进程拒绝启动。当前不接受 route 级 CA、SNI
+  或验证名覆盖，因为固定版本的连接池 尚不能按 TLS transport profile 隔离连接。CA bundle
+  内容变更需要滚动重启，以排空按旧 trust store 建立的连接。
 </p>
 <h3 id="8-3-请求与响应转发">
   8.3 请求与响应转发<a

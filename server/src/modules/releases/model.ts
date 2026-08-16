@@ -1,3 +1,4 @@
+import type { ActivationStatus, ActivationSummary } from '../activation/model.js'
 import type { ReleaseStatus } from './state.js'
 
 export type ReleaseResourceStatus =
@@ -46,7 +47,8 @@ export interface ProjectReleaseView {
     jobId: string | null
     state: string | null
   }
-  activationStatus: 'unknown'
+  activationStatus: ActivationStatus
+  activation: ActivationSummary
   createdAt: string
   publishedAt: string | null
 }

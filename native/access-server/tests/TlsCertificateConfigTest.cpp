@@ -72,6 +72,8 @@ public:
         });
     }
 
+    void close() { subscriptions_.publish(Result{.kind = nacos::ResultKind::Closed}); }
+
 private:
     tests::NacosSubscriptionStub<nacos::ConfigData> subscriptions_;
 };
@@ -108,7 +110,8 @@ std::string json_string(std::string_view value) {
 
 std::string tls_snapshot(std::uint64_t version, std::string_view certificate_pem, std::string_view private_key_pem) {
     return std::string("{\"schemaVersion\":1,\"version\":") + std::to_string(version) +
-           ",\"defaultCertificate\":\"default\",\"certificates\":[{\"id\":\"default\",\"certificatePem\":" +
+           ",\"defaultCertificate\":\"default\",\"certificates\":[{\"id\":"
+           "\"default\",\"certificatePem\":" +
            json_string(certificate_pem) + ",\"privateKeyPem\":" + json_string(private_key_pem) + "}]}";
 }
 
@@ -324,7 +327,8 @@ TEST(TlsCertificateStoreTest, PostsReaperOnlyForSnapshotsStillHeldByHazards) {
         std::string idle_output;
         metrics.append_prometheus(idle_output, loop.now());
         EXPECT_NE(idle_output.find("access_server_tls_certificate_rotations_total 0"), std::string::npos);
-        EXPECT_NE(idle_output.find("access_server_tls_certificate_reclaim_runs_total{trigger=\"hazard_clear\"} 0"),
+        EXPECT_NE(idle_output.find("access_server_tls_certificate_reclaim_runs_"
+                                   "total{trigger=\"hazard_clear\"} 0"),
                   std::string::npos);
         EXPECT_NE(idle_output.find("access_server_tls_certificate_retired_snapshots 0"), std::string::npos);
 
@@ -344,11 +348,12 @@ TEST(TlsCertificateStoreTest, PostsReaperOnlyForSnapshotsStillHeldByHazards) {
         std::string retained_output;
         metrics.append_prometheus(retained_output, loop.now());
         EXPECT_NE(retained_output.find("access_server_tls_certificate_rotations_total 1"), std::string::npos);
-        EXPECT_NE(retained_output.find("access_server_tls_certificate_reclaim_runs_total{trigger=\"publish\"} 1"),
+        EXPECT_NE(retained_output.find("access_server_tls_certificate_reclaim_runs_"
+                                       "total{trigger=\"publish\"} 1"),
                   std::string::npos);
-        EXPECT_NE(
-                retained_output.find("access_server_tls_certificate_reclaimed_snapshots_total{trigger=\"publish\"} 0"),
-                std::string::npos);
+        EXPECT_NE(retained_output.find("access_server_tls_certificate_reclaimed_"
+                                       "snapshots_total{trigger=\"publish\"} 0"),
+                  std::string::npos);
         EXPECT_NE(retained_output.find("access_server_tls_certificate_retired_snapshots 1"), std::string::npos);
         after_rotation_clear.schedule();
     };
@@ -356,10 +361,11 @@ TEST(TlsCertificateStoreTest, PostsReaperOnlyForSnapshotsStillHeldByHazards) {
     after_rotation_clear.callback = [&]() {
         std::string reclaimed_output;
         metrics.append_prometheus(reclaimed_output, loop.now());
-        EXPECT_NE(reclaimed_output.find("access_server_tls_certificate_reclaim_runs_total{trigger=\"hazard_clear\"} 1"),
+        EXPECT_NE(reclaimed_output.find("access_server_tls_certificate_reclaim_"
+                                        "runs_total{trigger=\"hazard_clear\"} 1"),
                   std::string::npos);
-        EXPECT_NE(reclaimed_output.find(
-                          "access_server_tls_certificate_reclaimed_snapshots_total{trigger=\"hazard_clear\"} 1"),
+        EXPECT_NE(reclaimed_output.find("access_server_tls_certificate_reclaimed_"
+                                        "snapshots_total{trigger=\"hazard_clear\"} 1"),
                   std::string::npos);
         EXPECT_NE(reclaimed_output.find("access_server_tls_certificate_retired_snapshots 0"), std::string::npos);
 
@@ -372,9 +378,11 @@ TEST(TlsCertificateStoreTest, PostsReaperOnlyForSnapshotsStillHeldByHazards) {
         std::string direct_output;
         metrics.append_prometheus(direct_output, loop.now());
         EXPECT_NE(direct_output.find("access_server_tls_certificate_rotations_total 2"), std::string::npos);
-        EXPECT_NE(direct_output.find("access_server_tls_certificate_reclaim_runs_total{trigger=\"publish\"} 2"),
+        EXPECT_NE(direct_output.find("access_server_tls_certificate_reclaim_runs_"
+                                     "total{trigger=\"publish\"} 2"),
                   std::string::npos);
-        EXPECT_NE(direct_output.find("access_server_tls_certificate_reclaimed_snapshots_total{trigger=\"publish\"} 1"),
+        EXPECT_NE(direct_output.find("access_server_tls_certificate_reclaimed_"
+                                     "snapshots_total{trigger=\"publish\"} 1"),
                   std::string::npos);
         EXPECT_NE(direct_output.find("access_server_tls_certificate_retired_snapshots 0"), std::string::npos);
 
@@ -382,10 +390,11 @@ TEST(TlsCertificateStoreTest, PostsReaperOnlyForSnapshotsStillHeldByHazards) {
             co_await store.shutdown();
             std::string shutdown_output;
             metrics.append_prometheus(shutdown_output, loop.now());
-            EXPECT_NE(shutdown_output.find("access_server_tls_certificate_reclaim_runs_total{trigger=\"shutdown\"} 1"),
+            EXPECT_NE(shutdown_output.find("access_server_tls_certificate_reclaim_"
+                                           "runs_total{trigger=\"shutdown\"} 1"),
                       std::string::npos);
-            EXPECT_NE(shutdown_output.find(
-                              "access_server_tls_certificate_reclaimed_snapshots_total{trigger=\"shutdown\"} 1"),
+            EXPECT_NE(shutdown_output.find("access_server_tls_certificate_reclaimed_"
+                                           "snapshots_total{trigger=\"shutdown\"} 1"),
                       std::string::npos);
             done_promise.set_value();
             loop.stop();
@@ -424,7 +433,8 @@ TEST(TlsCertificateWatcherTest, CompilesOffLoopAndCoalescesLatestSnapshot) {
     AccessConfigCompiler compiler(compiler_group.at(0));
     FakeTlsConfigService service;
     TlsCertificateStore store(owner_loop, http_workers, false);
-    TlsCertificateWatcher watcher(owner_loop, compiler, service, store);
+    AccessActivationEvidenceStore activation_evidence(owner_loop, AccessActivationEvidenceIdentity{});
+    TlsCertificateWatcher watcher(owner_loop, compiler, service, store, {}, activation_evidence.tls_observer());
     bool owner_progressed = false;
     bool compiler_started = false;
     bool completed = false;
@@ -460,6 +470,9 @@ TEST(TlsCertificateWatcherTest, CompilesOffLoopAndCoalescesLatestSnapshot) {
         EXPECT_EQ(store.certificate_count(), 1u);
         EXPECT_EQ(watcher.successful_updates(), 1u);
         EXPECT_EQ(watcher.failed_updates(), 0u);
+        EXPECT_EQ(activation_evidence.pin()->tls.resource.active_md5, "v3");
+        EXPECT_EQ(activation_evidence.pin()->tls.version, 3U);
+        EXPECT_EQ(activation_evidence.pin()->tls.certificate_count, 1U);
 
         service.push(version_three, "same");
         co_await wait_for_bool(processing, processing_snapshot, false);
@@ -474,6 +487,9 @@ TEST(TlsCertificateWatcherTest, CompilesOffLoopAndCoalescesLatestSnapshot) {
             EXPECT_EQ(watcher.last_failure()->error.code, TlsCertificateConfigErrorCode::VersionConflict);
         }
         EXPECT_EQ(store.version(), 3u);
+        EXPECT_EQ(activation_evidence.pin()->tls.resource.observed_md5, "conflict");
+        EXPECT_EQ(activation_evidence.pin()->tls.resource.active_md5, "same");
+        EXPECT_EQ(activation_evidence.pin()->tls.resource.candidate_status, AccessActivationCandidateStatus::Rejected);
 
         service.push(tls_snapshot(2, certificate_pem, "not-a-private-key"), "older-invalid");
         co_await wait_for_bool(processing, processing_snapshot, false);
@@ -488,6 +504,16 @@ TEST(TlsCertificateWatcherTest, CompilesOffLoopAndCoalescesLatestSnapshot) {
             EXPECT_EQ(watcher.last_failure()->error.code, TlsCertificateConfigErrorCode::InvalidPrivateKey);
         }
         EXPECT_EQ(store.version(), 3u);
+
+        service.close();
+        EXPECT_EQ(watcher.state(), TlsCertificateWatcherState::Failed);
+        const auto closed_evidence = activation_evidence.pin();
+        EXPECT_EQ(closed_evidence->tls.watcher_state, "failed");
+        EXPECT_TRUE(closed_evidence->tls.resource.failure);
+        if (closed_evidence->tls.resource.failure) {
+            EXPECT_EQ(closed_evidence->tls.resource.failure->code, "subscription_closed");
+        }
+        EXPECT_EQ(closed_evidence->tls.resource.active_md5, "same");
 
         co_await watcher.shutdown();
         co_await store.shutdown();

@@ -7,6 +7,7 @@ import { conflict } from '../../shared/errors.js'
 import { bufferToPublicId, createPublicId, publicIdToBuffer } from '../../shared/ids.js'
 import { mysqlDateTimeToRfc3339 } from '../../shared/time.js'
 import { AuditRepository } from '../audit/repository.js'
+import type { ActivationReadRepository } from '../activation/read-repository.js'
 import type { Actor } from '../auth/model.js'
 import type { ProjectView } from './model.js'
 
@@ -21,6 +22,7 @@ interface ProjectRow extends RowDataPacket {
   current_revision_no: number | null
   draft_lock_version: string | null
   published_revision_no: number | null
+  published_release_id: string | null
   created_at: string
   updated_at: string
 }
@@ -34,7 +36,10 @@ export interface ProjectIdentityRow extends RowDataPacket {
   status: 'active' | 'decommissioning' | 'archived'
 }
 
-function toView(row: ProjectRow): ProjectView {
+function toView(
+  row: ProjectRow,
+  activationStatus: ProjectView['activationStatus'] = 'unknown',
+): ProjectView {
   return {
     id: bufferToPublicId(row.public_id),
     domain: row.name,
@@ -49,7 +54,7 @@ function toView(row: ProjectRow): ProjectView {
         }
       : null,
     publishedVersion: row.published_revision_no,
-    activationStatus: 'unknown',
+    activationStatus,
     createdAt: mysqlDateTimeToRfc3339(row.created_at),
     updatedAt: mysqlDateTimeToRfc3339(row.updated_at),
   }
@@ -71,6 +76,16 @@ const selectProjects = `
       ORDER BY release_record.published_at DESC, release_record.id DESC
       LIMIT 1
     ) AS published_revision_no,
+    (
+      SELECT release_record.id
+      FROM releases release_record
+      INNER JOIN release_items release_item
+        ON release_item.release_id = release_record.id
+       AND release_item.kind IN ('project_route', 'project_decommission')
+      WHERE release_item.project_id = p.id AND release_record.status = 'published'
+      ORDER BY release_record.published_at DESC, release_record.id DESC
+      LIMIT 1
+    ) AS published_release_id,
     p.created_at, p.updated_at
   FROM projects p
   INNER JOIN environments e ON e.id = p.environment_id
@@ -80,10 +95,16 @@ const selectProjects = `
 export class ProjectRepository {
   readonly #pool: DatabasePool
   readonly #audit: AuditRepository
+  readonly #activation: ActivationReadRepository | null
 
-  constructor(pool: DatabasePool, audit = new AuditRepository()) {
+  constructor(
+    pool: DatabasePool,
+    audit = new AuditRepository(),
+    activation: ActivationReadRepository | null = null,
+  ) {
     this.#pool = pool
     this.#audit = audit
+    this.#activation = activation
   }
 
   async list(actor: Actor, environmentPublicId: string): Promise<readonly ProjectView[]> {
@@ -100,7 +121,20 @@ export class ProjectRepository {
        ORDER BY p.name, p.public_id`,
       values,
     )
-    return rows.map(toView)
+    const releaseIds = rows.flatMap((row) =>
+      row.published_release_id ? [row.published_release_id] : [],
+    )
+    const summaries = this.#activation
+      ? await this.#activation.summariesForReleases(releaseIds)
+      : new Map()
+    return rows.map((row) =>
+      toView(
+        row,
+        row.published_release_id
+          ? (summaries.get(row.published_release_id)?.status ?? 'unknown')
+          : 'unknown',
+      ),
+    )
   }
 
   async findView(actor: Actor, projectPublicId: string): Promise<ProjectView | null> {
@@ -118,7 +152,11 @@ export class ProjectRepository {
     )
     const row = rows[0]
     if (!row) return null
-    return toView(row)
+    const activationStatus =
+      row.published_release_id && this.#activation
+        ? (await this.#activation.summaryForRelease(row.published_release_id)).status
+        : 'unknown'
+    return toView(row, activationStatus)
   }
 
   async findIdentity(actor: Actor, projectPublicId: string): Promise<ProjectIdentityRow | null> {

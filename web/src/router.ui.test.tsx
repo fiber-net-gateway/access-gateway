@@ -46,7 +46,7 @@ function jsonResponse(body: unknown, status = 200): Response {
   })
 }
 
-function installApiMock() {
+function installApiMock(options: { releaseEvidence?: boolean } = {}) {
   const project = {
     id: projectId,
     domain: 'api.example.com',
@@ -164,6 +164,15 @@ function installApiMock() {
     ],
     publication: { jobId: null, state: null },
     activationStatus: 'unknown',
+    activation: {
+      status: 'unknown',
+      targetCount: 0,
+      activeCount: 0,
+      pendingCount: 0,
+      degradedCount: 0,
+      unknownCount: 0,
+      evaluatedAt: null,
+    },
     createdAt: '2026-08-13T00:00:00.000Z',
     publishedAt: null,
   }
@@ -198,7 +207,63 @@ function installApiMock() {
     }
     if (url === `/api/projects/${projectId}`) return jsonResponse(project)
     if (url === `/api/projects/${projectId}/releases`) {
-      return jsonResponse({ items: [] })
+      return jsonResponse({
+        items: options.releaseEvidence
+          ? [
+              {
+                ...decommissionRelease,
+                status: 'published',
+                publishedAt: '2026-08-13T00:01:00.000Z',
+                activationStatus: 'active',
+                activation: {
+                  status: 'active',
+                  targetCount: 1,
+                  activeCount: 1,
+                  pendingCount: 0,
+                  degradedCount: 0,
+                  unknownCount: 0,
+                  evaluatedAt: '2026-08-13T00:01:05.000Z',
+                },
+              },
+            ]
+          : [],
+      })
+    }
+    if (
+      url === `/api/releases/${decommissionRelease.id}/activation?limit=50` &&
+      options.releaseEvidence
+    ) {
+      return jsonResponse({
+        releaseId: decommissionRelease.id,
+        summary: {
+          status: 'active',
+          targetCount: 1,
+          activeCount: 1,
+          pendingCount: 0,
+          degradedCount: 0,
+          unknownCount: 0,
+          evaluatedAt: '2026-08-13T00:01:05.000Z',
+        },
+        items: [
+          {
+            id: '00000000-0000-4000-8000-000000000012',
+            instanceKey: 'access-0',
+            status: 'active',
+            buildVersion: '0.1.0',
+            buildRevision: 'test-revision',
+            evidenceRevision: '7',
+            routeSnapshotGeneration: '3',
+            routeSnapshotFingerprintSha256: 'a'.repeat(64),
+            candidateStatus: 'accepted',
+            candidateErrorCode: null,
+            activeMd5: '1'.repeat(32),
+            activeVersion: null,
+            observedAt: '2026-08-13T00:01:05.000Z',
+            expiresAt: '2026-08-13T00:01:20.000Z',
+          },
+        ],
+        nextCursor: null,
+      })
     }
     if (url === `/api/projects/${projectId}/decommission-releases` && init?.method === 'POST') {
       return jsonResponse(decommissionRelease, 201)
@@ -543,6 +608,21 @@ describe('application routes', () => {
     await waitFor(() =>
       expect(router.state.location.pathname).toBe(`/projects/${projectId}/releases`),
     )
+  })
+
+  test('shows exact per-instance activation evidence on demand', async () => {
+    installApiMock({ releaseEvidence: true })
+    const router = createMemoryRouter(appRoutes, {
+      initialEntries: [`/projects/${projectId}/releases`],
+    })
+    const user = userEvent.setup()
+    render(<RouterProvider router={router} />)
+
+    expect(await screen.findByText('实例：已激活')).toBeTruthy()
+    await user.click(screen.getByRole('button', { name: '查看实例证据' }))
+    expect(await screen.findByText('access-0')).toBeTruthy()
+    expect(screen.getByText('候选：accepted')).toBeTruthy()
+    expect(screen.queryByText(/ACTIVATION_TOKEN/u)).toBeNull()
   })
 
   test('previews ClientHello SNI resolution independently from a Project', async () => {

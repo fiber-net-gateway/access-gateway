@@ -13,7 +13,7 @@ Project Settings 是域名 Project 的低频生命周期操作入口，不是通
 3. 由管理员或发布者把下线 Release 加入既有发布队列；
 4. 先从 rnacos Project List 移除域名并回读，再把 Project 标记为 archived；
 5. 保留配置版本、Release、发布证据和审计历史；
-6. 在没有逐实例证据时始终报告 activation unknown。
+6. 只有逐实例精确证据可证明 activation；没有目标、没有证据或证据过期时报告 unknown。
 
 ## 2. 非目标
 
@@ -52,7 +52,7 @@ Settings 展示：
 - 生命周期状态 `active` 或 `decommissioning`；
 - 当前 Configuration Version；
 - 最近 rnacos 已发布来源版本；
-- 实例激活状态，当前固定为 unknown；
+- 实例激活状态为 unknown、pending、active 或 degraded；
 - 创建时间、最后更新时间。
 
 域名以只读形式展示，并解释为什么不能原地修改。
@@ -66,7 +66,7 @@ Settings 展示：
 - `published`：rnacos Project List 已回读一致，Project 归档；
 - `publish_failed` / `partially_published` / `abandoned`：展示事实并允许管理员基于新回读创建新的
   下线 Release；
-- `activationStatus=unknown`：无论 Release 状态如何均单独展示。
+- `activationStatus` 独立于 Release 发布状态展示；无有效实例证据时为 unknown。
 
 ### 4.3 Danger Zone
 
@@ -97,7 +97,7 @@ active
 - `decommissioning` 是控制面操作状态，不是运行时下线证据。
 - `archived` 表示控制面已完成必需 rnacos 资源发布并把 Project 从默认业务列表隐藏。
 - `published` 只证明 Project List 目标内容已写入或本来一致，并完成摘要回读。
-- `activation unknown` 表示尚无来自具体 access-server 实例的类型化证据。
+- `activation unknown` 表示没有目标、尚无或已经过期的具体 access-server 实例类型化证据。
 - 发布部分成功或失败时 Project 保持 `decommissioning`，不得回滚已经发生的外部写入，也不得标记为
   archived。
 
@@ -145,7 +145,7 @@ Body：
 - route 配置来源、wire version 和 Native Validator 为 `null`；
 - `sourceModelSha256` 是不可变下线计划文档摘要；
 - `resources` 包含 Project List 资源；
-- `activationStatus=unknown`。
+- `activationStatus` 由逐实例证据独立计算，缺失时为 unknown。
 
 稳定错误：
 
@@ -190,7 +190,7 @@ Release 查询按环境 membership 授权，并允许读取已归档 Project 的
 4. 正确确认后创建 immutable `project_decommission` Release，Project 进入 decommissioning。
 5. worker 只写部署配置的 Project List Data ID；目标内容不包含该域名，且不写空 route payload。
 6. Project List 写入并回读一致后 Release 为 Published、Project 为 archived、默认列表不再返回它。
-7. 上一步之后 UI 仍显示实例激活未知，不显示“实例已下线”或“已生效”。
+7. 上一步之后 UI 在 collector 收到精确卸载证据前显示 pending/unknown，不提前显示“已生效”。
 8. rnacos base 外部变化时不覆盖，Release 失败且 Project 保持 decommissioning。
 9. 请求在创建后、排队前中断时，Settings 展示 ready Release 并允许继续发布。
 10. 失败后重新创建会重新回读 rnacos，并生成新 Release；旧 Release 不修改。

@@ -85,7 +85,7 @@ Issue/PR，合入后再审查 revision range、运行完整回归并更新 gitli
 | P-06 | P1 | 初始项目批量发布和全局 matcher 重建优化 | 本项目 | 否 |
 | P-07 | P2 | Host matcher 高 fan-out 搜索优化 | 本项目 | 否 |
 | P-08 | P1 | Happy Eyeballs/交错多地址连接 | 双方 | 是 |
-| O-01 | P0/P1 | 实例级配置激活证据 | 本项目 | 否 |
+| O-01 | P0/P1 | 实例级配置激活证据 | 本项目（已解决） | 否 |
 | O-02 | P1 | 配置、发现、DNS、pool、proxy、TLS、日志指标 | 双方 | 是，Nacos 连接证据需 Fiber #27 |
 | C-01 | P1/P2 | 大类职责拆分 | 本项目 | 否 |
 | C-02 | P2 | 拆分 `access_server_core` 构建边界 | 本项目 | 否 |
@@ -954,24 +954,25 @@ body、response rewrite 和 WebSocket。建议分为：
 
 **归属：本项目，涉及 native、server 和 web。**
 
-当前 watcher 的成功/失败计数和最后错误大多只存在内存，业务进程没有对控制面提供类型化
-实例证据。rnacos write/readback 只能证明发布结果，不能证明某个实例已经编译并使用该
-版本。
+**实施状态：已解决（2026-08-17）。** rnacos write/readback 仍只证明发布结果；实例激活现在
+由 access-server 类型化回执、独立 collector、带 TTL 的实例观察和 Release 精确资源比对证明。
 
-建议提供经过认证、有界、分页的实例状态协议，至少包含：
+已提供经过认证、有界、分页的 contract version 1 实例状态协议，包含：
 
 - instance ID、build revision、启动时间；
 - resource kind、Data ID、group、observed MD5/version；
 - decode、compile、service-ready、publish result；
 - 当前 global snapshot generation/fingerprint；
-- 采用 per-worker snapshot 后的 worker acknowledgement；
+- 当前 process-wide immutable snapshot generation、fingerprint 和 request-pin 发布模式；
 - TLS snapshot version 和 certificate count；
 - discovery ready 和有界聚合数量；
 - 脱敏的最后失败及发生时间。
 
-高基数明细不能进入 Prometheus label，也不应放在当前无认证的 metrics endpoint。server
-负责认证、采集、持久化和环境隔离；web 必须继续区分 draft、published 和 instance
-activation。在协议实现前 activation 保持 `unknown`。
+高基数明细没有进入 Prometheus label。证据路径与 metrics 共用状态 listener，但独立执行
+Bearer 认证、分页和 `no-store`；server 的独立进程负责认证采集、租约、持久化、TTL 和环境
+隔离，token 不入库也不交给 API 进程。web 继续区分 draft、published 和 instance activation，
+并按需分页展示实例证据。缺少目标或证据过期仍严格显示 `unknown`。协议与运维说明见
+[`../../../docs/activation-evidence.md`](../../../docs/activation-evidence.md)。
 
 ### 9.2 O-02：有界运行指标
 

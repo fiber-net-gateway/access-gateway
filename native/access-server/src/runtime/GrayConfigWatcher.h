@@ -1,6 +1,7 @@
 #ifndef FIBER_ACCESS_SERVER_GRAY_CONFIG_WATCHER_H
 #define FIBER_ACCESS_SERVER_GRAY_CONFIG_WATCHER_H
 
+#include "../observability/AccessActivationEvidence.h"
 #include "GrayMatchStore.h"
 
 #include <cstdint>
@@ -19,6 +20,7 @@ namespace fiber::access_server {
 enum class GrayConfigWatcherState : std::uint8_t {
     Created,
     Running,
+    Failed,
     Stopping,
     Stopped,
 };
@@ -29,14 +31,17 @@ struct GrayConfigWatcherOptions {
 };
 
 struct GrayConfigWatcherFailure {
+    std::string stage;
+    std::string code;
     std::string md5;
     AccessConfigError error;
+    std::int64_t observed_at_unix_millis = 0;
 };
 
 class GrayConfigWatcher final : public common::NonCopyable, public common::NonMovable {
 public:
     GrayConfigWatcher(event::EventLoop &loop, nacos::ConfigService &config_service, GrayMatchStore &store,
-                      GrayConfigWatcherOptions options = {});
+                      GrayConfigWatcherOptions options = {}, AccessGrayActivationEvidenceObserver observer = {});
     ~GrayConfigWatcher();
 
     [[nodiscard]] std::expected<void, nacos::ConfigServiceError> start();
@@ -50,15 +55,22 @@ public:
 private:
     static void on_notify(void *context, const nacos::SubscriptionResult<nacos::ConfigData> &result) noexcept;
     void apply(const nacos::ConfigData &data);
+    void publish_evidence() const noexcept;
     void request_stop() noexcept;
 
     event::EventLoop *loop_ = nullptr;
     nacos::ConfigService *config_service_ = nullptr;
     GrayMatchStore *store_ = nullptr;
     GrayConfigWatcherOptions options_;
+    AccessGrayActivationEvidenceObserver observer_;
     std::optional<nacos::Subscription<nacos::ConfigData>> subscription_;
     std::optional<GrayConfigWatcherFailure> last_failure_;
     GrayConfigWatcherState state_ = GrayConfigWatcherState::Created;
+    AccessActivationCandidateStatus candidate_status_ = AccessActivationCandidateStatus::Awaiting;
+    std::string observed_md5_;
+    std::string active_md5_;
+    std::int64_t observed_at_unix_millis_ = 0;
+    std::int64_t active_at_unix_millis_ = 0;
     std::uint64_t successful_updates_ = 0;
     std::uint64_t failed_updates_ = 0;
 };

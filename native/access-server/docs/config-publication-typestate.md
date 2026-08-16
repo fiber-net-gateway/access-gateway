@@ -94,7 +94,8 @@ service readiness. It does not bypass the Ready type.
 
 Decode, compile, service-ready, and global Host-conflict failures do not replace the current
 snapshot. A successful rnacos read, Prepared candidate, or Ready transition is still not control
-plane activation evidence; activation remains unknown until typed per-instance evidence exists.
+plane activation evidence. Missing or expired typed per-instance evidence remains unknown; see
+[`../../../docs/activation-evidence.md`](../../../docs/activation-evidence.md).
 
 ## Scope
 

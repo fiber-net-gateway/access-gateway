@@ -4,6 +4,7 @@ import { Link, NavLink, Outlet, useOutletContext, useParams } from 'react-router
 import { fetchProject } from '../api/client'
 import type { ProjectView } from '../api/types'
 import { useConsoleContext, type ConsoleContextValue } from '../App'
+import { activationLabel } from '../components/ActivationEvidencePanel'
 import { CapabilityStrip } from '../components/CapabilityStrip'
 
 export interface ProjectContextValue extends ConsoleContextValue {
@@ -95,7 +96,7 @@ export function ProjectLayout() {
               rnacos 已发布：
               {project.publishedVersion ? `V${project.publishedVersion}` : '尚未发布'}
             </span>
-            <span>实例激活：未知</span>
+            <span>实例激活：{activationLabel(project.activationStatus)}</span>
           </div>
         </div>
         <Link className="button-secondary inline-button-link" to="/projects">

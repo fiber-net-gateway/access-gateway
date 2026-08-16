@@ -4,9 +4,10 @@
 selected from a compile-time table. Project names, routes, clusters, hosts, Data IDs, MD5 values,
 service names, headers, addresses, and request data are never used as metric labels.
 
-The metrics listener is not an instance-activation API and currently has no application-layer
-authentication. Bind it to an operational network with deployment-level access controls. The
-aggregates documented here do not contain configuration identifiers or secrets.
+The `/metrics` route has no application-layer authentication. Bind the status listener to an
+operational network with deployment-level access controls. The same listener can expose the
+separately authenticated `/v1/activation-evidence` route, but enabling that route does not protect
+`/metrics`. The aggregates documented here do not contain configuration identifiers or secrets.
 
 ## Request metrics
 
@@ -166,5 +167,5 @@ The implemented increments cover Project List/route outcomes, route readiness an
 size/age, application-owned Nacos lifecycle, service/endpoint/cluster/selector aggregates, and TLS
 rotation/reclamation. Actual Nacos transport/reconnect state remains blocked on Fiber #27.
 DNS/pool/proxy/WebSocket outcomes and async logging/CAT drops remain separate O-02 increments.
-Typed, authenticated, per-instance activation evidence remains O-01 and must continue to be
-reported as unknown until implemented.
+Typed, authenticated, per-instance activation evidence is implemented separately from these
+metrics; see [`../../../docs/activation-evidence.md`](../../../docs/activation-evidence.md).

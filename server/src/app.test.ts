@@ -91,6 +91,13 @@ test('readiness and persistent APIs fail closed when MySQL is unconfigured', asy
   })
   assert.equal(sniResolution.statusCode, 503)
   assert.equal(sniResolution.json().error.code, 'DATABASE_UNCONFIGURED')
+
+  const activation = await app.inject({
+    method: 'GET',
+    url: '/api/releases/00000000-0000-4000-8000-000000000001/activation',
+  })
+  assert.equal(activation.statusCode, 503)
+  assert.equal(activation.json().error.code, 'DATABASE_UNCONFIGURED')
 })
 
 test('mixed route APIs accept schema v5 and reject the legacy whole-project request shape', async (context) => {

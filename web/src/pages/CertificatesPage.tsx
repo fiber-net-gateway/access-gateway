@@ -15,6 +15,7 @@ import type {
   TlsSniResolutionView,
 } from '../api/types'
 import { CapabilityStrip } from '../components/CapabilityStrip'
+import { ActivationEvidencePanel } from '../components/ActivationEvidencePanel'
 import { CertificateUploadForm } from '../components/CertificateUploadForm'
 import { useConsoleContext } from '../App'
 
@@ -30,6 +31,16 @@ const resolutionLabel: Record<TlsSniResolutionView['resolutionStatus'], string> 
   uncovered: '未覆盖',
   conflict: '索引冲突',
 }
+
+const terminalTlsReleaseStatuses = new Set([
+  'published',
+  'partially_published',
+  'publish_failed',
+  'validation_failed',
+  'canceled',
+  'superseded',
+  'abandoned',
+])
 
 export function CertificatesPage() {
   const { apiState, health, systemStatus, statusError } = useConsoleContext()
@@ -47,6 +58,15 @@ export function CertificatesPage() {
     () => certificates.find((certificate) => certificate.id === selectedId) ?? null,
     [certificates, selectedId],
   )
+  const tlsRefreshDelay = useMemo(() => {
+    const latest = tlsReleases[0]
+    if (!latest) return null
+    if (!terminalTlsReleaseStatuses.has(latest.status)) return 1_000
+    if (latest.status === 'published' && latest.activation.targetCount > 0) {
+      return 5_000
+    }
+    return null
+  }, [tlsReleases])
 
   const load = useCallback(async (signal?: AbortSignal): Promise<void> => {
     setLoading(true)
@@ -77,6 +97,28 @@ export function CertificatesPage() {
     })
     return () => controller.abort()
   }, [load])
+
+  useEffect(() => {
+    if (tlsRefreshDelay === null) return
+    const delay = tlsRefreshDelay
+    const controller = new AbortController()
+    let timer = window.setTimeout(refresh, delay)
+    async function refresh(): Promise<void> {
+      try {
+        setTlsReleases(await fetchTlsCertificateReleases(controller.signal))
+      } catch (error) {
+        if (!controller.signal.aborted) {
+          setErrorMessage(error instanceof Error ? error.message : '刷新 TLS 发布状态失败')
+        }
+      } finally {
+        if (!controller.signal.aborted) timer = window.setTimeout(refresh, delay)
+      }
+    }
+    return () => {
+      controller.abort()
+      window.clearTimeout(timer)
+    }
+  }, [tlsRefreshDelay])
 
   useEffect(() => {
     if (!selectedId) {
@@ -128,7 +170,7 @@ export function CertificatesPage() {
           <p className="page-description">
             leaf 证书的 DNS SAN 自动形成 ClientHello SNI 选择索引，不需要维护域名绑定规则。TLS
             握手与 HTTP Host/:authority 的 Project 选择彼此独立。发布会生成不可变证书快照并写入
-            Nacos；实例激活证据尚未接入，因此运行时状态保持 unknown。
+            Nacos；rnacos 回读与实例激活是两个独立阶段，最近快照会显示逐实例证据的聚合状态。
           </p>
         </div>
       </header>
@@ -256,7 +298,15 @@ export function CertificatesPage() {
             <p className="eyebrow">IMMUTABLE TLS SNAPSHOT</p>
             <h2 id="tls-release-title">发布证书快照</h2>
           </div>
-          <span className="status-chip status-chip-unknown">实例激活 unknown</span>
+          <span
+            className={`status-chip status-chip-${
+              tlsReleases[0]?.activationStatus === 'active'
+                ? 'ready'
+                : (tlsReleases[0]?.activationStatus ?? 'unknown')
+            }`}
+          >
+            实例激活 {tlsReleases[0]?.activationStatus ?? 'unknown'}
+          </span>
         </header>
         <div className="tls-sni-preview">
           <label>
@@ -286,12 +336,16 @@ export function CertificatesPage() {
               <strong>#{tlsReleases[0].sequence}</strong>
               <span>{tlsReleases[0].status}</span>
               <span>{tlsReleases[0].certificateCount} 张证书</span>
-              <small>激活状态：{tlsReleases[0].activationStatus}</small>
+              <small>
+                激活状态：{tlsReleases[0].activationStatus} ·{' '}
+                {tlsReleases[0].activation.activeCount}/{tlsReleases[0].activation.targetCount}
+              </small>
             </div>
           ) : (
             <p>快照包含当前所有逻辑证书的当前版本；更新证书不会自动发布。</p>
           )}
         </div>
+        {tlsReleases[0] ? <ActivationEvidencePanel releaseId={tlsReleases[0].id} /> : null}
       </section>
 
       <section className="settings-panel tls-sni-panel" aria-labelledby="tls-sni-preview-title">

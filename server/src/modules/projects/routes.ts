@@ -48,7 +48,7 @@ const projectResponseSchema = {
       ],
     },
     publishedVersion: { anyOf: [{ type: 'integer' }, { type: 'null' }] },
-    activationStatus: { type: 'string', const: 'unknown' },
+    activationStatus: { type: 'string', enum: ['unknown', 'pending', 'active', 'degraded'] },
     createdAt: { type: 'string', format: 'date-time' },
     updatedAt: { type: 'string', format: 'date-time' },
   },

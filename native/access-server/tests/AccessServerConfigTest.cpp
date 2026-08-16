@@ -19,6 +19,9 @@ TEST(AccessServerConfigTest, LoadsJavaServerDefaultsAndNacosSettings) {
     ASSERT_TRUE(config) << config.error().detail;
     EXPECT_EQ(config->listen_address().to_string(), "0.0.0.0:16688");
     EXPECT_EQ(config->metrics_listen_address().to_string(), "0.0.0.0:16689");
+    EXPECT_FALSE(config->activation_endpoint_options().enabled);
+    EXPECT_TRUE(config->activation_endpoint_options().instance_id.empty());
+    EXPECT_TRUE(config->activation_endpoint_options().bearer_token.empty());
     EXPECT_EQ(config->initial_config_timeout(), std::chrono::seconds(60));
     EXPECT_EQ(config->default_max_request_body_size(), 400U << 20U);
     EXPECT_FALSE(config->test_mode());
@@ -56,6 +59,9 @@ TEST(AccessServerConfigTest, LoadsExplicitRuntimeAndCompatibilityKeys) {
         ACCESS_SERVER_HTTP3_ENABLED=false
         ACCESS_SERVER_METRICS_LISTEN_ADDRESS=127.0.0.2
         ACCESS_SERVER_METRICS_LISTEN_PORT=19090
+        ACCESS_SERVER_ACTIVATION_EVIDENCE_ENABLED=true
+        ACCESS_SERVER_INSTANCE_ID=access-0
+        ACCESS_SERVER_ACTIVATION_TOKEN=0123456789abcdef0123456789abcdef
         ACCESS_SERVER_INITIAL_CONFIG_TIMEOUT_MILLIS=2500
         ACCESS_SERVER_MAX_REQUEST_BODY_SIZE=12345
         ACCESS_SERVER_TEST_MODE=true
@@ -86,6 +92,9 @@ TEST(AccessServerConfigTest, LoadsExplicitRuntimeAndCompatibilityKeys) {
     ASSERT_TRUE(config) << config.error().detail;
     EXPECT_EQ(config->listen_address().to_string(), "127.0.0.1:18080");
     EXPECT_EQ(config->metrics_listen_address().to_string(), "127.0.0.2:19090");
+    EXPECT_TRUE(config->activation_endpoint_options().enabled);
+    EXPECT_EQ(config->activation_endpoint_options().instance_id, "access-0");
+    EXPECT_EQ(config->activation_endpoint_options().bearer_token, "0123456789abcdef0123456789abcdef");
     EXPECT_EQ(config->initial_config_timeout(), std::chrono::milliseconds(2500));
     EXPECT_EQ(config->default_max_request_body_size(), 12345U);
     EXPECT_TRUE(config->test_mode());
@@ -110,6 +119,29 @@ TEST(AccessServerConfigTest, LoadsExplicitRuntimeAndCompatibilityKeys) {
     EXPECT_EQ(config->service_discovery_options().zone, "sh");
     EXPECT_EQ(config->nacos_config().username(), "user");
     EXPECT_EQ(config->nacos_config().password(), "pass");
+}
+
+TEST(AccessServerConfigTest, RejectsIncompleteOrUnexpectedActivationCredentials) {
+    const auto expect_invalid = [](std::string_view settings) {
+        std::string input = "NACOS_SERVER_ADDRESSES=127.0.0.1\n";
+        input.append(settings);
+        auto config = AccessServerConfig::load_from_string(input);
+        EXPECT_FALSE(config);
+        if (!config) {
+            EXPECT_EQ(config.error().code, AccessServerConfigErrorCode::InvalidValue);
+        }
+    };
+
+    expect_invalid("ACCESS_SERVER_ACTIVATION_EVIDENCE_ENABLED=true\n"
+                   "ACCESS_SERVER_INSTANCE_ID=access-0\n");
+    expect_invalid("ACCESS_SERVER_ACTIVATION_EVIDENCE_ENABLED=true\n"
+                   "ACCESS_SERVER_INSTANCE_ID=bad instance\n"
+                   "ACCESS_SERVER_ACTIVATION_TOKEN=0123456789abcdef0123456789abcdef\n");
+    expect_invalid("ACCESS_SERVER_ACTIVATION_EVIDENCE_ENABLED=true\n"
+                   "ACCESS_SERVER_INSTANCE_ID=access-0\n"
+                   "ACCESS_SERVER_ACTIVATION_TOKEN=short\n");
+    expect_invalid("ACCESS_SERVER_ACTIVATION_TOKEN=0123456789abcdef0123456789abcdef\n");
+    expect_invalid("ACCESS_SERVER_INSTANCE_ID=access-0\n");
 }
 
 TEST(AccessServerConfigTest, LoadsUpstreamTlsVerificationModes) {

@@ -4,9 +4,12 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <limits>
 #include <new>
 #include <set>
+#include <string_view>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -18,6 +21,121 @@
 
 namespace fiber::access_server {
 namespace {
+
+std::string_view watcher_state_name(AccessConfigWatcherState state) noexcept {
+    switch (state) {
+        case AccessConfigWatcherState::Created:
+            return "created";
+        case AccessConfigWatcherState::Running:
+            return "running";
+        case AccessConfigWatcherState::Stopping:
+            return "stopping";
+        case AccessConfigWatcherState::Stopped:
+            return "stopped";
+    }
+    return "created";
+}
+
+std::string_view readiness_state_name(AccessConfigReadinessState state) noexcept {
+    switch (state) {
+        case AccessConfigReadinessState::WaitingForProjectList:
+            return "waiting_for_project_list";
+        case AccessConfigReadinessState::SynchronizingProjects:
+            return "synchronizing_projects";
+        case AccessConfigReadinessState::Ready:
+            return "ready";
+        case AccessConfigReadinessState::Unavailable:
+            return "unavailable";
+        case AccessConfigReadinessState::Stopped:
+            return "stopped";
+    }
+    return "waiting_for_project_list";
+}
+
+std::string_view subscription_state_name(AccessProjectSubscriptionState state) noexcept {
+    switch (state) {
+        case AccessProjectSubscriptionState::Subscribing:
+            return "subscribing";
+        case AccessProjectSubscriptionState::Subscribed:
+            return "subscribed";
+        case AccessProjectSubscriptionState::Retrying:
+            return "retrying";
+        case AccessProjectSubscriptionState::Failed:
+            return "failed";
+        case AccessProjectSubscriptionState::Retiring:
+            return "retiring";
+    }
+    return "subscribing";
+}
+
+AccessActivationCandidateStatus candidate_status(AccessProjectConfigState state) noexcept {
+    switch (state) {
+        case AccessProjectConfigState::AwaitingValue:
+            return AccessActivationCandidateStatus::Awaiting;
+        case AccessProjectConfigState::Processing:
+            return AccessActivationCandidateStatus::Processing;
+        case AccessProjectConfigState::ReadyToPublish:
+            return AccessActivationCandidateStatus::ReadyToPublish;
+        case AccessProjectConfigState::Accepted:
+            return AccessActivationCandidateStatus::Accepted;
+        case AccessProjectConfigState::Rejected:
+            return AccessActivationCandidateStatus::Rejected;
+    }
+    return AccessActivationCandidateStatus::Awaiting;
+}
+
+std::string_view failure_stage_name(AccessConfigWatcherFailureStage stage) noexcept {
+    switch (stage) {
+        case AccessConfigWatcherFailureStage::Subscription:
+            return "subscription";
+        case AccessConfigWatcherFailureStage::Decode:
+            return "decode";
+        case AccessConfigWatcherFailureStage::Compile:
+            return "compile";
+        case AccessConfigWatcherFailureStage::ServiceReady:
+            return "service_ready";
+        case AccessConfigWatcherFailureStage::Publish:
+            return "publish";
+    }
+    return "decode";
+}
+
+std::string_view config_error_code_name(AccessConfigErrorCode code) noexcept {
+    switch (code) {
+        case AccessConfigErrorCode::InvalidJson:
+            return "invalid_json";
+        case AccessConfigErrorCode::InvalidRoot:
+            return "invalid_root";
+        case AccessConfigErrorCode::InvalidField:
+            return "invalid_field";
+        case AccessConfigErrorCode::OutOfRange:
+            return "out_of_range";
+        case AccessConfigErrorCode::InvalidCombination:
+            return "invalid_combination";
+        case AccessConfigErrorCode::Conflict:
+            return "conflict";
+        case AccessConfigErrorCode::LimitExceeded:
+            return "limit_exceeded";
+    }
+    return "invalid_configuration";
+}
+
+AccessActivationFailure activation_failure(const AccessConfigWatcherFailure &failure) {
+    std::string code;
+    if (failure.io_error != common::IoErr::None) {
+        code = "io_";
+        code.append(common::io_err_name(failure.io_error));
+    } else {
+        code = config_error_code_name(failure.error.code);
+    }
+    return AccessActivationFailure{
+            .stage = std::string(failure_stage_name(failure.stage)),
+            .code = std::move(code),
+            .field = failure.error.field,
+            .offset = failure.error.offset,
+            .observed_at_unix_millis = failure.observed_at_unix_millis,
+    };
+}
 
 template<typename Entry>
 void request_stop(Entry &entry) noexcept {
@@ -72,6 +190,11 @@ struct AccessConfigWatcher::ProjectEntry final : public common::NonCopyable, pub
     std::optional<AccessConfigWatcherFailure> last_failure;
     std::string observed_md5;
     std::optional<std::int32_t> observed_version;
+    std::string active_md5;
+    std::optional<std::int32_t> active_version;
+    std::uint64_t active_snapshot_generation = 0;
+    std::int64_t observed_at_unix_millis = 0;
+    std::int64_t active_at_unix_millis = 0;
     std::chrono::steady_clock::time_point next_retry_at{};
     std::uint64_t generation = 0;
     std::uint64_t published_generation = 0;
@@ -105,9 +228,10 @@ struct AccessConfigWatcher::ProjectCompileJob final : public common::NonCopyable
 AccessConfigWatcher::AccessConfigWatcher(event::EventLoop &loop, AccessConfigCompiler &compiler,
                                          nacos::ConfigService &config_service, RouteConfigStore &store,
                                          AccessConfigWatcherOptions options, RouteSnapshotObserver observer,
-                                         AccessConfigMetricsObserver metrics_observer) :
+                                         AccessConfigMetricsObserver metrics_observer,
+                                         AccessRouteActivationEvidenceObserver activation_observer) :
     loop_(&loop), compiler_(&compiler), config_service_(&config_service), store_(&store), options_(std::move(options)),
-    observer_(observer), metrics_observer_(metrics_observer) {
+    observer_(observer), metrics_observer_(metrics_observer), activation_observer_(activation_observer) {
     FIBER_ASSERT(loop_ != &compiler_->loop());
     readiness_publisher_ = readiness_.acquire_publisher();
     FIBER_ASSERT(readiness_publisher_.has_value());
@@ -241,10 +365,13 @@ void AccessConfigWatcher::apply_project_list(const nacos::ConfigData &data) {
     if (!initial_project_list_received_) {
         initial_project_list_received_ = true;
     }
+    project_list_observed_md5_ = std::string(data.md5);
+    project_list_observed_at_unix_millis_ = access_activation_unix_millis(*loop_);
     ProjectListResult parsed = data.state == nacos::ConfigState::NotFound
                                        ? ProjectListResult(std::vector<std::string>{})
                                        : parse_project_list(data.content);
     if (!parsed) {
+        project_list_candidate_status_ = AccessActivationCandidateStatus::Rejected;
         report_failure(nullptr, AccessConfigWatcherFailureStage::Decode, options_.project_list_data_id,
                        std::string(data.md5), common::IoErr::Invalid, std::move(parsed.error()));
         project_list_failure_ = last_failure_;
@@ -252,7 +379,10 @@ void AccessConfigWatcher::apply_project_list(const nacos::ConfigData &data) {
         return;
     }
     project_list_failure_.reset();
+    project_list_candidate_status_ = AccessActivationCandidateStatus::Accepted;
     reconcile_projects(std::move(*parsed));
+    project_list_active_md5_ = project_list_observed_md5_;
+    project_list_active_at_unix_millis_ = project_list_observed_at_unix_millis_;
     observe_metric_event(AccessConfigMetricEvent::ProjectListAccepted);
     publish_readiness();
 }
@@ -266,6 +396,8 @@ void AccessConfigWatcher::apply_project(const std::shared_ptr<ProjectEntry> &ent
     entry->first_value_received = true;
     entry->observed_md5 = std::string(data->md5);
     entry->observed_version.reset();
+    entry->observed_at_unix_millis = access_activation_unix_millis(*loop_);
+    entry->last_failure.reset();
     entry->config_state = AccessProjectConfigState::Processing;
     publish_readiness();
 
@@ -498,6 +630,10 @@ void AccessConfigWatcher::commit_ready_project(const std::shared_ptr<ProjectEntr
     if (updated->status == ConfigUpdateStatus::Published || updated->status == ConfigUpdateStatus::Unloaded) {
         ++successful_updates_;
         entry->published_generation = generation;
+        entry->active_md5 = md5;
+        entry->active_version = entry->observed_version;
+        entry->active_snapshot_generation = snapshot_generation_ + 1U;
+        entry->active_at_unix_millis = access_activation_unix_millis(*loop_);
         publish_observer(updated->snapshot);
     }
     switch (updated->status) {
@@ -598,6 +734,10 @@ void AccessConfigWatcher::commit_initial_batch_if_ready() {
             if (status == ConfigUpdateStatus::Published || status == ConfigUpdateStatus::Unloaded) {
                 ++successful_updates_;
                 item.entry->published_generation = item.generation;
+                item.entry->active_md5 = item.md5;
+                item.entry->active_version = item.entry->observed_version;
+                item.entry->active_snapshot_generation = snapshot_generation_ + 1U;
+                item.entry->active_at_unix_millis = access_activation_unix_millis(*loop_);
             }
             switch (status) {
                 case ConfigUpdateStatus::IgnoredEmpty:
@@ -765,6 +905,7 @@ void AccessConfigWatcher::subscribe_project(const std::shared_ptr<ProjectEntry> 
     entry->synchronized = false;
     entry->observed_md5.clear();
     entry->observed_version.reset();
+    entry->observed_at_unix_millis = 0;
     entry->next_retry_at = {};
     publish_readiness();
 
@@ -920,6 +1061,7 @@ void AccessConfigWatcher::publish_readiness() {
         next.subscribed_projects == next.desired_projects && next.synchronized_projects == next.desired_projects) {
         next.state = AccessConfigReadinessState::Ready;
     }
+    publish_activation_evidence(next);
     if (next == published_readiness_) {
         return;
     }
@@ -958,6 +1100,55 @@ void AccessConfigWatcher::publish_readiness() {
     readiness_publisher_->publish(std::move(next));
 }
 
+void AccessConfigWatcher::publish_activation_evidence(const AccessConfigReadiness &readiness) const noexcept {
+    if (!activation_observer_.on_update) {
+        return;
+    }
+
+    AccessRouteActivationEvidence evidence;
+    evidence.watcher_state = watcher_state_name(state_);
+    evidence.readiness_state = readiness_state_name(readiness.state);
+    evidence.project_list = AccessActivationResourceEvidence{
+            .data_id = options_.project_list_data_id,
+            .group = options_.project_route_group,
+            .candidate_status = project_list_candidate_status_,
+            .observed_md5 = project_list_observed_md5_,
+            .active_md5 = project_list_active_md5_,
+            .observed_at_unix_millis = project_list_observed_at_unix_millis_,
+            .active_at_unix_millis = project_list_active_at_unix_millis_,
+            .failure = project_list_failure_ ? std::optional(activation_failure(*project_list_failure_)) : std::nullopt,
+    };
+    evidence.snapshot_generation = snapshot_generation_;
+    evidence.snapshot_published_at_unix_millis = snapshot_published_at_unix_millis_;
+    evidence.projects.reserve(projects_.size());
+
+    std::unordered_set<std::string_view> loaded;
+    const std::shared_ptr<const AccessRouteSnapshot> snapshot = store_->pin();
+    loaded.reserve(snapshot->projects().size());
+    for (const std::shared_ptr<const ProjectRouteSnapshot> &project: snapshot->projects()) {
+        loaded.insert(project->project());
+    }
+    for (const auto &[project, entry]: projects_) {
+        evidence.projects.push_back(AccessActivationProjectEvidence{
+                .name = project,
+                .data_id = options_.project_route_data_id_prefix + project,
+                .group = options_.project_route_group,
+                .subscription_state = std::string(subscription_state_name(entry->subscription_state)),
+                .candidate_status = candidate_status(entry->config_state),
+                .observed_md5 = entry->observed_md5,
+                .observed_version = entry->observed_version,
+                .active_md5 = entry->active_md5,
+                .active_version = entry->active_version,
+                .active_snapshot_generation = entry->active_snapshot_generation,
+                .active_loaded = loaded.contains(project),
+                .observed_at_unix_millis = entry->observed_at_unix_millis,
+                .active_at_unix_millis = entry->active_at_unix_millis,
+                .failure = entry->last_failure ? std::optional(activation_failure(*entry->last_failure)) : std::nullopt,
+        });
+    }
+    activation_observer_.on_update(activation_observer_.context, evidence);
+}
+
 void AccessConfigWatcher::set_unavailable(std::string data_id, common::IoErr io_error, std::string message) {
     FIBER_ASSERT(loop_->in_loop());
     report_failure(nullptr, AccessConfigWatcherFailureStage::Subscription, std::move(data_id), {}, io_error,
@@ -991,7 +1182,10 @@ void AccessConfigWatcher::observe_publication_timing(std::chrono::nanoseconds gl
     }
 }
 
-void AccessConfigWatcher::publish_observer(const std::shared_ptr<const AccessRouteSnapshot> &snapshot) const noexcept {
+void AccessConfigWatcher::publish_observer(const std::shared_ptr<const AccessRouteSnapshot> &snapshot) noexcept {
+    FIBER_ASSERT(snapshot_generation_ != std::numeric_limits<std::uint64_t>::max());
+    ++snapshot_generation_;
+    snapshot_published_at_unix_millis_ = access_activation_unix_millis(*loop_);
     if (observer_.on_update) {
         observer_.on_update(observer_.context, snapshot);
     }
@@ -1035,6 +1229,7 @@ void AccessConfigWatcher::report_failure(const std::shared_ptr<ProjectEntry> &en
             .md5 = std::move(md5),
             .io_error = io_error,
             .error = std::move(error),
+            .observed_at_unix_millis = access_activation_unix_millis(*loop_),
     };
     if (entry) {
         entry->last_failure = failure;

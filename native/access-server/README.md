@@ -87,6 +87,9 @@ connection pool，以及 Nacos、CAT、Prometheus 组件。迁移不要求这些
 - 已接入独立 Prometheus listener，默认 `0.0.0.0:16689`；请求完成计数、inflight、
   duration，以及配置结果/readiness/全局 route snapshot 规模和 age 均使用固定 schema；
   动态 project/route/cluster/Host/Data ID 不作为指标 label，避免配置和请求输入形成无限时序；
+- 已在同一运维 listener 上提供默认关闭、Bearer 鉴权的 `/v1/activation-evidence`：按实例报告
+  route/project-list/gray/TLS 候选与 active 摘要、不可变快照 generation/fingerprint 和有界
+  discovery 聚合；Project 明细使用绑定 evidence revision 的分页游标，配置内容和自由文本错误不出站；
 - 已接入共享异步 logging 生命周期，访问日志在 `access_server.access` 以结构化
   key/value 输出 trace、请求、路由、上游、结果、耗时和字节数；队列满时丢弃新日志，
   不反向影响请求执行；
@@ -155,7 +158,8 @@ cp native/access-server/access-server.env.example access-server.env
 
 - HTTPS 监听 `0.0.0.0:16688/tcp`，ALPN 提供 HTTP/2 与 HTTP/1.1；
 - HTTP/3 在相同地址和端口监听 UDP，并通过 `Alt-Svc` 发布；
-- Prometheus 监听 `0.0.0.0:16689`；
+- Prometheus `/metrics` 监听 `0.0.0.0:16689`；同一 listener 上的实例证据接口默认关闭，启用时
+  必须同时配置稳定实例 ID 和独立 Bearer token；
 - HTTP worker 数在启动时根据进程 CPU affinity 和 cgroup v1/v2 CPU quota 自动确定；
 - 默认 request body 上限 400 MiB；
 - upstream HTTPS 默认保持 Java `legacy_insecure` 兼容模式；可显式切换系统 CA 或挂载的
@@ -268,6 +272,8 @@ listener 只在 Nacos client/config/naming、project/gray watcher、项目列表
   move-only 类型状态、取消和兼容语义；
 - `docs/bounded-metrics.md`：请求、配置、Nacos 组件生命周期与服务发现指标的固定 label 集、
   readiness/snapshot 语义、并发成本及仍待实现的 O-02 范围；
+- `../../docs/activation-evidence.md`：实例证据协议、鉴权和分页边界、collector 租约/TTL、
+  Release 聚合状态和部署检查；
 - `docs/script-corpus-differential.md`：现网 condition/template/rewrite 的脱敏统计、
   Java golden、C++ 差分结果和私有 corpus 复跑方式；
 - `docs/optimization-analysis.md`：代码职责、生命周期、性能、安全和可观测性优化分析，

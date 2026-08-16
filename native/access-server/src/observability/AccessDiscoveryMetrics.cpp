@@ -173,11 +173,28 @@ AccessDiscoveryMetrics::Snapshot AccessDiscoveryMetrics::load_snapshot() const n
     }
 }
 
+AccessDiscoveryStatus AccessDiscoveryMetrics::status() const noexcept {
+    const Snapshot snapshot = load_snapshot();
+    AccessDiscoveryStatus result{
+            .ready_services = snapshot.ready_services,
+            .selectable_endpoints = snapshot.selectable_endpoints,
+            .logical_clusters = snapshot.logical_clusters,
+            .selector_leases = selector_leases_.load(std::memory_order_relaxed),
+    };
+    for (std::size_t index = 0; index < lifecycle_.size(); ++index) {
+        const std::uint8_t state = lifecycle_[index].load(std::memory_order_relaxed);
+        FIBER_ASSERT(state < static_cast<std::uint8_t>(AccessNacosLifecycleState::Count));
+        result.lifecycle[index] = static_cast<AccessNacosLifecycleState>(state);
+    }
+    return result;
+}
+
 void AccessDiscoveryMetrics::append_prometheus(std::string &output) const {
     const Snapshot snapshot = load_snapshot();
     output.reserve(output.size() + 4096);
 
-    output.append("# HELP access_server_nacos_component_lifecycle Application component lifecycle; not Nacos "
+    output.append("# HELP access_server_nacos_component_lifecycle Application "
+                  "component lifecycle; not Nacos "
                   "transport connection status.\n");
     output.append("# TYPE access_server_nacos_component_lifecycle gauge\n");
     for (std::size_t component = 0; component < kComponents.size(); ++component) {
@@ -194,7 +211,8 @@ void AccessDiscoveryMetrics::append_prometheus(std::string &output) const {
         }
     }
 
-    output.append("# HELP access_server_discovery_events_total Bounded service discovery lifecycle outcomes.\n");
+    output.append("# HELP access_server_discovery_events_total Bounded service "
+                  "discovery lifecycle outcomes.\n");
     output.append("# TYPE access_server_discovery_events_total counter\n");
     for (std::size_t i = 0; i < kEvents.size(); ++i) {
         const EventDescription &event = kEvents[i];
@@ -209,7 +227,8 @@ void AccessDiscoveryMetrics::append_prometheus(std::string &output) const {
         output.push_back('\n');
     }
 
-    output.append("# HELP access_server_discovery_resources Aggregate active service discovery resources.\n");
+    output.append("# HELP access_server_discovery_resources Aggregate active "
+                  "service discovery resources.\n");
     output.append("# TYPE access_server_discovery_resources gauge\n");
     append_resource(output, "ready_service", snapshot.ready_services);
     append_resource(output, "selectable_endpoint", snapshot.selectable_endpoints);

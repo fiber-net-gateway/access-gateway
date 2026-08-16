@@ -42,6 +42,11 @@ A successful rnacos write or matching readback proves publication, not activatio
 evidence does not exist, the Console must show activation as unknown rather than rendering Published as
 Active.
 
+For a published Release, the Console reports `active` only when every required instance provides a
+fresh exact MD5/version match. A not-yet-active candidate is `pending`, an explicit rejection or poll
+failure is `degraded`, and missing or expired evidence is `unknown`. Instance details are loaded from
+the Release page on demand.
+
 ### 2.2 Console editing model
 
 A Project can contain both editor formats in one ordered list:

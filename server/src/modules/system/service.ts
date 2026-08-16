@@ -42,6 +42,7 @@ export class DefaultSystemStatusService implements SystemStatusService {
   readonly #validatorDetail: string
   readonly #validatorConfigured: boolean
   readonly #publicationConfigured: boolean
+  readonly #activationConfigured: boolean
 
   constructor(
     pool: DatabasePool | null,
@@ -50,6 +51,7 @@ export class DefaultSystemStatusService implements SystemStatusService {
     validatorDetail = validator.available ? 'configured' : 'not configured',
     validatorConfigured = validator.available,
     publicationConfigured = false,
+    activationConfigured = false,
   ) {
     this.#pool = pool
     this.#auth = auth
@@ -57,6 +59,7 @@ export class DefaultSystemStatusService implements SystemStatusService {
     this.#validatorDetail = validatorDetail
     this.#validatorConfigured = validatorConfigured
     this.#publicationConfigured = publicationConfigured
+    this.#activationConfigured = activationConfigured
   }
 
   async get(): Promise<SystemStatusView> {
@@ -111,8 +114,10 @@ export class DefaultSystemStatusService implements SystemStatusService {
           : 'publication worker and Nacos adapter are not configured',
       },
       activationCollector: {
-        status: 'unconfigured',
-        detail: 'access-server status endpoints are not configured',
+        status: this.#activationConfigured ? 'ready' : 'unconfigured',
+        detail: this.#activationConfigured
+          ? 'activation evidence storage and APIs are configured; collector liveness is not inferred'
+          : 'access-server activation evidence endpoints are not configured',
       },
     }
     const ready = database.status === 'ready' && schema.status === 'ready'

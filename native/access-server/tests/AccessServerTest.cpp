@@ -206,10 +206,23 @@ TEST(AccessServerTest, ServesPublishedSnapshotAndShutsDownWorkerResources) {
     event::EventLoop accept_loop;
     event::EventLoopGroup workers(1);
     AccessRuntimeMetrics runtime_metrics(accept_loop);
+    AccessActivationEvidenceStore activation_evidence(accept_loop, AccessActivationEvidenceIdentity{
+                                                                           .instance_id = "access-test-0",
+                                                                           .build_version = "test",
+                                                                           .build_revision = "test-revision",
+                                                                           .started_at_unix_millis = 1000,
+                                                                   });
     AccessServer server(accept_loop, workers, store, {},
                         AccessServerOptions{
                                 .access_log = AccessLogOptions{.query_hash_enabled = true},
                                 .runtime_metrics = &runtime_metrics,
+                                .activation_evidence = &activation_evidence,
+                                .activation_endpoint =
+                                        AccessActivationEndpointOptions{
+                                                .enabled = true,
+                                                .instance_id = "access-test-0",
+                                                .bearer_token = "0123456789abcdef0123456789abcdef",
+                                        },
                         });
     std::promise<std::pair<std::uint16_t, std::uint16_t>> port_promise;
     auto port = port_promise.get_future();
@@ -220,6 +233,13 @@ TEST(AccessServerTest, ServesPublishedSnapshotAndShutsDownWorkerResources) {
     testing::internal::CaptureStderr();
     workers.start();
     async::spawn(accept_loop, [&]() -> async::DetachedTask {
+        AccessRouteActivationEvidence route_evidence;
+        route_evidence.watcher_state = "running";
+        route_evidence.readiness_state = "ready";
+        route_evidence.snapshot_generation = 1;
+        route_evidence.projects.push_back(AccessActivationProjectEvidence{.name = "a"});
+        route_evidence.projects.push_back(AccessActivationProjectEvidence{.name = "b"});
+        activation_evidence.route_observer().on_update(activation_evidence.route_observer().context, route_evidence);
         const AccessConfigMetricsObserver config_observer = runtime_metrics.config().observer();
         config_observer.on_event(config_observer.context, AccessConfigMetricEvent::ProjectRoutePublished);
         config_observer.on_readiness(config_observer.context, AccessConfigMetricReadiness{
@@ -269,6 +289,10 @@ TEST(AccessServerTest, ServesPublishedSnapshotAndShutsDownWorkerResources) {
     std::string gzip_head_response;
     std::string unacceptable_response;
     std::string metrics_response;
+    std::string unauthorized_activation_response;
+    std::string activation_response;
+    std::string changed_activation_response;
+    std::string invalid_activation_response;
     std::thread client([&]() {
         const auto [bound_port, metrics_port] = port.get();
         if (bound_port != 0 && metrics_port != 0) {
@@ -279,7 +303,16 @@ TEST(AccessServerTest, ServesPublishedSnapshotAndShutsDownWorkerResources) {
             gzip_response = request(bound_port, "Accept-Encoding: gzip\r\n");
             gzip_head_response = request(bound_port, "Accept-Encoding: gzip\r\n", "HEAD");
             unacceptable_response = request(bound_port, "Accept-Encoding: gzip;q=0, identity;q=0\r\n");
-            metrics_response = request(metrics_port);
+            metrics_response = request(metrics_port, {}, "GET", "/metrics");
+            unauthorized_activation_response = request(metrics_port, {}, "GET", "/v1/activation-evidence?limit=1");
+            activation_response = request(metrics_port, "Authorization: Bearer 0123456789abcdef0123456789abcdef\r\n",
+                                          "GET", "/v1/activation-evidence?limit=1");
+            changed_activation_response =
+                    request(metrics_port, "Authorization: Bearer 0123456789abcdef0123456789abcdef\r\n", "GET",
+                            "/v1/activation-evidence?cursor=1%3A1&limit=1");
+            invalid_activation_response =
+                    request(metrics_port, "Authorization: Bearer 0123456789abcdef0123456789abcdef\r\n", "GET",
+                            "/v1/activation-evidence?limit=257");
         }
         async::spawn(accept_loop, [&]() -> async::DetachedTask {
             if (startup_ok) {
@@ -318,21 +351,38 @@ TEST(AccessServerTest, ServesPublishedSnapshotAndShutsDownWorkerResources) {
     EXPECT_NE(metrics_response.find("access_server_response_compression_total{result=\"gzip\"} 2"), std::string::npos);
     EXPECT_NE(metrics_response.find("access_server_response_compression_total{result=\"identity\"} 1"),
               std::string::npos);
-    EXPECT_NE(metrics_response.find("access_server_response_compression_total{result=\"not_acceptable\"} 1"),
+    EXPECT_NE(metrics_response.find("access_server_response_compression_total{"
+                                    "result=\"not_acceptable\"} 1"),
               std::string::npos);
-    EXPECT_NE(metrics_response.find("access_server_config_updates_total{resource=\"project_route\",result=\"success\","
+    EXPECT_NE(metrics_response.find("access_server_config_updates_total{resource="
+                                    "\"project_route\",result=\"success\","
                                     "reason=\"published\"} 1"),
               std::string::npos);
     EXPECT_NE(metrics_response.find("access_server_config_readiness{state=\"ready\"} 1"), std::string::npos);
     EXPECT_NE(metrics_response.find("access_server_route_snapshot_resources{resource=\"project\"} 1"),
               std::string::npos);
-    EXPECT_NE(metrics_response.find("access_server_nacos_component_lifecycle{component=\"client\",state=\"running\"} "
+    EXPECT_NE(metrics_response.find("access_server_nacos_component_lifecycle{"
+                                    "component=\"client\",state=\"running\"} "
                                     "1"),
               std::string::npos);
     EXPECT_NE(metrics_response.find("access_server_discovery_resources{resource=\"ready_service\"} 1"),
               std::string::npos);
-    EXPECT_NE(metrics_response.find("access_server_discovery_resources{resource=\"selectable_endpoint\"} 2"),
+    EXPECT_NE(metrics_response.find("access_server_discovery_resources{resource="
+                                    "\"selectable_endpoint\"} 2"),
               std::string::npos);
+    EXPECT_NE(unauthorized_activation_response.find("HTTP/1.1 401"), std::string::npos);
+    EXPECT_EQ(unauthorized_activation_response.find("0123456789abcdef"), std::string::npos);
+    EXPECT_NE(activation_response.find("HTTP/1.1 200"), std::string::npos);
+    EXPECT_NE(activation_response.find("\"contractVersion\":1"), std::string::npos);
+    EXPECT_NE(activation_response.find("\"id\":\"access-test-0\""), std::string::npos);
+    EXPECT_NE(activation_response.find("\"publicationMode\":\"atomic_request_pin\""), std::string::npos);
+    EXPECT_NE(activation_response.find("\"nextCursor\":\"2:1\""), std::string::npos);
+    EXPECT_NE(activation_response.find("Cache-Control: no-store"), std::string::npos);
+    EXPECT_EQ(activation_response.find("0123456789abcdef"), std::string::npos);
+    EXPECT_NE(changed_activation_response.find("HTTP/1.1 409"), std::string::npos);
+    EXPECT_NE(changed_activation_response.find("evidence_changed"), std::string::npos);
+    EXPECT_NE(invalid_activation_response.find("HTTP/1.1 400"), std::string::npos);
+    EXPECT_NE(invalid_activation_response.find("invalid_page"), std::string::npos);
     EXPECT_EQ(access_logs.find("integration-secret"), std::string::npos);
     EXPECT_NE(access_logs.find("path=\"/\" query=\"\""), std::string::npos);
     EXPECT_NE(access_logs.find("query_hash=\"hmac-sha256:"), std::string::npos);
