@@ -35,7 +35,7 @@ AccessServer::AccessServer(event::EventLoop &accept_loop, event::EventLoopGroup 
                      .test_mode = options.test_mode,
              },
              executor_.adapter()),
-    metrics_(workers, options.config_metrics), cat_client_(options.cat_client),
+    metrics_(workers, options.runtime_metrics), cat_client_(options.cat_client),
     server_(
             accept_loop, [this](http::HttpExchange &exchange) { return handle(exchange); },
             make_http_options(std::move(options.http_server)), &workers),

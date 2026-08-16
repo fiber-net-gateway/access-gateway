@@ -74,23 +74,69 @@ Generation is process-local, starts at zero, and advances only when the watcher 
 global snapshot. Failed, ignored, or stale candidates do not advance it. It resets on process
 restart and is not a rnacos release number or activation token.
 
+## Nacos component lifecycle and service discovery
+
+`access_server_nacos_component_lifecycle{component,state}` is one-hot for `client`,
+`config_service`, and `naming_service`. The fixed lifecycle states are `created`, `starting`,
+`running`, `failed`, `stopping`, and `stopped`.
+
+This metric reports only access-server's calls into each component and their immediate start
+result. In particular, `running` means that `start()` succeeded; it does **not** mean that a Nacos
+transport is connected, authenticated, or currently able to reconnect. Fiber does not yet expose
+that evidence through its public API. The required upstream API is tracked by
+[fiber-gateway-cpp #27](https://github.com/fiber-net-gateway/fiber-gateway-cpp/issues/27). Until a
+pinned Fiber revision provides it, access-server intentionally emits no `connected` metric.
+
+`access_server_discovery_events_total{operation,result,reason}` uses this fixed matrix:
+
+| `operation` | `result` | `reason`                                                                                  |
+| ----------- | -------- | ----------------------------------------------------------------------------------------- |
+| `update`    | `success` | `changed`                                                                                |
+| `update`    | `ignored` | `unchanged`                                                                              |
+| `retire`    | `retired` | `released`, `subscription_closed`, or `shutdown`                                         |
+| `acquire`   | `success` | `acquired`                                                                               |
+| `acquire`   | `failure` | `invalid_argument`, `shutdown`, `authentication_unavailable`, `transport`, `grpc_status`, |
+|             |           | `protocol`, `server`, or `response_too_large`                                             |
+
+Acquire failures are mapped directly from Fiber's typed `NamingServiceErrorCode`; the service
+name and diagnostic message are not retained by metrics.
+
+`access_server_discovery_resources{resource}` exposes four fixed aggregates:
+
+- `ready_service`: initialized ServiceDiscovery states that received a first snapshot;
+- `selectable_endpoint`: healthy, enabled, positive-weight endpoint definitions accepted by those
+  states after identity deduplication;
+- `logical_cluster`: the sum of compiled logical clusters across ready service states;
+- `selector_lease`: live route selector objects holding a ServiceDiscovery lease.
+
+Endpoint and cluster values are sums across service states, not counts of globally unique names.
+Pending subscriptions are deliberately not inferred: the pinned Fiber API does not notify the
+application when an entry retires before its first snapshot, so only ready state is reported as an
+exact aggregate.
+
 ## Concurrency and cost
 
-The Nacos owner EventLoop is the sole writer. It records update events in a fixed atomic array and
-publishes readiness/snapshot aggregates through a sequence-checked group of atomics. Metrics
-workers take a lock-free coherent sample. Route counts and byte totals are cached during the
-global snapshot's existing build traversal, so the observer update is O(1) and does not rescan all
-Projects. Rendering and the small output buffer allocation happen only on a Prometheus scrape,
-never during configuration matching or request execution.
+The Nacos owner EventLoop is the sole writer for configuration snapshots, Nacos component
+lifecycle, and service aggregates. Events use fixed atomic arrays. Configuration and discovery
+aggregates each use a sequence-checked group of atomics so metrics workers take lock-free coherent
+samples. Selector destruction may occur on a request worker and updates only one relaxed atomic
+lease counter; it never posts, blocks, or calls back into ServiceDiscovery.
+
+Route counts and byte totals are cached during the global snapshot's existing build traversal, so
+the configuration observer update is O(1). Discovery endpoint and cluster totals are derived from
+the vectors already constructed for selection and updated only when a NamingService snapshot
+changes; no extra traversal occurs on scrape or request execution. Rendering and output buffer
+allocation happen only on a Prometheus scrape.
 
 The Fiber registry continues to own request metric shards and their collection lifecycle. The
-configuration block is appended after Fiber's text snapshot; no Fiber library modification or
+application blocks are appended through `AccessRuntimeMetrics` after Fiber's text snapshot; no
 cross-EventLoop `CounterRef`/`GaugeRef` mutation is required.
 
 ## Remaining scope
 
-This increment covers Project List/route outcomes, route readiness, and route snapshot size/age.
-Nacos client/naming connection state, service/endpoint aggregates, DNS/pool/proxy/WebSocket
-outcomes, TLS rotation/reclaim, and async logging/CAT drops remain separate O-02 increments.
-Typed, authenticated, per-instance activation evidence remains O-01 and must continue to be
-reported as unknown until implemented.
+The implemented increments cover Project List/route outcomes, route readiness and snapshot
+size/age, application-owned Nacos lifecycle, and service/endpoint/cluster/selector aggregates.
+Actual Nacos transport/reconnect state remains blocked on Fiber #27. DNS/pool/proxy/WebSocket
+outcomes, TLS rotation/reclaim, and async logging/CAT drops remain separate O-02 increments. Typed,
+authenticated, per-instance activation evidence remains O-01 and must continue to be reported as
+unknown until implemented.

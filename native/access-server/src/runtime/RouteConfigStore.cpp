@@ -80,8 +80,10 @@ RouteConfigStore::RouteConfigStore(ScriptCompilerAdapter script_compiler,
 }
 
 RouteConfigStore::RouteConfigStore(ScriptCompilerAdapter script_compiler, AccessServiceDiscovery &service_discovery,
-                                   AccessServiceDiscoveryOptions discovery_options) :
-    script_compiler_(script_compiler), service_selector_factory_(service_discovery, std::move(discovery_options)),
+                                   AccessServiceDiscoveryOptions discovery_options,
+                                   AccessDiscoveryMetricsObserver metrics_observer) :
+    script_compiler_(script_compiler),
+    service_selector_factory_(service_discovery, std::move(discovery_options), metrics_observer),
     selector_factory_(service_selector_factory_.adapter()), uses_service_discovery_(true) {
 #if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
     published_.store(std::make_shared<const AccessRouteSnapshot>(), std::memory_order_relaxed);

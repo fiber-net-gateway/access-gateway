@@ -86,7 +86,7 @@ Issue/PR，合入后再审查 revision range、运行完整回归并更新 gitli
 | P-07 | P2 | Host matcher 高 fan-out 搜索优化 | 本项目 | 否 |
 | P-08 | P1 | Happy Eyeballs/交错多地址连接 | 双方 | 是 |
 | O-01 | P0/P1 | 实例级配置激活证据 | 本项目 | 否 |
-| O-02 | P1 | 配置、DNS、pool、proxy、TLS、日志指标 | 本项目 | 否，Fiber 已暴露部分统计 |
+| O-02 | P1 | 配置、发现、DNS、pool、proxy、TLS、日志指标 | 双方 | 是，Nacos 连接证据需 Fiber #27 |
 | C-01 | P1/P2 | 大类职责拆分 | 本项目 | 否 |
 | C-02 | P2 | 拆分 `access_server_core` 构建边界 | 本项目 | 否 |
 | T-01 | P0/P1 | 生命周期、并发、sanitizer、fuzz 测试 | 本项目 | Fiber 改动另跑上游测试 |
@@ -102,7 +102,9 @@ P0 表示应在性能重构前处理的正确性、安全或生命周期问题�
 
 - **L-06**：系统 DNS 配置、多 nameserver 和 failover；
 - **S-04**：TLS client context 加载客户端证书和私钥；
-- **P-08**：可取消、可复用的 Happy Eyeballs 多地址 connector。
+- **P-08**：可取消、可复用的 Happy Eyeballs 多地址 connector；
+- **O-02**：暴露 Nacos config/naming transport、认证和 reconnect 的 typed bounded
+  snapshot/watch；见 [fiber-gateway-cpp #27](https://github.com/fiber-net-gateway/fiber-gateway-cpp/issues/27)。
 
 以下事项只有在 benchmark 或多应用复用需求成立后，才建议引入 Fiber 改动：
 
@@ -762,22 +764,27 @@ activation。在协议实现前 activation 保持 `unknown`。
 
 ### 9.2 O-02：有界运行指标
 
-**归属：本项目。Fiber 已提供部分原始统计。**
+**归属：双方。聚合与产品语义属于本项目；真实 Nacos 连接证据需要 Fiber。**
 
-**实施状态：部分解决（2026-08-17）。** 当前提交新增 Nacos owner loop 单写、metrics worker
+**实施状态：部分解决（2026-08-17）。** 第一阶段新增 Nacos owner loop 单写、metrics worker
 无锁读取的 `AccessConfigMetrics`。Project List/route 的 success、ignored、failure stage 使用
 编译期固定 `resource/result/reason` 表；readiness 使用固定 one-hot state 和六个 Project 聚合；
 每次实际发布同时更新 process-local snapshot generation、age、Project/Host/route/program 数量、
 估算内存和静态响应字节。配置值、Data ID、MD5、Project、Host、route 和 service 均不进入 label。
-具体 schema、并发模型和非 activation 语义见 [`bounded-metrics.md`](bounded-metrics.md)。
+第二阶段增加 `AccessRuntimeMetrics` 聚合边界和 `AccessDiscoveryMetrics`：报告 client/config/naming
+的应用生命周期、ready service、可选择 endpoint、logical cluster、selector lease，以及固定
+分类的 update/retire/acquire 结果。聚合来自现有选择模型，不扫描请求路径；跨线程 selector
+析构只更新原子 lease gauge。具体 schema、并发模型和非 activation 语义见
+[`bounded-metrics.md`](bounded-metrics.md)。
 
-本阶段尚未覆盖 Nacos/Naming 连接状态、service/endpoint、DNS/pool/proxy/WebSocket、TLS、异步
-日志和 CAT drop；以下清单保留为后续独立提交：
+`start()` 成功只报告 `running`，绝不冒充 transport connected。真实连接、认证和 reconnect
+状态需要 Fiber 公共 typed snapshot/watch，已提交
+[fiber-gateway-cpp #27](https://github.com/fiber-net-gateway/fiber-gateway-cpp/issues/27)。本阶段尚未覆盖
+DNS/pool/proxy/WebSocket、TLS、异步日志和 CAT drop；以下清单保留为后续独立提交：
 
 建议增加：
 
-- Nacos config/naming connected 和 subscription state；
-- service/endpoint 聚合数量；
+- Fiber #27 落地后接入 Nacos config/naming transport/reconnect state；
 - proxy phase/outcome/attempt、pool hit、DNS outcome；
 - TLS rotation/reclaim；
 - WebSocket outcome；

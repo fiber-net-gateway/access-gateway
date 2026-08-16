@@ -31,7 +31,7 @@ class CatClient;
 
 namespace fiber::access_server {
 
-class AccessConfigMetrics;
+class AccessRuntimeMetrics;
 
 struct AccessServerOptions {
     std::size_t default_max_request_body_size = 400U << 20U;
@@ -39,7 +39,7 @@ struct AccessServerOptions {
     AccessLogOptions access_log;
     AccessRequestScriptAdapter script_adapter;
     ProxyExecutorOptions executor;
-    const AccessConfigMetrics *config_metrics = nullptr;
+    const AccessRuntimeMetrics *runtime_metrics = nullptr;
     cat::CatClient *cat_client = nullptr;
     bool test_mode = false;
     http::HttpServerOptions http_server;

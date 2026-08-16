@@ -4,8 +4,10 @@
 #include <expected>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 
 #include <fiber/async/Spawn.h>
 #include <fiber/async/Yield.h>
@@ -39,6 +41,9 @@ public:
     std::expected<fiber::nacos::Subscription<fiber::nacos::ServiceInfo>, fiber::nacos::NamingServiceError>
     subscribe(std::string_view service_name, std::string_view group,
               fiber::nacos::Subscription<fiber::nacos::ServiceInfo>::NotifyCallback on_notify, void *ctx) override {
+        if (subscribe_error_) {
+            return std::unexpected(*subscribe_error_);
+        }
         const std::string key = make_key(service_name, group);
         auto [iterator, inserted] = entries_.try_emplace(key, std::make_unique<Entry>());
         (void) inserted;
@@ -67,6 +72,8 @@ public:
         return iterator == entries_.end() ? 0 : iterator->second->subscriptions.subscription_count();
     }
 
+    void set_subscribe_error(fiber::nacos::NamingServiceError error) { subscribe_error_ = std::move(error); }
+
 private:
     struct Entry {
         fiber::tests::NacosSubscriptionStub<fiber::nacos::ServiceInfo> subscriptions;
@@ -80,6 +87,7 @@ private:
     }
 
     std::map<std::string, std::unique_ptr<Entry>, std::less<>> entries_;
+    std::optional<fiber::nacos::NamingServiceError> subscribe_error_;
 };
 
 fiber::async::Task<void> yield_updates() {
@@ -126,9 +134,12 @@ TEST(AccessServiceDiscoveryTest, WaitsBeforePublishAndPinsDiscoveryGeneration) {
             .group = "DEFAULT_GROUP",
             .zone = "sh",
     };
+    fiber::access_server::AccessDiscoveryMetrics metrics(loop);
+    const fiber::access_server::AccessDiscoveryMetricsObserver metrics_observer = metrics.observer();
     fiber::access_server::AccessServiceDiscovery discovery(
-            loop, naming, fiber::access_server::AccessServiceOps{.zone = options.zone});
-    fiber::access_server::RouteConfigStore store({}, discovery, options);
+            loop, naming,
+            fiber::access_server::AccessServiceOps{.zone = options.zone, .metrics_observer = metrics_observer});
+    fiber::access_server::RouteConfigStore store({}, discovery, options, metrics_observer);
     bool completed = false;
 
     fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
@@ -143,6 +154,12 @@ TEST(AccessServiceDiscoveryTest, WaitsBeforePublishAndPinsDiscoveryGeneration) {
         EXPECT_EQ(discovery.size(), 1u);
         EXPECT_EQ(naming.subscriptions("orders"), 1u);
         EXPECT_FALSE(std::move(*prepared).try_ready());
+        std::string metrics_text;
+        metrics.append_prometheus(metrics_text);
+        EXPECT_NE(metrics_text.find("access_server_discovery_resources{resource=\"ready_service\"} 0"),
+                  std::string::npos);
+        EXPECT_NE(metrics_text.find("access_server_discovery_resources{resource=\"selector_lease\"} 2"),
+                  std::string::npos);
 
         fiber::tests::ServiceInfoTestData info;
         info.name = "orders";
@@ -194,6 +211,14 @@ TEST(AccessServiceDiscoveryTest, WaitsBeforePublishAndPinsDiscoveryGeneration) {
             loop.stop();
             co_return;
         }
+        metrics_text.clear();
+        metrics.append_prometheus(metrics_text);
+        EXPECT_NE(metrics_text.find("access_server_discovery_resources{resource=\"ready_service\"} 1"),
+                  std::string::npos);
+        EXPECT_NE(metrics_text.find("access_server_discovery_resources{resource=\"selectable_endpoint\"} 4"),
+                  std::string::npos);
+        EXPECT_NE(metrics_text.find("access_server_discovery_resources{resource=\"logical_cluster\"} 2"),
+                  std::string::npos);
 
         std::shared_ptr<const fiber::access_server::AccessRouteSnapshot> route_snapshot = store.pin();
         const auto &compiled_route = route_snapshot->projects().front()->routes().front();
@@ -250,6 +275,12 @@ TEST(AccessServiceDiscoveryTest, WaitsBeforePublishAndPinsDiscoveryGeneration) {
         };
         naming.push("orders", std::move(changed));
         co_await yield_updates();
+        metrics_text.clear();
+        metrics.append_prometheus(metrics_text);
+        EXPECT_NE(metrics_text.find("access_server_discovery_resources{resource=\"selectable_endpoint\"} 1"),
+                  std::string::npos);
+        EXPECT_NE(metrics_text.find("access_server_discovery_resources{resource=\"logical_cluster\"} 1"),
+                  std::string::npos);
 
         if (stable) {
             EXPECT_EQ(selected_host(*stable), "10.0.0.1");
@@ -286,6 +317,17 @@ TEST(AccessServiceDiscoveryTest, WaitsBeforePublishAndPinsDiscoveryGeneration) {
         route_snapshot.reset();
         co_await yield_updates();
         EXPECT_TRUE(discovery.empty());
+        metrics_text.clear();
+        metrics.append_prometheus(metrics_text);
+        EXPECT_NE(metrics_text.find("access_server_discovery_resources{resource=\"ready_service\"} 0"),
+                  std::string::npos);
+        EXPECT_NE(metrics_text.find("access_server_discovery_resources{resource=\"selectable_endpoint\"} 0"),
+                  std::string::npos);
+        EXPECT_NE(metrics_text.find("access_server_discovery_resources{resource=\"selector_lease\"} 0"),
+                  std::string::npos);
+        EXPECT_NE(metrics_text.find("access_server_discovery_events_total{operation=\"retire\",result=\"retired\","
+                                    "reason=\"released\"} 1"),
+                  std::string::npos);
         store.clear();
         co_await discovery.shutdown();
         completed = true;
@@ -317,6 +359,44 @@ TEST(AccessServiceDiscoveryTest, ClosedBeforeInitialUpdateRejectsCandidate) {
             EXPECT_FALSE(ready);
             EXPECT_TRUE(store.pin()->projects().empty());
         }
+        co_await discovery.shutdown();
+        completed = true;
+        loop.stop();
+    });
+
+    loop.run();
+    EXPECT_TRUE(completed);
+}
+
+TEST(AccessServiceDiscoveryTest, RecordsBoundedSelectorAcquireFailure) {
+    fiber::event::EventLoop loop;
+    FakeNamingService naming;
+    naming.set_subscribe_error(fiber::nacos::NamingServiceError{
+            .code = fiber::nacos::NamingServiceErrorCode::AuthenticationUnavailable,
+            .message = "secret authentication diagnostic",
+    });
+    fiber::access_server::AccessDiscoveryMetrics metrics(loop);
+    const fiber::access_server::AccessDiscoveryMetricsObserver metrics_observer = metrics.observer();
+    fiber::access_server::AccessServiceDiscovery discovery(
+            loop, naming, fiber::access_server::AccessServiceOps{.metrics_observer = metrics_observer});
+    fiber::access_server::RouteConfigStore store({}, discovery, {}, metrics_observer);
+    bool completed = false;
+
+    fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
+        auto prepared = store.prepare("demo", project_config("orders-secret"));
+        EXPECT_FALSE(prepared);
+        EXPECT_TRUE(discovery.empty());
+
+        std::string metrics_text;
+        metrics.append_prometheus(metrics_text);
+        EXPECT_NE(metrics_text.find("access_server_discovery_events_total{operation=\"acquire\",result=\"failure\","
+                                    "reason=\"authentication_unavailable\"} 2"),
+                  std::string::npos);
+        EXPECT_NE(metrics_text.find("access_server_discovery_resources{resource=\"selector_lease\"} 0"),
+                  std::string::npos);
+        EXPECT_EQ(metrics_text.find("orders-secret"), std::string::npos);
+        EXPECT_EQ(metrics_text.find("secret authentication diagnostic"), std::string::npos);
+
         co_await discovery.shutdown();
         completed = true;
         loop.stop();
