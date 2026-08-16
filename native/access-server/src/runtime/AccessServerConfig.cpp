@@ -31,6 +31,8 @@ constexpr std::string_view kAccessLogQueryHashEnabled = "ACCESS_SERVER_ACCESS_LO
 constexpr std::string_view kAccessLogSuccessSampleRate = "ACCESS_SERVER_ACCESS_LOG_SUCCESS_SAMPLE_RATE_BPS";
 constexpr std::string_view kAccessLogMaxPathBytes = "ACCESS_SERVER_ACCESS_LOG_MAX_PATH_BYTES";
 constexpr std::string_view kAccessLogMaxQueryBytes = "ACCESS_SERVER_ACCESS_LOG_MAX_QUERY_BYTES";
+constexpr std::string_view kUpstreamTlsMode = "ACCESS_SERVER_UPSTREAM_TLS_MODE";
+constexpr std::string_view kUpstreamTlsCaFile = "ACCESS_SERVER_UPSTREAM_TLS_CA_FILE";
 constexpr std::string_view kProjectsDataId = "ACCESS_SERVER_PROJECTS_DATA_ID";
 constexpr std::string_view kRouteDataIdPrefix = "ACCESS_SERVER_ROUTE_DATA_ID_PREFIX";
 constexpr std::string_view kRouteGroup = "ACCESS_SERVER_ROUTE_GROUP";
@@ -50,6 +52,7 @@ constexpr std::string_view kCatHostname = "CAT_HOSTNAME";
 constexpr std::string_view kCatIp = "CAT_IP";
 constexpr std::string_view kCatRouters = "CAT_ROUTER_ADDRESSES";
 constexpr std::string_view kCatCollectors = "CAT_COLLECTOR_ADDRESSES";
+constexpr std::size_t kMaxUpstreamTlsCaFileBytes = 4096;
 
 struct Entry {
     std::string key;
@@ -326,16 +329,17 @@ AccessServerConfig::AccessServerConfig(
         net::SocketAddress metrics_listen_address, std::chrono::milliseconds initial_config_timeout,
         std::size_t default_max_request_body_size, bool test_mode,
         ClientMetadataResolverOptions client_metadata_options, AccessLogOptions access_log_options,
-        std::optional<cat::CatClientConfig> cat_config, nacos::NacosClientConfig nacos_config,
-        AccessConfigWatcherOptions watcher_options, GrayConfigWatcherOptions gray_watcher_options,
-        TlsCertificateWatcherOptions tls_certificate_watcher_options,
+        UpstreamTlsClientPolicy upstream_tls_client_policy, std::optional<cat::CatClientConfig> cat_config,
+        nacos::NacosClientConfig nacos_config, AccessConfigWatcherOptions watcher_options,
+        GrayConfigWatcherOptions gray_watcher_options, TlsCertificateWatcherOptions tls_certificate_watcher_options,
         AccessServiceDiscoveryOptions service_discovery_options) noexcept :
     listen_address_(std::move(listen_address)), http_server_options_(std::move(http_server_options)),
     metrics_listen_address_(std::move(metrics_listen_address)), initial_config_timeout_(initial_config_timeout),
     default_max_request_body_size_(default_max_request_body_size), test_mode_(test_mode),
     client_metadata_options_(std::move(client_metadata_options)), access_log_options_(std::move(access_log_options)),
-    cat_config_(std::move(cat_config)), nacos_config_(std::move(nacos_config)),
-    watcher_options_(std::move(watcher_options)), gray_watcher_options_(std::move(gray_watcher_options)),
+    upstream_tls_client_policy_(std::move(upstream_tls_client_policy)), cat_config_(std::move(cat_config)),
+    nacos_config_(std::move(nacos_config)), watcher_options_(std::move(watcher_options)),
+    gray_watcher_options_(std::move(gray_watcher_options)),
     tls_certificate_watcher_options_(std::move(tls_certificate_watcher_options)),
     service_discovery_options_(std::move(service_discovery_options)) {}
 
@@ -371,6 +375,7 @@ AccessServerConfig::load_from_string(std::string_view input) {
     bool test_mode = false;
     ClientMetadataResolverOptions client_metadata_options;
     AccessLogOptions access_log_options;
+    UpstreamTlsClientPolicy upstream_tls_client_policy;
     cat::CatClientConfigParams cat_params{
             .thread_group_name = "access-server-cat",
             .thread_id = "0",
@@ -491,6 +496,23 @@ AccessServerConfig::load_from_string(std::string_view input) {
             } else {
                 access_log_options.max_query_bytes = maximum;
             }
+        } else if (entry.key == kUpstreamTlsMode) {
+            if (value == "legacy_insecure") {
+                upstream_tls_client_policy.verification = UpstreamTlsVerificationMode::LegacyInsecure;
+            } else if (value == "system_ca") {
+                upstream_tls_client_policy.verification = UpstreamTlsVerificationMode::SystemCa;
+            } else if (value == "custom_ca") {
+                upstream_tls_client_policy.verification = UpstreamTlsVerificationMode::CustomCa;
+            } else {
+                return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, entry.line, entry.key,
+                                             "expected legacy_insecure, system_ca, or custom_ca"));
+            }
+        } else if (entry.key == kUpstreamTlsCaFile) {
+            if (value.size() > kMaxUpstreamTlsCaFileBytes || value.find('\0') != std::string_view::npos) {
+                return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, entry.line, entry.key,
+                                             "expected a path no longer than 4096 bytes"));
+            }
+            upstream_tls_client_policy.ca_file = entry.value;
         } else if (entry.key == kProjectsDataId) {
             watcher_options.project_list_data_id = entry.value;
         } else if (entry.key == kRouteDataIdPrefix) {
@@ -572,6 +594,16 @@ AccessServerConfig::load_from_string(std::string_view input) {
         return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, 0, kTrustedProxyCidrs,
                                      "trusted proxy CIDRs are only valid in trusted_proxy mode"));
     }
+    if (upstream_tls_client_policy.verification == UpstreamTlsVerificationMode::CustomCa &&
+        upstream_tls_client_policy.ca_file.empty()) {
+        return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, 0, kUpstreamTlsCaFile,
+                                     "custom_ca mode requires a non-empty CA file path"));
+    }
+    if (upstream_tls_client_policy.verification != UpstreamTlsVerificationMode::CustomCa &&
+        !upstream_tls_client_policy.ca_file.empty()) {
+        return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, 0, kUpstreamTlsCaFile,
+                                     "a CA file path is only valid in custom_ca mode"));
+    }
     client_metadata_options.connection_secure = tls_enabled;
     auto nacos_config = nacos::NacosClientConfig::create(std::move(nacos_params));
     if (!nacos_config) {
@@ -601,9 +633,10 @@ AccessServerConfig::load_from_string(std::string_view input) {
     return AccessServerConfig(net::SocketAddress(listen_ip, listen_port), std::move(http_options),
                               net::SocketAddress(metrics_ip.value_or(listen_ip), *metrics_port),
                               std::chrono::milliseconds(timeout_millis), max_request_body, test_mode,
-                              std::move(client_metadata_options), std::move(access_log_options), std::move(cat_config),
-                              std::move(*nacos_config), std::move(watcher_options), std::move(gray_options),
-                              std::move(tls_certificate_options), std::move(service_discovery_options));
+                              std::move(client_metadata_options), std::move(access_log_options),
+                              std::move(upstream_tls_client_policy), std::move(cat_config), std::move(*nacos_config),
+                              std::move(watcher_options), std::move(gray_options), std::move(tls_certificate_options),
+                              std::move(service_discovery_options));
 }
 
 } // namespace fiber::access_server

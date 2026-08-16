@@ -75,7 +75,7 @@ Issue/PR，合入后再审查 revision range、运行完整回归并更新 gitli
 | L-06 | P1 | 系统 DNS 配置、多 nameserver 和 failover | 双方 | 是 |
 | S-01 | P0 | access log query 脱敏 | 本项目 | 否 |
 | S-02 | P0/P1 | trusted proxy 和真实客户端地址模型 | 本项目 | 否 |
-| S-03 | P1 | 上游 TLS peer/CA/SNI 验证配置 | 本项目 | 否，Fiber 已具备能力 |
+| S-03 | P1 | 上游 TLS peer/CA/SNI 验证配置 | 双方 | 路由级配置需要 Fiber #28；进程级可先落地 |
 | S-04 | P1 | 上游 mTLS 客户端身份 | 双方 | 是 |
 | P-01 | P1 | 消除 service selection 双层共享锁 | 双方 | 通用 SWRR 上游化时需要 |
 | P-02 | P1/P2 | per-worker route snapshot/RCU pin | 双方 | 采用通用原语时需要 |
@@ -102,6 +102,9 @@ P0 表示应在性能重构前处理的正确性、安全或生命周期问题�
 
 - **L-06**：系统 DNS 配置、多 nameserver 和 failover；
 - **S-04**：TLS client context 加载客户端证书和私钥；
+- **S-03（路由级）**：connection pool key 纳入有界 TLS transport profile，避免不同
+  CA/SNI/验证名复用同一连接；见
+  [fiber-gateway-cpp #28](https://github.com/fiber-net-gateway/fiber-gateway-cpp/issues/28)；
 - **P-08**：可取消、可复用的 Happy Eyeballs 多地址 connector；
 - **O-02**：暴露 Nacos config/naming transport、认证和 reconnect 的 typed bounded
   snapshot/watch；见 [fiber-gateway-cpp #27](https://github.com/fiber-net-gateway/fiber-gateway-cpp/issues/27)。
@@ -412,24 +415,37 @@ Java 行为跳过 allow/deny。
 
 ### 6.3 S-03：上游 TLS 验证
 
-**归属：本项目。Fiber 已具备所需基础能力。**
+**归属：双方。进程级策略由本项目完成；路由级策略依赖 Fiber #28。**
 
-当前 HTTPS upstream 明确设置 `verify_peer=false`，以匹配 Java 基线。Fiber
+改造前 HTTPS upstream 固定设置 `verify_peer=false`，以匹配 Java 基线。Fiber
 `TlsOptions` 和客户端 transport 已支持 `verify_peer`、`ca_file`、`server_name` 和
 `verify_name`，服务端证书验证无需先改 Fiber。
 
-代码位置：[`ProxyUpstreamConnection.cpp`](../src/execution/ProxyUpstreamConnection.cpp#L22)。
+代码位置：[`UpstreamTlsClientPolicy.cpp`](../src/execution/UpstreamTlsClientPolicy.cpp)、
+[`ProxyUpstreamConnection.cpp`](../src/execution/ProxyUpstreamConnection.cpp) 和
+[`AccessServerRuntime.cpp`](../src/runtime/AccessServerRuntime.cpp)。
 
-本项目应增加显式、可审计的模式：
+本项目现已增加显式、可审计的进程级模式：
 
 - `legacy_insecure`；
-- 系统 CA 验证；
-- 指定 CA bundle；
-- SNI 与独立证书验证名；
-- 证书验证失败的稳定错误、CAT/metrics 结果和敏感信息脱敏。
+- `system_ca` 系统 CA 验证；
+- `custom_ca` 指定 CA bundle；
+- hostname 自动作为 SNI/验证名，IP endpoint 只设置 IP `verify_name`、不发送 IP SNI；
+- trust store 启动前 fail-fast；
+- 可识别验证/ALPN 失败使用 502 `HTTP_CLIENT_TLS_ERROR` 和 CAT `tls` phase，且不回显
+  CA 路径。
 
-不能直接改变已有路由默认语义。新增字段必须同步 native codec/runtime、validator、server、
-web、fixture 和兼容文档。
+配置通过 `ACCESS_SERVER_UPSTREAM_TLS_MODE` 和
+`ACCESS_SERVER_UPSTREAM_TLS_CA_FILE` 提供，默认仍为 `legacy_insecure`，因此不改变已有
+route wire 或 Java 兼容默认。策略在进程生命周期内不可变，同一进程只有一个 trust profile，
+不会触发当前 endpoint-only pool key 的跨策略复用。
+
+完整的 route/环境级 CA、SNI 和独立验证名仍不能安全发布：Fiber 的
+`Http1ConnectionGroupKey` 当前只包含 endpoint 与 scheme，pool hit 会绕过新连接 options，可能
+复用由其他 TLS profile 创建的连接。该前置能力由
+[fiber-gateway-cpp #28](https://github.com/fiber-net-gateway/fiber-gateway-cpp/issues/28) 跟踪。
+在上游完成前，native codec、validator、server 和 web 均不接受或模拟 route 级字段；之后新增
+wire 字段时必须同步 codec/runtime、validator、server、web、fixture 和兼容文档。
 
 ### 6.4 S-04：上游 mTLS 客户端身份
 
@@ -900,7 +916,7 @@ Fiber benchmark：
 | 能力 | 当前 Fiber 状态 | 结论 |
 | --- | --- | --- |
 | HTTP socket peer 地址 | `HttpExchange::remote_addr()` 已提供 | trusted proxy 在本项目实现 |
-| TLS peer/CA/SNI/验证名 | client context 已支持 | 上游 TLS 安全模式在本项目接入 |
+| TLS peer/CA/SNI/验证名 | client context 已支持；pool key 未隔离 transport profile | 进程级模式已接入；路由级等待 Fiber #28 |
 | TLS 客户端证书 | 字段存在，但 client context 当前不加载身份 | Fiber 补能力，本项目接入 mTLS |
 | 异步日志丢弃统计 | LoggerManager/Appender stats 已提供 | 本项目接 Prometheus |
 | EventLoop worker index | `group_index()` 已提供 | DNS resolver 可直接 O(1) 取 slot |
@@ -934,15 +950,16 @@ Fiber benchmark：
 6. P-06 初始项目 batch build/publish；
 7. L-04 配置编译移出 Nacos loop；
 8. L-05 收敛 prepared/ready/published API；
-9. S-03 接入上游 peer/CA/SNI 验证模式。
+9. S-03 进程级 upstream peer/CA/SNI 验证模式（已完成；route 级配置移至阶段 C）。
 
 ### 阶段 C：Fiber 协同能力
 
 1. L-06 系统 DNS 配置和多 nameserver；
 2. P-08 Happy Eyeballs；
-3. S-04 upstream mTLS client identity；
-4. P-01 通用 SWRR 上游化或 sharding；
-5. 只有 profile 证明 route pin 成为瓶颈时，开展 P-02 RCU 设计。
+3. S-03 route 级 TLS transport profile 隔离与配置；
+4. S-04 upstream mTLS client identity；
+5. P-01 通用 SWRR 上游化或 sharding；
+6. 只有 profile 证明 route pin 成为瓶颈时，开展 P-02 RCU 设计。
 
 每项先在 Fiber 上游合入并测试，再更新本仓库 gitlink 和 provenance，最后运行完整
 Fiber/native 回归。

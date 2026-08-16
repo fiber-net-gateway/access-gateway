@@ -2,6 +2,7 @@
 #define FIBER_ACCESS_SERVER_ACCESS_SERVER_CONFIG_H
 
 #include "../execution/ClientMetadata.h"
+#include "../execution/UpstreamTlsClientPolicy.h"
 #include "../observability/AccessLogPolicy.h"
 #include "AccessConfigWatcher.h"
 #include "AccessServiceDiscovery.h"
@@ -58,6 +59,9 @@ public:
         return client_metadata_options_;
     }
     [[nodiscard]] const AccessLogOptions &access_log_options() const noexcept { return access_log_options_; }
+    [[nodiscard]] const UpstreamTlsClientPolicy &upstream_tls_client_policy() const noexcept {
+        return upstream_tls_client_policy_;
+    }
     [[nodiscard]] const std::optional<cat::CatClientConfig> &cat_config() const noexcept { return cat_config_; }
     [[nodiscard]] const nacos::NacosClientConfig &nacos_config() const noexcept { return nacos_config_; }
     [[nodiscard]] const AccessConfigWatcherOptions &watcher_options() const noexcept { return watcher_options_; }
@@ -76,6 +80,7 @@ private:
                        net::SocketAddress metrics_listen_address, std::chrono::milliseconds initial_config_timeout,
                        std::size_t default_max_request_body_size, bool test_mode,
                        ClientMetadataResolverOptions client_metadata_options, AccessLogOptions access_log_options,
+                       UpstreamTlsClientPolicy upstream_tls_client_policy,
                        std::optional<cat::CatClientConfig> cat_config, nacos::NacosClientConfig nacos_config,
                        AccessConfigWatcherOptions watcher_options, GrayConfigWatcherOptions gray_watcher_options,
                        TlsCertificateWatcherOptions tls_certificate_watcher_options,
@@ -89,6 +94,7 @@ private:
     bool test_mode_ = false;
     ClientMetadataResolverOptions client_metadata_options_;
     AccessLogOptions access_log_options_;
+    UpstreamTlsClientPolicy upstream_tls_client_policy_;
     std::optional<cat::CatClientConfig> cat_config_;
     nacos::NacosClientConfig nacos_config_;
     AccessConfigWatcherOptions watcher_options_;

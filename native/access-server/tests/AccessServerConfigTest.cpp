@@ -1,4 +1,5 @@
 #include "../src/runtime/AccessServerConfig.h"
+#include "../src/runtime/AccessServerRuntime.h"
 
 #include <gtest/gtest.h>
 
@@ -30,6 +31,8 @@ TEST(AccessServerConfigTest, LoadsJavaServerDefaultsAndNacosSettings) {
     EXPECT_EQ(config->access_log_options().success_sample_rate_bps, kAccessLogSampleScale);
     EXPECT_EQ(config->access_log_options().max_path_bytes, 2048u);
     EXPECT_EQ(config->access_log_options().max_query_bytes, 2048u);
+    EXPECT_EQ(config->upstream_tls_client_policy().verification, UpstreamTlsVerificationMode::LegacyInsecure);
+    EXPECT_TRUE(config->upstream_tls_client_policy().ca_file.empty());
     EXPECT_TRUE(config->http_server_options().tls.enabled);
     EXPECT_TRUE(config->http_server_options().http3.enabled);
     EXPECT_TRUE(config->http_server_options().tls.cert_file.empty());
@@ -107,6 +110,75 @@ TEST(AccessServerConfigTest, LoadsExplicitRuntimeAndCompatibilityKeys) {
     EXPECT_EQ(config->service_discovery_options().zone, "sh");
     EXPECT_EQ(config->nacos_config().username(), "user");
     EXPECT_EQ(config->nacos_config().password(), "pass");
+}
+
+TEST(AccessServerConfigTest, LoadsUpstreamTlsVerificationModes) {
+    auto system_ca = AccessServerConfig::load_from_string("NACOS_SERVER_ADDRESSES=127.0.0.1\n"
+                                                          "ACCESS_SERVER_UPSTREAM_TLS_MODE=system_ca\n");
+    ASSERT_TRUE(system_ca) << system_ca.error().detail;
+    EXPECT_EQ(system_ca->upstream_tls_client_policy().verification, UpstreamTlsVerificationMode::SystemCa);
+    EXPECT_TRUE(system_ca->upstream_tls_client_policy().ca_file.empty());
+
+    auto custom_ca =
+            AccessServerConfig::load_from_string("NACOS_SERVER_ADDRESSES=127.0.0.1\n"
+                                                 "ACCESS_SERVER_UPSTREAM_TLS_MODE=custom_ca\n"
+                                                 "ACCESS_SERVER_UPSTREAM_TLS_CA_FILE=/run/secrets/upstream-ca.pem\n");
+    ASSERT_TRUE(custom_ca) << custom_ca.error().detail;
+    EXPECT_EQ(custom_ca->upstream_tls_client_policy().verification, UpstreamTlsVerificationMode::CustomCa);
+    EXPECT_EQ(custom_ca->upstream_tls_client_policy().ca_file, "/run/secrets/upstream-ca.pem");
+}
+
+TEST(AccessServerConfigTest, RejectsInvalidUpstreamTlsVerificationSettings) {
+    const auto expect_invalid = [](std::string_view settings) {
+        std::string input = "NACOS_SERVER_ADDRESSES=127.0.0.1\n";
+        input.append(settings);
+        auto config = AccessServerConfig::load_from_string(input);
+        EXPECT_FALSE(config);
+        if (!config) {
+            EXPECT_EQ(config.error().code, AccessServerConfigErrorCode::InvalidValue);
+        }
+    };
+
+    expect_invalid("ACCESS_SERVER_UPSTREAM_TLS_MODE=verify\n");
+    expect_invalid("ACCESS_SERVER_UPSTREAM_TLS_MODE=custom_ca\n");
+    expect_invalid("ACCESS_SERVER_UPSTREAM_TLS_CA_FILE=/tmp/ca.pem\n");
+    expect_invalid("ACCESS_SERVER_UPSTREAM_TLS_MODE=system_ca\n"
+                   "ACCESS_SERVER_UPSTREAM_TLS_CA_FILE=/tmp/ca.pem\n");
+
+    std::string oversized = "ACCESS_SERVER_UPSTREAM_TLS_MODE=custom_ca\n"
+                            "ACCESS_SERVER_UPSTREAM_TLS_CA_FILE=";
+    oversized.append(4097, 'a');
+    oversized.push_back('\n');
+    expect_invalid(oversized);
+
+    std::string embedded_nul = "ACCESS_SERVER_UPSTREAM_TLS_MODE=custom_ca\n"
+                               "ACCESS_SERVER_UPSTREAM_TLS_CA_FILE=/tmp/ca";
+    embedded_nul.push_back('\0');
+    embedded_nul.append(".pem\n");
+    expect_invalid(embedded_nul);
+}
+
+TEST(AccessServerRuntimeTest, RejectsInvalidUpstreamTrustStoreBeforeEventLoopsStart) {
+    constexpr std::string_view kMissingCaPath = "/missing/runtime-upstream-ca.pem";
+    auto config = AccessServerConfig::load_from_string(
+            "NACOS_SERVER_ADDRESSES=127.0.0.1\n"
+            "ACCESS_SERVER_UPSTREAM_TLS_MODE=custom_ca\n"
+            "ACCESS_SERVER_UPSTREAM_TLS_CA_FILE=/missing/runtime-upstream-ca.pem\n");
+    ASSERT_TRUE(config) << config.error().detail;
+
+    event::EventLoop accept_loop;
+    event::EventLoopGroup http_workers(1);
+    event::EventLoopGroup nacos_group(1);
+    event::EventLoopGroup compiler_group(1);
+    event::EventLoopGroup cat_group(1);
+    auto runtime = AccessServerRuntime::create(accept_loop, nacos_group.at(0), compiler_group.at(0), cat_group.at(0),
+                                               http_workers, *config);
+
+    ASSERT_FALSE(runtime);
+    EXPECT_EQ(runtime.error().code, AccessServerRuntimeErrorCode::InitializeUpstreamTls);
+    EXPECT_EQ(runtime.error().io_error, common::IoErr::Invalid);
+    EXPECT_EQ(runtime.error().message.find(kMissingCaPath), std::string::npos);
+    EXPECT_EQ(access_server_runtime_stage_name(runtime.error().code), "initialize upstream TLS trust store");
 }
 
 TEST(AccessServerConfigTest, LoadsOptionalCatClientSettings) {

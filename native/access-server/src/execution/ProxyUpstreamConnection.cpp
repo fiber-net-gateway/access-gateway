@@ -1,5 +1,6 @@
 #include "ProxyUpstreamConnection.h"
 
+#include <fiber/common/Assert.h>
 #include <fiber/http/Http1ClientConnection.h>
 #include <fiber/http/Http1ConnectionGroupKey.h>
 #include <fiber/net/SocketAddress.h>
@@ -19,16 +20,34 @@ ProxyConnectError error(ProxyConnectErrorCode code, const char *message,
     };
 }
 
+bool verified_tls(const UpstreamTlsClientPolicy &policy) noexcept {
+    return policy.verification != UpstreamTlsVerificationMode::LegacyInsecure;
+}
+
+bool identifiable_tls_failure(const http::Http1ConnectionGroupKey &key, const UpstreamTlsClientPolicy &policy,
+                              common::IoErr io_error) noexcept {
+    return key.scheme() == http::Http1ConnectionGroupKey::Scheme::Https && verified_tls(policy) &&
+           (io_error == common::IoErr::Invalid || io_error == common::IoErr::NotSupported);
+}
+
 http::Http1ClientConnectionOptions connection_options(const http::Http1ConnectionGroupKey &key,
-                                                      const net::IpAddress &ip) {
+                                                      const net::IpAddress &ip,
+                                                      const UpstreamTlsClientPolicy &tls_policy) {
     http::Http1ClientConnectionOptions result;
     result.peer_addr = net::SocketAddress(ip, key.port());
     if (key.scheme() == http::Http1ConnectionGroupKey::Scheme::Https) {
         result.tls.enabled = true;
-        // The Java client uses InsecureTrustManagerFactory by default.
-        result.tls.verify_peer = false;
+        result.tls.verify_peer = verified_tls(tls_policy);
+        if (tls_policy.verification == UpstreamTlsVerificationMode::CustomCa) {
+            FIBER_ASSERT(!tls_policy.ca_file.empty());
+            result.tls.ca_file = tls_policy.ca_file;
+        }
         if (key.is_name()) {
             result.tls.server_name.assign(key.host_name());
+        } else if (result.tls.verify_peer) {
+            // IP literals are authenticated as IP identities without emitting an
+            // IP-valued SNI extension.
+            result.tls.verify_name = key.ip_address().to_string();
         }
     }
     return result;
@@ -38,7 +57,7 @@ http::Http1ClientConnectionOptions connection_options(const http::Http1Connectio
 
 async::Task<std::expected<ProxyUpstreamConnection, ProxyConnectError>>
 acquire_proxy_upstream_connection(http::StealableHttp1ConnectionPoolSet &pool, ProxyDnsResolver dns_resolver,
-                                  const http::Http1ConnectionGroupKey &key,
+                                  const http::Http1ConnectionGroupKey &key, const UpstreamTlsClientPolicy &tls_policy,
                                   std::chrono::milliseconds connect_timeout) noexcept {
     ProxyUpstreamConnection output;
     output.lease = co_await pool.acquire(key);
@@ -87,7 +106,7 @@ acquire_proxy_upstream_connection(http::StealableHttp1ConnectionPoolSet &pool, P
             }
         }
 
-        auto emplaced = output.lease.emplace_connection(connection_options(key, addresses[i]));
+        auto emplaced = output.lease.emplace_connection(connection_options(key, addresses[i], tls_policy));
         if (!emplaced) {
             last_error = emplaced.error();
             output.lease.reset();
@@ -101,7 +120,10 @@ acquire_proxy_upstream_connection(http::StealableHttp1ConnectionPoolSet &pool, P
         last_error = connected.error();
         output.lease.reset();
     }
-    co_return std::unexpected(error(ProxyConnectErrorCode::Connect, "upstream connection failed", last_error));
+    const bool tls_failure = identifiable_tls_failure(key, tls_policy, last_error);
+    co_return std::unexpected(error(tls_failure ? ProxyConnectErrorCode::Tls : ProxyConnectErrorCode::Connect,
+                                    tls_failure ? "upstream TLS negotiation failed" : "upstream connection failed",
+                                    last_error));
 }
 
 } // namespace fiber::access_server
