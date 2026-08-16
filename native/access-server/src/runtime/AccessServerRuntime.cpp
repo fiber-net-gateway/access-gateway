@@ -107,10 +107,10 @@ AccessServerRuntime::create(event::EventLoop &accept_loop, event::EventLoop &nac
     auto runtime = std::unique_ptr<AccessServerRuntime>(new (std::nothrow) AccessServerRuntime(
             accept_loop, nacos_loop, cat_loop, http_workers, config.listen_address(), config.http_server_options(),
             config.metrics_listen_address(), listen_options, config.initial_config_timeout(),
-            config.default_max_request_body_size(), config.test_mode(), config.access_log_options(),
-            config.watcher_options(), config.gray_watcher_options(), config.tls_certificate_watcher_options(),
-            config.service_discovery_options(), std::move(cat_client), std::move(*client), std::move(*config_service),
-            std::move(*naming_service)));
+            config.default_max_request_body_size(), config.test_mode(), config.client_metadata_options(),
+            config.access_log_options(), config.watcher_options(), config.gray_watcher_options(),
+            config.tls_certificate_watcher_options(), config.service_discovery_options(), std::move(cat_client),
+            std::move(*client), std::move(*config_service), std::move(*naming_service)));
     if (!runtime) {
         return std::unexpected(AccessServerRuntimeError{
                 .code = AccessServerRuntimeErrorCode::AllocateRuntime,
@@ -125,7 +125,8 @@ AccessServerRuntime::AccessServerRuntime(
         event::EventLoopGroup &http_workers, net::SocketAddress listen_address,
         http::HttpServerOptions http_server_options, net::SocketAddress metrics_listen_address,
         net::ListenOptions listen_options, std::chrono::milliseconds initial_config_timeout,
-        std::size_t default_max_request_body_size, bool test_mode, AccessLogOptions access_log_options,
+        std::size_t default_max_request_body_size, bool test_mode,
+        ClientMetadataResolverOptions client_metadata_options, AccessLogOptions access_log_options,
         AccessConfigWatcherOptions watcher_options, GrayConfigWatcherOptions gray_options,
         TlsCertificateWatcherOptions tls_certificate_options, AccessServiceDiscoveryOptions service_discovery_options,
         std::unique_ptr<cat::CatClient> cat_client, std::unique_ptr<nacos::NacosClient> nacos_client,
@@ -135,9 +136,10 @@ AccessServerRuntime::AccessServerRuntime(
     listen_address_(std::move(listen_address)), metrics_listen_address_(std::move(metrics_listen_address)),
     listen_options_(std::move(listen_options)), initial_config_timeout_(initial_config_timeout),
     default_max_request_body_size_(default_max_request_body_size), test_mode_(test_mode),
-    access_log_options_(std::move(access_log_options)), http_server_options_(std::move(http_server_options)),
-    cat_client_(std::move(cat_client)), nacos_client_(std::move(nacos_client)),
-    config_service_(std::move(config_service)), naming_service_(std::move(naming_service)),
+    client_metadata_options_(std::move(client_metadata_options)), access_log_options_(std::move(access_log_options)),
+    http_server_options_(std::move(http_server_options)), cat_client_(std::move(cat_client)),
+    nacos_client_(std::move(nacos_client)), config_service_(std::move(config_service)),
+    naming_service_(std::move(naming_service)),
     service_discovery_(nacos_loop, *naming_service_,
                        AccessServiceOps{.swrr_options = service_discovery_options.swrr_options,
                                         .zone = service_discovery_options.zone}),
@@ -434,6 +436,7 @@ async::Task<std::expected<void, AccessServerRuntimeError>> AccessServerRuntime::
             *accept_loop_, *http_workers_, route_store_, gray_store_.adapter(),
             AccessServerOptions{
                     .default_max_request_body_size = default_max_request_body_size_,
+                    .client_metadata = client_metadata_options_,
                     .access_log = access_log_options_,
                     .script_adapter = script_runtime_.request_adapter(),
                     .cat_client = cat_client_.get(),

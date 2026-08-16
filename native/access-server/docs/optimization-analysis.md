@@ -338,18 +338,30 @@ Fiber 已经通过 `LoggerManager::queue_stats()` 和 appender stats 暴露队�
 
 **归属：本项目。Fiber 已提供 socket peer 地址。**
 
-当前 HTTPS 判断直接读取 `X-Forwarded-Proto`，CIDR 和 gray 策略直接读取 `X-Real-Ip`。
+**实施状态：已解决（2026-08-16）。** 新增无请求期容器分配的 `ClientMetadataResolver`，
+提供安全默认 `direct`、可信链 `trusted_proxy` 和显式兼容 `legacy_headers` 三种模式。可信链只在
+socket peer 命中启动时严格编译的 CIDR 后生效，按 `Forwarded`、`X-Forwarded-For`、
+`X-Real-Ip` 优先级解析并从右向左剥离可信 hop；IPv4、IPv6、括号、端口、多字段、最多 32 hop
+和 XFP 下标对齐均有覆盖。非法高优先级输入不向低优先级 header 降级，而是使用 socket peer 和
+listener 的真实 TLS 状态。
+
+解析结果由 route CIDR、gray、HTTPS redirect、代理 Location/Refresh、CAT 和 access log 共同消费；
+安全模式不再因 header 缺失或解析失败跳过 CIDR。`legacy_headers` 单独保存 route/gray 的 Java
+兼容 target，继续覆盖旧 fixture，但必须显式配置。Fiber HTTP/1 exchange 当前不携带 scheme，
+本项目利用业务 listener 全局 TLS 配置确定真实协议，因此本项不需要修改 Fiber。
+
+改造前 HTTPS 判断直接读取 `X-Forwarded-Proto`，CIDR 和 gray 策略直接读取 `X-Real-Ip`。
 无可信代理边界时，客户端可以伪造这些 header。原始 IPv6 或非预期格式解析失败后还会按
 Java 行为跳过 allow/deny。
 
 代码位置：
 
-- [`AccessRequestHandler.cpp`](../src/execution/AccessRequestHandler.cpp#L171)；
-- [`AccessRequestHandler.cpp`](../src/execution/AccessRequestHandler.cpp#L189)；
-- [`GrayMatchStore.cpp`](../src/runtime/GrayMatchStore.cpp#L54)。
+- [`ClientMetadata.h`](../src/execution/ClientMetadata.h)；
+- [`ClientMetadata.cpp`](../src/execution/ClientMetadata.cpp)；
+- [`AccessRequestTelemetry.cpp`](../src/observability/AccessRequestTelemetry.cpp)；
+- [`GrayMatchStore.cpp`](../src/runtime/GrayMatchStore.cpp)。
 
-Fiber `HttpExchange::remote_addr()` 已经提供真实 socket peer，因此本项目应实现
-`ClientMetadataResolver`：
+实现遵循以下契约：
 
 1. peer 属于 configured trusted-proxy CIDR 时，才解析转发 header；
 2. 非可信 peer 使用 `remote_addr()` 和实际 TLS scheme；

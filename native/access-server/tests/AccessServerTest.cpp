@@ -251,7 +251,10 @@ TEST(AccessServerTest, ServesPublishedSnapshotAndShutsDownWorkerResources) {
     std::thread client([&]() {
         const auto [bound_port, metrics_port] = port.get();
         if (bound_port != 0 && metrics_port != 0) {
-            response = request(bound_port, {}, "GET", "/?token=integration-secret");
+            response = request(bound_port,
+                               "X-Real-Ip: 203.0.113.77\r\n"
+                               "X-Forwarded-Proto: https\r\n",
+                               "GET", "/?token=integration-secret");
             gzip_response = request(bound_port, "Accept-Encoding: gzip\r\n");
             gzip_head_response = request(bound_port, "Accept-Encoding: gzip\r\n", "HEAD");
             unacceptable_response = request(bound_port, "Accept-Encoding: gzip;q=0, identity;q=0\r\n");
@@ -300,6 +303,9 @@ TEST(AccessServerTest, ServesPublishedSnapshotAndShutsDownWorkerResources) {
     EXPECT_NE(access_logs.find("path=\"/\" query=\"\""), std::string::npos);
     EXPECT_NE(access_logs.find("query_hash=\"hmac-sha256:"), std::string::npos);
     EXPECT_NE(access_logs.find("query_filtered=true"), std::string::npos);
+    EXPECT_EQ(access_logs.find("203.0.113.77"), std::string::npos);
+    EXPECT_NE(access_logs.find("client_ip=\"127.0.0.1\" peer_ip=\"127.0.0.1\""), std::string::npos);
+    EXPECT_NE(access_logs.find("forwarding_status=ignored_direct_mode"), std::string::npos);
 }
 
 TEST(AccessServerTest, ReturnsCatTraceIdFromTheUnifiedRequestContext) {

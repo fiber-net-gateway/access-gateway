@@ -37,6 +37,14 @@ bool parse_prefix(std::string_view text, std::uint32_t &prefix) noexcept {
     return true;
 }
 
+bool parse_strict_prefix(std::string_view text, std::uint32_t &prefix) noexcept {
+    if (text.empty() || text.front() == '+') {
+        return false;
+    }
+    const auto result = std::from_chars(text.data(), text.data() + text.size(), prefix);
+    return result.ec == std::errc{} && result.ptr == text.data() + text.size();
+}
+
 bool parse_java_v4(std::string_view text, std::array<std::uint8_t, net::IpAddress::kV6Size> &bytes) noexcept {
     if (text.empty() || text.size() > 15) {
         return false;
@@ -132,6 +140,52 @@ std::expected<Cidr, AccessConfigError> Cidr::parse(std::string_view text, std::s
     const std::size_t zero_begin = whole_bytes + (remaining_bits == 0 ? 0 : 1);
     for (std::size_t i = zero_begin; i < byte_size; ++i) {
         cidr.network_[i] = 0;
+    }
+    return cidr;
+}
+
+std::expected<Cidr, AccessConfigError> Cidr::parse_strict(std::string_view text, std::string_view field) {
+    if (text.empty()) {
+        return std::unexpected(cidr_error(field, text));
+    }
+
+    const std::size_t slash = text.find('/');
+    if (slash != std::string_view::npos && text.find('/', slash + 1) != std::string_view::npos) {
+        return std::unexpected(cidr_error(field, text));
+    }
+    const std::string_view address_text = slash == std::string_view::npos ? text : text.substr(0, slash);
+    net::IpAddress address;
+    if (address_text.empty() || address_text.front() == '[' || address_text.find('%') != std::string_view::npos ||
+        !net::IpAddress::parse(address_text, address)) {
+        return std::unexpected(cidr_error(field, text));
+    }
+
+    const std::uint32_t max_prefix = static_cast<std::uint32_t>(address.byte_size() * 8);
+    std::uint32_t prefix = max_prefix;
+    if (slash != std::string_view::npos &&
+        (!parse_strict_prefix(text.substr(slash + 1), prefix) || prefix > max_prefix)) {
+        return std::unexpected(cidr_error(field, text));
+    }
+    Cidr cidr = from_address(address);
+    cidr.prefix_length_ = static_cast<std::uint8_t>(prefix);
+    const std::size_t whole_bytes = prefix / 8;
+    const std::uint32_t remaining_bits = prefix % 8;
+    if (remaining_bits != 0) {
+        cidr.network_[whole_bytes] &= static_cast<std::uint8_t>(0xFFU << (8U - remaining_bits));
+    }
+    const std::size_t zero_begin = whole_bytes + (remaining_bits == 0 ? 0 : 1);
+    for (std::size_t i = zero_begin; i < address.byte_size(); ++i) {
+        cidr.network_[i] = 0;
+    }
+    return cidr;
+}
+
+Cidr Cidr::from_address(const net::IpAddress &address) noexcept {
+    Cidr cidr;
+    cidr.byte_size_ = static_cast<std::uint8_t>(address.byte_size());
+    cidr.prefix_length_ = static_cast<std::uint8_t>(address.byte_size() * 8);
+    for (std::size_t i = 0; i < address.byte_size(); ++i) {
+        cidr.network_[i] = address.data()[i];
     }
     return cidr;
 }

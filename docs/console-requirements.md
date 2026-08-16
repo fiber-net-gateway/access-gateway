@@ -407,11 +407,12 @@ SAN，不需要业务流量验证。到期状态必须随时间持续计算；�
 安全前提和验收见
 [`network-policy-and-certificate-design.md`](network-policy-and-certificate-design.md)。
 
-当前 native 按 Java 兼容语义从 `X-Real-Ip` 执行 CIDR 判断，缺失或不可解析时跳过检查。因此生产
-部署必须由受信任入口清洗并设置该头；可信代理边界完成前不得把该配置宣传为独立网络防火墙。
-HTTPS redirect 同样只信任已清洗的 `X-Forwarded-Proto`。当前单一业务监听器启用 TLS 时不接收
-明文 HTTP，因此直连 access-server 不会触发 HTTP 到 HTTPS 重定向；该策略面向同时接收 HTTP/HTTPS
-的受信任 Ingress/LB 链路。
+native 默认 `direct` 模式从 socket peer 执行 CIDR，并忽略 forwarding header；使用 Ingress/LB 时
+必须显式选择 `trusted_proxy` 并配置实际代理 CIDR，才会按 Forwarded/XFF/XRI 可信链解析客户端。
+非法链回退 peer，不跳过策略。Java 的缺失/非法 XRI 跳过行为仅由不适合公网 listener 的
+`legacy_headers` 模式保留。当前单一业务 listener 启用 TLS 时不接收明文 HTTP，因此直连
+access-server 不会触发 HTTP 到 HTTPS 重定向；外部终止 TLS 的入口需要相同 trusted proxy 配置，
+使受信 Forwarded/XFP 参与 scheme 解析。
 
 ### 7.5 Release 与发布到 rnacos
 

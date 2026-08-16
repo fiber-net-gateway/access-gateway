@@ -435,7 +435,7 @@ bool parse_content_length(std::string_view value, std::size_t &output) noexcept 
 bool build_downstream_headers(http::HttpExchange &downstream, const CompiledProxyRoute &proxy,
                               const ProxyUpstreamEndpoint &endpoint, const http::Http1ResponseHead &upstream_head,
                               std::span<const EvaluatedHeader> custom_headers, bool websocket_response,
-                              http::HttpHeaders &output) {
+                              const ClientMetadata &client_metadata, http::HttpHeaders &output) {
     for (const http::HttpHeaders::HeaderField &field: upstream_head.headers) {
         if (field.name_len == 0 || is_java_filtered_response_header(field.name_view()) ||
             proxy.response_headers.contains(field.lowcase_view(), field.name_hash)) {
@@ -454,8 +454,8 @@ bool build_downstream_headers(http::HttpExchange &downstream, const CompiledProx
     if (!proxy.response_headers.contains("Location")) {
         const std::string_view location = upstream_head.headers.get("Location");
         if (!location.empty()) {
-            auto rewritten = rewrite_java_proxy_location(
-                    location, endpoint.host_header, downstream.header("X-Forwarded-Proto"), downstream.header("Host"));
+            auto rewritten = rewrite_java_proxy_location(location, endpoint.host_header,
+                                                         client_metadata.external_scheme, downstream.header("Host"));
             if (rewritten && !output.set("Location", *rewritten)) {
                 return false;
             }
@@ -464,8 +464,8 @@ bool build_downstream_headers(http::HttpExchange &downstream, const CompiledProx
     if (!proxy.response_headers.contains("Refresh")) {
         const std::string_view refresh = upstream_head.headers.get("Refresh");
         if (!refresh.empty()) {
-            auto rewritten = rewrite_java_proxy_refresh(
-                    refresh, endpoint.host_header, downstream.header("X-Forwarded-Proto"), downstream.header("Host"));
+            auto rewritten = rewrite_java_proxy_refresh(refresh, endpoint.host_header, client_metadata.external_scheme,
+                                                        downstream.header("Host"));
             if (rewritten && !output.set("Refresh", *rewritten)) {
                 return false;
             }
@@ -591,7 +591,8 @@ async::Task<Result<void>> ProxyExecutor::execute_impl(http::HttpExchange &exchan
     if (*context_cluster) {
         cluster_override = **context_cluster;
     }
-    if (cluster_matcher_.matches && cluster_matcher_.matches(cluster_matcher_.context, exchange)) {
+    if (cluster_matcher_.matches &&
+        cluster_matcher_.matches(cluster_matcher_.context, exchange.header("X-Entry"), telemetry.client_metadata())) {
         cluster_override = std::string_view("gray");
         auto stored = telemetry.put_trace_context(kTraceCluster, "gray");
         if (!stored) {
@@ -847,7 +848,7 @@ async::Task<Result<void>> ProxyExecutor::execute_impl(http::HttpExchange &exchan
 
         http::HttpHeaders &response_headers = telemetry.response_headers();
         if (!build_downstream_headers(exchange, proxy, *selected, *upstream_head, *custom_headers, websocket_response,
-                                      response_headers) ||
+                                      telemetry.client_metadata(), response_headers) ||
             !telemetry.finalize_response_headers()) {
             (void) upstream.abort(common::IoErr::NoMem);
             provider_transaction.fail("aborted", common::IoErr::NoMem);

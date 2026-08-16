@@ -21,6 +21,9 @@ TEST(AccessServerConfigTest, LoadsJavaServerDefaultsAndNacosSettings) {
     EXPECT_EQ(config->initial_config_timeout(), std::chrono::seconds(60));
     EXPECT_EQ(config->default_max_request_body_size(), 400U << 20U);
     EXPECT_FALSE(config->test_mode());
+    EXPECT_EQ(config->client_metadata_options().mode, ClientMetadataMode::Direct);
+    EXPECT_TRUE(config->client_metadata_options().trusted_proxy_cidrs.empty());
+    EXPECT_TRUE(config->client_metadata_options().connection_secure);
     EXPECT_TRUE(config->access_log_options().query_allowlist.empty());
     EXPECT_TRUE(config->access_log_options().additional_sensitive_query_keys.empty());
     EXPECT_FALSE(config->access_log_options().query_hash_enabled);
@@ -53,6 +56,8 @@ TEST(AccessServerConfigTest, LoadsExplicitRuntimeAndCompatibilityKeys) {
         ACCESS_SERVER_INITIAL_CONFIG_TIMEOUT_MILLIS=2500
         ACCESS_SERVER_MAX_REQUEST_BODY_SIZE=12345
         ACCESS_SERVER_TEST_MODE=true
+        ACCESS_SERVER_CLIENT_METADATA_MODE=trusted_proxy
+        ACCESS_SERVER_TRUSTED_PROXY_CIDRS=10.0.0.0/8,2001:db8::/32
         ACCESS_SERVER_ACCESS_LOG_QUERY_ALLOWLIST=page,requestId
         ACCESS_SERVER_ACCESS_LOG_SENSITIVE_QUERY_KEYS=otp,CustomSecret
         ACCESS_SERVER_ACCESS_LOG_QUERY_HASH_ENABLED=true
@@ -81,6 +86,9 @@ TEST(AccessServerConfigTest, LoadsExplicitRuntimeAndCompatibilityKeys) {
     EXPECT_EQ(config->initial_config_timeout(), std::chrono::milliseconds(2500));
     EXPECT_EQ(config->default_max_request_body_size(), 12345U);
     EXPECT_TRUE(config->test_mode());
+    EXPECT_EQ(config->client_metadata_options().mode, ClientMetadataMode::TrustedProxy);
+    EXPECT_EQ(config->client_metadata_options().trusted_proxy_cidrs.size(), 2u);
+    EXPECT_FALSE(config->client_metadata_options().connection_secure);
     EXPECT_EQ(config->access_log_options().query_allowlist, (std::vector<std::string>{"page", "requestId"}));
     EXPECT_EQ(config->access_log_options().additional_sensitive_query_keys,
               (std::vector<std::string>{"otp", "customsecret"}));
@@ -213,6 +221,30 @@ TEST(AccessServerConfigTest, RejectsInvalidAccessLogPolicySettings) {
     expect_invalid("ACCESS_SERVER_ACCESS_LOG_SUCCESS_SAMPLE_RATE_BPS=10001");
     expect_invalid("ACCESS_SERVER_ACCESS_LOG_MAX_PATH_BYTES=15");
     expect_invalid("ACCESS_SERVER_ACCESS_LOG_MAX_QUERY_BYTES=65537");
+}
+
+TEST(AccessServerConfigTest, LoadsLegacyClientMetadataModeAndRejectsUnsafeProxyConfiguration) {
+    auto legacy = AccessServerConfig::load_from_string("NACOS_SERVER_ADDRESSES=127.0.0.1\n"
+                                                       "ACCESS_SERVER_CLIENT_METADATA_MODE=legacy_headers\n");
+    ASSERT_TRUE(legacy);
+    EXPECT_EQ(legacy->client_metadata_options().mode, ClientMetadataMode::LegacyHeaders);
+
+    const auto expect_invalid = [](std::string_view settings) {
+        std::string input = "NACOS_SERVER_ADDRESSES=127.0.0.1\n";
+        input.append(settings);
+        auto config = AccessServerConfig::load_from_string(input);
+        EXPECT_FALSE(config);
+        if (!config) {
+            EXPECT_EQ(config.error().code, AccessServerConfigErrorCode::InvalidValue);
+        }
+    };
+    expect_invalid("ACCESS_SERVER_CLIENT_METADATA_MODE=automatic\n");
+    expect_invalid("ACCESS_SERVER_CLIENT_METADATA_MODE=trusted_proxy\n");
+    expect_invalid("ACCESS_SERVER_TRUSTED_PROXY_CIDRS=10.0.0.0/8\n");
+    expect_invalid("ACCESS_SERVER_CLIENT_METADATA_MODE=trusted_proxy\n"
+                   "ACCESS_SERVER_TRUSTED_PROXY_CIDRS=.1.2.3/8\n");
+    expect_invalid("ACCESS_SERVER_CLIENT_METADATA_MODE=trusted_proxy\n"
+                   "ACCESS_SERVER_TRUSTED_PROXY_CIDRS=10.0.0.0/8,\n");
 }
 
 TEST(AccessServerConfigTest, LoadsTlsIdentityFromNacosAndRejectsRemovedFileSettings) {

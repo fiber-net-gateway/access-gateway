@@ -168,15 +168,6 @@ std::uint8_t entry_bit(std::string_view entry) noexcept {
     return 0;
 }
 
-bool is_https(const http::HttpExchange &exchange) noexcept {
-    constexpr std::string_view kHttps = "https";
-    if (exchange.scheme().size() == kHttps.size() && http::http_header_name_equals_ci(exchange.scheme(), kHttps)) {
-        return true;
-    }
-    const std::string_view forwarded = exchange.header("X-Forwarded-Proto");
-    return forwarded.size() == kHttps.size() && http::http_header_name_equals_ci(forwarded, kHttps);
-}
-
 bool cidr_matches_any(std::span<const Cidr> cidrs, const Cidr &target) noexcept {
     for (const Cidr &cidr: cidrs) {
         if (cidr.matches(target)) {
@@ -186,22 +177,16 @@ bool cidr_matches_any(std::span<const Cidr> cidrs, const Cidr &target) noexcept 
     return false;
 }
 
-bool source_ip_allowed(const CompiledRoute &route, std::string_view real_ip) {
-    if (real_ip.empty()) {
+bool source_ip_allowed(const CompiledRoute &route, const ClientMetadata &metadata) noexcept {
+    if (!metadata.route_policy_target) {
+        // Only the explicit legacy mode can omit this target. It preserves the
+        // Java behavior of skipping CIDR policy for a missing or invalid header.
         return true;
     }
-
-    const std::size_t colon = real_ip.rfind(':');
-    const std::size_t address_end = colon == std::string_view::npos ? real_ip.size() : colon;
-    auto target = Cidr::parse(real_ip.substr(0, address_end), "X-Real-Ip");
-    if (!target) {
-        // Java skips allow/deny checks when X-Real-Ip cannot be parsed.
-        return true;
-    }
-    if (!route.allow_cidrs.empty() && !cidr_matches_any(route.allow_cidrs, *target)) {
+    if (!route.allow_cidrs.empty() && !cidr_matches_any(route.allow_cidrs, *metadata.route_policy_target)) {
         return false;
     }
-    return route.deny_cidrs.empty() || !cidr_matches_any(route.deny_cidrs, *target);
+    return route.deny_cidrs.empty() || !cidr_matches_any(route.deny_cidrs, *metadata.route_policy_target);
 }
 
 std::size_t request_body_limit(const CompiledRoute &route, std::size_t default_limit) noexcept {
@@ -336,7 +321,7 @@ async::Task<Result<void>> AccessRequestHandler::handle_impl(http::HttpExchange &
         co_return std::unexpected(Err::from_exception(Exception::entry_error()));
     }
 
-    const bool request_is_https = is_https(exchange);
+    const bool request_is_https = telemetry.client_metadata().secure;
     if (!strategy.https) {
         if (!request_is_https) {
             co_return std::unexpected(Err::from_exception(Exception::unknown("invalid HTTPS strategy")));
@@ -386,7 +371,7 @@ async::Task<Result<void>> AccessRequestHandler::handle_impl(http::HttpExchange &
     if (body_limit != 0 && body_spec.is_content_length() && body_spec.content_length() > body_limit) {
         co_return std::unexpected(Err::from_exception(Exception::request_body_too_large()));
     }
-    if (!source_ip_allowed(route, exchange.header("X-Real-Ip"))) {
+    if (!source_ip_allowed(route, telemetry.client_metadata())) {
         co_return std::unexpected(Err::from_exception(Exception::source_ip_not_allowed()));
     }
     TemplateEvaluator template_evaluator;

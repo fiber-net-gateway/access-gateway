@@ -172,8 +172,12 @@ Java 使用的 Jackson 配置会产生以下行为，C++ 的 wire codec 必须�
 `https`：
 
 - `S_NOT_MUST`：默认，不重定向；
-- `S_301`、`S_302`、`S_307`、`S_308`：当
-  `X-Forwarded-Proto` 不是大小写不敏感的 `https` 时返回对应重定向。
+- `S_301`、`S_302`、`S_307`、`S_308`：当统一解析出的 external scheme 不是 HTTPS 时返回对应重定向。
+
+external scheme 默认来自业务 listener 的真实 TLS 状态。只有
+`ACCESS_SERVER_CLIENT_METADATA_MODE=trusted_proxy` 且 socket peer 命中可信 CIDR 时，才接受
+`Forwarded: proto=` 或与地址链对齐的 `X-Forwarded-Proto`；`legacy_headers` 显式保留旧的
+XFP 兼容语义。
 
 重定向：
 
@@ -344,11 +348,31 @@ adapter 编译为同步程序，请求热路径只执行已编译程序。通用
 
 ## 8. 请求前置策略
 
+### 8.0 客户端元数据与可信代理
+
+启动配置提供三种互斥模式：
+
+- `direct`（默认）：client address=socket peer，scheme=listener TLS 状态，转发头全部忽略；
+- `trusted_proxy`：socket peer 必须命中 `ACCESS_SERVER_TRUSTED_PROXY_CIDRS`，地址再按
+  `Forwarded`、`X-Forwarded-For`、`X-Real-Ip` 的优先级选择；
+- `legacy_headers`：显式保留 Java 兼容头语义。
+
+可信地址链按 client 到 proxy 的 wire 顺序保存，从 socket peer 向右到左剥离可信 CIDR，选择首个
+非可信 hop；全部 hop 都可信时选择最左项。支持 IPv4、原生/括号 IPv6 和可选端口；多字段按 wire
+顺序连接。链最多 32 项。空项、`unknown`、obfuscated、重复 `Forwarded` 参数、非法端口、非法
+proto 或 XFF/XFP 数量错位都标记为 invalid；高优先级 header 非法时不降级读取低优先级 header。
+invalid 结果使用 socket peer 和 listener scheme，且仍执行 CIDR/gray，不再 fail-open。
+
+同一 `ClientMetadata` 被 HTTPS、Route CIDR、gray、代理 Location/Refresh、CAT 和 access log 使用。
+日志与 CAT 记录规范化 `clientIp`、`peerIp`、scheme、address/scheme source 和 forwarding status，
+不记录非法原始 header 值。
+
 ### 8.1 CIDR allows
 
 - `!` 开头为 deny CIDR，其他为 allow CIDR；
-- Java 从 `X-Real-Ip` 取来源地址；
-- header 缺失或无法解析时，Java 当前会跳过 allow/deny 检查；
+- 安全模式从统一 client address 生成 `/32` 或 `/128` target，header 缺失/非法时对 socket peer
+  执行 allow/deny，不会跳过；
+- `legacy_headers` 从 `X-Real-Ip` 取来源地址，缺失或无法解析时继续按 Java 行为跳过；
 - 被拒绝返回 403、`NOT_ALLOW_IP`、`source ip is not allowed`；
 - Java 对带端口地址的截取方式偏向 IPv4，IPv6 和多值 header 必须作为显式 fixture，
   在没有差异决定前不得“顺手修复”。
@@ -366,9 +390,9 @@ adapter 编译为同步程序，请求热路径只执行已编译程序。通用
 }
 ```
 
-对于匹配的 X-Entry：
+对于匹配的 X-Entry，使用同一客户端元数据中的 gray target：
 
-1. `X-Real-Ip` 命中 CIDR whitelist，或
+1. client address 命中 CIDR whitelist，或
 2. 随机数 `nextInt(10000) < ratio`
 
 则选择 gray cluster，并写相应业务 trace/tag。随机序列本身不做兼容；ratio 的区间
@@ -630,7 +654,7 @@ Prometheus 内部快照时点或日志行顺序。现网脚本 corpus 与阶段 
 - custom response header 空值表示不写；
 - `flush=true` 写 `X-Accel-Buffering: no`；
 - Location/Refresh 为 absolute URL 且 host 等于实际 upstream host 时，改写为：
-  - scheme：inbound `X-Forwarded-Proto`，缺失时 `http`；
+  - scheme：统一解析出的 external scheme；`legacy_headers` 保留旧 XFP 兼容输入；
   - host：inbound Host；
   - path/query/fragment：保留原 location 内容；
 - 用户显式覆盖 Location/Refresh 时不执行自动改写；

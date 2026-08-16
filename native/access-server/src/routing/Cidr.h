@@ -16,8 +16,11 @@ namespace fiber::access_server {
 class Cidr {
 public:
     [[nodiscard]] static std::expected<Cidr, AccessConfigError> parse(std::string_view text, std::string_view field);
+    [[nodiscard]] static std::expected<Cidr, AccessConfigError> parse_strict(std::string_view text,
+                                                                             std::string_view field);
     [[nodiscard]] static std::expected<std::vector<Cidr>, AccessConfigError>
     parse_list(std::span<const std::string_view> values, std::string_view field);
+    [[nodiscard]] static Cidr from_address(const net::IpAddress &address) noexcept;
 
     [[nodiscard]] bool contains(const Cidr &other) const noexcept;
     [[nodiscard]] bool matches(const Cidr &other) const noexcept;

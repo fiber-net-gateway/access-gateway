@@ -17,11 +17,9 @@
 #include <utility>
 #include <vector>
 
-namespace fiber::http {
-class HttpExchange;
-}
-
 namespace fiber::access_server {
+
+struct ClientMetadata;
 
 enum class ProxyAddressSelectErrorCode : std::uint8_t {
     NoHosts,
@@ -106,7 +104,7 @@ struct ProxyAddressSelectorFactory {
 };
 
 struct ProxyClusterMatcher {
-    using Function = bool (*)(void *context, const http::HttpExchange &exchange) noexcept;
+    using Function = bool (*)(void *context, std::string_view entry, const ClientMetadata &metadata) noexcept;
 
     void *context = nullptr;
     Function matches = nullptr;

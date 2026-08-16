@@ -20,7 +20,7 @@ An inbound request is processed in roughly this order:
 2. normalize `Host` and select a Project from the global Host tree;
 3. apply Host-level `X-Entry` and HTTPS policy;
 4. select Path candidates, then evaluate optional `method` and `condition` in order;
-5. apply request-body and `X-Real-Ip` CIDR policy to the matched Route;
+5. apply request-body and resolved client-address CIDR policy to the matched Route;
 6. execute `RESPONSE`, `PROXY`, or `SCRIPT`;
 7. emit bounded metrics, traces, and structured access logs.
 
@@ -88,7 +88,7 @@ Host matches.
 ### 3.2 HTTPS and entry policy
 
 A Host can leave HTTPS optional or redirect with status 301, 302, 307, or 308. A request is HTTPS when its
-scheme or `X-Forwarded-Proto` is ASCII case-insensitively equal to `https`. Otherwise the response is:
+resolved external scheme is `https`. Otherwise the response is:
 
 ```text
 Location: https://<effective-host><original-uri>
@@ -98,6 +98,11 @@ Strict-Transport-Security: max-age=31536000
 After a Host matches, access-server prepares HSTS for subsequent responses. Valid Route
 `response_headers` can override it. If an entry mask is configured, `X-Entry` must match an allowed
 `vdi`, `desktop`, or `internet` entry; otherwise access-server returns 403 `ENTRY_ERROR`.
+
+`ACCESS_SERVER_CLIENT_METADATA_MODE=direct` is the default: the scheme comes from the actual business
+listener TLS state and all forwarding headers are ignored. `Forwarded: proto=` or an aligned
+`X-Forwarded-Proto` is accepted only in `trusted_proxy` mode when the socket peer matches a configured trusted
+proxy CIDR. The old trust-all behavior is available only through explicit `legacy_headers` mode.
 
 ## 4. Path patterns
 
@@ -389,9 +394,12 @@ Entries without `!` form the allow set; prefixed entries form the deny set:
 2. any deny match rejects the source;
 3. deny therefore wins in the final result.
 
-The source comes from `X-Real-Ip`. For Java compatibility, a missing or unparsable value skips CIDR checks.
-Your trust boundary must therefore ensure only a trusted frontend can set or replace this header. Rejected
-requests return 403 `NOT_ALLOW_IP`.
+The source comes from the unified client metadata. `direct` mode uses the socket peer. After a socket peer
+matches `ACCESS_SERVER_TRUSTED_PROXY_CIDRS`, `trusted_proxy` mode considers `Forwarded`,
+`X-Forwarded-For`, then `X-Real-Ip`, and walks the chain right-to-left across trusted hops. Invalid or oversized
+chains fall back to the socket peer, so safe modes never skip CIDR checks because a header is absent or invalid.
+Only explicit `legacy_headers` mode preserves the Java rule that a missing or unparsable `X-Real-Ip` skips the
+check. Rejected requests return 403 `NOT_ALLOW_IP`.
 
 When Console Network Policy makes Project policy authoritative, the compiler injects one allow/deny list
 into every wire Route. Route YAML must not also define `allows`, or validation reports a policy conflict.
@@ -485,7 +493,7 @@ compatibility format, and the Project list must remain a semicolon-separated str
 | 404 `ROUTER_NOT_FOUND`     | Invalid, missing, or unmatched Host                   | Actual Host/port, Project domain, wildcard       |
 | 404 `URL_NOT_MATCHED`      | Every Path/method/condition failed                    | Pattern shape, case, order, condition values     |
 | 403 `ENTRY_ERROR`          | `X-Entry` not allowed by Host policy                  | Trusted frontend value and network policy        |
-| 403 `NOT_ALLOW_IP`         | `X-Real-Ip` rejected by CIDR                          | Header provenance, allow/deny overlap, IP family |
+| 403 `NOT_ALLOW_IP`         | Resolved client address rejected by CIDR              | Metadata mode, trusted chain, allow/deny, family |
 | 413 `REQ_BODY_TOO_LARGE`   | Route/global body limit or unknown-length SCRIPT body | Content-Length, transfer encoding, limits        |
 | 500 template/script error  | Expression failure or uncaught script error           | Native field path, arguments, `$path` names      |
 | 503 no hosts/circuit break | No eligible NamingService endpoint                    | service, cluster, enabled/healthy/weight         |

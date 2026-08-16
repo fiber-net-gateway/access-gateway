@@ -3,6 +3,7 @@
 
 #include "../config/AccessConfig.h"
 #include "../config/AccessConfigError.h"
+#include "../execution/ClientMetadata.h"
 #include "../routing/Cidr.h"
 #include "../routing/ProxyAddressSelector.h"
 
@@ -14,8 +15,6 @@
 #include <string>
 #include <string_view>
 #include <vector>
-
-#include <fiber/http/HttpExchange.h>
 
 namespace fiber::access_server {
 
@@ -31,14 +30,13 @@ public:
     [[nodiscard]] std::expected<GrayMatchUpdateStatus, AccessConfigError>
     apply(const std::optional<GrayMatchConfig> &config);
 
-    [[nodiscard]] bool matches(const http::HttpExchange &exchange) const noexcept;
-    [[nodiscard]] bool matches(std::string_view entry, std::string_view real_ip,
+    [[nodiscard]] bool matches(std::string_view entry, const ClientMetadata &metadata,
                                std::uint32_t random_sample) const noexcept;
     [[nodiscard]] ProxyClusterMatcher adapter() noexcept;
     [[nodiscard]] std::size_t rule_count() const noexcept;
 
 private:
-    static bool matches_request(void *context, const http::HttpExchange &exchange) noexcept;
+    static bool matches_request(void *context, std::string_view entry, const ClientMetadata &metadata) noexcept;
     struct Rule {
         std::string entry;
         std::int32_t ratio = 0;

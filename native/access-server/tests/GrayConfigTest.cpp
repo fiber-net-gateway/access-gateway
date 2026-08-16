@@ -84,6 +84,13 @@ fiber::async::Task<void> yield_updates() {
     }
 }
 
+fiber::access_server::ClientMetadata metadata_for(const fiber::net::IpAddress &address) {
+    fiber::access_server::ClientMetadata metadata;
+    metadata.client_address = address;
+    metadata.gray_target = fiber::access_server::Cidr::from_address(address);
+    return metadata;
+}
+
 TEST(GrayConfigTest, DecodesJavaMapAndAppliesRatioAndCidrRules) {
     auto decoded =
             fiber::access_server::parse_gray_match_config(R"({"vdi":{"ratio":1000,"cidrs":["10.0.0.0/8","bad"]},)"
@@ -97,11 +104,13 @@ TEST(GrayConfigTest, DecodesJavaMapAndAppliesRatioAndCidrRules) {
     ASSERT_TRUE(applied);
     EXPECT_EQ(store.rule_count(), 2u);
 
-    EXPECT_TRUE(store.matches("vdi", "10.1.2.3", 9999));
-    EXPECT_TRUE(store.matches("vdi", "192.0.2.1", 999));
-    EXPECT_FALSE(store.matches("vdi", "192.0.2.1", 1000));
-    EXPECT_TRUE(store.matches("desktop", "192.0.2.1", 9999));
-    EXPECT_FALSE(store.matches("unknown", "10.1.2.3", 0));
+    const auto inside = metadata_for(fiber::net::IpAddress::v4({10, 1, 2, 3}));
+    const auto outside = metadata_for(fiber::net::IpAddress::v4({192, 0, 2, 1}));
+    EXPECT_TRUE(store.matches("vdi", inside, 9999));
+    EXPECT_TRUE(store.matches("vdi", outside, 999));
+    EXPECT_FALSE(store.matches("vdi", outside, 1000));
+    EXPECT_TRUE(store.matches("desktop", outside, 9999));
+    EXPECT_FALSE(store.matches("unknown", inside, 0));
 
     auto empty_wire = fiber::access_server::parse_gray_match_config("");
     ASSERT_TRUE(empty_wire);
@@ -129,7 +138,10 @@ TEST(GrayConfigTest, WatcherRetainsOnEmptyAndInvalidThenAcceptsClear) {
         service.push(R"({"internet":{"ratio":5000,"cidrs":["2001:db8::/32"]}})", "v1");
         co_await yield_updates();
         EXPECT_EQ(store.rule_count(), 1u);
-        EXPECT_TRUE(store.matches("internet", "2001:db8::1", 9999));
+        EXPECT_TRUE(store.matches(
+                "internet",
+                metadata_for(fiber::net::IpAddress::v6({0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1})),
+                9999));
 
         service.push("", "empty");
         co_await yield_updates();
