@@ -4,6 +4,11 @@ import type {
   NacosTarget,
 } from '../../integrations/nacos/model.js'
 import type { NativeValidator } from '../../integrations/native-validator/model.js'
+import type { AccessConfigLimits } from '../../integrations/native-validator/model.js'
+import {
+  fallbackAccessConfigLimits,
+  utf8Bytes,
+} from '../../integrations/native-validator/limits.js'
 import { conflict, forbidden, notFound, unavailable, unprocessable } from '../../shared/errors.js'
 import { canonicalJson, sha256 } from '../../shared/json.js'
 import { bufferToPublicId } from '../../shared/ids.js'
@@ -76,13 +81,80 @@ function projectNames(content: string | null): string[] {
   ]
 }
 
-export function compileDecommissionProjectList(content: string | null, domain: string): string {
+function trimJava(value: string): string {
+  let begin = 0
+  let end = value.length
+  while (begin < end && value.charCodeAt(begin) <= 0x20) begin += 1
+  while (end > begin && value.charCodeAt(end - 1) <= 0x20) end -= 1
+  return value.slice(begin, end)
+}
+
+function projectListLimitExceeded(path: string, message: string): never {
+  throw unprocessable('PROJECT_LIST_LIMIT_EXCEEDED', 'The Project List exceeds native limits', [
+    { path, code: 'limit_exceeded', message },
+  ])
+}
+
+export function validateProjectListTarget(
+  content: string,
+  limits: AccessConfigLimits = fallbackAccessConfigLimits,
+): string {
+  const listLimits = limits.projectList
+  if (utf8Bytes(content) > listLimits.maxPayloadBytes) {
+    projectListLimitExceeded(
+      'projectList',
+      `Project List payload must not exceed ${listLimits.maxPayloadBytes} bytes`,
+    )
+  }
+  const trimmed = trimJava(content)
+  if (trimmed.length === 0) return content
+
+  let index = 0
+  let offset = 0
+  while (true) {
+    if (index === listLimits.maxProjects) {
+      let onlyTrailingSeparators = true
+      for (let cursor = offset; cursor < trimmed.length; cursor += 1) {
+        if (trimmed[cursor] !== ';') {
+          onlyTrailingSeparators = false
+          break
+        }
+      }
+      if (onlyTrailingSeparators) break
+      projectListLimitExceeded(
+        'projectList',
+        `Project List must not contain more than ${listLimits.maxProjects} entries`,
+      )
+    }
+    const separator = trimmed.indexOf(';', offset)
+    const name = separator === -1 ? trimmed.slice(offset) : trimmed.slice(offset, separator)
+    if (utf8Bytes(name) > listLimits.maxProjectNameBytes) {
+      projectListLimitExceeded(
+        `projectList.${index}`,
+        `Project names must not exceed ${listLimits.maxProjectNameBytes} bytes`,
+      )
+    }
+    index += 1
+    if (separator === -1) break
+    offset = separator + 1
+  }
+  return content
+}
+
+export function compileDecommissionProjectList(
+  content: string | null,
+  domain: string,
+  limits: AccessConfigLimits = fallbackAccessConfigLimits,
+): string {
+  validateProjectListTarget(content ?? '', limits)
   const names = projectNames(content)
-  if (!names.includes(domain)) return content ?? ''
-  return names
-    .filter((name) => name !== domain)
-    .sort()
-    .join(';')
+  const target = !names.includes(domain)
+    ? (content ?? '')
+    : names
+        .filter((name) => name !== domain)
+        .sort()
+        .join(';')
+  return validateProjectListTarget(target, limits)
 }
 
 function validateDecommissionReason(value: string): string {
@@ -136,7 +208,7 @@ export class DefaultReleaseService implements ReleaseService {
     const project = await this.#projects.findIdentity(actor, projectId)
     if (!project) throw notFound('Project')
     await this.requirePublisher(actor, project.environment_public_id)
-    if (!this.#validator.available || !this.#validator.revision) {
+    if (!this.#validator.available || !this.#validator.revision || !this.#validator.limits) {
       throw unavailable(
         'NATIVE_VALIDATOR_UNCONFIGURED',
         'Native Validator is required before creating a Release',
@@ -199,7 +271,12 @@ export class DefaultReleaseService implements ReleaseService {
         })),
       )
     }
-    const compiled = compileProjectRoutes(project.name, source.model, wireVersion).compiled
+    const compiled = compileProjectRoutes(
+      project.name,
+      source.model,
+      wireVersion,
+      this.#validator.limits,
+    ).compiled
     if (!compiled) throw new Error('Validated route configuration did not compile')
 
     const environment = await this.#environments.findAccessibleByPublicId(
@@ -237,18 +314,27 @@ export class DefaultReleaseService implements ReleaseService {
         publishOrder: 10,
       },
     ]
-    const names = projectNames(projectsBase.content)
-    if (!names.includes(project.name)) {
-      resources.push({
-        kind: 'project_list',
-        dataId: environment.dataIds.projects,
-        group: environment.dataIds.routeGroup,
-        contentType: 'text',
-        targetContent: [...names, project.name].sort().join(';'),
-        base: projectsBase,
-        publishOrder: 20,
-        dependsOnKind: 'project_route',
-      })
+    try {
+      validateProjectListTarget(projectsBase.content ?? '', this.#validator.limits)
+      const names = projectNames(projectsBase.content)
+      if (!names.includes(project.name)) {
+        resources.push({
+          kind: 'project_list',
+          dataId: environment.dataIds.projects,
+          group: environment.dataIds.routeGroup,
+          contentType: 'text',
+          targetContent: validateProjectListTarget(
+            [...names, project.name].sort().join(';'),
+            this.#validator.limits,
+          ),
+          base: projectsBase,
+          publishOrder: 20,
+          dependsOnKind: 'project_route',
+        })
+      }
+    } catch (error) {
+      await this.#releases.markAbandoned(begun.release.id, 'PROJECT_LIST_LIMIT_EXCEEDED')
+      throw error
     }
     try {
       await this.#releases.completePreparation(
@@ -303,6 +389,12 @@ export class DefaultReleaseService implements ReleaseService {
       )
     }
     const reason = validateDecommissionReason(input.reason)
+    if (!this.#validator.available || !this.#validator.revision || !this.#validator.limits) {
+      throw unavailable(
+        'NATIVE_VALIDATOR_UNCONFIGURED',
+        'Native Validator is required before creating a decommission Release',
+      )
+    }
     if (!this.#nacos.available) {
       throw unavailable('PUBLICATION_UNCONFIGURED', 'Nacos publication is not configured')
     }
@@ -355,7 +447,11 @@ export class DefaultReleaseService implements ReleaseService {
       dataId: environment.dataIds.projects,
       group: environment.dataIds.routeGroup,
       base,
-      targetContent: compileDecommissionProjectList(base.content, project.name),
+      targetContent: compileDecommissionProjectList(
+        base.content,
+        project.name,
+        this.#validator.limits,
+      ),
     })
     return result.release
   }

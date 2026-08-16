@@ -58,6 +58,9 @@ struct ValidationSummary {
     std::optional<std::size_t> host_count;
     std::optional<std::size_t> route_count;
     std::optional<std::size_t> gray_rule_count;
+    std::optional<std::size_t> estimated_snapshot_bytes;
+    std::optional<std::size_t> static_response_bytes;
+    std::optional<std::size_t> compiled_program_count;
 };
 
 struct ValidationResult {
@@ -180,8 +183,9 @@ std::optional<ValidationError> decode_request(std::string_view input, ValidatorR
                 .message = "validator kind is not supported",
         };
     }
-    if (request.kind == "project_route" && (request.project.empty() || request.project.size() > 255 ||
-                                            request.project.find(';') != std::string_view::npos)) {
+    if (request.kind == "project_route" &&
+        (request.project.empty() || request.project.size() > kAccessConfigLimits.project_list.max_project_name_bytes ||
+         request.project.find(';') != std::string_view::npos)) {
         return ValidationError{
                 .code = "invalid_request",
                 .field = "project",
@@ -205,6 +209,8 @@ std::string_view access_error_code(AccessConfigErrorCode code) noexcept {
             return "invalid_combination";
         case AccessConfigErrorCode::Conflict:
             return "conflict";
+        case AccessConfigErrorCode::LimitExceeded:
+            return "limit_exceeded";
     }
     return "invalid_configuration";
 }
@@ -249,6 +255,9 @@ ValidationResult validate_project(std::string_view project, std::string_view pay
                             .project_version = (**parsed).version,
                             .host_count = host_count,
                             .route_count = route_count,
+                            .estimated_snapshot_bytes = *compiled ? (**compiled).estimated_memory_bytes() : 0,
+                            .static_response_bytes = *compiled ? (**compiled).static_response_bytes() : 0,
+                            .compiled_program_count = *compiled ? (**compiled).compiled_program_count() : 0,
                     },
     };
 }
@@ -335,6 +344,61 @@ bool write_string(Generator &generator, std::string_view value) {
     return generated(generator.string(value.data(), value.size()));
 }
 
+bool write_size(Generator &generator, std::string_view key, std::size_t value) {
+    return write_key(generator, key) && generated(generator.integer(static_cast<std::int64_t>(value)));
+}
+
+std::string encode_config_limits() {
+    std::string output;
+    StringSink sink(output);
+    Generator generator(sink);
+    const ProjectListLimits &project_list = kAccessConfigLimits.project_list;
+    const ProjectRouteLimits &project_route = kAccessConfigLimits.project_route;
+    const GrayRuleLimits &gray_rules = kAccessConfigLimits.gray_rules;
+
+    bool ok = generated(generator.map_open()) &&
+              write_size(generator, "schemaVersion", kAccessConfigLimits.schema_version) &&
+              write_key(generator, "projectList") && generated(generator.map_open()) &&
+              write_size(generator, "maxPayloadBytes", project_list.max_payload_bytes) &&
+              write_size(generator, "maxProjects", project_list.max_projects) &&
+              write_size(generator, "maxProjectNameBytes", project_list.max_project_name_bytes) &&
+              generated(generator.map_close()) && write_key(generator, "projectRoute") &&
+              generated(generator.map_open()) &&
+              write_size(generator, "maxPayloadBytes", project_route.max_payload_bytes) &&
+              write_size(generator, "maxHosts", project_route.max_hosts) &&
+              write_size(generator, "maxRoutes", project_route.max_routes) &&
+              write_size(generator, "maxHostPatternBytes", project_route.max_host_pattern_bytes) &&
+              write_size(generator, "maxPathBytes", project_route.max_path_bytes) &&
+              write_size(generator, "maxMethodBytes", project_route.max_method_bytes) &&
+              write_size(generator, "maxServiceBytes", project_route.max_service_bytes) &&
+              write_size(generator, "maxClusterBytes", project_route.max_cluster_bytes) &&
+              write_size(generator, "maxConditionBytes", project_route.max_condition_bytes) &&
+              write_size(generator, "maxScriptBytes", project_route.max_script_bytes) &&
+              write_size(generator, "maxTemplateBytes", project_route.max_template_bytes) &&
+              write_size(generator, "maxHeaderEntries", project_route.max_header_entries) &&
+              write_size(generator, "maxHeaderNameBytes", project_route.max_header_name_bytes) &&
+              write_size(generator, "maxHeaderValueBytes", project_route.max_header_value_bytes) &&
+              write_size(generator, "maxCidrsPerRoute", project_route.max_cidrs_per_route) &&
+              write_size(generator, "maxCidrBytes", project_route.max_cidr_bytes) &&
+              write_size(generator, "maxAddressesPerRoute", project_route.max_addresses_per_route) &&
+              write_size(generator, "maxAddressBytes", project_route.max_address_bytes) &&
+              write_size(generator, "maxStaticResponseBodyBytes", project_route.max_static_response_body_bytes) &&
+              write_size(generator, "maxStaticResponseBytes", project_route.max_static_response_bytes) &&
+              write_size(generator, "maxPathVariables", project_route.max_path_variables) &&
+              write_size(generator, "maxTemplateExpressions", project_route.max_template_expressions) &&
+              write_size(generator, "maxCompiledPrograms", project_route.max_compiled_programs) &&
+              write_size(generator, "maxEstimatedSnapshotBytes", project_route.max_estimated_snapshot_bytes) &&
+              generated(generator.map_close()) && write_key(generator, "grayRules") &&
+              generated(generator.map_open()) &&
+              write_size(generator, "maxPayloadBytes", gray_rules.max_payload_bytes) &&
+              write_size(generator, "maxRules", gray_rules.max_rules) &&
+              write_size(generator, "maxEntryBytes", gray_rules.max_entry_bytes) &&
+              write_size(generator, "maxCidrsPerRule", gray_rules.max_cidrs_per_rule) &&
+              write_size(generator, "maxCidrBytes", gray_rules.max_cidr_bytes) && generated(generator.map_close()) &&
+              generated(generator.map_close());
+    return ok ? output : std::string(R"({"schemaVersion":1,"error":"encoding_failed"})");
+}
+
 std::string encode_response(const ValidationResult &result) {
     std::string output;
     StringSink sink(output);
@@ -361,6 +425,15 @@ std::string encode_response(const ValidationResult &result) {
         if (ok && result.summary.gray_rule_count) {
             ok = write_key(generator, "grayRuleCount") &&
                  generated(generator.integer(static_cast<std::int64_t>(*result.summary.gray_rule_count)));
+        }
+        if (ok && result.summary.estimated_snapshot_bytes) {
+            ok = write_size(generator, "estimatedSnapshotBytes", *result.summary.estimated_snapshot_bytes);
+        }
+        if (ok && result.summary.static_response_bytes) {
+            ok = write_size(generator, "staticResponseBytes", *result.summary.static_response_bytes);
+        }
+        if (ok && result.summary.compiled_program_count) {
+            ok = write_size(generator, "compiledProgramCount", *result.summary.compiled_program_count);
         }
         ok = ok && generated(generator.map_close());
     }
@@ -414,5 +487,7 @@ std::string native_validator_input_too_large_response() {
             }},
     });
 }
+
+std::string native_validator_config_limits_response() { return encode_config_limits(); }
 
 } // namespace fiber::access_server

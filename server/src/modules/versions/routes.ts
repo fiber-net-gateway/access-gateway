@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify'
 
+import { fallbackAccessConfigLimits } from '../../integrations/native-validator/limits.js'
 import { badRequest } from '../../shared/errors.js'
 import { requireActor } from '../auth/http.js'
 import type { AuthService } from '../auth/model.js'
@@ -59,19 +60,27 @@ const projectRoutesModelSchema = {
         httpsRedirect: { type: 'string', enum: ['off', '301', '302', '307', '308'] },
         allowedCidrs: {
           type: 'array',
-          maxItems: 256,
-          items: { type: 'string', minLength: 1, maxLength: 64 },
+          maxItems: fallbackAccessConfigLimits.projectRoute.maxCidrsPerRoute,
+          items: {
+            type: 'string',
+            minLength: 1,
+            maxLength: fallbackAccessConfigLimits.projectRoute.maxCidrBytes,
+          },
         },
         deniedCidrs: {
           type: 'array',
-          maxItems: 256,
-          items: { type: 'string', minLength: 1, maxLength: 64 },
+          maxItems: fallbackAccessConfigLimits.projectRoute.maxCidrsPerRoute,
+          items: {
+            type: 'string',
+            minLength: 1,
+            maxLength: fallbackAccessConfigLimits.projectRoute.maxCidrBytes,
+          },
         },
       },
     },
     routes: {
       type: 'array',
-      maxItems: 5000,
+      maxItems: fallbackAccessConfigLimits.projectRoute.maxRoutes,
       items: {
         type: 'object',
         additionalProperties: false,
@@ -79,12 +88,31 @@ const projectRoutesModelSchema = {
         properties: {
           id: { type: 'string', format: 'uuid' },
           format: { type: 'string', enum: ['yaml', 'js'] },
-          source: { type: 'string', maxLength: 1048576 },
-          path: { type: 'string', minLength: 1, maxLength: 2048 },
-          method: { type: 'string', minLength: 1, maxLength: 64 },
+          source: {
+            type: 'string',
+            maxLength: fallbackAccessConfigLimits.projectRoute.maxPayloadBytes,
+          },
+          path: {
+            type: 'string',
+            minLength: 1,
+            maxLength: fallbackAccessConfigLimits.projectRoute.maxPathBytes,
+          },
+          method: {
+            type: 'string',
+            minLength: 1,
+            maxLength: fallbackAccessConfigLimits.projectRoute.maxMethodBytes,
+          },
         },
         if: { properties: { format: { const: 'js' } }, required: ['format'] },
-        then: { required: ['path'] },
+        then: {
+          required: ['path'],
+          properties: {
+            source: {
+              type: 'string',
+              maxLength: fallbackAccessConfigLimits.projectRoute.maxScriptBytes,
+            },
+          },
+        },
         else: { not: { anyOf: [{ required: ['path'] }, { required: ['method'] }] } },
       },
     },

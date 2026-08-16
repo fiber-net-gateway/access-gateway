@@ -57,7 +57,20 @@ Console 使用 YAML 1.2 core schema，并额外要求：
 - 禁止 anchor、alias 和显式 tag；
 - 值只能是 JSON 安全的字符串、布尔值、数组、对象、`null` 和安全整数；
 - 未知字段直接拒绝，而不是依赖 native 忽略；
-- 单条 source 最大 1 MiB，一个 Project 的所有 source 合计最大 4 MiB，最多 5000 条 Route。
+- JavaScript source 最大 1 MiB；YAML source 和一个 Project 的所有 source 合计受 4 MiB
+  project payload 预算约束；最多 5000 条 Route。所有大小按 UTF-8 字节计算，不按浏览器字符数计算。
+
+### 2.3 Native 资源预算
+
+Console 启动时从 Native Validator 探测版本化限额，并在 Routes 与 Network Policy 页面显示当前
+配额。schema version 1 的常用边界包括：Project List 256 KiB/1024 项、单 Project route payload
+4 MiB/5000 Routes、Path 2048 bytes、Method 64 bytes、单 Route 256 个 CIDR/静态地址、单脚本或
+模板 1 MiB、单静态响应解码后 2 MiB、Project 静态响应合计 8 MiB，以及约 64 MiB 的 compiled
+snapshot 预算。
+
+浏览器只提前阻止能直接判断的超限；保存、校验和发布仍以 server compiler 与 Native Validator
+为准。超限错误码为 `limit_exceeded`。rnacos 中的超限候选不会替换实例旧快照；Project List 超限
+也不会卸载当前项目。Release 创建要求 Validator 和限额探测可用，但这仍不能证明实例已激活。
 
 ## 3. Host 与 Project 选择
 

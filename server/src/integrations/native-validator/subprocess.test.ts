@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 
-import { SubprocessNativeValidator } from './subprocess.js'
+import { fallbackAccessConfigLimits } from './limits.js'
+import { loadNativeValidatorLimits, SubprocessNativeValidator } from './subprocess.js'
 
 async function validatorFixture(source: string): Promise<{ directory: string; path: string }> {
   const directory = await mkdtemp(join(tmpdir(), 'access-gateway-validator-'))
@@ -38,6 +39,7 @@ process.stdin.on('end', () => {
     timeoutMillis: 2_000,
     maxInputBytes: 4_096,
     maxOutputBytes: 4_096,
+    limits: fallbackAccessConfigLimits,
   })
 
   const result = await validator.validate({
@@ -80,6 +82,7 @@ process.stdin.on('end', () => {
     timeoutMillis: 2_000,
     maxInputBytes: 4_096,
     maxOutputBytes: 4_096,
+    limits: fallbackAccessConfigLimits,
   })
 
   await assert.rejects(
@@ -93,5 +96,25 @@ process.stdin.on('end', () => {
       typeof error === 'object' &&
       error !== null &&
       (error as { code?: string }).code === 'NATIVE_VALIDATOR_PROTOCOL_ERROR',
+  )
+})
+
+test('subprocess validator probes strict native config limits', async (context) => {
+  const fixture = await validatorFixture(`
+process.stdout.write(JSON.stringify(${JSON.stringify(fallbackAccessConfigLimits)}))
+`)
+  context.after(() => rm(fixture.directory, { recursive: true, force: true }))
+
+  const limits = await loadNativeValidatorLimits(fixture.path, 2_000, 8_192)
+  assert.deepEqual(limits, fallbackAccessConfigLimits)
+
+  const malformed = await validatorFixture(`process.stdout.write('{"schemaVersion":1}')`)
+  context.after(() => rm(malformed.directory, { recursive: true, force: true }))
+  await assert.rejects(
+    loadNativeValidatorLimits(malformed.path, 2_000, 8_192),
+    (error: unknown) =>
+      typeof error === 'object' &&
+      error !== null &&
+      (error as { code?: string }).code === 'NATIVE_VALIDATOR_CAPABILITY_ERROR',
   )
 })

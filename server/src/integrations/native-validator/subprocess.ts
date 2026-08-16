@@ -2,7 +2,9 @@ import { spawn } from 'node:child_process'
 import { isAbsolute } from 'node:path'
 
 import { badRequest, unavailable } from '../../shared/errors.js'
+import { isAccessConfigLimits } from './limits.js'
 import type {
+  AccessConfigLimits,
   NativeValidationError,
   NativeValidationRequest,
   NativeValidationResult,
@@ -16,6 +18,7 @@ interface SubprocessValidatorOptions {
   timeoutMillis: number
   maxInputBytes: number
   maxOutputBytes: number
+  limits: AccessConfigLimits
 }
 
 interface ProtocolResponse {
@@ -107,6 +110,7 @@ export class SubprocessNativeValidator implements NativeValidator {
   readonly available = true
   readonly contractVersion: number
   readonly revision: string
+  readonly limits: AccessConfigLimits
   readonly #path: string
   readonly #timeoutMillis: number
   readonly #maxInputBytes: number
@@ -119,6 +123,7 @@ export class SubprocessNativeValidator implements NativeValidator {
     this.#path = options.path
     this.contractVersion = options.contractVersion
     this.revision = options.revision
+    this.limits = options.limits
     this.#timeoutMillis = options.timeoutMillis
     this.#maxInputBytes = options.maxInputBytes
     this.#maxOutputBytes = options.maxOutputBytes
@@ -240,6 +245,7 @@ export class UnavailableNativeValidator implements NativeValidator {
   readonly available = false
   readonly revision = null
   readonly contractVersion: number
+  readonly limits = null
 
   constructor(contractVersion: number) {
     this.contractVersion = contractVersion
@@ -248,4 +254,108 @@ export class UnavailableNativeValidator implements NativeValidator {
   async validate(): Promise<never> {
     throw unavailable('NATIVE_VALIDATOR_UNCONFIGURED', 'Native Validator is not configured')
   }
+}
+
+export async function loadNativeValidatorLimits(
+  path: string,
+  timeoutMillis: number,
+  maxOutputBytes: number,
+): Promise<AccessConfigLimits> {
+  if (!isAbsolute(path)) {
+    throw new Error('Native Validator path must be absolute')
+  }
+  const output = await new Promise<string>((resolve, reject) => {
+    const child = spawn(path, ['--describe-config-limits'], {
+      shell: false,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+    })
+    const stdout: Buffer[] = []
+    let stdoutBytes = 0
+    let stderrBytes = 0
+    let finished = false
+    const finish = (operation: () => void): void => {
+      if (finished) return
+      finished = true
+      clearTimeout(timeout)
+      operation()
+    }
+    const terminate = (error: Error): void => {
+      child.kill('SIGKILL')
+      finish(() => reject(error))
+    }
+    const timeout = setTimeout(
+      () =>
+        terminate(
+          unavailable(
+            'NATIVE_VALIDATOR_TIMEOUT',
+            'Native Validator capability probe exceeded its deadline',
+          ),
+        ),
+      timeoutMillis,
+    )
+    timeout.unref()
+    child.stdout.on('data', (chunk: Buffer) => {
+      stdoutBytes += chunk.length
+      if (stdoutBytes > maxOutputBytes) {
+        terminate(
+          unavailable(
+            'NATIVE_VALIDATOR_OUTPUT_LIMIT',
+            'Native Validator capability output exceeded its limit',
+          ),
+        )
+        return
+      }
+      stdout.push(chunk)
+    })
+    child.stderr.on('data', (chunk: Buffer) => {
+      stderrBytes += chunk.length
+      if (stderrBytes > maxOutputBytes) {
+        terminate(
+          unavailable(
+            'NATIVE_VALIDATOR_OUTPUT_LIMIT',
+            'Native Validator capability diagnostics exceeded its limit',
+          ),
+        )
+      }
+    })
+    child.once('error', () => {
+      finish(() =>
+        reject(
+          unavailable('NATIVE_VALIDATOR_UNAVAILABLE', 'Native Validator could not be started'),
+        ),
+      )
+    })
+    child.once('close', (code, closeSignal) => {
+      finish(() => {
+        if (code !== 0 || closeSignal !== null) {
+          reject(
+            unavailable(
+              'NATIVE_VALIDATOR_CAPABILITY_ERROR',
+              'Native Validator capability probe failed',
+            ),
+          )
+          return
+        }
+        resolve(Buffer.concat(stdout).toString('utf8'))
+      })
+    })
+  })
+
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(output)
+  } catch {
+    throw unavailable(
+      'NATIVE_VALIDATOR_CAPABILITY_ERROR',
+      'Native Validator returned malformed config limits',
+    )
+  }
+  if (!isAccessConfigLimits(parsed)) {
+    throw unavailable(
+      'NATIVE_VALIDATOR_CAPABILITY_ERROR',
+      'Native Validator returned invalid config limits',
+    )
+  }
+  return parsed
 }

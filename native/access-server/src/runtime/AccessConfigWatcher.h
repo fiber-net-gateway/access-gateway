@@ -12,6 +12,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <fiber/async/Spawn.h>
 #include <fiber/async/Task.h>
@@ -158,7 +159,7 @@ private:
     [[nodiscard]] async::DetachedTask retry_project_subscription(std::shared_ptr<ProjectEntry> entry,
                                                                  std::uint64_t revision_version,
                                                                  std::chrono::milliseconds delay) noexcept;
-    void reconcile_projects(std::string_view content);
+    void reconcile_projects(std::vector<std::string> requested);
     void add_project(std::string project);
     void remove_project(std::string_view project);
     void subscribe_project(const std::shared_ptr<ProjectEntry> &entry);
@@ -182,6 +183,7 @@ private:
     std::map<std::string, std::shared_ptr<ProjectEntry>, std::less<>> projects_;
     std::optional<AccessConfigWatcherFailure> last_failure_;
     std::optional<AccessConfigWatcherFailure> unavailable_failure_;
+    std::optional<AccessConfigWatcherFailure> project_list_failure_;
     async::Watch<AccessConfigReadiness> readiness_{AccessConfigReadiness{}};
     std::optional<async::Watch<AccessConfigReadiness>::Publisher> readiness_publisher_;
     AccessConfigReadiness published_readiness_;

@@ -216,6 +216,11 @@ DecodeResult<T> out_of_range(std::string_view field, std::string message) {
     return std::unexpected(make_error(AccessConfigErrorCode::OutOfRange, std::string(field), std::move(message)));
 }
 
+template<typename T>
+DecodeResult<T> limit_exceeded(std::string_view field, std::string message) {
+    return std::unexpected(make_error(AccessConfigErrorCode::LimitExceeded, std::string(field), std::move(message)));
+}
+
 std::string child_path(std::string_view parent, std::string_view child) {
     if (parent.empty()) {
         return std::string(child);
@@ -554,12 +559,16 @@ void set_string_entry(StringConfigMap &entries, std::string name, std::optional<
     entries.push_back(StringConfigEntry{.name = std::move(name), .value = std::move(value)});
 }
 
-DecodeResult<StringConfigMap> string_map(const AccessJsonValue &value, std::string_view field) {
+DecodeResult<StringConfigMap> string_map(const AccessJsonValue &value, std::string_view field,
+                                         const ProjectRouteLimits &limits) {
     if (value.is_null()) {
         return StringConfigMap{};
     }
     if (!value.is_object()) {
         return invalid_field<StringConfigMap>(field, "expected object or null");
+    }
+    if (value.as_object().size() > limits.max_header_entries) {
+        return limit_exceeded<StringConfigMap>(field, "entry count exceeds the configured limit");
     }
 
     StringConfigMap result;
@@ -578,7 +587,8 @@ bool nullable_string_equal(const std::optional<std::string> &lhs, const std::opt
     return lhs == rhs;
 }
 
-DecodeResult<NullableStringSet> string_set(const AccessJsonValue &value, std::string_view field) {
+DecodeResult<NullableStringSet> string_set(const AccessJsonValue &value, std::string_view field,
+                                           std::size_t max_items) {
     if (value.is_null()) {
         return NullableStringSet{};
     }
@@ -588,6 +598,9 @@ DecodeResult<NullableStringSet> string_set(const AccessJsonValue &value, std::st
 
     NullableStringSet result;
     const JsonArray<AccessJsonValue> &array = value.as_array();
+    if (array.size() > max_items) {
+        return limit_exceeded<NullableStringSet>(field, "entry count exceeds the configured limit");
+    }
     result.reserve(array.size());
     for (std::size_t i = 0; i < array.size(); ++i) {
         auto decoded = nullable_java_string(array[i], index_path(field, i));
@@ -633,7 +646,8 @@ DecodeResult<std::optional<RouteBodyConfig>> route_body(const AccessJsonValue &v
     return std::optional<RouteBodyConfig>(std::move(result));
 }
 
-DecodeResult<RouteConfig> route_config(const AccessJsonValue &value, std::string_view field) {
+DecodeResult<RouteConfig> route_config(const AccessJsonValue &value, std::string_view field,
+                                       const ProjectRouteLimits &limits) {
     if (!value.is_object()) {
         return invalid_field<RouteConfig>(field, "expected route object");
     }
@@ -674,7 +688,7 @@ DecodeResult<RouteConfig> route_config(const AccessJsonValue &value, std::string
             }
             result.cluster = std::move(*decoded);
         } else if (entry.key == "addresses") {
-            auto decoded = string_set(entry.value, path);
+            auto decoded = string_set(entry.value, path, limits.max_addresses_per_route);
             if (!decoded) {
                 return std::unexpected(std::move(decoded.error()));
             }
@@ -686,19 +700,19 @@ DecodeResult<RouteConfig> route_config(const AccessJsonValue &value, std::string
             }
             result.condition = std::move(*decoded);
         } else if (entry.key == "proxy_headers") {
-            auto decoded = string_map(entry.value, path);
+            auto decoded = string_map(entry.value, path, limits);
             if (!decoded) {
                 return std::unexpected(std::move(decoded.error()));
             }
             result.proxy_headers = std::move(*decoded);
         } else if (entry.key == "response_headers") {
-            auto decoded = string_map(entry.value, path);
+            auto decoded = string_map(entry.value, path, limits);
             if (!decoded) {
                 return std::unexpected(std::move(decoded.error()));
             }
             result.response_headers = std::move(*decoded);
         } else if (entry.key == "context") {
-            auto decoded = string_map(entry.value, path);
+            auto decoded = string_map(entry.value, path, limits);
             if (!decoded) {
                 return std::unexpected(std::move(decoded.error()));
             }
@@ -758,7 +772,7 @@ DecodeResult<RouteConfig> route_config(const AccessJsonValue &value, std::string
             }
             result.flush = *decoded;
         } else if (entry.key == "allows") {
-            auto decoded = string_set(entry.value, path);
+            auto decoded = string_set(entry.value, path, limits.max_cidrs_per_route);
             if (!decoded) {
                 return std::unexpected(std::move(decoded.error()));
             }
@@ -774,8 +788,8 @@ DecodeResult<RouteConfig> route_config(const AccessJsonValue &value, std::string
     return result;
 }
 
-DecodeResult<std::optional<std::vector<std::optional<RouteConfig>>>> route_list(const AccessJsonValue &value,
-                                                                                std::string_view field) {
+DecodeResult<std::optional<std::vector<std::optional<RouteConfig>>>>
+route_list(const AccessJsonValue &value, std::string_view field, const ProjectRouteLimits &limits) {
     if (value.is_null()) {
         return std::optional<std::vector<std::optional<RouteConfig>>>{};
     }
@@ -785,13 +799,17 @@ DecodeResult<std::optional<std::vector<std::optional<RouteConfig>>>> route_list(
 
     std::vector<std::optional<RouteConfig>> routes;
     const JsonArray<AccessJsonValue> &array = value.as_array();
+    if (array.size() > limits.max_routes) {
+        return limit_exceeded<std::optional<std::vector<std::optional<RouteConfig>>>>(
+                field, "route count exceeds the configured limit");
+    }
     routes.reserve(array.size());
     for (std::size_t i = 0; i < array.size(); ++i) {
         if (array[i].is_null()) {
             routes.emplace_back();
             continue;
         }
-        auto decoded = route_config(array[i], index_path(field, i));
+        auto decoded = route_config(array[i], index_path(field, i), limits);
         if (!decoded) {
             return std::unexpected(std::move(decoded.error()));
         }
@@ -875,13 +893,17 @@ void set_host_entry(std::vector<HostConfigEntry> &entries, std::string pattern,
     entries.push_back(HostConfigEntry{.pattern = std::move(pattern), .strategy = std::move(strategy)});
 }
 
-DecodeResult<std::optional<std::vector<HostConfigEntry>>> host_map(const AccessJsonValue &value,
-                                                                   std::string_view field) {
+DecodeResult<std::optional<std::vector<HostConfigEntry>>> host_map(const AccessJsonValue &value, std::string_view field,
+                                                                   const ProjectRouteLimits &limits) {
     if (value.is_null()) {
         return std::optional<std::vector<HostConfigEntry>>{};
     }
     if (!value.is_object()) {
         return invalid_field<std::optional<std::vector<HostConfigEntry>>>(field, "expected object or null");
+    }
+    if (value.as_object().size() > limits.max_hosts) {
+        return limit_exceeded<std::optional<std::vector<HostConfigEntry>>>(field,
+                                                                           "host count exceeds the configured limit");
     }
 
     std::vector<HostConfigEntry> hosts;
@@ -900,7 +922,8 @@ DecodeResult<std::optional<std::vector<HostConfigEntry>>> host_map(const AccessJ
     return std::optional<std::vector<HostConfigEntry>>(std::move(hosts));
 }
 
-DecodeResult<ProjectConfig> project_config(const JsonObject<AccessJsonValue> &object) {
+DecodeResult<ProjectConfig> project_config(const JsonObject<AccessJsonValue> &object,
+                                           const ProjectRouteLimits &limits) {
     ProjectConfig result;
     for (const auto &entry: object) {
         if (entry.key == "version") {
@@ -910,13 +933,13 @@ DecodeResult<ProjectConfig> project_config(const JsonObject<AccessJsonValue> &ob
             }
             result.version = *decoded;
         } else if (entry.key == "host") {
-            auto decoded = host_map(entry.value, "host");
+            auto decoded = host_map(entry.value, "host", limits);
             if (!decoded) {
                 return std::unexpected(std::move(decoded.error()));
             }
             result.hosts = std::move(*decoded);
         } else if (entry.key == "routes") {
-            auto decoded = route_list(entry.value, "routes");
+            auto decoded = route_list(entry.value, "routes", limits);
             if (!decoded) {
                 return std::unexpected(std::move(decoded.error()));
             }
@@ -926,8 +949,12 @@ DecodeResult<ProjectConfig> project_config(const JsonObject<AccessJsonValue> &ob
     return result;
 }
 
-DecodeResult<GrayMatchConfig> gray_match_config(const JsonObject<AccessJsonValue> &object) {
+DecodeResult<GrayMatchConfig> gray_match_config(const JsonObject<AccessJsonValue> &object,
+                                                const GrayRuleLimits &limits) {
     GrayMatchConfig result;
+    if (object.size() > limits.max_rules) {
+        return limit_exceeded<GrayMatchConfig>("rules", "gray rule count exceeds the configured limit");
+    }
     for (const auto &entry: object) {
         const std::string entry_path(entry.key);
         if (entry.value.is_null() || !entry.value.is_object()) {
@@ -946,7 +973,7 @@ DecodeResult<GrayMatchConfig> gray_match_config(const JsonObject<AccessJsonValue
                 }
                 decoded_entry.ratio = *decoded;
             } else if (property.key == "cidrs") {
-                auto decoded = string_set(property.value, path);
+                auto decoded = string_set(property.value, path, limits.max_cidrs_per_rule);
                 if (!decoded) {
                     return std::unexpected(std::move(decoded.error()));
                 }
@@ -989,9 +1016,13 @@ DecodeResult<AccessJsonValue> parse_json(std::string_view content, mem::BufPool 
 
 } // namespace
 
-ProjectConfigResult parse_project_config(std::string_view content) {
+ProjectConfigResult parse_project_config(std::string_view content, const AccessConfigLimits &limits) {
     if (content.empty()) {
         return std::optional<ProjectConfig>{};
+    }
+    if (content.size() > limits.project_route.max_payload_bytes) {
+        return std::unexpected(make_error(AccessConfigErrorCode::LimitExceeded, "payload",
+                                          "project route payload exceeds the configured byte limit"));
     }
 
     mem::BufPool pool;
@@ -1008,16 +1039,24 @@ ProjectConfigResult parse_project_config(std::string_view content) {
                 make_error(AccessConfigErrorCode::InvalidRoot, {}, "project configuration must be an object or null"));
     }
 
-    auto decoded = project_config(root->as_object());
+    auto decoded = project_config(root->as_object(), limits.project_route);
     if (!decoded) {
         return std::unexpected(std::move(decoded.error()));
+    }
+    auto within_limits = validate_project_config_limits(*decoded, limits);
+    if (!within_limits) {
+        return std::unexpected(std::move(within_limits.error()));
     }
     return std::optional<ProjectConfig>(std::move(*decoded));
 }
 
-GrayMatchConfigResult parse_gray_match_config(std::string_view content) {
+GrayMatchConfigResult parse_gray_match_config(std::string_view content, const AccessConfigLimits &limits) {
     if (content.empty()) {
         return std::optional<GrayMatchConfig>{};
+    }
+    if (content.size() > limits.gray_rules.max_payload_bytes) {
+        return std::unexpected(make_error(AccessConfigErrorCode::LimitExceeded, "payload",
+                                          "gray rules payload exceeds the configured byte limit"));
     }
 
     mem::BufPool pool;
@@ -1033,33 +1072,59 @@ GrayMatchConfigResult parse_gray_match_config(std::string_view content) {
         return std::unexpected(make_error(AccessConfigErrorCode::InvalidRoot, {},
                                           "gray-match configuration must be an object or null"));
     }
-    auto decoded = gray_match_config(root->as_object());
+    auto decoded = gray_match_config(root->as_object(), limits.gray_rules);
     if (!decoded) {
         return std::unexpected(std::move(decoded.error()));
+    }
+    auto within_limits = validate_gray_match_config_limits(*decoded, limits);
+    if (!within_limits) {
+        return std::unexpected(std::move(within_limits.error()));
     }
     return std::optional<GrayMatchConfig>(std::move(*decoded));
 }
 
-std::vector<std::string> parse_project_list(std::string_view content) {
+ProjectListResult parse_project_list(std::string_view content, const AccessConfigLimits &limits) {
+    if (content.size() > limits.project_list.max_payload_bytes) {
+        return std::unexpected(make_error(AccessConfigErrorCode::LimitExceeded, "projects",
+                                          "project list payload exceeds the configured byte limit"));
+    }
     if (content.empty()) {
-        return {};
+        return std::vector<std::string>{};
     }
 
     content = trim_java(content);
     if (content.empty()) {
         // Java "".split(";") returns one empty element.
-        return {std::string()};
+        return std::vector<std::string>{std::string()};
     }
 
     std::vector<std::string> projects;
     std::size_t offset = 0;
     while (true) {
+        if (projects.size() == limits.project_list.max_projects) {
+            // Java String.split drops all trailing empty elements. Preserve
+            // that behavior at the exact entry limit without allocating an
+            // unbounded number of empty strings for repeated separators.
+            if (content.find_first_not_of(';', offset) == std::string_view::npos) {
+                break;
+            }
+            return std::unexpected(make_error(AccessConfigErrorCode::LimitExceeded, "projects",
+                                              "project count exceeds the configured limit"));
+        }
         const std::size_t separator = content.find(';', offset);
+        const std::string_view project = separator == std::string_view::npos
+                                                 ? content.substr(offset)
+                                                 : content.substr(offset, separator - offset);
+        if (project.size() > limits.project_list.max_project_name_bytes) {
+            return std::unexpected(make_error(AccessConfigErrorCode::LimitExceeded,
+                                              index_path("projects", projects.size()),
+                                              "project name exceeds the configured byte limit"));
+        }
         if (separator == std::string_view::npos) {
-            projects.emplace_back(content.substr(offset));
+            projects.emplace_back(project);
             break;
         }
-        projects.emplace_back(content.substr(offset, separator - offset));
+        projects.emplace_back(project);
         offset = separator + 1;
     }
     while (!projects.empty() && projects.back().empty()) {

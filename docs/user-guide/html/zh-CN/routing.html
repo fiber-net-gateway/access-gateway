@@ -38,7 +38,7 @@
   <li>规范化 <code>Host</code>，在全局 Host 树中选择 Project；</li>
   <li>执行 Host 级 <code>X-Entry</code> 和 HTTPS 策略；</li>
   <li>按 Path 结构选择候选，再依次判断可选 <code>method</code> 和 <code>condition</code>；</li>
-  <li>对命中的 Route 检查请求体大小和 <code>X-Real-Ip</code> CIDR；</li>
+  <li>对命中的 Route 检查请求体大小和统一 client address CIDR；</li>
   <li>执行 <code>RESPONSE</code>、<code>PROXY</code> 或 <code>SCRIPT</code>；</li>
   <li>写入有界 metrics、trace 和结构化 access log。</li>
 </ol>
@@ -123,8 +123,31 @@
   <li>禁止 anchor、alias 和显式 tag；</li>
   <li>值只能是 JSON 安全的字符串、布尔值、数组、对象、<code>null</code> 和安全整数；</li>
   <li>未知字段直接拒绝，而不是依赖 native 忽略；</li>
-  <li>单条 source 最大 1 MiB，一个 Project 的所有 source 合计最大 4 MiB，最多 5000 条 Route。</li>
+  <li>
+    JavaScript source 最大 1 MiB；YAML source 和一个 Project 的所有 source 合计受 4 MiB project
+    payload 预算约束；最多 5000 条 Route。所有大小按 UTF-8 字节计算，不按浏览器字符数计算。
+  </li>
 </ul>
+<h3 id="2-3-native-资源预算">
+  2.3 Native 资源预算<a
+    class="documentation-heading-anchor"
+    href="#2-3-native-资源预算"
+    aria-label="Link to 2.3 Native 资源预算"
+    >#</a
+  >
+</h3>
+<p>
+  Console 启动时从 Native Validator 探测版本化限额，并在 Routes 与 Network Policy 页面显示当前
+  配额。schema version 1 的常用边界包括：Project List 256 KiB/1024 项、单 Project route payload 4
+  MiB/5000 Routes、Path 2048 bytes、Method 64 bytes、单 Route 256 个 CIDR/静态地址、单脚本或 模板 1
+  MiB、单静态响应解码后 2 MiB、Project 静态响应合计 8 MiB，以及约 64 MiB 的 compiled snapshot 预算。
+</p>
+<p>
+  浏览器只提前阻止能直接判断的超限；保存、校验和发布仍以 server compiler 与 Native Validator
+  为准。超限错误码为 <code>limit_exceeded</code>。rnacos 中的超限候选不会替换实例旧快照；Project
+  List 超限 也不会卸载当前项目。Release 创建要求 Validator
+  和限额探测可用，但这仍不能证明实例已激活。
+</p>
 <h2 id="3-host-与-project-选择">
   3. Host 与 Project 选择<a
     class="documentation-heading-anchor"
@@ -192,8 +215,8 @@
   >
 </h3>
 <p>
-  Host 的 HTTPS 策略可为不强制，或使用 301、302、307、308 重定向。请求 scheme 或
-  <code>X-Forwarded-Proto</code> 大小写不敏感地等于 <code>https</code> 时视为 HTTPS；否则返回：
+  Host 的 HTTPS 策略可为不强制，或使用 301、302、307、308 重定向。统一解析出的 external scheme 为
+  <code>https</code> 时视为 HTTPS；否则返回：
 </p>
 <pre><code class="language-text">Location: https://&lt;effective-host&gt;&lt;original-uri&gt;
 Strict-Transport-Security: max-age=31536000
@@ -203,6 +226,12 @@ Strict-Transport-Security: max-age=31536000
   <code>response_headers</code> 可以覆盖它。若配置了网络入口 mask，<code>X-Entry</code> 必须匹配
   <code>vdi</code>、<code>desktop</code> 或 <code>internet</code> 中允许的入口，否则返回 403
   <code>ENTRY_ERROR</code>。
+</p>
+<p>
+  默认 <code>ACCESS_SERVER_CLIENT_METADATA_MODE=direct</code>，scheme 取业务 listener 的真实 TLS
+  状态且忽略 所有 forwarding header。仅在 <code>trusted_proxy</code> 模式且 socket peer
+  命中配置的可信代理 CIDR 时， 才接受 <code>Forwarded: proto=</code> 或与地址链对齐的
+  <code>X-Forwarded-Proto</code>。旧的全信任行为只在显式 <code>legacy_headers</code> 模式保留。
 </p>
 <h2 id="4-path-pattern">
   4. Path pattern<a
@@ -752,9 +781,15 @@ allows:
   <li>deny 优先于 allow 的最终结果。</li>
 </ol>
 <p>
-  来源取自 <code>X-Real-Ip</code>。为保持 Java 行为，该 header 缺失或无法解析时会跳过 CIDR
-  检查，因此可信边界 必须保证只有受信任的前置代理能写入/覆盖 <code>X-Real-Ip</code>。被拒绝返回 403
-  <code>NOT_ALLOW_IP</code>。
+  来源取自统一的 client metadata。默认 <code>direct</code> 使用 socket peer；<code
+    >trusted_proxy</code
+  >
+  只有在 socket peer 命中 <code>ACCESS_SERVER_TRUSTED_PROXY_CIDRS</code> 后，才按
+  <code>Forwarded</code>、<code>X-Forwarded-For</code>、
+  <code>X-Real-Ip</code> 的顺序解析，并从右向左剥离可信代理 hop。非法或超限链回退 socket
+  peer，因此安全模式 不会因 header 缺失或不可解析而跳过 CIDR。只有显式
+  <code>legacy_headers</code> 模式保留 Java 的缺失/非法 <code>X-Real-Ip</code> 跳过规则。被拒绝返回
+  403 <code>NOT_ALLOW_IP</code>。
 </p>
 <p>
   当 Console 的 Network Policy 选择 Project 级策略时，编译器会把统一 allow/deny 列表注入每条 wire
@@ -929,8 +964,8 @@ $conn.remote_addr  $conn.remote_port  $conn.http_version  $conn.scheme  $conn.tl
     </tr>
     <tr>
       <td>403 <code>NOT_ALLOW_IP</code></td>
-      <td><code>X-Real-Ip</code> 被 CIDR 拒绝</td>
-      <td>header 来源、allow/deny 交集、IPv4/IPv6 prefix</td>
+      <td>解析后的 client address 被 CIDR 拒绝</td>
+      <td>metadata mode、可信代理链、allow/deny、IP family</td>
     </tr>
     <tr>
       <td>413 <code>REQ_BODY_TOO_LARGE</code></td>

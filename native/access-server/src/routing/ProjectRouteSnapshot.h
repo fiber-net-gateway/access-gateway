@@ -4,6 +4,7 @@
 #include <fiber/common/util/RoutePathMatcher.h>
 #include "../config/AccessConfig.h"
 #include "../config/AccessConfigError.h"
+#include "../config/AccessConfigLimits.h"
 #include "Cidr.h"
 #include "CompiledHeaderTemplates.h"
 #include "HostMatcher.h"
@@ -108,6 +109,9 @@ public:
         return context_cluster_indices_;
     }
     [[nodiscard]] std::size_t max_path_variable_count() const noexcept { return path_matcher_.max_path_var_count(); }
+    [[nodiscard]] std::size_t estimated_memory_bytes() const noexcept { return estimated_memory_bytes_; }
+    [[nodiscard]] std::size_t static_response_bytes() const noexcept { return static_response_bytes_; }
+    [[nodiscard]] std::size_t compiled_program_count() const noexcept { return compiled_program_count_; }
 
     [[nodiscard]] const CompiledHost *match_host(std::string_view host) const noexcept;
     template<typename Context>
@@ -120,7 +124,7 @@ public:
 private:
     friend std::expected<std::optional<ProjectRouteSnapshot>, AccessConfigError>
     compile_project_config(std::string_view project, const ProjectConfig &config, ScriptCompilerAdapter compiler,
-                           ProxyAddressSelectorFactory selector_factory);
+                           ProxyAddressSelectorFactory selector_factory, const AccessConfigLimits &limits);
 
     std::string project_;
     std::int32_t version_ = 0;
@@ -130,6 +134,9 @@ private:
     std::vector<http_script::ConstIndex> context_cluster_indices_;
     HostMatcher host_matcher_;
     util::RoutePathMatcher<std::uint32_t> path_matcher_;
+    std::size_t estimated_memory_bytes_ = 0;
+    std::size_t static_response_bytes_ = 0;
+    std::size_t compiled_program_count_ = 0;
 };
 
 using ProjectSnapshotResult = std::expected<std::optional<ProjectRouteSnapshot>, AccessConfigError>;
@@ -141,7 +148,8 @@ using ProjectSnapshotResult = std::expected<std::optional<ProjectRouteSnapshot>,
                                                            ScriptCompilerAdapter compiler);
 [[nodiscard]] ProjectSnapshotResult compile_project_config(std::string_view project, const ProjectConfig &config,
                                                            ScriptCompilerAdapter compiler,
-                                                           ProxyAddressSelectorFactory selector_factory);
+                                                           ProxyAddressSelectorFactory selector_factory,
+                                                           const AccessConfigLimits &limits = kAccessConfigLimits);
 
 } // namespace fiber::access_server
 

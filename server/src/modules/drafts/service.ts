@@ -1,4 +1,5 @@
 import { badRequest, forbidden, notFound, unavailable } from '../../shared/errors.js'
+import { fallbackAccessConfigLimits } from '../../integrations/native-validator/limits.js'
 import type { NativeValidator } from '../../integrations/native-validator/model.js'
 import { bufferToPublicId } from '../../shared/ids.js'
 import type { Actor } from '../auth/model.js'
@@ -37,11 +38,14 @@ export interface DraftService {
   ): Promise<ProjectRoutesValidationView>
 }
 
-function parseProjectRoutesModel(value: unknown): ProjectRoutesModel {
+function parseProjectRoutesModel(
+  value: unknown,
+  limits = fallbackAccessConfigLimits,
+): ProjectRoutesModel {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw badRequest('INVALID_DRAFT_MODEL', 'Draft model must be an object')
   }
-  if (!isProjectRoutesModel(value)) {
+  if (!isProjectRoutesModel(value, limits)) {
     throw badRequest(
       'INVALID_DRAFT_MODEL',
       'Draft model does not match project_routes_yaml schema version 5',
@@ -51,9 +55,13 @@ function parseProjectRoutesModel(value: unknown): ProjectRoutesModel {
   return value
 }
 
-function parseSavableProjectRoutesModel(domain: string, value: unknown): ProjectRoutesModel {
-  const model = parseProjectRoutesModel(value)
-  const result = compileProjectRoutes(domain, model)
+function parseSavableProjectRoutesModel(
+  domain: string,
+  value: unknown,
+  limits = fallbackAccessConfigLimits,
+): ProjectRoutesModel {
+  const model = parseProjectRoutesModel(value, limits)
+  const result = compileProjectRoutes(domain, model, 1, limits)
   if (!result.compiled) {
     const routeIndexes = new Map(model.routes.map((route, index) => [route.id, index]))
     throw badRequest(
@@ -151,7 +159,11 @@ export class DefaultDraftService implements DraftService {
       actor,
       draftId,
       parseLockVersion(input.lockVersion),
-      parseSavableProjectRoutesModel(project.name, input.model),
+      parseSavableProjectRoutesModel(
+        project.name,
+        input.model,
+        this.#validator.limits ?? fallbackAccessConfigLimits,
+      ),
       summary,
       requestId,
     )
@@ -201,7 +213,10 @@ export class DefaultDraftService implements DraftService {
       throw notFound('Project')
     }
     await this.requireEditor(actor, bufferToPublicId(project.environment_public_id))
-    const parsed = parseProjectRoutesModel(model)
+    const parsed = parseProjectRoutesModel(
+      model,
+      this.#validator.limits ?? fallbackAccessConfigLimits,
+    )
     return validateProjectRoutesCandidate(
       this.#validator,
       project.name,

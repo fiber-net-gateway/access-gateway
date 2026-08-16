@@ -20,6 +20,8 @@ connection pool，以及 Nacos、CAT、Prometheus 组件。迁移不要求这些
 - 已建立 `access_server_core` 和 `fiber_access_server_tests`；
 - 已实现项目列表、`ProjectConf`、`HostStrategy`、`RouteItem`、Duration/DataSize 的
   Java 兼容解码；
+- 已实现版本化 `AccessConfigLimits`：在解析前限制 payload，在 codec/编译期限制 route、Host、
+  header、CIDR、address、script/template、静态响应和 snapshot 预算；超限候选失败保旧；
 - 已实现 route build-time 校验、CIDR/address 编译、RESPONSE body 预解码和
   service/cluster 上游计划；
 - 已实现 Java 兼容 Host 校验与 exact/wildcard 匹配，并直接复用本仓库
@@ -134,6 +136,10 @@ Base64，单次协议输入上限为 8 MiB：
 CIDR。结果始终是单条 JSON，包含 `contractVersion`、`valid`、`normalized` 和脱敏的
 `errors`，不会回显 payload。
 
+`access-gateway-validator --describe-config-limits` 输出 runtime 与 Validator 共用的 strict
+schema version 1 限额 JSON。Console 在启动时探测该输出；完整数值和失败语义见
+[`docs/config-resource-limits.md`](docs/config-resource-limits.md)。
+
 ## 运行
 
 复制示例配置并至少修改 Nacos 地址：
@@ -239,6 +245,7 @@ listener 只在 Nacos client/config/naming、project/gray watcher、项目列表
 - `tests/`：access-server 聚焦测试和 Java golden fixtures；
 - `docs/migration-plan.md`：范围边界、C++ 模块划分、工作包和阶段门槛；
 - `docs/compatibility-contract.md`：配置字段、热更新和 HTTP 请求执行的 Java 契约；
+- `docs/config-resource-limits.md`：Project List、route、gray 的版本化资源上限和失败保旧语义；
 - `docs/script-corpus-differential.md`：现网 condition/template/rewrite 的脱敏统计、
   Java golden、C++ 差分结果和私有 corpus 复跑方式；
 - `docs/optimization-analysis.md`：代码职责、生命周期、性能、安全和可观测性优化分析，

@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -30,12 +31,14 @@ enum class TemplateParseError : std::uint8_t {
     InvalidEscape,
     EmptyExpression,
     UnclosedExpression,
+    TooManyExpressions,
 };
 
 // Parses ploto-unified-access templates. Escaping is intentionally limited to
 // the Java RouteExecutionBuilder contract: only \\, \$, \{ and \} are valid,
 // and escapes are interpreted only outside ${...} expressions.
-[[nodiscard]] std::expected<CompiledTemplate, TemplateParseError> parse_template(std::string_view source);
+[[nodiscard]] std::expected<CompiledTemplate, TemplateParseError>
+parse_template(std::string_view source, std::size_t max_expressions = std::numeric_limits<std::size_t>::max());
 
 } // namespace fiber::access_server
 

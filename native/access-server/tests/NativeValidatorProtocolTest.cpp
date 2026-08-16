@@ -35,6 +35,8 @@ TEST(NativeValidatorProtocolTest, CompilesProjectPayloadWithAccessServerCore) {
     EXPECT_NE(response.find(R"("projectVersion":3)"), std::string::npos) << response;
     EXPECT_NE(response.find(R"("hostCount":1)"), std::string::npos) << response;
     EXPECT_NE(response.find(R"("routeCount":1)"), std::string::npos) << response;
+    EXPECT_NE(response.find(R"("estimatedSnapshotBytes":)"), std::string::npos) << response;
+    EXPECT_NE(response.find(R"("staticResponseBytes":)"), std::string::npos) << response;
 }
 
 TEST(NativeValidatorProtocolTest, RejectsUnsupportedResponseGzipCombination) {
@@ -117,6 +119,27 @@ TEST(NativeValidatorProtocolTest, AppliesStrictConsoleGrayValidation) {
             fiber::access_server::process_native_validator_request(request("gray_rules", "", payload));
     EXPECT_NE(response.find(R"("valid":false)"), std::string::npos) << response;
     EXPECT_NE(response.find(R"("code":"out_of_range")"), std::string::npos) << response;
+}
+
+TEST(NativeValidatorProtocolTest, ReportsStableLimitErrorsWithoutEchoingValues) {
+    const std::string marker = "private-limit-marker";
+    const std::string path = "/" + marker + std::string(2048, 'x');
+    const std::string payload =
+            R"({"host":{"example.com":{}},"routes":[{"path":")" + path + R"(","type":"RESPONSE","status":200}]})";
+    const std::string response =
+            fiber::access_server::process_native_validator_request(request("project_route", "example", payload));
+    EXPECT_NE(response.find(R"("code":"limit_exceeded")"), std::string::npos) << response;
+    EXPECT_NE(response.find(R"("field":"routes[0].path")"), std::string::npos) << response;
+    EXPECT_EQ(response.find(marker), std::string::npos) << response;
+}
+
+TEST(NativeValidatorProtocolTest, DescribesTheRuntimeConfigLimits) {
+    const std::string response = fiber::access_server::native_validator_config_limits_response();
+    EXPECT_NE(response.find(R"("schemaVersion":1)"), std::string::npos) << response;
+    EXPECT_NE(response.find(R"("maxPayloadBytes":4194304)"), std::string::npos) << response;
+    EXPECT_NE(response.find(R"("maxRoutes":5000)"), std::string::npos) << response;
+    EXPECT_NE(response.find(R"("maxEstimatedSnapshotBytes":67108864)"), std::string::npos) << response;
+    EXPECT_NE(response.find(R"("grayRules")"), std::string::npos) << response;
 }
 
 } // namespace

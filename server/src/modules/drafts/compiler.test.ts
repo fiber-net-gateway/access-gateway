@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
+import { fallbackAccessConfigLimits } from '../../integrations/native-validator/limits.js'
 import type { ProjectRoutesModel } from './model.js'
 import { compileProjectRoutes } from './compiler.js'
 
@@ -297,4 +298,99 @@ test('compiles every HTTPS redirect setting to the native HostStrategy wire valu
     }
     assert.equal(payload.host['api.example.com']?.https, strategy)
   }
+})
+
+test('enforces native UTF-8 and compiled payload limits before validation', () => {
+  const scriptLimits = {
+    ...fallbackAccessConfigLimits,
+    projectRoute: {
+      ...fallbackAccessConfigLimits.projectRoute,
+      maxScriptBytes: 3,
+    },
+  }
+  const oversizedScript = compileProjectRoutes(
+    'api.example.com',
+    {
+      ...model(),
+      routes: [
+        {
+          id: '00000000-0000-4000-8000-000000000001',
+          format: 'js',
+          path: '/',
+          source: '返回',
+        },
+      ],
+    },
+    1,
+    scriptLimits,
+  )
+  assert.equal(oversizedScript.compiled, null)
+  assert.ok(
+    oversizedScript.issues.some(
+      (issue) => issue.code === 'limit_exceeded' && issue.path === 'source',
+    ),
+  )
+
+  const payloadLimits = {
+    ...fallbackAccessConfigLimits,
+    projectRoute: {
+      ...fallbackAccessConfigLimits.projectRoute,
+      maxPayloadBytes: 100,
+    },
+  }
+  const oversizedPayload = compileProjectRoutes(
+    'api.example.com',
+    model('path: /\ntype: RESPONSE\nstatus: 200'),
+    1,
+    payloadLimits,
+  )
+  assert.equal(oversizedPayload.compiled, null)
+  assert.ok(
+    oversizedPayload.issues.some(
+      (issue) => issue.code === 'limit_exceeded' && issue.path === 'payload',
+    ),
+  )
+})
+
+test('enforces native structured entry limits on compiled YAML routes', () => {
+  const limits = {
+    ...fallbackAccessConfigLimits,
+    projectRoute: {
+      ...fallbackAccessConfigLimits.projectRoute,
+      maxHeaderEntries: 1,
+    },
+  }
+  const result = compileProjectRoutes(
+    'api.example.com',
+    model('path: /\ntype: RESPONSE\nstatus: 200\nresponse_headers: { X-One: one, X-Two: two }'),
+    1,
+    limits,
+  )
+
+  assert.equal(result.compiled, null)
+  assert.ok(
+    result.issues.some(
+      (issue) => issue.code === 'limit_exceeded' && issue.path === 'response_headers',
+    ),
+  )
+
+  const clusterLimits = {
+    ...fallbackAccessConfigLimits,
+    projectRoute: {
+      ...fallbackAccessConfigLimits.projectRoute,
+      maxClusterBytes: 3,
+    },
+  }
+  const serviceCluster = compileProjectRoutes(
+    'api.example.com',
+    model('path: /\ntype: PROXY\nservice: users/gray'),
+    1,
+    clusterLimits,
+  )
+  assert.equal(serviceCluster.compiled, null)
+  assert.ok(
+    serviceCluster.issues.some(
+      (issue) => issue.code === 'limit_exceeded' && issue.path === 'service',
+    ),
+  )
 })

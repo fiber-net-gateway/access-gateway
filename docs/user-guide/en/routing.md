@@ -61,7 +61,22 @@ The Console parses YAML 1.2 with the core schema and additionally requires:
 - no anchors, aliases, or explicit tags;
 - only JSON-safe strings, booleans, arrays, objects, `null`, and safe integers;
 - rejection of unknown fields instead of relying on the native compatibility codec to ignore them;
-- at most 1 MiB per source, 4 MiB total source per Project, and 5000 Routes.
+- at most 1 MiB per JavaScript source; YAML source and all source in one Project share the 4 MiB
+  project payload budget; and at most 5000 Routes. Sizes are UTF-8 bytes, not browser character counts.
+
+### 2.3 Native resource budgets
+
+At startup the Console probes versioned limits from the Native Validator and displays the applicable
+quota on the Routes and Network Policy pages. Common schema-version-1 boundaries include a 256 KiB / 1,024
+entry Project List, a 4 MiB / 5,000 Route Project payload, 2,048-byte Paths, 64-byte Methods, 256 CIDRs or
+static addresses per Route, 1 MiB scripts/templates, 2 MiB decoded static response bodies, 8 MiB aggregate
+static response storage, and an approximately 64 MiB compiled-snapshot budget.
+
+The browser only blocks limits it can determine directly. Saving, validation, and publication remain
+authoritative in the server compiler and Native Validator. The stable over-limit code is
+`limit_exceeded`. An over-limit rnacos candidate retains the instance's previous snapshot, and an
+over-limit Project List does not unload current Projects. Release creation requires the Validator and
+its probed limits to be available, but that still does not prove instance activation.
 
 ## 3. Host and Project selection
 

@@ -250,7 +250,10 @@ The offline control-plane validator is written to
 `native/build/apps/access-gateway-validator`; configure its absolute path with
 `NATIVE_VALIDATOR_PATH`. It accepts one bounded, versioned JSON request on stdin and returns one
 JSON result on stdout. It reuses the native codec, script compiler, and compiled route model, and
-does not connect to Nacos or external services.
+does not connect to Nacos or external services. The Console also runs
+`access-gateway-validator --describe-config-limits` during startup and fails Validator readiness if
+the strict, versioned resource-limit schema cannot be read. Release preparation requires that
+probed schema; draft transport retains only a bounded fallback while Validator is unavailable.
 
 ## Run Access Server
 

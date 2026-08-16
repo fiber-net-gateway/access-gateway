@@ -4,7 +4,8 @@
 
 namespace fiber::access_server {
 
-std::expected<CompiledTemplate, TemplateParseError> parse_template(std::string_view source) {
+std::expected<CompiledTemplate, TemplateParseError> parse_template(std::string_view source,
+                                                                   std::size_t max_expressions) {
     CompiledTemplate result;
     std::string literal;
     std::string expression;
@@ -29,6 +30,9 @@ std::expected<CompiledTemplate, TemplateParseError> parse_template(std::string_v
             }
             if (expression.empty()) {
                 return std::unexpected(TemplateParseError::EmptyExpression);
+            }
+            if (result.expressions.size() == max_expressions) {
+                return std::unexpected(TemplateParseError::TooManyExpressions);
             }
             result.literal_size += literal.size();
             result.expressions.push_back(CompiledTemplateExpression{

@@ -36,6 +36,12 @@ function modelFingerprint(model: ProjectRoutesModel): string {
   return JSON.stringify(model)
 }
 
+const utf8Encoder = new TextEncoder()
+
+function utf8Bytes(value: string): number {
+  return utf8Encoder.encode(value).byteLength
+}
+
 function routeIssues(
   route: RouteItemModel,
   validation: ProjectRoutesValidationView | null,
@@ -52,7 +58,7 @@ function routeIssues(
 }
 
 export function ProjectRoutesPage() {
-  const { project, refreshProject } = useProjectContext()
+  const { project, refreshProject, systemStatus } = useProjectContext()
   const navigate = useNavigate()
   const location = useLocation()
   const [searchParams] = useSearchParams()
@@ -128,7 +134,42 @@ export function ProjectRoutesPage() {
     () => model.routes.reduce((total, route) => total + analyzeRouteSource(route).issues.length, 0),
     [model.routes],
   )
-  const hasLocalIssues = localIssueCount > 0
+  const routeLimits = systemStatus?.dependencies.nativeValidator.limits?.projectRoute ?? null
+  const sourceBytes = useMemo(
+    () => model.routes.reduce((total, route) => total + utf8Bytes(route.source), 0),
+    [model.routes],
+  )
+  const limitMessages = useMemo(() => {
+    if (!routeLimits) return []
+    const messages: string[] = []
+    if (model.routes.length > routeLimits.maxRoutes) {
+      messages.push(`Route 数量超过 Native 上限 ${routeLimits.maxRoutes}`)
+    }
+    if (sourceBytes > routeLimits.maxPayloadBytes) {
+      messages.push(`Route 源码合计超过 ${routeLimits.maxPayloadBytes} UTF-8 bytes`)
+    }
+    for (const [index, route] of model.routes.entries()) {
+      const sourceLimit =
+        route.format === 'js' ? routeLimits.maxScriptBytes : routeLimits.maxPayloadBytes
+      if (utf8Bytes(route.source) > sourceLimit) {
+        messages.push(`Route ${index + 1} 源码超过 ${sourceLimit} UTF-8 bytes`)
+      }
+      if (route.format === 'js' && utf8Bytes(route.path) > routeLimits.maxPathBytes) {
+        messages.push(`Route ${index + 1} Path 超过 ${routeLimits.maxPathBytes} UTF-8 bytes`)
+      }
+      if (
+        route.format === 'js' &&
+        route.method &&
+        utf8Bytes(route.method) > routeLimits.maxMethodBytes
+      ) {
+        messages.push(`Route ${index + 1} Method 超过 ${routeLimits.maxMethodBytes} UTF-8 bytes`)
+      }
+    }
+    return messages
+  }, [model.routes, routeLimits, sourceBytes])
+  const hasLimitIssues = limitMessages.length > 0
+  const hasLocalIssues = localIssueCount > 0 || hasLimitIssues
+  const routeCountAtLimit = routeLimits ? model.routes.length >= routeLimits.maxRoutes : false
   const projectIssues =
     validation?.issues.filter(
       (issue) => !model.routes.some((route) => route.id === issue.routeId),
@@ -156,6 +197,10 @@ export function ProjectRoutesPage() {
   }
 
   const openSaveDialog = (): void => {
+    if (hasLimitIssues) {
+      setErrorMessage(limitMessages[0] ?? '配置超过 Native 资源上限')
+      return
+    }
     if (hasLocalIssues) {
       setErrorMessage(`当前有 ${localIssueCount} 个 Route 问题，请修复后再保存为版本。`)
       return
@@ -171,7 +216,11 @@ export function ProjectRoutesPage() {
     await runAction(async () => {
       if (!hasUnsavedChanges) throw new Error('当前工作区没有需要保存的修改')
       if (hasLocalIssues) {
-        throw new Error(`当前有 ${localIssueCount} 个 Route 问题，请修复后再保存为版本。`)
+        throw new Error(
+          hasLimitIssues
+            ? (limitMessages[0] ?? '配置超过 Native 资源上限')
+            : `当前有 ${localIssueCount} 个 Route 问题，请修复后再保存为版本。`,
+        )
       }
       const saveBaseVersionId = currentVersionId
       if (sourceVersion && !saveBaseVersionId) {
@@ -224,6 +273,10 @@ export function ProjectRoutesPage() {
   }
 
   const addRoute = (template: RouteTemplate): void => {
+    if (routeCountAtLimit) {
+      setErrorMessage(`Route 数量已达到 Native 上限 ${routeLimits?.maxRoutes ?? ''}`)
+      return
+    }
     const route = createRouteItem(template)
     updateRoutes([...model.routes, route])
     setExpanded(new Set([route.id]))
@@ -277,12 +330,18 @@ export function ProjectRoutesPage() {
               保存基线：{currentVersionNumber ? `当前 V${currentVersionNumber}` : '尚无版本'}
             </span>
             <span>{model.routes.length} Routes</span>
+            {routeLimits ? (
+              <span>
+                源码：{sourceBytes.toLocaleString()} /{' '}
+                {routeLimits.maxPayloadBytes.toLocaleString()} bytes
+              </span>
+            ) : null}
           </div>
         </div>
         <div className="header-actions">
           <button
             className="button-secondary"
-            disabled={routeLoading || validating || saving}
+            disabled={routeLoading || validating || saving || hasLimitIssues}
             onClick={() => void runAction(validateRoutes)}
             type="button"
           >
@@ -293,7 +352,7 @@ export function ProjectRoutesPage() {
             className="button-primary"
             disabled={routeLoading || saving || !hasUnsavedChanges || hasLocalIssues}
             onClick={openSaveDialog}
-            title={hasLocalIssues ? '请先修复 YAML 问题' : undefined}
+            title={hasLocalIssues ? '请先修复配置问题' : undefined}
             type="button"
           >
             {saving ? '保存中…' : '保存为版本'}
@@ -305,6 +364,17 @@ export function ProjectRoutesPage() {
         <div className="error-banner" role="alert">
           <strong>操作未完成</strong>
           <span>{errorMessage}</span>
+        </div>
+      ) : null}
+
+      {limitMessages.length > 0 ? (
+        <div className="project-validation-errors" role="alert">
+          {limitMessages.map((message) => (
+            <p key={message}>
+              <strong>limit_exceeded</strong>
+              <span>{message}</span>
+            </p>
+          ))}
         </div>
       ) : null}
 
@@ -330,18 +400,37 @@ export function ProjectRoutesPage() {
 
       <section className="route-toolbar" aria-label="路由操作">
         <div>
-          <button className="button-secondary" onClick={() => addRoute('RESPONSE')} type="button">
+          <button
+            className="button-secondary"
+            disabled={routeCountAtLimit}
+            onClick={() => addRoute('RESPONSE')}
+            type="button"
+          >
             + RESPONSE
           </button>
-          <button className="button-secondary" onClick={() => addRoute('PROXY')} type="button">
+          <button
+            className="button-secondary"
+            disabled={routeCountAtLimit}
+            onClick={() => addRoute('PROXY')}
+            type="button"
+          >
             + PROXY
           </button>
-          <button className="button-secondary" onClick={() => addRoute('JS')} type="button">
+          <button
+            className="button-secondary"
+            disabled={routeCountAtLimit}
+            onClick={() => addRoute('JS')}
+            type="button"
+          >
             + JS
           </button>
         </div>
         <div className="route-toolbar-status" role="status">
-          {hasLocalIssues ? (
+          {hasLimitIssues ? (
+            <span className="status-chip status-chip-pending" id="route-save-state">
+              Native 资源上限 · {limitMessages.length} 个问题
+            </span>
+          ) : hasLocalIssues ? (
             <span className="status-chip status-chip-pending" id="route-save-state">
               {localIssueCount} 个 Route 问题 · 修复后才能保存
             </span>
@@ -446,6 +535,7 @@ export function ProjectRoutesPage() {
                       ↓
                     </button>
                     <button
+                      disabled={routeCountAtLimit}
                       onClick={() =>
                         updateRoutes([
                           ...model.routes.slice(0, index + 1),
@@ -470,6 +560,7 @@ export function ProjectRoutesPage() {
                           Path pattern
                           <input
                             aria-label={`路由 ${index + 1} Path pattern`}
+                            maxLength={routeLimits?.maxPathBytes}
                             required
                             value={route.path}
                             onChange={(event) =>
@@ -487,6 +578,7 @@ export function ProjectRoutesPage() {
                           Method（可选）
                           <input
                             aria-label={`路由 ${index + 1} Method`}
+                            maxLength={routeLimits?.maxMethodBytes}
                             placeholder="留空匹配所有 method"
                             value={route.method ?? ''}
                             onChange={(event) =>
@@ -613,7 +705,7 @@ export function ProjectRoutesPage() {
               >
                 取消
               </button>
-              <button className="button-primary" disabled={saving} type="submit">
+              <button className="button-primary" disabled={saving || hasLimitIssues} type="submit">
                 {saving
                   ? '保存中…'
                   : `保存为 ${currentVersionNumber ? `V${currentVersionNumber + 1}` : 'V1'}`}

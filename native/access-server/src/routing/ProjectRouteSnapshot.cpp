@@ -14,8 +14,7 @@ namespace {
 
 constexpr std::string_view kDefaultServiceCluster = "default";
 
-AccessConfigError route_error(AccessConfigErrorCode code, std::size_t route_index, std::string_view field,
-                              std::string_view message) {
+std::string route_path(std::size_t route_index, std::string_view field) {
     std::string path = "routes[";
     path.append(std::to_string(route_index));
     path.push_back(']');
@@ -23,9 +22,14 @@ AccessConfigError route_error(AccessConfigErrorCode code, std::size_t route_inde
         path.push_back('.');
         path.append(field);
     }
+    return path;
+}
+
+AccessConfigError route_error(AccessConfigErrorCode code, std::size_t route_index, std::string_view field,
+                              std::string_view message) {
     return AccessConfigError{
             .code = code,
-            .field = std::move(path),
+            .field = route_path(route_index, field),
             .message = std::string(message),
     };
 }
@@ -47,6 +51,188 @@ bool has_non_whitespace(std::string_view value) noexcept {
         }
     }
     return false;
+}
+
+class ProjectCompileBudget {
+public:
+    explicit ProjectCompileBudget(const ProjectRouteLimits &limits) noexcept : limits_(&limits) {}
+
+    [[nodiscard]] std::expected<void, AccessConfigError> account_config(std::string_view project,
+                                                                        const ProjectConfig &config) {
+        auto base = add_bytes(sizeof(ProjectRouteSnapshot) + project.size(), "project");
+        if (!base) {
+            return base;
+        }
+        if (config.hosts) {
+            auto hosts = add_scaled(config.hosts->size(), sizeof(CompiledHost) + sizeof(HostPattern) + 64U, "host");
+            if (!hosts) {
+                return hosts;
+            }
+            for (std::size_t index = 0; index < config.hosts->size(); ++index) {
+                auto pattern = add_scaled((*config.hosts)[index].pattern.size(), 2U,
+                                          "host[" + std::to_string(index) + "].pattern");
+                if (!pattern) {
+                    return pattern;
+                }
+            }
+        }
+        if (!config.routes) {
+            return {};
+        }
+        auto routes = add_scaled(config.routes->size(), sizeof(CompiledRoute) + 512U, "routes");
+        if (!routes) {
+            return routes;
+        }
+        for (std::size_t index = 0; index < config.routes->size(); ++index) {
+            if (!(*config.routes)[index]) {
+                continue;
+            }
+            const RouteConfig &route = *(*config.routes)[index];
+            const auto add_optional = [&](const std::optional<std::string> &value, std::string_view field,
+                                          std::size_t multiplier = 2U) {
+                return value ? add_scaled(value->size(), multiplier, route_path(index, field))
+                             : std::expected<void, AccessConfigError>{};
+            };
+            for (auto result: {add_optional(route.path, "path", 3U), add_optional(route.method, "method"),
+                               add_optional(route.service, "service"), add_optional(route.cluster, "cluster"),
+                               add_optional(route.condition, "condition", 4U),
+                               add_optional(route.rewrite, "rewrite", 3U), add_optional(route.script, "script", 4U)}) {
+                if (!result) {
+                    return result;
+                }
+            }
+            auto addresses = add_scaled(route.addresses.size(), sizeof(AccessUpstreamInstance) + 64U,
+                                        route_path(index, "addresses"));
+            if (!addresses) {
+                return addresses;
+            }
+            for (const std::optional<std::string> &address: route.addresses) {
+                if (address) {
+                    auto result = add_scaled(address->size(), 2U, route_path(index, "addresses"));
+                    if (!result) {
+                        return result;
+                    }
+                }
+            }
+            auto cidrs = add_scaled(route.allows.size(), sizeof(Cidr) + 32U, route_path(index, "allows"));
+            if (!cidrs) {
+                return cidrs;
+            }
+            for (const auto &[entries, field]:
+                 {std::pair<const StringConfigMap *, std::string_view>{&route.proxy_headers, "proxy_headers"},
+                  {&route.response_headers, "response_headers"},
+                  {&route.context, "context"}}) {
+                auto structures =
+                        add_scaled(entries->size(), sizeof(CompiledTemplateEntry) + 128U, route_path(index, field));
+                if (!structures) {
+                    return structures;
+                }
+                for (const StringConfigEntry &entry: *entries) {
+                    auto name = add_scaled(entry.name.size(), 2U, route_path(index, field));
+                    if (!name) {
+                        return name;
+                    }
+                    if (entry.value) {
+                        auto value = add_scaled(entry.value->size(), 3U, route_path(index, field));
+                        if (!value) {
+                            return value;
+                        }
+                    }
+                }
+            }
+            if (route.body && route.body->content) {
+                auto body = add_scaled(route.body->content->size(), 2U, route_path(index, "body.content"));
+                if (!body) {
+                    return body;
+                }
+            }
+        }
+        return {};
+    }
+
+    [[nodiscard]] std::expected<void, AccessConfigError>
+    account_template(const CompiledTemplate &value, std::size_t route_index, std::string_view field) {
+        auto programs = reserve_programs(value.expressions.size(), route_index, field);
+        if (!programs) {
+            return programs;
+        }
+        return add_scaled(value.expressions.size(), sizeof(CompiledTemplateExpression), route_path(route_index, field));
+    }
+
+    [[nodiscard]] std::expected<void, AccessConfigError> reserve_programs(std::size_t count, std::size_t route_index,
+                                                                          std::string_view field) {
+        if (count > limits_->max_compiled_programs - compiled_programs_) {
+            return std::unexpected(route_error(AccessConfigErrorCode::LimitExceeded, route_index, field,
+                                               "compiled program count exceeds the configured limit"));
+        }
+        compiled_programs_ += count;
+        return add_scaled(count, 1024U, route_path(route_index, field));
+    }
+
+    [[nodiscard]] std::expected<void, AccessConfigError> add_static_response(std::size_t bytes,
+                                                                             std::size_t route_index) {
+        if (bytes > limits_->max_static_response_bytes - static_response_bytes_) {
+            return std::unexpected(route_error(AccessConfigErrorCode::LimitExceeded, route_index, "body",
+                                               "project static response bytes exceed the configured limit"));
+        }
+        static_response_bytes_ += bytes;
+        return add_bytes(bytes, route_path(route_index, "body"));
+    }
+
+    [[nodiscard]] std::size_t estimated_bytes() const noexcept { return estimated_bytes_; }
+    [[nodiscard]] std::size_t static_response_bytes() const noexcept { return static_response_bytes_; }
+    [[nodiscard]] std::size_t compiled_programs() const noexcept { return compiled_programs_; }
+    [[nodiscard]] const ProjectRouteLimits &limits() const noexcept { return *limits_; }
+
+private:
+    [[nodiscard]] std::expected<void, AccessConfigError> add_scaled(std::size_t count, std::size_t bytes,
+                                                                    std::string field) {
+        if (count != 0 && bytes > limits_->max_estimated_snapshot_bytes / count) {
+            return memory_error(std::move(field));
+        }
+        return add_bytes(count * bytes, std::move(field));
+    }
+
+    [[nodiscard]] std::expected<void, AccessConfigError> add_bytes(std::size_t bytes, std::string field) {
+        if (bytes > limits_->max_estimated_snapshot_bytes - estimated_bytes_) {
+            return memory_error(std::move(field));
+        }
+        estimated_bytes_ += bytes;
+        return {};
+    }
+
+    [[nodiscard]] std::expected<void, AccessConfigError> memory_error(std::string field) const {
+        return std::unexpected(AccessConfigError{
+                .code = AccessConfigErrorCode::LimitExceeded,
+                .field = std::move(field),
+                .message = "estimated compiled snapshot bytes exceed the configured limit",
+        });
+    }
+
+    const ProjectRouteLimits *limits_;
+    std::size_t estimated_bytes_ = 0;
+    std::size_t static_response_bytes_ = 0;
+    std::size_t compiled_programs_ = 0;
+};
+
+std::expected<CompiledTemplate, AccessConfigError> compile_template(std::string_view source, std::size_t route_index,
+                                                                    std::string_view field,
+                                                                    ProjectCompileBudget &budget) {
+    auto parsed = parse_template(source, budget.limits().max_template_expressions);
+    if (!parsed) {
+        const AccessConfigErrorCode code = parsed.error() == TemplateParseError::TooManyExpressions
+                                                   ? AccessConfigErrorCode::LimitExceeded
+                                                   : AccessConfigErrorCode::InvalidField;
+        const std::string_view message = parsed.error() == TemplateParseError::TooManyExpressions
+                                                 ? "template expression count exceeds the configured limit"
+                                                 : "invalid template";
+        return std::unexpected(route_error(code, route_index, field, message));
+    }
+    auto accounted = budget.account_template(*parsed, route_index, field);
+    if (!accounted) {
+        return std::unexpected(std::move(accounted.error()));
+    }
+    return std::move(*parsed);
 }
 
 std::int32_t java_int32_narrow(std::int64_t value) noexcept {
@@ -101,8 +287,10 @@ std::optional<std::string_view> validate_path_pattern(std::string_view path) noe
     return std::nullopt;
 }
 
-std::expected<std::vector<CompiledTemplateEntry>, AccessConfigError>
-compile_templates(const StringConfigMap &input, std::size_t route_index, std::string_view field) {
+std::expected<std::vector<CompiledTemplateEntry>, AccessConfigError> compile_templates(const StringConfigMap &input,
+                                                                                       std::size_t route_index,
+                                                                                       std::string_view field,
+                                                                                       ProjectCompileBudget &budget) {
     std::vector<CompiledTemplateEntry> result;
     result.reserve(input.size());
     for (const StringConfigEntry &entry: input) {
@@ -110,10 +298,9 @@ compile_templates(const StringConfigMap &input, std::size_t route_index, std::st
             return std::unexpected(
                     route_error(AccessConfigErrorCode::InvalidField, route_index, field, "invalid template"));
         }
-        auto value = parse_template(*entry.value);
+        auto value = compile_template(*entry.value, route_index, field, budget);
         if (!value) {
-            return std::unexpected(
-                    route_error(AccessConfigErrorCode::InvalidField, route_index, field, "invalid template"));
+            return std::unexpected(std::move(value.error()));
         }
         result.push_back(CompiledTemplateEntry{
                 .name = entry.name,
@@ -124,8 +311,9 @@ compile_templates(const StringConfigMap &input, std::size_t route_index, std::st
 }
 
 std::expected<CompiledHeaderTemplates::Builder, AccessConfigError>
-compile_header_templates(const StringConfigMap &input, std::size_t route_index, std::string_view field) {
-    auto entries = compile_templates(input, route_index, field);
+compile_header_templates(const StringConfigMap &input, std::size_t route_index, std::string_view field,
+                         ProjectCompileBudget &budget) {
+    auto entries = compile_templates(input, route_index, field, budget);
     if (!entries) {
         return std::unexpected(std::move(entries.error()));
     }
@@ -156,7 +344,8 @@ struct PendingRouteCompile {
 std::expected<void, AccessConfigError> compile_route_scripts(CompiledRoute &route, std::size_t route_index,
                                                              PendingRouteCompile &pending,
                                                              ScriptCompilerAdapter compiler,
-                                                             http_script::ConstPackage::Builder &constants) {
+                                                             http_script::ConstPackage::Builder &constants,
+                                                             ProjectCompileBudget &budget) {
     auto compile_template = [&](CompiledTemplate &value,
                                 std::string_view field) -> std::expected<void, AccessConfigError> {
         for (CompiledTemplateExpression &expression: value.expressions) {
@@ -190,6 +379,10 @@ std::expected<void, AccessConfigError> compile_route_scripts(CompiledRoute &rout
     };
 
     if (pending.condition) {
+        auto reserved = budget.reserve_programs(1, route_index, "condition");
+        if (!reserved) {
+            return reserved;
+        }
         if (!compiler.compile_expression) {
             return std::unexpected(route_error(AccessConfigErrorCode::InvalidField, route_index, "condition",
                                                "script compiler is not configured"));
@@ -208,6 +401,10 @@ std::expected<void, AccessConfigError> compile_route_scripts(CompiledRoute &rout
     }
 
     if (pending.script) {
+        auto reserved = budget.reserve_programs(1, route_index, "script");
+        if (!reserved) {
+            return reserved;
+        }
         if (!compiler.compile_route_script) {
             return std::unexpected(route_error(AccessConfigErrorCode::InvalidField, route_index, "script",
                                                "route script compiler is not configured"));
@@ -331,9 +528,9 @@ bool response_status_has_no_content(std::int32_t status) noexcept {
     return (status >= 100 && status < 200) || status == 204 || status == 205 || status == 304;
 }
 
-std::expected<std::vector<CompiledTemplateEntry>, AccessConfigError> compile_context(const StringConfigMap &input,
-                                                                                     std::size_t route_index) {
-    auto compiled = compile_templates(input, route_index, "context");
+std::expected<std::vector<CompiledTemplateEntry>, AccessConfigError>
+compile_context(const StringConfigMap &input, std::size_t route_index, ProjectCompileBudget &budget) {
+    auto compiled = compile_templates(input, route_index, "context", budget);
     if (!compiled) {
         return compiled;
     }
@@ -452,7 +649,8 @@ std::expected<std::vector<Cidr>, AccessConfigError> compile_cidr_list(const std:
 
 std::expected<CompiledRoute, AccessConfigError> compile_route(const RouteConfig &source, std::size_t route_index,
                                                               PendingRouteCompile &pending,
-                                                              ProxyAddressSelectorFactory selector_factory) {
+                                                              ProxyAddressSelectorFactory selector_factory,
+                                                              ProjectCompileBudget &budget) {
     if (!source.path || source.path->empty()) {
         return std::unexpected(route_error(AccessConfigErrorCode::InvalidField, route_index, "path", "path is empty"));
     }
@@ -515,6 +713,10 @@ std::expected<CompiledRoute, AccessConfigError> compile_route(const RouteConfig 
                     return std::unexpected(route_error(AccessConfigErrorCode::InvalidField, route_index, "body",
                                                        "invalid base64 response body"));
                 }
+                if (response.body.size() > budget.limits().max_static_response_body_bytes) {
+                    return std::unexpected(route_error(AccessConfigErrorCode::LimitExceeded, route_index, "body",
+                                                       "response body bytes exceed the configured limit"));
+                }
                 response.body_kind = ResponseBodyKind::Base64;
             } else if (body.type == BodyType::Text) {
                 if (!body.content || body.content->empty()) {
@@ -528,17 +730,26 @@ std::expected<CompiledRoute, AccessConfigError> compile_route(const RouteConfig 
                     return std::unexpected(route_error(AccessConfigErrorCode::InvalidField, route_index, "body",
                                                        "invalid template response body"));
                 }
-                auto compiled_body = parse_template(*body.content);
+                auto compiled_body = compile_template(*body.content, route_index, "body", budget);
                 if (!compiled_body) {
-                    return std::unexpected(route_error(AccessConfigErrorCode::InvalidField, route_index, "body",
-                                                       "invalid template response body"));
+                    return std::unexpected(std::move(compiled_body.error()));
                 }
                 response.body_kind = ResponseBodyKind::Template;
                 response.body_template.emplace(std::move(*compiled_body));
             }
         }
+        if (response.body_kind == ResponseBodyKind::Text || response.body_kind == ResponseBodyKind::Base64) {
+            if (response.body.size() > budget.limits().max_static_response_body_bytes) {
+                return std::unexpected(route_error(AccessConfigErrorCode::LimitExceeded, route_index, "body",
+                                                   "response body bytes exceed the configured limit"));
+            }
+            auto accounted = budget.add_static_response(response.body.size(), route_index);
+            if (!accounted) {
+                return std::unexpected(std::move(accounted.error()));
+            }
+        }
 
-        auto headers = compile_templates(source.response_headers, route_index, "response_headers");
+        auto headers = compile_templates(source.response_headers, route_index, "response_headers", budget);
         if (!headers) {
             return std::unexpected(std::move(headers.error()));
         }
@@ -565,6 +776,10 @@ std::expected<CompiledRoute, AccessConfigError> compile_route(const RouteConfig 
             if (!encoded) {
                 return std::unexpected(route_error(AccessConfigErrorCode::InvalidField, route_index, "gzip",
                                                    "failed to precompress response body"));
+            }
+            auto accounted = budget.add_static_response(encoded->size(), route_index);
+            if (!accounted) {
+                return std::unexpected(std::move(accounted.error()));
             }
             response.gzip_level = source.gzip->level;
             response.gzip_body = std::move(*encoded);
@@ -625,29 +840,29 @@ std::expected<CompiledRoute, AccessConfigError> compile_route(const RouteConfig 
                                                "upstream selector factory returned null"));
         }
 
-        auto proxy_headers = compile_header_templates(source.proxy_headers, route_index, "proxy_headers");
+        auto proxy_headers = compile_header_templates(source.proxy_headers, route_index, "proxy_headers", budget);
         if (!proxy_headers) {
             return std::unexpected(std::move(proxy_headers.error()));
         }
         pending.proxy_headers = std::move(*proxy_headers);
 
-        auto response_headers = compile_header_templates(source.response_headers, route_index, "response_headers");
+        auto response_headers =
+                compile_header_templates(source.response_headers, route_index, "response_headers", budget);
         if (!response_headers) {
             return std::unexpected(std::move(response_headers.error()));
         }
         pending.response_headers = std::move(*response_headers);
 
-        auto context = compile_context(source.context, route_index);
+        auto context = compile_context(source.context, route_index, budget);
         if (!context) {
             return std::unexpected(std::move(context.error()));
         }
         proxy.context = std::move(*context);
 
         if (is_nonempty(source.rewrite)) {
-            auto rewrite = parse_template(*source.rewrite);
+            auto rewrite = compile_template(*source.rewrite, route_index, "rewrite", budget);
             if (!rewrite) {
-                return std::unexpected(
-                        route_error(AccessConfigErrorCode::InvalidField, route_index, "rewrite", "invalid template"));
+                return std::unexpected(std::move(rewrite.error()));
             }
             proxy.rewrite.emplace(std::move(*rewrite));
         }
@@ -693,8 +908,9 @@ std::expected<CompiledRoute, AccessConfigError> compile_route(const RouteConfig 
 
 class RouteDefiner {
 public:
-    RouteDefiner(std::vector<CompiledRoute> &routes, std::span<const PendingRouteCompile> pending) :
-        routes_(routes), pending_(pending) {}
+    RouteDefiner(std::vector<CompiledRoute> &routes, std::span<const PendingRouteCompile> pending,
+                 std::size_t max_path_variables) :
+        routes_(routes), pending_(pending), max_path_variables_(max_path_variables) {}
 
     void add_path_var_definer(std::uint32_t &route_index, std::string_view name, std::uint32_t index) {
         CompiledRoute &route = routes_[route_index];
@@ -703,6 +919,11 @@ public:
                 set_error(route_index, AccessConfigErrorCode::Conflict, "duplicated path variable");
                 return;
             }
+        }
+        if (route.path_variable_names.size() >= max_path_variables_) {
+            set_error(route_index, AccessConfigErrorCode::LimitExceeded,
+                      "path variable count exceeds the configured limit");
+            return;
         }
         route.path_variable_names.emplace_back(name);
     }
@@ -739,6 +960,7 @@ private:
     std::optional<AccessConfigError> error_;
     std::uint32_t last_node_id_ = util::RoutePathMatcher<std::uint32_t>::kInvalidIndex;
     std::uint32_t last_route_ = kNoRoute;
+    std::size_t max_path_variables_ = 0;
 };
 
 } // namespace
@@ -774,25 +996,40 @@ bool ProjectRouteSnapshot::ready_for_publish() const noexcept {
 }
 
 ProjectSnapshotResult compile_project_config(std::string_view project, const ProjectConfig &config) {
-    return compile_project_config(project, config, {}, {});
+    return compile_project_config(project, config, {}, {}, kAccessConfigLimits);
 }
 
 ProjectSnapshotResult compile_project_config(std::string_view project, const ProjectConfig &config,
                                              ScriptCompilerAdapter compiler) {
-    return compile_project_config(project, config, compiler, {});
+    return compile_project_config(project, config, compiler, {}, kAccessConfigLimits);
 }
 
 ProjectSnapshotResult compile_project_config(std::string_view project, const ProjectConfig &config,
                                              ScriptCompilerAdapter compiler,
-                                             ProxyAddressSelectorFactory selector_factory) {
+                                             ProxyAddressSelectorFactory selector_factory,
+                                             const AccessConfigLimits &limits) {
     if (project.empty()) {
         return std::unexpected(project_error("project", "project name is empty"));
+    }
+    auto project_limit = validate_project_name_limit(project, limits);
+    if (!project_limit) {
+        return std::unexpected(std::move(project_limit.error()));
+    }
+    auto config_limits = validate_project_config_limits(config, limits);
+    if (!config_limits) {
+        return std::unexpected(std::move(config_limits.error()));
     }
     if (!config.hosts || config.hosts->empty()) {
         return std::optional<ProjectRouteSnapshot>{};
     }
     if (!config.routes) {
         return std::unexpected(project_error("routes", "routes is null while host is configured"));
+    }
+
+    ProjectCompileBudget budget(limits.project_route);
+    auto accounted = budget.account_config(project, config);
+    if (!accounted) {
+        return std::unexpected(std::move(accounted.error()));
     }
 
     ProjectRouteSnapshot snapshot;
@@ -808,14 +1045,14 @@ ProjectSnapshotResult compile_project_config(std::string_view project, const Pro
             return std::unexpected(route_error(AccessConfigErrorCode::InvalidField, i, {}, "route entry is null"));
         }
         PendingRouteCompile &route_pending = pending.emplace_back();
-        auto route = compile_route(*source, i, route_pending, selector_factory);
+        auto route = compile_route(*source, i, route_pending, selector_factory, budget);
         if (!route) {
             return std::unexpected(std::move(route.error()));
         }
         snapshot.routes_.push_back(std::move(*route));
     }
 
-    RouteDefiner definer(snapshot.routes_, pending);
+    RouteDefiner definer(snapshot.routes_, pending, limits.project_route.max_path_variables);
     util::RoutePathMatcher<std::uint32_t>::Builder<std::uint32_t, RouteDefiner> path_builder(definer);
     for (std::uint32_t i = 0; i < snapshot.routes_.size(); ++i) {
         path_builder.add_route(snapshot.routes_[i].path, i);
@@ -825,7 +1062,7 @@ ProjectSnapshotResult compile_project_config(std::string_view project, const Pro
         return std::unexpected(*definer.error());
     }
     for (std::size_t i = 0; i < snapshot.routes_.size(); ++i) {
-        auto compiled = compile_route_scripts(snapshot.routes_[i], i, pending[i], compiler, constants);
+        auto compiled = compile_route_scripts(snapshot.routes_[i], i, pending[i], compiler, constants, budget);
         if (!compiled) {
             return std::unexpected(std::move(compiled.error()));
         }
@@ -878,6 +1115,9 @@ ProjectSnapshotResult compile_project_config(std::string_view project, const Pro
         return std::unexpected(std::move(host_matcher.error()));
     }
     snapshot.host_matcher_ = std::move(*host_matcher);
+    snapshot.estimated_memory_bytes_ = budget.estimated_bytes();
+    snapshot.static_response_bytes_ = budget.static_response_bytes();
+    snapshot.compiled_program_count_ = budget.compiled_programs();
     return std::optional<ProjectRouteSnapshot>(std::move(snapshot));
 }
 

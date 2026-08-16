@@ -1,5 +1,7 @@
 #include "GrayMatchStore.h"
 
+#include "../config/AccessConfigLimits.h"
+
 #include <utility>
 
 namespace fiber::access_server {
@@ -16,6 +18,10 @@ std::expected<GrayMatchUpdateStatus, AccessConfigError>
 GrayMatchStore::apply(const std::optional<GrayMatchConfig> &config) {
     if (!config) {
         return GrayMatchUpdateStatus::IgnoredEmpty;
+    }
+    auto within_limits = validate_gray_match_config_limits(*config);
+    if (!within_limits) {
+        return std::unexpected(std::move(within_limits.error()));
     }
 
     auto candidate = std::make_shared<Snapshot>();

@@ -189,6 +189,7 @@ function installApiMock() {
             detail: 'ready',
             contractVersion: 1,
             revision: 'test',
+            limits: null,
           },
           publicationWorker: { status: 'ready', detail: 'ready' },
           activationCollector: { status: 'unavailable', detail: 'not implemented' },

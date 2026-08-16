@@ -198,12 +198,37 @@ TEST(AccessConfigWatcherTest, ReconcilesProjectsAndRetainsLastValidSnapshots) {
         EXPECT_TRUE(store.pin()->match_host("b.example.com"));
         const auto valid = store.pin();
 
+        service.push(fiber::access_server::kProjectListDataId,
+                     std::string(fiber::access_server::kAccessConfigLimits.project_list.max_payload_bytes + 1U, 'x'),
+                     "oversized-list");
+        co_await yield_updates();
+        EXPECT_EQ(watcher.project_subscription_count(), 2u);
+        EXPECT_EQ(store.pin(), valid);
+        readiness_snapshot = readiness.current();
+        EXPECT_TRUE(readiness_snapshot.value);
+        if (readiness_snapshot.value) {
+            EXPECT_EQ(readiness_snapshot.value->state, fiber::access_server::AccessConfigReadinessState::Unavailable);
+        }
+        EXPECT_TRUE(watcher.last_failure());
+        if (watcher.last_failure()) {
+            EXPECT_EQ(watcher.last_failure()->stage, fiber::access_server::AccessConfigWatcherFailureStage::Decode);
+            EXPECT_EQ(watcher.last_failure()->error.code, fiber::access_server::AccessConfigErrorCode::LimitExceeded);
+        }
+
+        service.push(fiber::access_server::kProjectListDataId, "a;b", "valid-list");
+        co_await yield_updates();
+        readiness_snapshot = readiness.current();
+        EXPECT_TRUE(readiness_snapshot.value);
+        if (readiness_snapshot.value) {
+            EXPECT_EQ(readiness_snapshot.value->state, fiber::access_server::AccessConfigReadinessState::Ready);
+        }
+
         service.push("ploto.unified-access.route.a", route_config(1, "changed.example.com", "orders"), "same");
         service.push("ploto.unified-access.route.b", "{", "invalid");
         co_await yield_updates();
         EXPECT_EQ(store.pin(), valid);
         EXPECT_FALSE(store.pin()->match_host("changed.example.com"));
-        EXPECT_EQ(watcher.failed_updates(), 1u);
+        EXPECT_EQ(watcher.failed_updates(), 2u);
         EXPECT_TRUE(watcher.last_failure());
         if (watcher.last_failure()) {
             EXPECT_EQ(watcher.last_failure()->data_id, "ploto.unified-access.route.b");
