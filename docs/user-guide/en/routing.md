@@ -352,6 +352,13 @@ A non-empty `service` takes precedence; `addresses` is not its failure fallback.
 static addresses. Without a scheme, port 443 implies HTTPS and other ports imply HTTP. Explicitly specify
 `http://` or `https://` to avoid port-dependent meaning.
 
+Outbound HTTPS trust is process-wide: `ACCESS_SERVER_UPSTREAM_TLS_MODE` is `legacy_insecure` by default,
+or can be set to `system_ca` or `custom_ca` (with `ACCESS_SERVER_UPSTREAM_TLS_CA_FILE`). Secure modes verify
+the endpoint hostname or IP identity, and an invalid trust store prevents startup. Route-specific CA, SNI,
+and verification-name overrides are not currently accepted because the pinned connection pool cannot yet
+isolate connections by TLS transport profile. Changing CA bundle contents requires a rolling restart so
+existing connections established under the previous trust store are drained.
+
 ### 8.3 Request and response forwarding
 
 - the original method is preserved;

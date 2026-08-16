@@ -1,6 +1,8 @@
 #ifndef FIBER_ACCESS_SERVER_PROXY_UPSTREAM_CONNECTION_H
 #define FIBER_ACCESS_SERVER_PROXY_UPSTREAM_CONNECTION_H
 
+#include "UpstreamTlsClientPolicy.h"
+
 #include <fiber/async/Task.h>
 #include <fiber/common/IoError.h>
 #include <fiber/http/StealableHttp1ConnectionPoolSet.h>
@@ -30,6 +32,7 @@ enum class ProxyConnectErrorCode : std::uint8_t {
     Resolve,
     PoolShutdown,
     Connect,
+    Tls,
 };
 
 struct ProxyConnectError {
@@ -45,7 +48,7 @@ struct ProxyUpstreamConnection {
 
 [[nodiscard]] async::Task<std::expected<ProxyUpstreamConnection, ProxyConnectError>>
 acquire_proxy_upstream_connection(http::StealableHttp1ConnectionPoolSet &pool, ProxyDnsResolver dns_resolver,
-                                  const http::Http1ConnectionGroupKey &key,
+                                  const http::Http1ConnectionGroupKey &key, const UpstreamTlsClientPolicy &tls_policy,
                                   std::chrono::milliseconds connect_timeout) noexcept;
 
 } // namespace fiber::access_server

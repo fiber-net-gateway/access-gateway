@@ -158,6 +158,8 @@ cp native/access-server/access-server.env.example access-server.env
 - Prometheus 监听 `0.0.0.0:16689`；
 - HTTP worker 数在启动时根据进程 CPU affinity 和 cgroup v1/v2 CPU quota 自动确定；
 - 默认 request body 上限 400 MiB；
+- upstream HTTPS 默认保持 Java `legacy_insecure` 兼容模式；可显式切换系统 CA 或挂载的
+  自定义 CA bundle 校验；
 - 客户端地址默认取 socket peer，忽略所有 forwarding header；
 - access log 默认只记录经安全编码的 path，不记录 query value；正常请求默认采样率为
   10000 bps（全量），失败请求始终保留；
@@ -178,6 +180,20 @@ cp native/access-server/access-server.env.example access-server.env
 CAT 默认关闭；任一 `CAT_*` 设置非空后必须给出完整 app key、hostname、IP，以及
 至少一个 router 或 bootstrap collector。CAT 不可用会在启动阶段 fail closed，不会
 静默退化为无 trace 的生产实例。
+
+`ACCESS_SERVER_UPSTREAM_TLS_MODE` 控制出站 HTTPS 的进程级信任策略：
+
+- `legacy_insecure`（默认）保持 Java `InsecureTrustManagerFactory` 行为，不校验 upstream 证书；
+- `system_ca` 使用 Fiber 探测到的系统 CA bundle；
+- `custom_ca` 要求 `ACCESS_SERVER_UPSTREAM_TLS_CA_FILE` 指向已挂载的 PEM CA bundle。
+
+安全模式会在 EventLoop 启动前初始化 trust store，路径不存在或 bundle 无效时启动失败，错误和日志
+不回显路径。hostname endpoint 自动发送同名 SNI 并校验证书名；IP endpoint 不发送 IP-valued SNI，
+而是校验证书的 IP identity。该策略在进程生命周期内固定，因此当前连接池不会跨不同 trust profile
+复用连接。CA bundle 内容变更不作为热更新；需要滚动重启以重新验证文件并排空按旧 trust store
+建立的连接。路由级 CA、SNI 和独立校验名尚未开放；它们依赖 Fiber 连接池按 TLS transport
+profile 隔离，跟踪于
+[fiber-gateway-cpp #28](https://github.com/fiber-net-gateway/fiber-gateway-cpp/issues/28)。
 
 `ACCESS_SERVER_CLIENT_METADATA_MODE` 控制请求来源信任边界：
 

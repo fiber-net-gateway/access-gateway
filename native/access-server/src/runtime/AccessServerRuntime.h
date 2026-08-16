@@ -43,6 +43,7 @@ enum class AccessServerRuntimeErrorCode : std::uint8_t {
     CreateConfigService,
     CreateNamingService,
     CreateCatClient,
+    InitializeUpstreamTls,
     AllocateRuntime,
     InitializeWorkers,
     StartNacosClient,
@@ -108,8 +109,9 @@ private:
                         net::SocketAddress metrics_listen_address, net::ListenOptions listen_options,
                         std::chrono::milliseconds initial_config_timeout, std::size_t default_max_request_body_size,
                         bool test_mode, ClientMetadataResolverOptions client_metadata_options,
-                        AccessLogOptions access_log_options, AccessConfigWatcherOptions watcher_options,
-                        GrayConfigWatcherOptions gray_options, TlsCertificateWatcherOptions tls_certificate_options,
+                        AccessLogOptions access_log_options, UpstreamTlsClientPolicy upstream_tls_client_policy,
+                        AccessConfigWatcherOptions watcher_options, GrayConfigWatcherOptions gray_options,
+                        TlsCertificateWatcherOptions tls_certificate_options,
                         AccessServiceDiscoveryOptions service_discovery_options,
                         std::unique_ptr<cat::CatClient> cat_client, std::unique_ptr<nacos::NacosClient> nacos_client,
                         std::unique_ptr<nacos::ConfigService> config_service,
@@ -141,6 +143,7 @@ private:
     bool test_mode_ = false;
     ClientMetadataResolverOptions client_metadata_options_;
     AccessLogOptions access_log_options_;
+    UpstreamTlsClientPolicy upstream_tls_client_policy_;
     http::HttpServerOptions http_server_options_;
     std::unique_ptr<cat::CatClient> cat_client_;
     std::unique_ptr<nacos::NacosClient> nacos_client_;

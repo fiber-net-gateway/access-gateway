@@ -18,6 +18,7 @@ add_library(access_server_core STATIC
     "${CMAKE_CURRENT_LIST_DIR}/src/execution/ResponseExecutor.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/execution/ResponsePlan.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/execution/TemplateEvaluator.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/execution/UpstreamTlsClientPolicy.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/observability/AccessLogPolicy.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/observability/AccessConfigMetrics.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/observability/AccessDiscoveryMetrics.cpp"

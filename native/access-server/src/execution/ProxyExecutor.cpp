@@ -46,6 +46,7 @@ enum class ProxyFailurePhase : std::uint8_t {
     ResolveUpstream,
     PoolShutdown,
     Connect,
+    Tls,
     BuildHeaders,
     SendHeader,
     ReadRequestBody,
@@ -81,6 +82,9 @@ ProxyFailure from_connect_error(const ProxyConnectError &connect_error) noexcept
             break;
         case ProxyConnectErrorCode::Connect:
             break;
+        case ProxyConnectErrorCode::Tls:
+            phase = ProxyFailurePhase::Tls;
+            break;
     }
     return failure(phase, connect_error.message, connect_error.io_error);
 }
@@ -106,6 +110,8 @@ std::string_view proxy_failure_phase_name(ProxyFailurePhase phase) noexcept {
             return "pool_shutdown";
         case ProxyFailurePhase::Connect:
             return "connect";
+        case ProxyFailurePhase::Tls:
+            return "tls";
         case ProxyFailurePhase::BuildHeaders:
             return "build_headers";
         case ProxyFailurePhase::SendHeader:
@@ -148,6 +154,8 @@ Exception map_proxy_failure(const ProxyFailure &proxy_failure) noexcept {
         case ProxyFailurePhase::PoolShutdown:
         case ProxyFailurePhase::Connect:
             return http_client_error(502, "HTTP_CLIENT_CONNECT_ERROR", "cannot connect to upstream");
+        case ProxyFailurePhase::Tls:
+            return http_client_error(502, "HTTP_CLIENT_TLS_ERROR", "upstream TLS verification or negotiation failed");
         case ProxyFailurePhase::SendHeader:
         case ProxyFailurePhase::SendRequestBody:
             return http_client_error(502, "SEND_REQUEST_ERROR", "send request error");
@@ -174,6 +182,7 @@ bool is_upstream_call_failure(ProxyFailurePhase phase) noexcept {
         case ProxyFailurePhase::ResolveUpstream:
         case ProxyFailurePhase::PoolShutdown:
         case ProxyFailurePhase::Connect:
+        case ProxyFailurePhase::Tls:
         case ProxyFailurePhase::SendHeader:
         case ProxyFailurePhase::SendRequestBody:
         case ProxyFailurePhase::ReadResponseHeader:
@@ -673,7 +682,7 @@ async::Task<Result<void>> ProxyExecutor::execute_impl(http::HttpExchange &exchan
         provider_transaction.add_upstream(selected->host_header, attempt + 1);
 
         auto connected = co_await acquire_proxy_upstream_connection(pool_, dns_resolver_, *selected->connection_key,
-                                                                    options_.connect_timeout);
+                                                                    options_.upstream_tls, options_.connect_timeout);
         if (!connected) {
             ProxyFailure connect_failure = from_connect_error(connected.error());
             record_provider_failure(provider_transaction, connect_failure);

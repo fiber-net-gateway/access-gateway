@@ -743,6 +743,53 @@ std::size_t count_header(std::string_view response, std::string_view header) {
     return count;
 }
 
+TEST(ProxyExecutorTest, ReturnsStableRedactedTlsErrorForTrustStoreFailure) {
+    fiber::event::EventLoopGroup group(1);
+    fiber::http::StealableHttp1ConnectionPoolSet pool(group);
+    ASSERT_TRUE(pool.init());
+
+    auto config = project_config(443);
+    (**config.routes->begin()).addresses = {
+            std::optional<std::string>("https://127.0.0.1:443"),
+    };
+    fiber::access_server::RouteConfigStore store;
+    auto published = store.apply("orders", std::move(config));
+    ASSERT_TRUE(published) << published.error().message;
+
+    constexpr std::string_view kMissingCaPath = "/missing/sensitive-upstream-ca.pem";
+    fiber::access_server::ProxyExecutorOptions options;
+    options.upstream_tls = {
+            .verification = fiber::access_server::UpstreamTlsVerificationMode::CustomCa,
+            .ca_file = std::string(kMissingCaPath),
+    };
+    fiber::access_server::ProxyExecutor executor(pool, {}, {}, std::move(options));
+
+    std::promise<void> request_promise;
+    auto request_done = request_promise.get_future();
+    std::string output;
+    std::string request = "GET /proxy HTTP/1.1\r\n"
+                          "Host: api.example.com\r\n"
+                          "Connection: close\r\n\r\n";
+    group.start();
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_downstream(&group.at(0), &store, executor.adapter(), std::move(request), &output, &request_promise);
+    });
+    ASSERT_EQ(request_done.wait_for(5s), std::future_status::ready);
+    EXPECT_TRUE(output.starts_with("HTTP/1.1 502 Bad Gateway\r\n"));
+    EXPECT_NE(output.find("HTTP_CLIENT_TLS_ERROR"), std::string::npos);
+    EXPECT_EQ(output.find(kMissingCaPath), std::string::npos);
+
+    std::promise<void> shutdown_promise;
+    auto shutdown_done = shutdown_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
+        co_await pool.shutdown_async();
+        shutdown_promise.set_value();
+    });
+    ASSERT_EQ(shutdown_done.wait_for(2s), std::future_status::ready);
+    group.stop();
+    group.join();
+}
+
 TEST(ProxyExecutorTest, StreamsJavaCompatibleRequestsAndReusesTheUpstreamConnection) {
     fiber::event::EventLoopGroup group(1);
     fiber::http::StealableHttp1ConnectionPoolSet pool(group);

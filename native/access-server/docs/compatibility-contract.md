@@ -531,6 +531,15 @@ Host header 对 80/443 省略默认端口。没有配置/健康实例时返回 5
 `UPSTREAM_NO_HOSTS`，实例均处于熔断状态时返回 503 `UPSTREAM_CIRCUIT_BREAK`；这两类
 选择失败发生在连接池和 socket 建连之前，不得映射为 `HTTP_CLIENT_CONNECT_ERROR`。
 
+upstream HTTPS 的进程级校验模式默认为 `legacy_insecure`，保留 Java 不验证服务端证书的行为。
+`system_ca` 使用系统 trust store；`custom_ca` 使用启动配置指定的 PEM CA bundle。安全模式下，
+hostname 同时作为 SNI 和默认验证名；数字 IP 不发送 IP-valued SNI，而通过独立 `verify_name`
+校验证书 IP identity。trust store 在 EventLoop 启动前验证，失败信息不包含 CA 文件路径。
+能够明确识别的证书验证或 ALPN 失败返回 502 `HTTP_CLIENT_TLS_ERROR`；TCP 建连失败仍返回
+`HTTP_CLIENT_CONNECT_ERROR`。当前策略对整个进程固定，route wire 尚不接受独立 CA/SNI/
+验证名。CA bundle 内容变更要求滚动重启并排空旧连接，不定义文件热更新语义。route 级能力等待
+Fiber connection pool 支持 TLS transport-profile 隔离。
+
 ### 10.3 Request header
 
 下列 hop-by-hop/header 不直接复制，名称比较大小写不敏感：
@@ -727,6 +736,7 @@ name 包含 Java class name，C++ 不伪造 Java 类型名，固定使用
 | request body 超限 | 413 | `REQ_BODY_TOO_LARGE` | `request body is too large` |
 | upstream 无可用实例 | 503 | `UPSTREAM_NO_HOSTS` | `no available service instance` |
 | upstream 实例均熔断 | 503 | `UPSTREAM_CIRCUIT_BREAK` | `service upstream circuit breaker is open` |
+| upstream TLS 校验/协商失败 | 502 | `HTTP_CLIENT_TLS_ERROR` | `upstream TLS verification or negotiation failed` |
 
 HTML Content-Type 为 `text/html`。当前实现按 Java 页面精确拼接 status、name、
 message、trace ID 和 null meta；Java 对 message 没有 HTML escaping，C++ 为保持当前

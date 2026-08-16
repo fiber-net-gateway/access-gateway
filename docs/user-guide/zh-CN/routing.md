@@ -335,6 +335,13 @@ timeout: 20s
 省略 `service`。未写 scheme 时，端口 443 推导为 HTTPS，其他端口推导为 HTTP；建议始终显式写
 `http://` 或 `https://`，避免配置含义依赖端口。
 
+出站 HTTPS 信任策略当前为进程级：`ACCESS_SERVER_UPSTREAM_TLS_MODE` 默认是
+`legacy_insecure`，也可设为 `system_ca` 或 `custom_ca`（后者同时配置
+`ACCESS_SERVER_UPSTREAM_TLS_CA_FILE`）。安全模式会验证 endpoint 的 hostname 或 IP identity，
+trust store 无效则进程拒绝启动。当前不接受 route 级 CA、SNI 或验证名覆盖，因为固定版本的连接池
+尚不能按 TLS transport profile 隔离连接。CA bundle 内容变更需要滚动重启，以排空按旧 trust store
+建立的连接。
+
 ### 8.3 请求与响应转发
 
 - 原始 method 保留；
