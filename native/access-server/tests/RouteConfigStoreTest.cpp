@@ -25,6 +25,7 @@ using fiber::access_server::RouteBodyConfig;
 using fiber::access_server::RouteConfig;
 using fiber::access_server::RouteConfigStore;
 using fiber::access_server::RouteType;
+using fiber::access_server::UpstreamTlsVerificationMode;
 
 static_assert(!std::is_default_constructible_v<PreparedProjectUpdate>);
 static_assert(!std::is_copy_constructible_v<PreparedProjectUpdate>);
@@ -335,6 +336,28 @@ TEST(RouteConfigStoreTest, RejectsInvalidGzipCandidateWithoutReplacingPublishedS
     ASSERT_FALSE(rejected);
     EXPECT_EQ(rejected.error().field, "routes[0].gzip");
     EXPECT_EQ(store.pin(), before);
+    EXPECT_TRUE(store.pin()->match_host("api.example.com"));
+    EXPECT_FALSE(store.pin()->match_host("new.example.com"));
+}
+
+TEST(RouteConfigStoreTest, RejectsInvalidUpstreamTlsCandidateWithoutReplacingPublishedSnapshot) {
+    RouteConfigStore store;
+    ASSERT_TRUE(store.apply("demo", project_config(1, "api.example.com", "/one")));
+    auto before = store.pin();
+
+    ProjectConfig invalid = project_config(2, "new.example.com", "/secure");
+    (*invalid.routes)[0]->upstream_tls = fiber::access_server::RouteUpstreamTlsConfig{
+            .generation = 2,
+            .verification = UpstreamTlsVerificationMode::CustomCa,
+            .ca_pem = "not a certificate",
+    };
+
+    auto rejected = store.apply("demo", invalid);
+
+    ASSERT_FALSE(rejected);
+    EXPECT_EQ(rejected.error().field, "routes[0].upstream_tls.ca_pem");
+    EXPECT_EQ(store.pin(), before);
+    EXPECT_EQ(store.current_version("demo"), 1);
     EXPECT_TRUE(store.pin()->match_host("api.example.com"));
     EXPECT_FALSE(store.pin()->match_host("new.example.com"));
 }

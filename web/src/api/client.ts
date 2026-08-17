@@ -95,7 +95,7 @@ function hasPositiveIntegers(value: Record<string, unknown>, keys: readonly stri
 function isAccessConfigLimits(value: unknown): value is AccessConfigLimits {
   if (
     !isRecord(value) ||
-    value.schemaVersion !== 1 ||
+    value.schemaVersion !== 2 ||
     !isRecord(value.projectList) ||
     !isRecord(value.projectRoute) ||
     !isRecord(value.grayRules)
@@ -127,6 +127,8 @@ function isAccessConfigLimits(value: unknown): value is AccessConfigLimits {
       'maxCidrBytes',
       'maxAddressesPerRoute',
       'maxAddressBytes',
+      'maxUpstreamTlsProfiles',
+      'maxUpstreamTlsCaPemBytes',
       'maxStaticResponseBodyBytes',
       'maxStaticResponseBytes',
       'maxPathVariables',

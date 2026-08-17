@@ -29,6 +29,7 @@
 #include <fiber/net/TlsContext.h>
 #include "QuicTestTlsCertificate.h"
 #include "execution/ProxyUpstreamConnection.h"
+#include "routing/UpstreamTlsTransportProfile.h"
 
 namespace {
 
@@ -215,6 +216,7 @@ struct ConnectionScenarioResult {
     std::size_t connection_loop_index = 0;
     bool first_hit = false;
     bool second_hit = false;
+    bool rotated_hit = false;
     bool tls_enabled = false;
     bool verify_peer = false;
     std::string ca_file;
@@ -222,6 +224,7 @@ struct ConnectionScenarioResult {
     std::string verify_name;
     fiber::access_server::ProxyConnectionObservation observation;
     fiber::access_server::ProxyConnectionObservation second_observation;
+    fiber::access_server::ProxyConnectionObservation rotated_observation;
 };
 
 fiber::async::DetachedTask run_tls_server(fiber::net::TcpListener *listener, fiber::net::TlsContext *context,
@@ -245,7 +248,7 @@ fiber::async::DetachedTask run_tls_server(fiber::net::TcpListener *listener, fib
 
 fiber::async::DetachedTask run_tls_client_scenario(fiber::http::StealableHttp1ConnectionPoolSet *pool,
                                                    fiber::http::Http1ConnectionGroupKey key, ResolverState *resolver,
-                                                   fiber::access_server::UpstreamTlsClientPolicy policy,
+                                                   fiber::access_server::UpstreamTlsClientPolicyView policy,
                                                    std::promise<ConnectionScenarioResult> *promise) {
     ConnectionScenarioResult result;
     auto connected = co_await fiber::access_server::acquire_proxy_upstream_connection(
@@ -272,7 +275,8 @@ fiber::async::DetachedTask run_tls_client_scenario(fiber::http::StealableHttp1Co
 }
 
 ConnectionScenarioResult run_tls_scenario(const std::string &certificate_path, const std::string &private_key_path,
-                                          std::string_view host, fiber::access_server::UpstreamTlsClientPolicy policy,
+                                          std::string_view host,
+                                          fiber::access_server::UpstreamTlsClientPolicyView policy,
                                           bool use_ip_key = false) {
     fiber::event::EventLoopGroup group(1);
     fiber::http::StealableHttp1ConnectionPoolSet pool(group);
@@ -336,9 +340,8 @@ fiber::async::DetachedTask run_ip_scenario(fiber::http::StealableHttp1Connection
     ConnectionScenarioResult result;
     const fiber::access_server::ProxyDnsResolver dns_resolver =
             resolver ? resolver_adapter(*resolver) : fiber::access_server::ProxyDnsResolver{};
-    auto connected = co_await fiber::access_server::acquire_proxy_upstream_connection(*pool, dns_resolver, key,
-                                                                                      kLegacyUpstreamTls, 500ms,
-                                                                                      happy_eyeballs);
+    auto connected = co_await fiber::access_server::acquire_proxy_upstream_connection(
+            *pool, dns_resolver, key, kLegacyUpstreamTls, 500ms, happy_eyeballs);
     result.resolver_calls = resolver ? resolver->calls : 0;
     if (!connected) {
         result.error = connected.error().io_error;
@@ -384,6 +387,53 @@ fiber::async::DetachedTask run_pool_hit_scenario(fiber::http::StealableHttp1Conn
         result.second_observation = second->observation;
         result.second_hit = second->lease.hit();
         second->lease.reset();
+    }
+    co_await pool->shutdown_async();
+    promise->set_value(std::move(result));
+}
+
+fiber::async::DetachedTask run_pool_affinity_rotation_scenario(fiber::http::StealableHttp1ConnectionPoolSet *pool,
+                                                               fiber::http::Http1ConnectionGroupKey original_key,
+                                                               fiber::http::Http1ConnectionGroupKey rotated_key,
+                                                               ResolverState *resolver,
+                                                               std::promise<ConnectionScenarioResult> *promise) {
+    ConnectionScenarioResult result;
+    auto first = co_await fiber::access_server::acquire_proxy_upstream_connection(
+            *pool, resolver_adapter(*resolver), original_key, kLegacyUpstreamTls, 500ms);
+    if (!first) {
+        result.error = first.error().io_error;
+        result.observation = first.error().observation;
+        co_await pool->shutdown_async();
+        promise->set_value(std::move(result));
+        co_return;
+    }
+    result.observation = first->observation;
+    result.first_hit = first->lease.hit();
+    first->lease.reset();
+
+    auto second = co_await fiber::access_server::acquire_proxy_upstream_connection(
+            *pool, resolver_adapter(*resolver), original_key, kLegacyUpstreamTls, 500ms);
+    if (!second) {
+        result.error = second.error().io_error;
+        result.second_observation = second.error().observation;
+        co_await pool->shutdown_async();
+        promise->set_value(std::move(result));
+        co_return;
+    }
+    result.second_observation = second->observation;
+    result.second_hit = second->lease.hit();
+    second->lease.reset();
+
+    auto rotated = co_await fiber::access_server::acquire_proxy_upstream_connection(
+            *pool, resolver_adapter(*resolver), rotated_key, kLegacyUpstreamTls, 500ms);
+    result.resolver_calls = resolver->calls;
+    if (!rotated) {
+        result.error = rotated.error().io_error;
+        result.rotated_observation = rotated.error().observation;
+    } else {
+        result.rotated_observation = rotated->observation;
+        result.rotated_hit = rotated->lease.hit();
+        rotated->lease.reset();
     }
     co_await pool->shutdown_async();
     promise->set_value(std::move(result));
@@ -672,6 +722,64 @@ TEST(ProxyUpstreamConnectionTest, PoolHitBypassesDns) {
     group.join();
 }
 
+TEST(ProxyUpstreamConnectionTest, TlsProfileGenerationDoesNotReuseAnOldIdleLease) {
+    fiber::event::EventLoopGroup group(1);
+    fiber::http::StealableHttp1ConnectionPoolSet pool(group);
+    ASSERT_TRUE(pool.init());
+    fiber::net::TcpListener listener(group.at(0));
+    ASSERT_TRUE(listener.bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), {}));
+    auto port = bound_port(listener.fd());
+    ASSERT_TRUE(port);
+    auto base_key = fiber::http::Http1ConnectionGroupKey::from_name("upstream.example", *port,
+                                                                    fiber::http::Http1ConnectionGroupKey::Scheme::Http);
+    ASSERT_TRUE(base_key);
+
+    auto original_profile = fiber::access_server::compile_upstream_tls_transport_profile(
+            {
+                    .generation = 1,
+                    .verification = fiber::access_server::UpstreamTlsVerificationMode::Inherit,
+            },
+            0);
+    auto rotated_profile = fiber::access_server::compile_upstream_tls_transport_profile(
+            {
+                    .generation = 2,
+                    .verification = fiber::access_server::UpstreamTlsVerificationMode::Inherit,
+            },
+            0);
+    ASSERT_TRUE(original_profile);
+    ASSERT_TRUE(rotated_profile);
+    auto original_key = original_profile->connection_key(*base_key);
+    auto rotated_key = rotated_profile->connection_key(*base_key);
+    ASSERT_TRUE(original_key);
+    ASSERT_TRUE(rotated_key);
+    ASSERT_NE(*original_key, *rotated_key);
+
+    ResolverState resolver{
+            .addresses = {fiber::net::IpAddress::loopback_v4()},
+    };
+    std::promise<ConnectionScenarioResult> promise;
+    auto future = promise.get_future();
+    group.start();
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_pool_affinity_rotation_scenario(&pool, *original_key, *rotated_key, &resolver, &promise);
+    });
+
+    const ConnectionScenarioResult result = future.get();
+    EXPECT_EQ(result.error, fiber::common::IoErr::None);
+    EXPECT_FALSE(result.first_hit);
+    EXPECT_TRUE(result.second_hit);
+    EXPECT_FALSE(result.rotated_hit);
+    EXPECT_EQ(result.resolver_calls, 2U);
+    EXPECT_EQ(result.observation.pool_misses, 1U);
+    EXPECT_EQ(result.second_observation.pool_hits, 1U);
+    EXPECT_EQ(result.rotated_observation.pool_misses, 1U);
+    EXPECT_EQ(result.rotated_observation.connect_success, 1U);
+
+    listener.close();
+    group.stop();
+    group.join();
+}
+
 TEST(ProxyUpstreamConnectionTest, StealsAnIdleConnectionFromAnotherWorker) {
     fiber::event::EventLoopGroup group(2);
     fiber::http::StealableHttp1ConnectionPoolSet pool(group);
@@ -809,6 +917,39 @@ TEST(ProxyUpstreamConnectionTest, CustomCaVerifiesPeerAndDerivesSniFromUpstreamN
     EXPECT_EQ(result.server_name, "localhost");
     EXPECT_TRUE(result.verify_name.empty());
     EXPECT_EQ(result.observation.dns_success, 1U);
+    EXPECT_EQ(result.observation.connect_success, 1U);
+}
+
+TEST(ProxyUpstreamConnectionTest, RouteProfileSeparatesSniFromCertificateVerificationName) {
+    const auto &chain = trusted_test_tls_chain();
+    ASSERT_TRUE(chain);
+    fiber::test::QuicTestTlsFile certificate("access-upstream-profile-cert", chain->server_certificate_pem);
+    fiber::test::QuicTestTlsFile private_key("access-upstream-profile-key", chain->server_private_key_pem);
+    ASSERT_TRUE(certificate.valid());
+    ASSERT_TRUE(private_key.valid());
+
+    auto profile = fiber::access_server::compile_upstream_tls_transport_profile(
+            {
+                    .generation = 9,
+                    .verification = fiber::access_server::UpstreamTlsVerificationMode::CustomCa,
+                    .ca_pem = chain->ca_certificate_pem,
+                    .server_name = "sni.example.com",
+                    .verify_name = "localhost",
+            },
+            0);
+    ASSERT_TRUE(profile) << profile.error().message;
+    const fiber::access_server::UpstreamTlsClientPolicy environment;
+    const auto effective = fiber::access_server::effective_upstream_tls_client_policy(environment, &*profile);
+
+    const ConnectionScenarioResult result =
+            run_tls_scenario(certificate.path(), private_key.path(), "endpoint.example.com", effective);
+
+    EXPECT_EQ(result.error, fiber::common::IoErr::None);
+    EXPECT_EQ(result.server_error, fiber::common::IoErr::None);
+    EXPECT_TRUE(result.verify_peer);
+    EXPECT_EQ(result.ca_file, profile->ca_file());
+    EXPECT_EQ(result.server_name, "sni.example.com");
+    EXPECT_EQ(result.verify_name, "localhost");
     EXPECT_EQ(result.observation.connect_success, 1U);
 }
 

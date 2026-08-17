@@ -144,6 +144,55 @@ test('reports RESPONSE gzip values and combinations rejected by access-server', 
   }
 })
 
+test('accepts and validates route upstream TLS transport profiles', () => {
+  const valid = analyzeRouteSource({
+    id: crypto.randomUUID(),
+    format: 'yaml',
+    source: `path: /secure
+type: PROXY
+service: orders
+upstream_tls:
+  generation: 3
+  verification: CUSTOM_CA
+  ca_pem: test-ca
+  server_name: sni.example.com
+  verify_name: 192.0.2.1`,
+  })
+  assert.deepEqual(valid.issues, [])
+  assert.equal(valid.hasUpstreamTls, true)
+
+  for (const testCase of [
+    { profile: 'generation: 0', code: 'INVALID_UPSTREAM_TLS_GENERATION' },
+    { profile: 'generation: 1\n  unknown: true', code: 'UNKNOWN_UPSTREAM_TLS_FIELD' },
+    {
+      profile: 'generation: 1\n  verification: CUSTOM_CA',
+      code: 'INVALID_UPSTREAM_TLS_CA',
+    },
+    {
+      profile: 'generation: 1\n  verification: LEGACY_INSECURE\n  verify_name: example.com',
+      code: 'UPSTREAM_TLS_VERIFY_NAME_CONFLICT',
+    },
+    {
+      profile: 'generation: 1\n  server_name: 127.0.0.1',
+      code: 'INVALID_UPSTREAM_TLS_SERVER_NAME',
+    },
+    {
+      profile: "generation: 1\n  verify_name: '::::'",
+      code: 'INVALID_UPSTREAM_TLS_VERIFY_NAME',
+    },
+  ]) {
+    const result = analyzeRouteSource({
+      id: crypto.randomUUID(),
+      format: 'yaml',
+      source: `path: /secure\ntype: PROXY\nservice: orders\nupstream_tls:\n  ${testCase.profile}`,
+    })
+    assert.ok(
+      result.issues.some((issue) => issue.code === testCase.code),
+      `${testCase.code}: ${JSON.stringify(result.issues)}`,
+    )
+  }
+})
+
 test('rejects YAML scalar values that cannot be represented safely in JSON', () => {
   const result = analyzeRouteSource({
     id: crypto.randomUUID(),

@@ -30,7 +30,7 @@ Issue/PR，合入后再审查 revision range、运行完整回归并更新 gitli
 - 实施状态和验证结果持续更新至：2026-08-17；
 - `native/access-server/src/` 约 1.37 万行代码；
 - 当前 Release/ThinLTO 构建、CMake target、兼容文档和测试注册；
-- `ctest --test-dir native/build --output-on-failure -L access-server`：共发现 299 个测试，
+- `ctest --test-dir native/build --output-on-failure -L access-server`：共发现 318 个测试，
   0 失败，其中
   `ProductionScriptCorpusTest.CompilesExternalSnapshotWhenProvided` 因未设置私有 corpus 而
   skip；完整 CTest 共 1,936 项，0 失败、5 项按环境条件 skip。
@@ -81,7 +81,7 @@ Issue/PR，合入后再审查 revision range、运行完整回归并更新 gitli
 | L-06 | P1 | 系统 DNS 配置、多 nameserver 和 failover | 双方（已解决） | Fiber 前置已合入并已接入 |
 | S-01 | P0 | access log query 脱敏 | 本项目 | 否 |
 | S-02 | P0/P1 | trusted proxy 和真实客户端地址模型 | 本项目 | 否 |
-| S-03 | P1 | 上游 TLS peer/CA/SNI 验证配置 | 双方 | Fiber 前置已合入；路由级待接入 |
+| S-03 | P1 | 上游 TLS peer/CA/SNI 验证配置 | 双方（已解决） | Fiber 前置与本项目接入均已完成 |
 | S-04 | P1 | 上游 mTLS 客户端身份 | 双方 | Fiber 前置已合入；本项目待接入 |
 | P-01 | P1 | 消除 service selection 双层共享锁 | 双方 | 通用 SWRR 上游化时需要 |
 | P-02 | P1/P2 | per-worker route snapshot pin | 本项目（已解决） | 否；进一步通用化才需要 |
@@ -138,7 +138,6 @@ Access Gateway 的配置、secret、生命周期、指标、兼容和端到端�
 
 | ID | 已完成边界 | 剩余工作 |
 | --- | --- | --- |
-| S-03 | 进程级 peer/CA 验证已完成；Fiber pool affinity 已合入 | 设计 route/环境级 CA、SNI、独立验证名和 profile generation，并同步 native/validator/server/web/fixture/docs |
 | S-04 | Fiber client identity 加载、pool affinity 和上游组合测试已完成 | 设计 secret 引用和轮换生命周期，接入 route/环境模型、脱敏、连接隔离及 access-server loopback e2e |
 | P-01 | service directory 外层锁已移除 | 仅在 production profile 证明全局 SWRR mutex/O(N) scan 是瓶颈后，决定 sharding 或上游化；当前是条件项 |
 | O-02 | 除 Nacos transport 状态外的固定 schema 指标已完成；Fiber status watch 已合入 | 在 Nacos owner loop 订阅两个 status watch，映射 bounded metrics/readiness，正确关闭 subscriber，且不把 `running` 当 `connected` |
@@ -466,7 +465,7 @@ Java 行为跳过 allow/deny。
 
 ### 6.3 S-03：上游 TLS 验证
 
-**归属：双方。进程级策略由本项目完成；路由级 Fiber 前置已解决，本项目尚未接入。**
+**归属：双方。实施状态：已解决（2026-08-17）。**
 
 改造前 HTTPS upstream 固定设置 `verify_peer=false`，以匹配 Java 基线。Fiber
 `TlsOptions` 和客户端 transport 已支持 `verify_peer`、`ca_file`、`server_name` 和
@@ -496,12 +495,25 @@ server 两端握手完成。该测试加固只修改本项目，没有要求 Fib
 route wire 或 Java 兼容默认。策略在进程生命周期内不可变，同一进程只有一个 trust profile，
 当前仍使用默认 affinity `0`；因为同一进程只有一个不可变 trust profile，不会跨策略复用。
 
-当前 Fiber 的 `Http1ConnectionGroupKey` 已包含应用分配的
-`Http1ConnectionPoolAffinity`，本地命中和跨 worker steal 都按 affinity 隔离，因此 route/环境级
-CA、SNI 和独立验证名不再缺少上游机制。但 access-server 尚未定义不可变 TLS transport profile、
-profile generation 或 route 字段，也尚未把同一 profile 同时用于 connection key 和
-`TlsOptions`。native codec、validator、server 和 web 仍不得接受或模拟这些字段；交付时必须同步
-codec/runtime、validator、server、web、fixture 和兼容文档，并覆盖 profile 轮换期间的旧 lease。
+route 级能力现已通过 native-only `upstream_tls` 对象接入。对象要求正整数 `generation`，支持
+`INHERIT`、`LEGACY_INSECURE`、`SYSTEM_CA`、`CUSTOM_CA`，并可配置 custom CA PEM、SNI
+`server_name` 和独立 DNS/IP `verify_name`。对象缺失/null 时继续使用进程默认和 affinity `0`，
+不改变既有 wire。
+
+custom CA 不接受任意文件路径：候选在 compiler loop 上完成 PEM/trust 校验并写入只读 sealed memfd，
+不可变 Project snapshot 持有其生命周期。`generation` 与所有连接级字段/CA 内容共同生成稳定非零
+affinity，同一 profile 同时用于重建 `Http1ConnectionGroupKey` 和生成 `TlsOptions`。因此新旧
+generation、本地 pool 命中和跨 worker steal 都不会跨 profile 复用；旧请求 pin 的 snapshot 仍可
+安全完成并保活旧 CA。字段内容即使误改但未递增 generation，内容摘要也会改变 affinity，不过发布
+契约仍要求递增 generation 以保留审计语义。
+
+native codec 对 profile 子字段、重复/未知字段和组合 fail closed；validator limits schema 已升至 2，
+增加每 Project 256 个 profile 和单份 512 KiB CA PEM 上限，在创建 sealed fd 前完成资源拒绝。
+server compiler、web 预检、fixture、双语用户文档和兼容文档同步完成。
+测试覆盖 strict codec、limit、无效候选保留旧 snapshot、affinity 稳定/轮换隔离、真实 loopback
+custom CA、SNI 与独立验证名。该字段不属于 Java 基线，旧 Java 会忽略并回退 insecure，因此混合
+实例或旧 validator 环境禁止发布；rnacos readback 不作为实例激活证明，激活状态仍按 typed evidence
+报告 unknown。
 
 ### 6.4 S-04：上游 mTLS 客户端身份
 
@@ -1529,7 +1541,7 @@ compatibility contract 统一引用该矩阵，并继续声明：完整生产 co
 | 能力 | 当前 Fiber 状态 | 结论 |
 | --- | --- | --- |
 | HTTP socket peer 地址 | `HttpExchange::remote_addr()` 已提供 | trusted proxy 在本项目实现 |
-| TLS peer/CA/SNI/验证名 | client context 已支持；pool key 已包含应用分配的 affinity | 进程级模式已完成；route profile 模型和接入待完成 |
+| TLS peer/CA/SNI/验证名 | client context 已支持；pool key 已包含应用分配的 affinity | 进程级与 route profile 模型、隔离、validator/Console 接入已完成 |
 | TLS 客户端证书 | client context 已加载证书链/私钥；上游组合测试已覆盖 | 本项目补 secret/profile/轮换和 e2e |
 | 异步日志丢弃统计 | LoggerManager/Appender stats 已提供 | 本项目接 Prometheus |
 | EventLoop worker index | `group_index()` 已提供 | DNS resolver 可直接 O(1) 取 slot |
@@ -1564,13 +1576,13 @@ compatibility contract 统一引用该矩阵，并继续声明：完整生产 co
 6. P-06 初始项目 batch build/publish；
 7. L-04 配置编译移出 Nacos loop；
 8. L-05 收敛 prepared/ready/published API；
-9. S-03 进程级 upstream peer/CA/SNI 验证模式（已完成；route 级配置移至阶段 C）。
+9. S-03 进程级 upstream peer/CA/SNI 验证模式（已完成；route 级配置也已在阶段 C 完成）。
 
 ### 阶段 C：Fiber 协同能力
 
 1. L-06 系统 DNS 配置和多 nameserver（已完成）；
 2. P-08 Happy Eyeballs（已完成）；
-3. S-03 route 级 TLS transport profile 隔离与配置（Fiber affinity 已合入；本项目待接入）；
+3. S-03 route 级 TLS transport profile 隔离与配置（已完成）；
 4. S-04 upstream mTLS client identity（Fiber 已合入；本项目待接入）；
 5. O-02 Nacos config/naming status watch（Fiber 已合入；本项目待接入）；
 6. P-01 通用 SWRR 上游化或 sharding；

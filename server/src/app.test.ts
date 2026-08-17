@@ -3,8 +3,11 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
+import Fastify from 'fastify'
 
 import { buildApp } from './app.js'
+import { fallbackAccessConfigLimits } from './integrations/native-validator/limits.js'
+import { registerSystemRoutes } from './modules/system/routes.js'
 
 test('GET /api/health returns deterministic service metadata', async (context) => {
   const app = buildApp()
@@ -21,6 +24,40 @@ test('GET /api/health returns deterministic service metadata', async (context) =
     service: 'access-gateway-console-api',
     version: '0.1.0',
   })
+})
+
+test('system status serializes the complete native limits schema v2', async (context) => {
+  const app = Fastify()
+  registerSystemRoutes(app, {
+    async get() {
+      const ready = { status: 'ready' as const, detail: 'ready' }
+      return {
+        status: 'ready',
+        service: 'access-gateway-console-api',
+        dependencies: {
+          database: ready,
+          schema: ready,
+          authentication: ready,
+          nativeValidator: {
+            ...ready,
+            contractVersion: 1,
+            revision: 'test',
+            limits: fallbackAccessConfigLimits,
+          },
+          publicationWorker: ready,
+          activationCollector: ready,
+        },
+      }
+    },
+  })
+  context.after(() => app.close())
+
+  const response = await app.inject({ method: 'GET', url: '/api/system/status' })
+  assert.equal(response.statusCode, 200)
+  const limits = response.json().dependencies.nativeValidator.limits
+  assert.equal(limits.schemaVersion, 2)
+  assert.equal(limits.projectRoute.maxUpstreamTlsProfiles, 256)
+  assert.equal(limits.projectRoute.maxUpstreamTlsCaPemBytes, 524_288)
 })
 
 test('unknown API routes return a stable machine-readable error', async (context) => {

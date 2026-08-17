@@ -381,6 +381,8 @@ std::string encode_config_limits() {
               write_size(generator, "maxCidrBytes", project_route.max_cidr_bytes) &&
               write_size(generator, "maxAddressesPerRoute", project_route.max_addresses_per_route) &&
               write_size(generator, "maxAddressBytes", project_route.max_address_bytes) &&
+              write_size(generator, "maxUpstreamTlsProfiles", project_route.max_upstream_tls_profiles) &&
+              write_size(generator, "maxUpstreamTlsCaPemBytes", project_route.max_upstream_tls_ca_pem_bytes) &&
               write_size(generator, "maxStaticResponseBodyBytes", project_route.max_static_response_body_bytes) &&
               write_size(generator, "maxStaticResponseBytes", project_route.max_static_response_bytes) &&
               write_size(generator, "maxPathVariables", project_route.max_path_variables) &&
@@ -395,7 +397,7 @@ std::string encode_config_limits() {
               write_size(generator, "maxCidrsPerRule", gray_rules.max_cidrs_per_rule) &&
               write_size(generator, "maxCidrBytes", gray_rules.max_cidr_bytes) && generated(generator.map_close()) &&
               generated(generator.map_close());
-    return ok ? output : std::string(R"({"schemaVersion":1,"error":"encoding_failed"})");
+    return ok ? output : std::string(R"({"schemaVersion":2,"error":"encoding_failed"})");
 }
 
 std::string encode_response(const ValidationResult &result) {

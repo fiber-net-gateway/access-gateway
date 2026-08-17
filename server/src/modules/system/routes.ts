@@ -19,7 +19,7 @@ const accessConfigLimitsSchema = {
   additionalProperties: false,
   required: ['schemaVersion', 'projectList', 'projectRoute', 'grayRules'],
   properties: {
-    schemaVersion: { type: 'integer', const: 1 },
+    schemaVersion: { type: 'integer', const: 2 },
     projectList: {
       type: 'object',
       additionalProperties: false,
@@ -52,6 +52,8 @@ const accessConfigLimitsSchema = {
         'maxCidrBytes',
         'maxAddressesPerRoute',
         'maxAddressBytes',
+        'maxUpstreamTlsProfiles',
+        'maxUpstreamTlsCaPemBytes',
         'maxStaticResponseBodyBytes',
         'maxStaticResponseBytes',
         'maxPathVariables',
@@ -78,6 +80,8 @@ const accessConfigLimitsSchema = {
         maxCidrBytes: positiveIntegerSchema,
         maxAddressesPerRoute: positiveIntegerSchema,
         maxAddressBytes: positiveIntegerSchema,
+        maxUpstreamTlsProfiles: positiveIntegerSchema,
+        maxUpstreamTlsCaPemBytes: positiveIntegerSchema,
         maxStaticResponseBodyBytes: positiveIntegerSchema,
         maxStaticResponseBytes: positiveIntegerSchema,
         maxPathVariables: positiveIntegerSchema,

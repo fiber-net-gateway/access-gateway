@@ -1,4 +1,5 @@
 #include "ProxyUpstreamConnection.h"
+#include "../routing/UpstreamTlsTransportProfile.h"
 
 #include <fiber/common/Assert.h>
 #include <fiber/http/Http1ClientConnection.h>
@@ -12,6 +13,23 @@
 #include <utility>
 
 namespace fiber::access_server {
+
+UpstreamTlsClientPolicyView effective_upstream_tls_client_policy(const UpstreamTlsClientPolicy &environment,
+                                                                 const UpstreamTlsTransportProfile *profile) noexcept {
+    UpstreamTlsClientPolicyView result = upstream_tls_client_policy_view(environment);
+    if (!profile) {
+        return result;
+    }
+    if (profile->verification() != UpstreamTlsVerificationMode::Inherit) {
+        result.verification = profile->verification();
+        result.ca_file = profile->verification() == UpstreamTlsVerificationMode::CustomCa ? profile->ca_file()
+                                                                                          : std::string_view{};
+    }
+    result.server_name = profile->server_name();
+    result.verify_name = profile->verify_name();
+    return result;
+}
+
 namespace {
 
 ProxyConnectError error(ProxyConnectErrorCode code, const char *message, common::IoErr io_error,
@@ -24,11 +42,11 @@ ProxyConnectError error(ProxyConnectErrorCode code, const char *message, common:
     };
 }
 
-bool verified_tls(const UpstreamTlsClientPolicy &policy) noexcept {
+bool verified_tls(UpstreamTlsClientPolicyView policy) noexcept {
     return policy.verification != UpstreamTlsVerificationMode::LegacyInsecure;
 }
 
-bool identifiable_tls_failure(const http::Http1ConnectionGroupKey &key, const UpstreamTlsClientPolicy &policy,
+bool identifiable_tls_failure(const http::Http1ConnectionGroupKey &key, UpstreamTlsClientPolicyView policy,
                               common::IoErr io_error) noexcept {
     return key.scheme() == http::Http1ConnectionGroupKey::Scheme::Https && verified_tls(policy) &&
            (io_error == common::IoErr::Invalid || io_error == common::IoErr::NotSupported);
@@ -36,7 +54,7 @@ bool identifiable_tls_failure(const http::Http1ConnectionGroupKey &key, const Up
 
 http::Http1ClientConnectionOptions connection_options(const http::Http1ConnectionGroupKey &key,
                                                       const net::IpAddress &ip,
-                                                      const UpstreamTlsClientPolicy &tls_policy) {
+                                                      UpstreamTlsClientPolicyView tls_policy) {
     http::Http1ClientConnectionOptions result;
     result.peer_addr = net::SocketAddress(ip, key.port());
     if (key.scheme() == http::Http1ConnectionGroupKey::Scheme::Https) {
@@ -44,11 +62,16 @@ http::Http1ClientConnectionOptions connection_options(const http::Http1Connectio
         result.tls.verify_peer = verified_tls(tls_policy);
         if (tls_policy.verification == UpstreamTlsVerificationMode::CustomCa) {
             FIBER_ASSERT(!tls_policy.ca_file.empty());
-            result.tls.ca_file = tls_policy.ca_file;
+            result.tls.ca_file.assign(tls_policy.ca_file);
         }
-        if (key.is_name()) {
+        if (!tls_policy.server_name.empty()) {
+            result.tls.server_name.assign(tls_policy.server_name);
+        } else if (key.is_name()) {
             result.tls.server_name.assign(key.host_name());
-        } else if (result.tls.verify_peer) {
+        }
+        if (!tls_policy.verify_name.empty()) {
+            result.tls.verify_name.assign(tls_policy.verify_name);
+        } else if (key.is_ip() && result.tls.verify_peer && tls_policy.server_name.empty()) {
             // IP literals are authenticated as IP identities without emitting an
             // IP-valued SNI extension.
             result.tls.verify_name = key.ip_address().to_string();
@@ -61,7 +84,7 @@ http::Http1ClientConnectionOptions connection_options(const http::Http1Connectio
 
 async::Task<std::expected<ProxyUpstreamConnection, ProxyConnectError>>
 acquire_proxy_upstream_connection(http::StealableHttp1ConnectionPoolSet &pool, ProxyDnsResolver dns_resolver,
-                                  const http::Http1ConnectionGroupKey &key, const UpstreamTlsClientPolicy &tls_policy,
+                                  const http::Http1ConnectionGroupKey &key, UpstreamTlsClientPolicyView tls_policy,
                                   std::chrono::milliseconds connect_timeout,
                                   ProxyHappyEyeballsPolicy happy_eyeballs) noexcept {
     ProxyUpstreamConnection output;
@@ -130,9 +153,8 @@ acquire_proxy_upstream_connection(http::StealableHttp1ConnectionPoolSet &pool, P
         auto emplaced = output.lease.emplace_connection(connection_options(key, addresses.front(), tls_policy));
         if (!emplaced) {
             ++output.observation.create_failure;
-            co_return std::unexpected(error(ProxyConnectErrorCode::Connect,
-                                            "failed to create upstream connection", emplaced.error(),
-                                            std::move(output.observation)));
+            co_return std::unexpected(error(ProxyConnectErrorCode::Connect, "failed to create upstream connection",
+                                            emplaced.error(), std::move(output.observation)));
         }
         net::HappyEyeballsOptions options{
                 .total_timeout = connect_timeout,
@@ -159,8 +181,7 @@ acquire_proxy_upstream_connection(http::StealableHttp1ConnectionPoolSet &pool, P
         output.lease.reset();
         const bool tls_failure = identifiable_tls_failure(key, tls_policy, connect_error);
         co_return std::unexpected(error(tls_failure ? ProxyConnectErrorCode::Tls : ProxyConnectErrorCode::Connect,
-                                        tls_failure ? "upstream TLS negotiation failed"
-                                                    : "upstream connection failed",
+                                        tls_failure ? "upstream TLS negotiation failed" : "upstream connection failed",
                                         connect_error, std::move(output.observation)));
     }
 

@@ -12,7 +12,9 @@
 
 #include <fiber/async/Spawn.h>
 #include <fiber/event/EventLoop.h>
+#include <fiber/http/Http1ConnectionGroupKey.h>
 
+#include "TlsClientIdentityTestData.h"
 #include "routing/AccessRouteSnapshot.h"
 #include "routing/AccessScriptCompiler.h"
 #include "routing/Cidr.h"
@@ -43,6 +45,7 @@ using fiber::access_server::RouteConfig;
 using fiber::access_server::RouteType;
 using fiber::access_server::ScriptCompilerAdapter;
 using fiber::access_server::StringConfigEntry;
+using fiber::access_server::UpstreamTlsVerificationMode;
 
 struct ScriptCompilerCapture {
     fiber::access_server::AccessScriptCompiler runtime;
@@ -446,6 +449,78 @@ TEST(ProjectRouteSnapshotTest, CompilesStaticAddressesWithJavaHttpHostRules) {
     oversized.addresses = {std::optional<std::string>("backend:70000")};
     auto oversized_rejected = compile_project_config("demo", project_with_routes({std::move(oversized)}));
     EXPECT_FALSE(oversized_rejected);
+}
+
+TEST(ProjectRouteSnapshotTest, CompilesImmutableUpstreamTlsProfileAndPoolAffinity) {
+    RouteConfig route = proxy_route("/secure");
+    route.upstream_tls = fiber::access_server::RouteUpstreamTlsConfig{
+            .generation = 11,
+            .verification = UpstreamTlsVerificationMode::CustomCa,
+            .ca_pem = fiber::test::kRootCertPem,
+            .server_name = "sni.example.com",
+            .verify_name = "identity.example.com",
+    };
+    auto first = compile_project_config("demo", project_with_routes({route}));
+    const ProjectRouteSnapshot &first_snapshot = require_snapshot(first);
+    ASSERT_EQ(first_snapshot.routes().size(), 1U);
+    ASSERT_TRUE(first_snapshot.routes()[0].proxy);
+    ASSERT_TRUE(first_snapshot.routes()[0].proxy->upstream_tls);
+    const auto &first_profile = *first_snapshot.routes()[0].proxy->upstream_tls;
+    EXPECT_EQ(first_profile.generation(), 11U);
+    EXPECT_EQ(first_profile.verification(), UpstreamTlsVerificationMode::CustomCa);
+    EXPECT_EQ(first_profile.server_name(), "sni.example.com");
+    EXPECT_EQ(first_profile.verify_name(), "identity.example.com");
+    EXPECT_TRUE(first_profile.ca_file().starts_with("/proc/self/fd/"));
+    EXPECT_NE(first_profile.pool_affinity(), 0U);
+
+    auto base = fiber::http::Http1ConnectionGroupKey::from_name("upstream.example.com", 443,
+                                                                fiber::http::Http1ConnectionGroupKey::Scheme::Https);
+    ASSERT_TRUE(base);
+    auto profiled = first_profile.connection_key(*base);
+    ASSERT_TRUE(profiled);
+    EXPECT_NE(*profiled, *base);
+    EXPECT_EQ(profiled->pool_affinity().value(), first_profile.pool_affinity());
+
+    auto same = compile_project_config("demo", project_with_routes({route}));
+    const auto &same_profile = *require_snapshot(same).routes()[0].proxy->upstream_tls;
+    EXPECT_EQ(same_profile.pool_affinity(), first_profile.pool_affinity());
+
+    route.upstream_tls->generation = 12;
+    auto rotated = compile_project_config("demo", project_with_routes({std::move(route)}));
+    const auto &rotated_profile = *require_snapshot(rotated).routes()[0].proxy->upstream_tls;
+    EXPECT_NE(rotated_profile.pool_affinity(), first_profile.pool_affinity());
+    auto rotated_key = rotated_profile.connection_key(*base);
+    ASSERT_TRUE(rotated_key);
+    EXPECT_NE(*rotated_key, *profiled);
+}
+
+TEST(ProjectRouteSnapshotTest, RejectsInvalidUpstreamTlsProfilesBeforeSnapshotPublication) {
+    const auto compile = [](fiber::access_server::RouteUpstreamTlsConfig profile, RouteType type = RouteType::Proxy) {
+        RouteConfig route = type == RouteType::Proxy ? proxy_route("/secure") : response_route("/secure");
+        route.upstream_tls = std::move(profile);
+        return compile_project_config("demo", project_with_routes({std::move(route)}));
+    };
+
+    struct InvalidProfileCase {
+        fiber::access_server::RouteUpstreamTlsConfig profile;
+        RouteType route_type = RouteType::Proxy;
+    };
+    std::vector<InvalidProfileCase> cases{
+            {{.generation = 1, .verification = UpstreamTlsVerificationMode::CustomCa}},
+            {{.generation = 1, .verification = UpstreamTlsVerificationMode::SystemCa, .ca_pem = "unexpected"}},
+            {{.generation = 1,
+              .verification = UpstreamTlsVerificationMode::LegacyInsecure,
+              .verify_name = "identity.example.com"}},
+            {{.generation = 1, .server_name = "127.0.0.1"}},
+            {{.generation = 1, .verify_name = "bad name"}},
+            {{.generation = 1, .verification = UpstreamTlsVerificationMode::CustomCa, .ca_pem = "not a certificate"}},
+            {{.generation = 1}, RouteType::Response},
+    };
+    for (InvalidProfileCase &test_case: cases) {
+        auto result = compile(std::move(test_case.profile), test_case.route_type);
+        ASSERT_FALSE(result);
+        EXPECT_TRUE(result.error().field.starts_with("routes[0].upstream_tls"));
+    }
 }
 
 TEST(ProjectRouteSnapshotTest, CompilesResponseBodyAndHeaders) {

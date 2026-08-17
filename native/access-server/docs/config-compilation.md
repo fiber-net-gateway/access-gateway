@@ -42,7 +42,15 @@ CPU-only `ProjectConfigCompiler` on the compiler loop:
 - Host/Path, method, CIDR, address, header, and relationship compilation;
 - condition, template, rewrite, and JavaScript route compilation;
 - static response decoding and gzip precompression;
+- strict native-only outbound `upstream_tls` validation, sealed custom-CA preparation, and stable
+  non-zero pool-affinity derivation;
 - construction of a complete `ProjectRouteSnapshot` candidate.
+
+The immutable Project snapshot owns each route profile's sealed CA descriptor. A request pinned to
+an old snapshot therefore keeps the old trust material alive across publication of a new generation;
+new and old connection keys use different affinities. Invalid CA/name/profile candidates retain the
+previously published Project snapshot. This outbound route profile is independent of the downstream
+certificate watcher described below.
 
 Pure compilation represents a service route with an unavailable selector that retains only its
 normalized service and cluster metadata. After the candidate returns, `RouteConfigStore` binds

@@ -212,6 +212,7 @@ matcher 的结构优先级。
 | `websocket_timeout`    | PROXY          | 大于 0 时允许 WebSocket tunnel，并作为隧道读写 timeout     |
 | `flush`                | PROXY          | `true` 开启低延迟 body flush，并写 `X-Accel-Buffering: no` |
 | `allows`               | 全部           | CIDR allow/deny sequence；`!` 前缀表示 deny                |
+| `upstream_tls`         | PROXY          | native-only 不可变出站 TLS transport profile               |
 
 时间值接受整数毫秒，或不区分单位大小写的字符串：`500`、`500ms`、`5s`。数据大小接受整数 byte，
 或二进制单位字符串，例如 `64k`、`4m`、`1g`。新配置应使用非负、含义明确的值；不要依赖 Java
@@ -339,12 +340,33 @@ timeout: 20s
 省略 `service`。未写 scheme 时，端口 443 推导为 HTTPS，其他端口推导为 HTTP；建议始终显式写
 `http://` 或 `https://`，避免配置含义依赖端口。
 
-出站 HTTPS 信任策略当前为进程级：`ACCESS_SERVER_UPSTREAM_TLS_MODE` 默认是
+出站 HTTPS 的环境默认策略由进程配置提供：`ACCESS_SERVER_UPSTREAM_TLS_MODE` 默认是
 `legacy_insecure`，也可设为 `system_ca` 或 `custom_ca`（后者同时配置
 `ACCESS_SERVER_UPSTREAM_TLS_CA_FILE`）。安全模式会验证 endpoint 的 hostname 或 IP identity，
-trust store 无效则进程拒绝启动。当前不接受 route 级 CA、SNI 或验证名覆盖，因为固定版本的连接池
-尚不能按 TLS transport profile 隔离连接。CA bundle 内容变更需要滚动重启，以排空按旧 trust store
-建立的连接。
+trust store 无效则进程拒绝启动。PROXY Route 可用 `upstream_tls` 定义 route profile：
+
+```yaml
+upstream_tls:
+    generation: 3
+    verification: CUSTOM_CA # INHERIT / LEGACY_INSECURE / SYSTEM_CA / CUSTOM_CA
+    ca_pem: |
+        -----BEGIN CERTIFICATE-----
+        ...
+        -----END CERTIFICATE-----
+    server_name: sni.internal.example
+    verify_name: identity.internal.example
+```
+
+`generation` 必填且为正整数；任何 CA、SNI、验证名变更都必须递增。`CUSTOM_CA` 必须提供 PEM，
+其他模式不得提供；每个 Project 最多 256 个 profile，每份 PEM 上限 512 KiB，在候选发布前验证并存入
+只读内存 fd。`server_name` 只控制 SNI，
+`verify_name` 可独立选择证书 DNS/IP identity；两者缺失时继续按 endpoint hostname/IP 自动推导。
+每个 profile 都产生非零连接池 affinity，因此新旧 generation 不会复用同一连接；已 pin 旧 snapshot
+的请求仍可安全完成。字段缺失/`null` 时继续使用进程默认和旧 affinity `0`。
+
+这是 native-only wire 扩展。旧 Java 实例会忽略它并退回不校验证书；混合 Java/native 环境或旧版
+Native Validator 必须禁止发布。Console 的 rnacos readback 也不等于实例激活证据，激活状态在取得
+逐实例 typed evidence 前仍显示 unknown。进程级 CA 文件内容变更仍需滚动重启。
 
 ### 8.3 请求与响应转发
 

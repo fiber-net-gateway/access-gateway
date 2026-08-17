@@ -95,6 +95,22 @@ TEST(AccessConfigLimitsTest, AppliesByteLimitsAfterJavaScalarCoercion) {
     ASSERT_FALSE(service_cluster);
     EXPECT_EQ(service_cluster.error().code, AccessConfigErrorCode::LimitExceeded);
     EXPECT_EQ(service_cluster.error().field, "routes[0].service");
+
+    limits = kAccessConfigLimits;
+    limits.project_route.max_upstream_tls_ca_pem_bytes = 3;
+    auto ca_pem = parse_project_config(
+            R"({"routes":[{"upstream_tls":{"generation":1,"verification":"CUSTOM_CA","ca_pem":"four"}}]})", limits);
+    ASSERT_FALSE(ca_pem);
+    EXPECT_EQ(ca_pem.error().code, AccessConfigErrorCode::LimitExceeded);
+    EXPECT_EQ(ca_pem.error().field, "routes[0].upstream_tls.ca_pem");
+
+    limits = kAccessConfigLimits;
+    limits.project_route.max_upstream_tls_profiles = 1;
+    auto profiles = parse_project_config(
+            R"({"routes":[{"upstream_tls":{"generation":1}},{"upstream_tls":{"generation":2}}]})", limits);
+    ASSERT_FALSE(profiles);
+    EXPECT_EQ(profiles.error().code, AccessConfigErrorCode::LimitExceeded);
+    EXPECT_EQ(profiles.error().field, "routes[1].upstream_tls");
 }
 
 TEST(AccessConfigLimitsTest, BoundsProjectListWithoutChangingValidJavaSplitSemantics) {

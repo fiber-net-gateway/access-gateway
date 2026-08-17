@@ -155,6 +155,20 @@ public:
                     return body;
                 }
             }
+            if (route.upstream_tls) {
+                auto profile =
+                        add_scaled(1U, sizeof(UpstreamTlsTransportProfile) + 128U, route_path(index, "upstream_tls"));
+                if (!profile) {
+                    return profile;
+                }
+                for (auto result: {add_optional(route.upstream_tls->ca_pem, "upstream_tls.ca_pem", 1U),
+                                   add_optional(route.upstream_tls->server_name, "upstream_tls.server_name"),
+                                   add_optional(route.upstream_tls->verify_name, "upstream_tls.verify_name")}) {
+                    if (!result) {
+                        return result;
+                    }
+                }
+            }
         }
         return {};
     }
@@ -688,6 +702,10 @@ std::expected<CompiledRoute, AccessConfigError> compile_route(const RouteConfig 
         return std::unexpected(
                 route_error(AccessConfigErrorCode::InvalidField, route_index, "type", "route type is null"));
     }
+    if (source.upstream_tls && *source.type != RouteType::Proxy) {
+        return std::unexpected(route_error(AccessConfigErrorCode::InvalidCombination, route_index, "upstream_tls",
+                                           "upstream_tls is only valid for PROXY routes"));
+    }
 
     CompiledRoute route;
     route.path = *source.path;
@@ -826,6 +844,13 @@ std::expected<CompiledRoute, AccessConfigError> compile_route(const RouteConfig 
 
         CompiledProxyRoute proxy;
         proxy.timeout_millis = source.timeout_millis ? java_int32_narrow(*source.timeout_millis) : 60000;
+        if (source.upstream_tls) {
+            auto profile = compile_upstream_tls_transport_profile(*source.upstream_tls, route_index);
+            if (!profile) {
+                return std::unexpected(std::move(profile.error()));
+            }
+            proxy.upstream_tls.emplace(std::move(*profile));
+        }
         if (is_nonempty(source.service)) {
             std::string service;
             std::string cluster(kDefaultServiceCluster);

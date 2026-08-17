@@ -505,6 +505,11 @@ service: report-service/stable
       <td>全部</td>
       <td>CIDR allow/deny sequence；<code>!</code> 前缀表示 deny</td>
     </tr>
+    <tr>
+      <td><code>upstream_tls</code></td>
+      <td>PROXY</td>
+      <td>native-only 不可变出站 TLS transport profile</td>
+    </tr>
   </tbody>
 </table>
 <p>
@@ -689,13 +694,36 @@ timeout: 20s
   <code>https://</code>，避免配置含义依赖端口。
 </p>
 <p>
-  出站 HTTPS 信任策略当前为进程级：<code>ACCESS_SERVER_UPSTREAM_TLS_MODE</code> 默认是
+  出站 HTTPS 的环境默认策略由进程配置提供：<code>ACCESS_SERVER_UPSTREAM_TLS_MODE</code> 默认是
   <code>legacy_insecure</code>，也可设为 <code>system_ca</code> 或
   <code>custom_ca</code>（后者同时配置
   <code>ACCESS_SERVER_UPSTREAM_TLS_CA_FILE</code>）。安全模式会验证 endpoint 的 hostname 或 IP
-  identity， trust store 无效则进程拒绝启动。当前不接受 route 级 CA、SNI
-  或验证名覆盖，因为固定版本的连接池 尚不能按 TLS transport profile 隔离连接。CA bundle
-  内容变更需要滚动重启，以排空按旧 trust store 建立的连接。
+  identity， trust store 无效则进程拒绝启动。PROXY Route 可用 <code>upstream_tls</code> 定义 route
+  profile：
+</p>
+<pre><code class="language-yaml">upstream_tls:
+    generation: 3
+    verification: CUSTOM_CA # INHERIT / LEGACY_INSECURE / SYSTEM_CA / CUSTOM_CA
+    ca_pem: |
+        -----BEGIN CERTIFICATE-----
+        ...
+        -----END CERTIFICATE-----
+    server_name: sni.internal.example
+    verify_name: identity.internal.example
+</code></pre>
+<p>
+  <code>generation</code> 必填且为正整数；任何 CA、SNI、验证名变更都必须递增。<code>CUSTOM_CA</code>
+  必须提供 PEM， 其他模式不得提供；每个 Project 最多 256 个 profile，每份 PEM 上限 512
+  KiB，在候选发布前验证并存入 只读内存 fd。<code>server_name</code> 只控制 SNI，
+  <code>verify_name</code> 可独立选择证书 DNS/IP identity；两者缺失时继续按 endpoint hostname/IP
+  自动推导。 每个 profile 都产生非零连接池 affinity，因此新旧 generation 不会复用同一连接；已 pin 旧
+  snapshot 的请求仍可安全完成。字段缺失/<code>null</code> 时继续使用进程默认和旧 affinity
+  <code>0</code>。
+</p>
+<p>
+  这是 native-only wire 扩展。旧 Java 实例会忽略它并退回不校验证书；混合 Java/native 环境或旧版
+  Native Validator 必须禁止发布。Console 的 rnacos readback 也不等于实例激活证据，激活状态在取得
+  逐实例 typed evidence 前仍显示 unknown。进程级 CA 文件内容变更仍需滚动重启。
 </p>
 <h3 id="8-3-请求与响应转发">
   8.3 请求与响应转发<a
@@ -802,8 +830,9 @@ allows:
   <code>Forwarded</code>、<code>X-Forwarded-For</code>、
   <code>X-Real-Ip</code> 的顺序解析，并从右向左剥离可信代理 hop。非法或超限链回退 socket
   peer，因此安全模式 不会因 header 缺失或不可解析而跳过 CIDR。只有显式
-  <code>legacy_headers</code> 模式保留 Java 的缺失/非法 <code>X-Real-Ip</code> 跳过规则。被拒绝返回
-  403 <code>NOT_ALLOW_IP</code>。
+  <code>legacy_headers</code> 模式保留 Java 的缺失/非法 <code>X-Real-Ip</code> 跳过规则。地址链最多
+  32 个 hop；每个 <code>Forwarded</code> element 最多 16 个不重复参数， 扩展值也必须是合法 token 或
+  quoted-string。被拒绝返回 403 <code>NOT_ALLOW_IP</code>。
 </p>
 <p>
   当 Console 的 Network Policy 选择 Project 级策略时，编译器会把统一 allow/deny 列表注入每条 wire

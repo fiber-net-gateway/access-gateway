@@ -120,6 +120,11 @@ std::optional<AccessConfigError> validate_route(const RouteConfig &route, std::s
     if (auto error = check(route.script, "script", "script bytes", limits.max_script_bytes)) {
         return error;
     }
+    if (route.upstream_tls && route.upstream_tls->ca_pem &&
+        route.upstream_tls->ca_pem->size() > limits.max_upstream_tls_ca_pem_bytes) {
+        return limit_error(route_field(route_index, "upstream_tls.ca_pem"), "upstream TLS CA PEM bytes",
+                           limits.max_upstream_tls_ca_pem_bytes);
+    }
     if (auto error = check_string_set(route.addresses, route_field(route_index, "addresses"),
                                       limits.max_addresses_per_route, limits.max_address_bytes, "address bytes")) {
         return error;
@@ -182,9 +187,15 @@ std::expected<void, AccessConfigError> validate_project_config_limits(const Proj
         return std::unexpected(limit_error("routes", "route count", route_limits.max_routes));
     }
     if (config.routes) {
+        std::size_t upstream_tls_profiles = 0;
         for (std::size_t index = 0; index < config.routes->size(); ++index) {
             if (!(*config.routes)[index]) {
                 continue;
+            }
+            if ((*config.routes)[index]->upstream_tls &&
+                ++upstream_tls_profiles > route_limits.max_upstream_tls_profiles) {
+                return std::unexpected(limit_error(route_field(index, "upstream_tls"), "upstream TLS profile count",
+                                                   route_limits.max_upstream_tls_profiles));
             }
             if (auto error = validate_route(*(*config.routes)[index], index, route_limits)) {
                 return std::unexpected(std::move(*error));

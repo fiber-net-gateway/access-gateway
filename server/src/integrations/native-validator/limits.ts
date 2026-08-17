@@ -20,6 +20,8 @@ const projectRouteKeys = [
   'maxCidrBytes',
   'maxAddressesPerRoute',
   'maxAddressBytes',
+  'maxUpstreamTlsProfiles',
+  'maxUpstreamTlsCaPemBytes',
   'maxStaticResponseBodyBytes',
   'maxStaticResponseBytes',
   'maxPathVariables',
@@ -59,7 +61,7 @@ function isAtMost(value: unknown, upperBound: unknown): boolean {
 }
 
 export function isAccessConfigLimits(value: unknown): value is AccessConfigLimits {
-  if (!isRecord(value) || value.schemaVersion !== 1) return false
+  if (!isRecord(value) || value.schemaVersion !== 2) return false
   if (!isRecord(value.projectList) || !isRecord(value.projectRoute) || !isRecord(value.grayRules)) {
     return false
   }
@@ -86,7 +88,7 @@ export function isAccessConfigLimits(value: unknown): value is AccessConfigLimit
 // bounded transport envelope. Publication still fails closed without a
 // validator revision and its probed limits.
 export const fallbackAccessConfigLimits: AccessConfigLimits = {
-  schemaVersion: 1,
+  schemaVersion: 2,
   projectList: {
     maxPayloadBytes: 262_144,
     maxProjects: 1_024,
@@ -111,6 +113,8 @@ export const fallbackAccessConfigLimits: AccessConfigLimits = {
     maxCidrBytes: 64,
     maxAddressesPerRoute: 256,
     maxAddressBytes: 2_048,
+    maxUpstreamTlsProfiles: 256,
+    maxUpstreamTlsCaPemBytes: 524_288,
     maxStaticResponseBodyBytes: 2_097_152,
     maxStaticResponseBytes: 8_388_608,
     maxPathVariables: 64,

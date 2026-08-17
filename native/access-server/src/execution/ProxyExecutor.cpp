@@ -933,6 +933,9 @@ async::Task<Result<void>> ProxyExecutor::execute_impl(http::HttpExchange &exchan
     std::array<std::uint64_t, kMaxJavaAttempts> excluded_selection_tokens{};
     std::size_t excluded_selection_token_count = 0;
     std::optional<ProxyFailure> previous_failure;
+    const UpstreamTlsTransportProfile *tls_profile = proxy.upstream_tls ? &*proxy.upstream_tls : nullptr;
+    const UpstreamTlsClientPolicyView tls_policy =
+            effective_upstream_tls_client_policy(options_.upstream_tls, tls_profile);
 
     for (std::size_t attempt = 0; attempt < kMaxJavaAttempts; ++attempt) {
         auto selected = proxy.address_selector->select_address(
@@ -959,6 +962,19 @@ async::Task<Result<void>> ProxyExecutor::execute_impl(http::HttpExchange &exchan
             telemetry.record_proxy_failure(metric_failure_phase(selected_failure.phase));
             co_return proxy_failure_result(selected_failure);
         }
+        std::optional<http::Http1ConnectionGroupKey> profiled_connection_key;
+        const http::Http1ConnectionGroupKey *connection_key = selected->connection_key;
+        if (tls_profile) {
+            profiled_connection_key = tls_profile->connection_key(*connection_key);
+            if (!profiled_connection_key) {
+                const ProxyFailure selected_failure =
+                        failure(ProxyFailurePhase::InvalidSelection,
+                                "upstream TLS profile cannot be applied to the connection key", common::IoErr::Invalid);
+                telemetry.record_proxy_failure(metric_failure_phase(selected_failure.phase));
+                co_return proxy_failure_result(selected_failure);
+            }
+            connection_key = &*profiled_connection_key;
+        }
         ProxyRequestPlanResult planned = request_plan.prepared()
                                                  ? request_plan.rebind_endpoint(*selected)
                                                  : request_plan.prepare(*selected, exchange, proxy, input, telemetry);
@@ -975,9 +991,8 @@ async::Task<Result<void>> ProxyExecutor::execute_impl(http::HttpExchange &exchan
         provider_transaction.add_upstream(selected->host_header, attempt + 1);
         ProxyAttemptMetricScope attempt_metrics(telemetry);
 
-        auto connected = co_await acquire_proxy_upstream_connection(pool_, dns_resolver_, *selected->connection_key,
-                                                                    options_.upstream_tls, options_.connect_timeout,
-                                                                    options_.happy_eyeballs);
+        auto connected = co_await acquire_proxy_upstream_connection(pool_, dns_resolver_, *connection_key, tls_policy,
+                                                                    options_.connect_timeout, options_.happy_eyeballs);
         if (!connected) {
             telemetry.record_proxy_connection(connected.error().observation);
             ProxyFailure connect_failure = from_connect_error(connected.error());
