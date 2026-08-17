@@ -189,8 +189,10 @@ std::uint64_t header_checksum(const std::vector<EvaluatedHeader> &headers) noexc
 }
 
 struct CaseResult {
-    double median_ns_per_operation = 0;
+    double p50_ns_per_operation = 0;
+    double p95_ns_per_operation = 0;
     double p99_ns_per_operation = 0;
+    double operations_per_second = 0;
     double allocations_per_operation = 0;
     double bytes_per_operation = 0;
     std::uint64_t checksum = 0;
@@ -223,9 +225,15 @@ CaseResult run_case(std::uint64_t operations, Operation operation) {
     }
     std::sort(elapsed.begin(), elapsed.end());
     checksum_sink ^= allocation_checksum ^ timing_checksum;
+    const std::uint64_t p50 = elapsed[kSamples / 2];
+    const std::uint64_t p95 = elapsed[(kSamples * 95U + 99U) / 100U - 1U];
+    const std::uint64_t p99 = elapsed[(kSamples * 99U + 99U) / 100U - 1U];
     return {
-            .median_ns_per_operation = static_cast<double>(elapsed[kSamples / 2]) / static_cast<double>(operations),
-            .p99_ns_per_operation = static_cast<double>(elapsed.back()) / static_cast<double>(operations),
+            .p50_ns_per_operation = static_cast<double>(p50) / static_cast<double>(operations),
+            .p95_ns_per_operation = static_cast<double>(p95) / static_cast<double>(operations),
+            .p99_ns_per_operation = static_cast<double>(p99) / static_cast<double>(operations),
+            .operations_per_second =
+                    p50 == 0 ? 0.0 : static_cast<double>(operations) * 1'000'000'000.0 / static_cast<double>(p50),
             .allocations_per_operation =
                     static_cast<double>(allocation.allocation_count) / static_cast<double>(operations),
             .bytes_per_operation = static_cast<double>(allocation.allocated_bytes) / static_cast<double>(operations),
@@ -234,9 +242,10 @@ CaseResult run_case(std::uint64_t operations, Operation operation) {
 }
 
 void print_case(std::string_view name, const CaseResult &result) {
-    std::printf("%.*s,%.1f,%.1f,%.3f,%.1f,%llu\n", static_cast<int>(name.size()), name.data(),
-                result.median_ns_per_operation, result.p99_ns_per_operation, result.allocations_per_operation,
-                result.bytes_per_operation, static_cast<unsigned long long>(result.checksum));
+    std::printf("%.*s,%.1f,%.1f,%.1f,%.0f,%.3f,%.1f,%llu\n", static_cast<int>(name.size()), name.data(),
+                result.p50_ns_per_operation, result.p95_ns_per_operation, result.p99_ns_per_operation,
+                result.operations_per_second, result.allocations_per_operation, result.bytes_per_operation,
+                static_cast<unsigned long long>(result.checksum));
 }
 
 } // namespace
@@ -256,8 +265,8 @@ int main(int argc, char **argv) {
     const CompiledHeaderTemplates static_proxy_headers = proxy_headers(false);
     const CompiledHeaderTemplates dynamic_proxy_headers = proxy_headers(true);
 
-    std::printf("case,median_ns_per_operation,p99_ns_per_operation,allocations_per_operation,allocated_bytes_per_"
-                "operation,checksum\n");
+    std::printf("case,p50_ns_per_operation,p95_ns_per_operation,p99_ns_per_operation,operations_per_second,"
+                "allocations_per_operation,allocated_bytes_per_operation,checksum\n");
     print_case("static_template", run_case(operations, [&] {
                    auto result = fiber::access_server::evaluate_template(static_template, {});
                    return result ? static_cast<std::uint64_t>(result->size()) : 0;

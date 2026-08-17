@@ -177,55 +177,40 @@ fiber_add_app(access_server
         access_server_runtime)
 
 if (ACCESS_SERVER_BUILD_BENCHMARKS)
-    add_executable(fiber_access_service_selection_benchmark
-        "${CMAKE_CURRENT_LIST_DIR}/benchmarks/AccessServiceSelectionBenchmark.cpp")
-    target_link_libraries(fiber_access_service_selection_benchmark PRIVATE access_server_runtime)
-    set_target_properties(fiber_access_service_selection_benchmark PROPERTIES FOLDER "native/access-server")
-    fiber_link_runtime_allocator(fiber_access_service_selection_benchmark)
+    function(access_server_add_benchmark target source library)
+        add_executable(${target}
+            "${CMAKE_CURRENT_LIST_DIR}/benchmarks/${source}"
+            ${ARGN})
+        target_link_libraries(${target} PRIVATE ${library})
+        set_target_properties(${target} PROPERTIES FOLDER "native/access-server")
+        fiber_link_runtime_allocator(${target})
+        if (FIBER_ENABLE_LTO AND FIBER_IPO_SUPPORTED)
+            set_property(TARGET ${target} PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
+        endif()
+    endfunction()
 
-    if (FIBER_ENABLE_LTO AND FIBER_IPO_SUPPORTED)
-        set_property(TARGET fiber_access_service_selection_benchmark PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
-    endif()
-
-    add_executable(fiber_access_template_header_benchmark
-        "${CMAKE_CURRENT_LIST_DIR}/benchmarks/TemplateHeaderBenchmark.cpp")
-    target_link_libraries(fiber_access_template_header_benchmark PRIVATE access_server_execution)
-    set_target_properties(fiber_access_template_header_benchmark PROPERTIES FOLDER "native/access-server")
-    fiber_link_runtime_allocator(fiber_access_template_header_benchmark)
-
-    if (FIBER_ENABLE_LTO AND FIBER_IPO_SUPPORTED)
-        set_property(TARGET fiber_access_template_header_benchmark PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
-    endif()
-
-    add_executable(fiber_access_route_publication_benchmark
-        "${CMAKE_CURRENT_LIST_DIR}/benchmarks/RoutePublicationBenchmark.cpp")
-    target_link_libraries(fiber_access_route_publication_benchmark PRIVATE access_server_runtime)
-    set_target_properties(fiber_access_route_publication_benchmark PROPERTIES FOLDER "native/access-server")
-    fiber_link_runtime_allocator(fiber_access_route_publication_benchmark)
-
-    if (FIBER_ENABLE_LTO AND FIBER_IPO_SUPPORTED)
-        set_property(TARGET fiber_access_route_publication_benchmark PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
-    endif()
-
-    add_executable(fiber_access_host_matcher_benchmark
-        "${CMAKE_CURRENT_LIST_DIR}/benchmarks/HostMatcherBenchmark.cpp")
-    target_link_libraries(fiber_access_host_matcher_benchmark PRIVATE access_server_config)
-    set_target_properties(fiber_access_host_matcher_benchmark PROPERTIES FOLDER "native/access-server")
-    fiber_link_runtime_allocator(fiber_access_host_matcher_benchmark)
-
-    if (FIBER_ENABLE_LTO AND FIBER_IPO_SUPPORTED)
-        set_property(TARGET fiber_access_host_matcher_benchmark PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
-    endif()
-
-    add_executable(fiber_access_route_lookup_benchmark
-        "${CMAKE_CURRENT_LIST_DIR}/benchmarks/RouteLookupBenchmark.cpp")
-    target_link_libraries(fiber_access_route_lookup_benchmark PRIVATE access_server_runtime)
-    set_target_properties(fiber_access_route_lookup_benchmark PROPERTIES FOLDER "native/access-server")
-    fiber_link_runtime_allocator(fiber_access_route_lookup_benchmark)
-
-    if (FIBER_ENABLE_LTO AND FIBER_IPO_SUPPORTED)
-        set_property(TARGET fiber_access_route_lookup_benchmark PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
-    endif()
+    access_server_add_benchmark(fiber_access_service_selection_benchmark
+        AccessServiceSelectionBenchmark.cpp access_server_runtime)
+    access_server_add_benchmark(fiber_access_template_header_benchmark
+        TemplateHeaderBenchmark.cpp access_server_execution)
+    access_server_add_benchmark(fiber_access_route_publication_benchmark
+        RoutePublicationBenchmark.cpp access_server_runtime)
+    access_server_add_benchmark(fiber_access_host_matcher_benchmark
+        HostMatcherBenchmark.cpp access_server_config)
+    access_server_add_benchmark(fiber_access_route_lookup_benchmark
+        RouteLookupBenchmark.cpp access_server_runtime)
+    access_server_add_benchmark(fiber_access_gray_match_benchmark
+        GrayMatchBenchmark.cpp access_server_runtime)
+    access_server_add_benchmark(fiber_access_tls_identity_benchmark
+        TlsIdentityBenchmark.cpp access_server_runtime)
+    access_server_add_benchmark(fiber_access_proxy_loopback_benchmark
+        ProxyLoopbackBenchmark.cpp access_server_runtime
+        "${CMAKE_CURRENT_LIST_DIR}/benchmarks/BenchmarkAllocationProbe.cpp")
+    access_server_add_benchmark(fiber_access_observability_benchmark
+        ObservabilityBenchmark.cpp access_server_observability
+        "${CMAKE_CURRENT_LIST_DIR}/benchmarks/BenchmarkAllocationProbe.cpp")
+    access_server_add_benchmark(fiber_access_network_integration_benchmark
+        NetworkIntegrationBenchmark.cpp fiber_lib)
 endif()
 
 if (ACCESS_SERVER_BUILD_EXTERNAL_INTEROP_TESTS)

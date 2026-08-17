@@ -10,6 +10,7 @@
 #include <utility>
 #include <vector>
 
+#include "BenchmarkSupport.h"
 #include "config/AccessConfig.h"
 #include "routing/ProjectConfigCompiler.h"
 #include "runtime/RouteConfigStore.h"
@@ -27,8 +28,7 @@ using fiber::access_server::RouteConfig;
 using fiber::access_server::RouteConfigStore;
 using fiber::access_server::RouteType;
 
-constexpr std::size_t kSamples = 7;
-constexpr std::array<std::size_t, 3> kProjectCounts{10, 100, 500};
+constexpr std::array<std::size_t, 4> kProjectCounts{10, 100, 352, 500};
 
 std::uint64_t checksum_sink = 0;
 
@@ -111,36 +111,66 @@ std::uint64_t run_batch(std::size_t count) {
     return static_cast<std::uint64_t>(elapsed.count());
 }
 
+std::uint64_t run_full_pipeline(std::size_t count) {
+    RouteConfigStore store;
+    const auto started = std::chrono::steady_clock::now();
+    std::vector<ReadyProjectUpdate> updates = prepare_updates(store, count);
+    auto committed = store.commit_batch(std::move(updates));
+    const auto elapsed =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started);
+    if (!committed || !committed->published || committed->projects.size() != count) {
+        std::abort();
+    }
+    for (const auto &project: committed->projects) {
+        if (!project.outcome || *project.outcome != ConfigUpdateStatus::Published) {
+            std::abort();
+        }
+    }
+    checksum_sink += store.pin()->host_count();
+    return static_cast<std::uint64_t>(elapsed.count());
+}
+
 struct Result {
-    std::uint64_t sequential_nanoseconds = 0;
-    std::uint64_t batch_nanoseconds = 0;
+    fiber::access_server::benchmark::Distribution sequential;
+    fiber::access_server::benchmark::Distribution batch;
+    fiber::access_server::benchmark::Distribution full_pipeline;
 };
 
 Result measure(std::size_t count) {
-    std::array<std::uint64_t, kSamples> sequential{};
-    std::array<std::uint64_t, kSamples> batch{};
-    for (std::size_t sample = 0; sample < kSamples; ++sample) {
-        sequential[sample] = run_sequential(count);
-        batch[sample] = run_batch(count);
+    std::vector<std::uint64_t> sequential;
+    std::vector<std::uint64_t> batch;
+    std::vector<std::uint64_t> full_pipeline;
+    sequential.reserve(fiber::access_server::benchmark::kDefaultSamples);
+    batch.reserve(fiber::access_server::benchmark::kDefaultSamples);
+    full_pipeline.reserve(fiber::access_server::benchmark::kDefaultSamples);
+    for (std::size_t sample = 0; sample < fiber::access_server::benchmark::kDefaultSamples; ++sample) {
+        sequential.push_back(run_sequential(count));
+        batch.push_back(run_batch(count));
+        full_pipeline.push_back(run_full_pipeline(count));
     }
-    std::sort(sequential.begin(), sequential.end());
-    std::sort(batch.begin(), batch.end());
     return {
-            .sequential_nanoseconds = sequential[kSamples / 2],
-            .batch_nanoseconds = batch[kSamples / 2],
+            .sequential = fiber::access_server::benchmark::summarize(std::move(sequential), 1),
+            .batch = fiber::access_server::benchmark::summarize(std::move(batch), 1),
+            .full_pipeline = fiber::access_server::benchmark::summarize(std::move(full_pipeline), 1),
     };
 }
 
 } // namespace
 
 int main() {
-    std::printf("projects,sequential_median_us,batch_median_us,speedup,sequential_publications,batch_publications\n");
+    std::printf("projects,sequential_p50_us,batch_p50_us,full_pipeline_p50_us,full_pipeline_p95_us,"
+                "full_pipeline_p99_us,full_pipeline_projects_per_second,speedup,sequential_publications,"
+                "batch_publications\n");
     for (const std::size_t count: kProjectCounts) {
         const Result result = measure(count);
-        const double sequential_microseconds = static_cast<double>(result.sequential_nanoseconds) / 1000.0;
-        const double batch_microseconds = static_cast<double>(result.batch_nanoseconds) / 1000.0;
+        const double sequential_microseconds = result.sequential.p50_ns_per_operation / 1000.0;
+        const double batch_microseconds = result.batch.p50_ns_per_operation / 1000.0;
+        const double full_pipeline_microseconds = result.full_pipeline.p50_ns_per_operation / 1000.0;
         const double speedup = batch_microseconds == 0.0 ? 0.0 : sequential_microseconds / batch_microseconds;
-        std::printf("%zu,%.1f,%.1f,%.2f,%zu,1\n", count, sequential_microseconds, batch_microseconds, speedup, count);
+        const double projects_per_second = result.full_pipeline.operations_per_second * static_cast<double>(count);
+        std::printf("%zu,%.1f,%.1f,%.1f,%.1f,%.1f,%.0f,%.2f,%zu,1\n", count, sequential_microseconds,
+                    batch_microseconds, full_pipeline_microseconds, result.full_pipeline.p95_ns_per_operation / 1000.0,
+                    result.full_pipeline.p99_ns_per_operation / 1000.0, projects_per_second, speedup, count);
     }
     std::fprintf(stderr, "checksum=%llu\n", static_cast<unsigned long long>(checksum_sink));
     return 0;

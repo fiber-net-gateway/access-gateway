@@ -10,6 +10,7 @@
 #include <utility>
 #include <vector>
 
+#include "BenchmarkSupport.h"
 #include "routing/HostMatcher.h"
 
 namespace {
@@ -17,7 +18,6 @@ namespace {
 using fiber::access_server::HostMatcher;
 using fiber::access_server::HostPattern;
 
-constexpr std::size_t kSamples = 7;
 constexpr std::size_t kQueries = 4096;
 constexpr std::size_t kLookupsPerSample = 65536;
 constexpr std::array<std::size_t, 8> kFanouts{1, 4, 8, 16, 32, 64, 256, 1024};
@@ -76,7 +76,7 @@ Fixture make_fixture(std::size_t fanout) {
     return fixture;
 }
 
-double measure(std::size_t fanout) {
+fiber::access_server::benchmark::Distribution measure(std::size_t fanout) {
     Fixture fixture = make_fixture(fanout);
     for (const Query &query: fixture.queries) {
         if (fixture.matcher.match(query.host) != query.expected) {
@@ -84,29 +84,32 @@ double measure(std::size_t fanout) {
         }
     }
 
-    std::array<std::uint64_t, kSamples> elapsed{};
+    std::vector<std::uint64_t> elapsed;
+    elapsed.reserve(fiber::access_server::benchmark::kDefaultSamples);
     std::uint64_t checksum = 0;
-    for (std::size_t sample = 0; sample < kSamples; ++sample) {
+    for (std::size_t sample = 0; sample < fiber::access_server::benchmark::kDefaultSamples; ++sample) {
         const auto started = std::chrono::steady_clock::now();
         for (std::size_t lookup = 0; lookup < kLookupsPerSample; ++lookup) {
             const std::optional<std::uint32_t> matched = fixture.matcher.match(fixture.queries[lookup % kQueries].host);
             checksum += matched ? static_cast<std::uint64_t>(*matched) + 1U : 1U;
         }
-        elapsed[sample] = static_cast<std::uint64_t>(
+        elapsed.push_back(static_cast<std::uint64_t>(
                 std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started)
-                        .count());
+                        .count()));
     }
     checksum_sink += checksum;
-    std::sort(elapsed.begin(), elapsed.end());
-    return static_cast<double>(elapsed[kSamples / 2]) / static_cast<double>(kLookupsPerSample);
+    return fiber::access_server::benchmark::summarize(std::move(elapsed), kLookupsPerSample);
 }
 
 } // namespace
 
 int main() {
-    std::printf("fanout,median_ns_per_lookup,lookups_per_sample\n");
+    std::printf("fanout,lookups_per_sample,p50_ns_per_lookup,p95_ns_per_lookup,p99_ns_per_lookup,"
+                "lookups_per_second\n");
     for (const std::size_t fanout: kFanouts) {
-        std::printf("%zu,%.2f,%zu\n", fanout, measure(fanout), kLookupsPerSample);
+        const auto result = measure(fanout);
+        std::printf("%zu,%zu,%.2f,%.2f,%.2f,%.0f\n", fanout, kLookupsPerSample, result.p50_ns_per_operation,
+                    result.p95_ns_per_operation, result.p99_ns_per_operation, result.operations_per_second);
     }
     std::fprintf(stderr, "checksum=%llu\n", static_cast<unsigned long long>(checksum_sink));
     return 0;

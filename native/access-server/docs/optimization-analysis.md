@@ -96,7 +96,7 @@ Issue/PR，合入后再审查 revision range、运行完整回归并更新 gitli
 | C-01 | P1/P2 | 大类职责拆分 | 本项目 | 否 |
 | C-02 | P2 | 拆分 `access_server_core` 构建边界 | 本项目 | 否 |
 | T-01 | P0/P1 | 生命周期、并发、sanitizer 测试 | 本项目 | Fiber 改动另跑上游测试 |
-| T-02 | P1 | 请求、selector、TLS、配置编译 benchmark | 双方 | Fiber 通用组件需上游 benchmark |
+| T-02 | P1 | 请求、selector、TLS、配置编译 benchmark | 双方（已解决） | 当前 pin 的产品与集成基线已完成 |
 | D-01 | P1 | 生产 corpus 和阶段 8 门禁状态统一 | 本项目 | 否 |
 
 P0 表示应在性能重构前处理的正确性、安全或生命周期问题；P1 表示高收益改造；P2 表示
@@ -127,7 +127,8 @@ Access Gateway 的配置、secret、生命周期、指标、兼容和端到端�
   balancer；
 - **P-02（可选后续）**：只有其他 Fiber 应用也需要，或新的 profile 证明 project-local slot
   仍是瓶颈时，再提供通用 loop-local immutable snapshot/epoch/RCU 原语；
-- **T-02**：为上述通用组件建立 Fiber benchmark。
+- **T-02（条件后续）**：新增通用 SWRR/RCU 或改变 Fiber DNS/connector 时，在 Fiber 上游补组件
+  benchmark，再复跑本项目集成基线。
 
 其余事项均可由本项目独立完成。即使归属为“双方”，端到端交付也必然包括本项目的配置、
 兼容、指标和测试工作，因此没有仅更新 Fiber gitlink 即可完成的产品优化项。
@@ -139,11 +140,13 @@ Access Gateway 的配置、secret、生命周期、指标、兼容和端到端�
 | ID | 已完成边界 | 剩余工作 |
 | --- | --- | --- |
 | P-01 | service directory 外层锁已移除 | 仅在 production profile 证明全局 SWRR mutex/O(N) scan 是瓶颈后，决定 sharding 或上游化；当前是条件项 |
-| T-02 | 五组 microbenchmark 已有基线 | 补 gray、TLS identity、loopback proxy/WebSocket、CAT/logging，以及新 Fiber DNS/connector 的集成基线 |
 | D-01 | gate 状态和证据格式已统一 | 获取完整生产 corpus，完成同请求 Java/C++ 差分、阶段 8、稳定性/灰度/回滚演练；在此之前切流 gate 仍为 `NOT_MET` |
 
 T-01 已于 2026-08-18 完成；聚焦 sanitizer 和外部 rnacos 故障注入的范围、复现命令与证据见
 [`sanitizer-and-interop.md`](sanitizer-and-interop.md)。
+
+T-02 也已于 2026-08-18 完成；统一 runner、十组覆盖、指标口径和绑核 Release+LTO 基线见
+[`benchmark-baselines.md`](benchmark-baselines.md)。
 
 ## 5. 生命周期、配置和并发正确性
 
@@ -597,36 +600,33 @@ worker 访问同一 service 时会共享这些 cache line，选择本身还需�
 - 保留当前全局 SWRR 状态和锁，先消除双层锁；
 - 建立 endpoint 数 1/8/32/128、worker 数 1 到 CPU 数的 contention benchmark。
 
-已增加默认关闭的 `fiber_access_service_selection_benchmark`。它对每个 endpoint 数执行
-worker `1..max-workers` 的固定总 selection 次数，输出 CSV；测量包含 atomic directory pin、
-cluster 查找和 SWRR selection，不包含请求执行与 completion/report。构建和运行方式：
+默认关闭的 `fiber_access_service_selection_benchmark` 对每个 endpoint 数执行 worker
+`1..max-workers` 的固定总 selection 次数；每个 case 运行 21 个 aggregate sample，输出
+p50/p95/p99、吞吐和相对单 worker 的扩展效率。测量包含 atomic directory pin、cluster 查找和
+SWRR selection，不包含请求执行与 completion/report。统一构建和运行方式：
 
 ```bash
-cmake -S native -B native/build-benchmark -G Ninja \
-  -DCMAKE_BUILD_TYPE=Release -DFIBER_BUILD_TESTS=OFF \
-  -DACCESS_SERVER_BUILD_BENCHMARKS=ON
-cmake --build native/build-benchmark \
-  --target fiber_access_service_selection_benchmark --parallel
-native/build-benchmark/access-server/fiber_access_service_selection_benchmark \
-  100000 "$(nproc)"
+ACCESS_SERVER_BENCHMARK_CPUSET=0-3 \
+ACCESS_SERVER_BENCHMARK_MAX_WORKERS=4 \
+npm run benchmark:native
 ```
 
-2026-08-17 在 20 vCPU、13th Gen Intel Core i7-13700H、WSL 虚拟化环境，以每个 case
-100,000 次 selection 单次运行得到以下方向性结果；未绑定 CPU、未隔离系统负载，也未做多轮
-统计，因此只能用于确认热点趋势，不能作为生产容量结论：
+2026-08-18 在同一 i7-13700H/WSL 环境将 target 绑定到 CPU 0-3，以每个 sample 100,000 次
+selection 得到以下方向性结果：
 
-| endpoint 数 | 1 worker ops/s | 20 worker ops/s | 20/1 吞吐比 |
+| endpoint 数 | 1 worker ops/s | 4 worker ops/s | 4 worker 扩展效率 |
 | ---: | ---: | ---: | ---: |
-| 1 | 17,534,569 | 2,169,046 | 0.12 |
-| 8 | 17,079,046 | 2,291,947 | 0.13 |
-| 32 | 9,529,716 | 1,385,815 | 0.15 |
-| 128 | 4,210,610 | 726,212 | 0.17 |
+| 1 | 17,767,294 | 6,934,807 | 9.76% |
+| 8 | 16,864,214 | 5,996,604 | 8.89% |
+| 32 | 10,761,640 | 3,006,603 | 6.98% |
+| 128 | 4,531,126 | 1,676,750 | 9.25% |
 
 结果确认剩余的共享 selection 路径在同一 service 高并发下呈负扩展，且 endpoint 增长带来
 预期的 O(N) 扫描成本。当前 benchmark 尚不能把 atomic directory pin 与全局 SWRR mutex 的
-成本完全分离，而且没有计入 completion/report 的再次加锁。第二阶段应先补组件分解、多轮、
-绑核和生产分布 profile，再比较 sharded/per-loop 方案的流量分布与故障状态一致性，不能仅凭
-这次微基准直接改变负载均衡语义。
+成本完全分离，而且没有计入 completion/report 的再次加锁。第二阶段仍需组件分解和生产分布
+profile，再比较 sharded/per-loop 方案的流量分布与故障状态一致性，不能仅凭微基准直接改变
+负载均衡语义。完整 percentile、资源数据、source/manifest digest 和解释限制见
+[`benchmark-baselines.md`](benchmark-baselines.md)。
 
 第二阶段由双方协同：
 
@@ -1508,10 +1508,9 @@ gitlink 并运行完整 Fiber/native 回归。
 
 **归属：双方，各自测试自己的抽象。**
 
-**实施状态：部分完成（2026-08-17）。** 本项目已有 service selection contention、template/header
-分配、route batch publication、Host 高 fan-out，以及 route global/worker-local pin + Host/Path
-前后对照 benchmark；全部默认关闭，不进入生产 binary。gray、TLS identity、loopback
-proxy/WebSocket 和 CAT/logging 成本仍待补齐。
+**实施状态：已解决（2026-08-18）。** 十个 benchmark target 全部默认关闭，不进入生产 binary；
+统一 runner 配置 Release+LTO，支持 quick/full、CPU affinity 和 worker 上限，并为每个 target 保存
+CSV、stderr、GNU time 资源数据、环境/source metadata 和 SHA-256 manifest。
 
 本项目 benchmark：
 
@@ -1524,15 +1523,17 @@ proxy/WebSocket 和 CAT/logging 成本仍待补齐。
 - loopback HTTP proxy、连接复用和 WebSocket；
 - CAT/logging 开关与采样的开销。
 
-Fiber benchmark：
+当前 pinned Fiber 集成 benchmark：
 
-- 通用 SWRR update/select/complete；
-- multi-nameserver DNS/failover；
-- Happy Eyeballs 不同地址和失败组合；
-- 若引入 RCU，则测试读取、更新、回收和 shutdown。
+- service selection 通过产品 adapter 覆盖当前 SWRR select 和共享状态竞争；
+- 真实 loopback multi-nameserver DNS 覆盖 SERVFAIL/timeout 后 failover；
+- 真实 loopback connector 覆盖 IPv4 和 IPv6 失败后 IPv4；
+- 当前没有引入新的通用 RCU，因此不伪造不存在的 RCU benchmark。
 
-至少记录 throughput、CPU/core、p50/p95/p99、allocations/request、bytes/request、锁竞争、
-连接池 hit ratio、配置更新时间和旧快照最长保留时间。
+本次基线记录 throughput、CPU/core、p50/p95/p99、适用路径的 allocations/bytes、service selection
+扩展效率、连接池 hit ratio、配置更新时间和旧快照最长保留时间。完整复现契约、覆盖矩阵、
+2026-08-18 绑核结果和限制见 [`benchmark-baselines.md`](benchmark-baselines.md)。未来新增通用
+SWRR/RCU 或改变 Fiber DNS/connector 时，仍须先在 Fiber 上游建立组件基准，再复跑本项目集成基线。
 
 ## 12. 文档与兼容门禁
 
@@ -1593,7 +1594,7 @@ compatibility contract 统一引用该矩阵，并继续声明：完整生产 co
 
 ### 阶段 B：建立性能基线后处理共享热点
 
-1. 建立 T-02 benchmark；
+1. 建立 T-02 benchmark（已完成）；
 2. P-04 修复 TLS reaper 调度；
 3. P-01 先消除 service directory 外层锁；
 4. P-03 per-worker gray snapshot/PRNG；
@@ -1623,7 +1624,7 @@ P-01/P-02
 
 1. C-01 按已稳定的运行边界拆类；
 2. C-02 拆 CMake targets；
-3. sanitizer 和外部 rnacos 故障注入已完成；继续以 T-02 基线和阶段 8 承载性能/稳定性压力门禁；
+3. sanitizer、外部 rnacos 故障注入和 T-02 基线已完成；继续以阶段 8 承载性能/稳定性压力门禁；
 4. 完成生产 corpus 和阶段 8 全量差分；
 5. 基于实例证据验收 published 与 activation 状态；
 6. 达到所有门禁前继续明确标记“不满足生产切流条件”。
