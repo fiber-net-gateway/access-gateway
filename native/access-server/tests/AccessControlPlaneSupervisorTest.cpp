@@ -83,9 +83,9 @@ enum class ProjectListReplay : std::uint8_t {
 class FakeConfigService final : public fiber::nacos::ConfigService {
 public:
     FakeConfigService(LifecycleEvents &events, bool fail_start, std::string failed_subscription,
-                      ProjectListReplay project_list_replay) :
+                      ProjectListReplay project_list_replay, bool tls_closed_replay) :
         events_(&events), fail_start_(fail_start), failed_subscription_(std::move(failed_subscription)),
-        project_list_replay_(project_list_replay) {}
+        project_list_replay_(project_list_replay), tls_closed_replay_(tls_closed_replay) {}
 
     fiber::common::IoResult<void> start() noexcept override {
         events_->add("config.start");
@@ -132,7 +132,11 @@ public:
                 .events = events_,
                 .stop_event = std::string(data_id) + ".stop",
         };
-        if (data_id == "projects") {
+        if (data_id == "tls" && tls_closed_replay_) {
+            on_notify(context, fiber::nacos::SubscriptionResult<fiber::nacos::ConfigData>{
+                                       .kind = fiber::nacos::ResultKind::Closed,
+                               });
+        } else if (data_id == "projects") {
             if (project_list_replay_ == ProjectListReplay::Closed) {
                 on_notify(context, fiber::nacos::SubscriptionResult<fiber::nacos::ConfigData>{
                                            .kind = fiber::nacos::ResultKind::Closed,
@@ -168,6 +172,7 @@ private:
     bool fail_start_ = false;
     std::string failed_subscription_;
     ProjectListReplay project_list_replay_ = ProjectListReplay::NotFound;
+    bool tls_closed_replay_ = false;
 };
 
 class FakeNamingService final : public fiber::nacos::NamingService {
@@ -228,6 +233,7 @@ enum class FailurePoint : std::uint8_t {
     TlsWatcher,
     AccessWatcher,
     InitialReadiness,
+    SynchronousTlsClosedReplay,
 };
 
 struct FailureCase {
@@ -262,7 +268,8 @@ TEST_P(AccessControlPlaneSupervisorFailureTest, RollsBackOnlyAttemptedResourcesI
             : test.point == FailurePoint::TlsWatcher    ? "tls"
             : test.point == FailurePoint::AccessWatcher ? "projects"
                                                         : "",
-            test.point == FailurePoint::InitialReadiness ? ProjectListReplay::Closed : ProjectListReplay::NotFound);
+            test.point == FailurePoint::InitialReadiness ? ProjectListReplay::Closed : ProjectListReplay::NotFound,
+            test.point == FailurePoint::SynchronousTlsClosedReplay);
     auto naming_service = std::make_unique<FakeNamingService>(events, test.point == FailurePoint::NamingService);
 
     fiber::event::EventLoop coordinator_loop;
@@ -285,7 +292,8 @@ TEST_P(AccessControlPlaneSupervisorFailureTest, RollsBackOnlyAttemptedResourcesI
         options.gray_watcher.group = "gray-group";
         options.tls_certificate_watcher.data_id = "tls";
         options.tls_certificate_watcher.group = "tls-group";
-        options.tls_enabled = test.point == FailurePoint::TlsWatcher || test.point == FailurePoint::AccessWatcher;
+        options.tls_enabled = test.point == FailurePoint::TlsWatcher || test.point == FailurePoint::AccessWatcher ||
+                              test.point == FailurePoint::SynchronousTlsClosedReplay;
 
         AccessControlPlaneSupervisor supervisor(coordinator_loop, nacos_group.at(0), compiler_group.at(0),
                                                 cat_group.at(0), http_workers, std::move(options),
@@ -346,6 +354,8 @@ std::string failure_case_name(const testing::TestParamInfo<FailureCase> &info) {
             return "AccessWatcher";
         case FailurePoint::InitialReadiness:
             return "InitialReadiness";
+        case FailurePoint::SynchronousTlsClosedReplay:
+            return "SynchronousTlsClosedReplay";
     }
     return "Unknown";
 }
@@ -406,6 +416,13 @@ INSTANTIATE_TEST_SUITE_P(
                         .expected_events = {"cat.start", "nacos.start", "config.start", "naming.start", "gray.start",
                                             "projects.start", "projects.stop", "gray.stop", "naming.stop",
                                             "config.stop", "nacos.stop", "cat.stop"},
+                },
+                FailureCase{
+                        .point = FailurePoint::SynchronousTlsClosedReplay,
+                        .error = AccessServerRuntimeErrorCode::StartTlsCertificateWatcher,
+                        .expected_events = {"cat.start", "nacos.start", "config.start", "naming.start", "gray.start",
+                                            "tls.start", "tls.stop", "gray.stop", "naming.stop", "config.stop",
+                                            "nacos.stop", "cat.stop"},
                 }),
         failure_case_name);
 

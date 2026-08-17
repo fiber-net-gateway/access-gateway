@@ -395,11 +395,12 @@ AccessControlPlaneSupervisor::wait_for_tls_certificate() noexcept {
         co_return ready;
     }
 
-    auto tls_ready = tls_certificate_watcher_.subscribe_ready();
-    auto tls_snapshot = tls_ready.current();
-    if ((!tls_snapshot.value || !*tls_snapshot.value) && initial_config_timeout_ > std::chrono::milliseconds::zero()) {
+    auto tls_readiness = tls_certificate_watcher_.subscribe_readiness();
+    auto tls_snapshot = tls_readiness.current();
+    if ((!tls_snapshot.value || *tls_snapshot.value == TlsCertificateReadiness::Awaiting) &&
+        initial_config_timeout_ > std::chrono::milliseconds::zero()) {
         auto result = co_await async::when_any(
-                [&tls_ready, version = tls_snapshot.version]() { return tls_ready.next(version); },
+                [&tls_readiness, version = tls_snapshot.version]() { return tls_readiness.next(version); },
                 [timeout = initial_config_timeout_]() { return async::sleep(timeout); });
         if (result.is<1>()) {
             std::move(result).get<1>();
@@ -408,16 +409,17 @@ AccessControlPlaneSupervisor::wait_for_tls_certificate() noexcept {
                     "initial TLS certificate synchronization timed out"));
         }
         tls_snapshot = std::move(result).get<0>();
-    } else if (!tls_snapshot.value || !*tls_snapshot.value) {
-        while (!tls_snapshot.value || !*tls_snapshot.value) {
-            tls_snapshot = co_await tls_ready.next(tls_snapshot.version);
+    } else if (!tls_snapshot.value || *tls_snapshot.value == TlsCertificateReadiness::Awaiting) {
+        while (!tls_snapshot.value || *tls_snapshot.value == TlsCertificateReadiness::Awaiting) {
+            tls_snapshot = co_await tls_readiness.next(tls_snapshot.version);
         }
     }
-    if (!tls_snapshot.value || !*tls_snapshot.value) {
+    if (!tls_snapshot.value || *tls_snapshot.value == TlsCertificateReadiness::Failed) {
         co_return std::unexpected(make_access_server_runtime_io_error(
                 AccessServerRuntimeErrorCode::InitialTlsCertificateUnavailable, common::IoErr::Canceled,
                 "TLS certificate subscription closed before synchronization"));
     }
+    FIBER_ASSERT(*tls_snapshot.value == TlsCertificateReadiness::Ready);
     ready.tls_bootstrap = tls_certificate_store_.bootstrap_identity();
     FIBER_ASSERT(ready.tls_bootstrap);
     ready.tls_identity_selector = tls_certificate_store_.selector_ops();

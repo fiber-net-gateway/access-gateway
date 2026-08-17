@@ -672,8 +672,8 @@ TEST(TlsCertificateWatcherTest, CompilesOffLoopAndCoalescesLatestSnapshot) {
     bool completed = false;
 
     async::spawn(owner_loop, [&]() -> async::DetachedTask {
-        auto ready = watcher.subscribe_ready();
-        auto ready_snapshot = ready.current();
+        auto readiness = watcher.subscribe_readiness();
+        auto readiness_snapshot = readiness.current();
         auto processing = watcher.subscribe_processing();
         auto processing_snapshot = processing.current();
         EXPECT_TRUE(watcher.start());
@@ -693,10 +693,10 @@ TEST(TlsCertificateWatcherTest, CompilesOffLoopAndCoalescesLatestSnapshot) {
         compiler_group.start();
         compiler_started = true;
         co_await wait_for_bool(processing, processing_snapshot, false);
-        ready_snapshot = ready.current();
-        EXPECT_TRUE(ready_snapshot.value);
-        if (ready_snapshot.value) {
-            EXPECT_TRUE(*ready_snapshot.value);
+        readiness_snapshot = readiness.current();
+        EXPECT_TRUE(readiness_snapshot.value);
+        if (readiness_snapshot.value) {
+            EXPECT_EQ(*readiness_snapshot.value, TlsCertificateReadiness::Ready);
         }
         EXPECT_EQ(store.version(), 3u);
         EXPECT_EQ(store.certificate_count(), 1u);
@@ -739,6 +739,11 @@ TEST(TlsCertificateWatcherTest, CompilesOffLoopAndCoalescesLatestSnapshot) {
 
         service.close();
         EXPECT_EQ(watcher.state(), TlsCertificateWatcherState::Failed);
+        readiness_snapshot = readiness.current();
+        EXPECT_TRUE(readiness_snapshot.value);
+        if (readiness_snapshot.value) {
+            EXPECT_EQ(*readiness_snapshot.value, TlsCertificateReadiness::Ready);
+        }
         const auto closed_evidence = activation_evidence.pin();
         EXPECT_EQ(closed_evidence->tls.watcher_state, "failed");
         EXPECT_TRUE(closed_evidence->tls.resource.failure);
@@ -759,6 +764,68 @@ TEST(TlsCertificateWatcherTest, CompilesOffLoopAndCoalescesLatestSnapshot) {
         compiler_group.join();
     }
     EXPECT_TRUE(owner_progressed);
+    EXPECT_TRUE(completed);
+}
+
+TEST(TlsCertificateWatcherTest, RejectsProcessingCandidateWhenSubscriptionCloses) {
+    auto [certificate_pem, private_key_pem] = make_test_identity();
+    event::EventLoop owner_loop;
+    event::EventLoopGroup compiler_group(1);
+    event::EventLoopGroup http_workers(1);
+    AccessConfigCompiler compiler(compiler_group.at(0));
+    FakeTlsConfigService service;
+    TlsCertificateStore store(owner_loop, http_workers, false);
+    AccessActivationEvidenceStore activation_evidence(owner_loop, AccessActivationEvidenceIdentity{});
+    TlsCertificateWatcher watcher(owner_loop, compiler, service, store, {}, activation_evidence.tls_observer());
+    bool compiler_started = false;
+    bool completed = false;
+
+    async::spawn(owner_loop, [&]() -> async::DetachedTask {
+        auto readiness = watcher.subscribe_readiness();
+        auto processing = watcher.subscribe_processing();
+        auto processing_snapshot = processing.current();
+        EXPECT_TRUE(watcher.start());
+
+        service.push(tls_snapshot(1, certificate_pem, private_key_pem), "closing");
+        processing_snapshot = processing.current();
+        EXPECT_TRUE(processing_snapshot.value);
+        if (processing_snapshot.value) {
+            EXPECT_TRUE(*processing_snapshot.value);
+        }
+        EXPECT_EQ(activation_evidence.pin()->tls.resource.candidate_status,
+                  AccessActivationCandidateStatus::Processing);
+
+        service.close();
+        EXPECT_EQ(watcher.state(), TlsCertificateWatcherState::Failed);
+        const auto failed_readiness = readiness.current();
+        EXPECT_TRUE(failed_readiness.value);
+        if (failed_readiness.value) {
+            EXPECT_EQ(*failed_readiness.value, TlsCertificateReadiness::Failed);
+        }
+        EXPECT_EQ(activation_evidence.pin()->tls.resource.candidate_status, AccessActivationCandidateStatus::Rejected);
+
+        compiler_group.start();
+        compiler_started = true;
+        co_await wait_for_bool(processing, processing_snapshot, false);
+        const auto settled_evidence = activation_evidence.pin();
+        EXPECT_EQ(settled_evidence->tls.resource.candidate_status, AccessActivationCandidateStatus::Rejected);
+        EXPECT_TRUE(settled_evidence->tls.resource.failure);
+        if (settled_evidence->tls.resource.failure) {
+            EXPECT_EQ(settled_evidence->tls.resource.failure->code, "subscription_closed");
+        }
+        EXPECT_EQ(store.version(), 0U);
+
+        co_await watcher.shutdown();
+        co_await store.shutdown();
+        completed = true;
+        owner_loop.stop();
+    });
+
+    owner_loop.run();
+    if (compiler_started) {
+        compiler_group.stop();
+        compiler_group.join();
+    }
     EXPECT_TRUE(completed);
 }
 
