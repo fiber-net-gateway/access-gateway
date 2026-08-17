@@ -92,7 +92,7 @@ Issue/PR，合入后再审查 revision range、运行完整回归并更新 gitli
 | O-02 | P1 | 配置、发现、DNS、pool、proxy、TLS、日志指标 | 双方 | 是，Nacos 连接证据需 Fiber #27 |
 | C-01 | P1/P2 | 大类职责拆分 | 本项目 | 否 |
 | C-02 | P2 | 拆分 `access_server_core` 构建边界 | 本项目 | 否 |
-| T-01 | P0/P1 | 生命周期、并发、sanitizer、fuzz 测试 | 本项目 | Fiber 改动另跑上游测试 |
+| T-01 | P0/P1 | 生命周期、并发、sanitizer 测试 | 本项目 | Fiber 改动另跑上游测试 |
 | T-02 | P1 | 请求、selector、TLS、配置编译 benchmark | 双方 | Fiber 通用组件需上游 benchmark |
 | D-01 | P1 | 生产 corpus 和阶段 8 门禁状态统一 | 本项目 | 否 |
 
@@ -1402,8 +1402,7 @@ ASAN/UBSAN；该子项不修改生产实现或 Fiber。
 
 - upstream mTLS 客户端证书组合测试；该项等待 Fiber #31 的 client identity 加载和 #28 的
   connection-pool identity 隔离，不能在本项目先行模拟完成；
-- ASAN/UBSAN、聚焦 TSAN；
-- codec、Host/CIDR、trace state、validator fuzz。
+- ASAN/UBSAN、聚焦 TSAN。
 
 Fiber DNS、connector、SWRR 或通用 RCU 有上游改动时，必须在 Fiber 仓库先补独立测试，再更新
 gitlink 并运行完整 Fiber/native 回归。
@@ -1523,7 +1522,7 @@ Fiber/native 回归。
 
 1. C-01 按已稳定的运行边界拆类；
 2. C-02 拆 CMake targets；
-3. 完成 sanitizer、fuzz、故障注入和压力测试；
+3. 完成 sanitizer、故障注入和压力测试；
 4. 完成生产 corpus 和阶段 8 全量差分；
 5. 基于实例证据验收 published 与 activation 状态；
 6. 达到所有门禁前继续明确标记“不满足生产切流条件”。
