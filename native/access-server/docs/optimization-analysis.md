@@ -1277,12 +1277,18 @@ TLS store/route/discovery、NamingService、ConfigService、Nacos client、CAT �
 多 EventLoop 测试覆盖四个 client/service 启动、三个 watcher subscribe、initial readiness 和正常
 启动；subscription handle 的 close 事件用于验证真实资源次序，重复 shutdown 无副作用。
 
-上述测试已经覆盖 concrete control-plane 启动阶段，但还不等价于 data-plane listener、请求并发及
-外部互操作均已完成故障注入。仍应优先增加：
+Data-plane 资源级回滚子项也已完成。现有 `AccessDnsResolverFactory` 沿
+`AccessDataPlaneOptions -> AccessServerOptions -> AccessWorkerResourcesOptions` 透传，生产默认仍使用
+system resolver，测试则可在完整 `AccessDataPlaneService` 边界确定性注入 worker initialize 失败，
+且不在请求热路径增加虚调用或共享所有权。`start()` 的 allocation、worker initialize、业务 bind 和
+metrics bind 失败统一先关闭 TLS bootstrap，再通过 `AccessServer::shutdown_and_wait()` 严格按
+metrics listener、业务 listener、worker resources 逆序等待清理完成，错误返回后外层协调器的重复
+shutdown 无副作用。集成测试还用真实 loopback 端口冲突证明两种 bind 失败均不遗留 fd；metrics bind
+失败前已成功获得的业务端口在 `start()` 返回时即可重新绑定。
 
-- `AccessDataPlaneService` worker initialize、业务 bind 和 metrics bind 失败的资源级逆序回滚；
-- project subscribe 失败、closed、retry、stale generation；
-- 初始 project-list 与 route/service readiness 的各种到达顺序；
+上述测试已经覆盖 concrete control-plane 与 data-plane 启动阶段，但还不等价于请求并发及外部互操作
+均已完成故障注入。仍应优先增加：
+
 - TLS rotation 与握手并发、retired snapshot 回收；
 - route snapshot 更新与跨 await 请求 pin；
 - trusted proxy、IPv6、多值和非法 forwarding header；
