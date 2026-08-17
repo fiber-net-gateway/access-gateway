@@ -1263,6 +1263,12 @@ project-list 显式删除/重加和同步缓存回放恢复到新 entry。compil
 v3 job 依次返回，最终只有 v3 可以发布，从 watcher 集成层覆盖 subscription closed、stale
 generation、旧快照保留和显式 reconcile 恢复的组合边界。
 
+初始配置到达顺序子项现在使用可确定性门控的 service selector 覆盖三种顺序：service-ready 和
+route 均早于 project-list 的同步缓存回放、project-list 早于 route，以及 route 早于
+service-ready。一个已准备好的 Project 不会提前发布部分 snapshot；另一个 Project 的 v1 真正
+挂起在 service readiness 后再被 v2 revision 取代。放行 readiness 后只发生一次 batch publish，
+其中包含早到 Project 与当前 v2 generation，旧 v1 从不进入可见快照。
+
 该层测试证明 coordinator 的取消/回滚协议，不等价于 concrete Nacos/CAT/watcher/listener 每个
 内部阶段都已完成故障注入。仍应优先增加：
 

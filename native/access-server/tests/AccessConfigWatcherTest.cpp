@@ -5,12 +5,15 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
 
 #include <fiber/async/Spawn.h>
+#include <fiber/async/Watch.h>
 #include <fiber/async/Yield.h>
+#include <fiber/common/Assert.h>
 #include <fiber/event/EventLoop.h>
 #include <fiber/event/EventLoopGroup.h>
 #include <fiber/nacos/ConfigService.h>
@@ -223,6 +226,111 @@ fiber::access_server::ProjectConfig stored_route_config(std::int32_t version, st
     config.routes = std::vector<std::optional<fiber::access_server::RouteConfig>>{std::move(route)};
     return config;
 }
+
+class DeferredServiceReadiness final {
+public:
+    explicit DeferredServiceReadiness(bool ready) : ready_(ready), wait_calls_(0U) {
+        ready_publisher_ = ready_.acquire_publisher();
+        wait_calls_publisher_ = wait_calls_.acquire_publisher();
+        FIBER_ASSERT(ready_publisher_);
+        FIBER_ASSERT(wait_calls_publisher_);
+    }
+
+    [[nodiscard]] bool ready() const noexcept {
+        const auto snapshot = ready_.current();
+        return snapshot.value && *snapshot.value;
+    }
+
+    [[nodiscard]] fiber::async::Task<std::expected<void, fiber::access_server::ProxyAddressReadyError>>
+    wait_ready() noexcept {
+        wait_calls_publisher_->publish(++observed_wait_calls_);
+        auto subscriber = ready_.subscribe();
+        auto snapshot = subscriber.current();
+        while (!snapshot.value || !*snapshot.value) {
+            snapshot = co_await subscriber.next(snapshot.version);
+        }
+        co_return std::expected<void, fiber::access_server::ProxyAddressReadyError>{};
+    }
+
+    [[nodiscard]] fiber::async::Task<void> wait_for_calls(std::size_t expected) {
+        auto subscriber = wait_calls_.subscribe();
+        auto snapshot = subscriber.current();
+        while (!snapshot.value || *snapshot.value < expected) {
+            snapshot = co_await subscriber.next(snapshot.version);
+        }
+    }
+
+    void set_ready(bool ready) { ready_publisher_->publish(ready); }
+
+private:
+    fiber::async::Watch<bool> ready_;
+    fiber::async::Watch<std::size_t> wait_calls_;
+    std::optional<fiber::async::Watch<bool>::Publisher> ready_publisher_;
+    std::optional<fiber::async::Watch<std::size_t>::Publisher> wait_calls_publisher_;
+    std::size_t observed_wait_calls_ = 0;
+};
+
+class DeferredServiceAddressSelector final : public fiber::access_server::ProxyAddressSelector {
+public:
+    DeferredServiceAddressSelector(DeferredServiceReadiness &readiness, std::string service, std::string cluster) :
+        readiness_(&readiness), service_(std::move(service)), cluster_(std::move(cluster)) {}
+
+    [[nodiscard]] fiber::async::Task<std::expected<void, fiber::access_server::ProxyAddressReadyError>>
+    wait_ready() noexcept override {
+        return readiness_->wait_ready();
+    }
+
+    [[nodiscard]] bool ready_for_publish() const noexcept override { return readiness_->ready(); }
+
+    std::expected<fiber::access_server::ProxyUpstreamEndpoint, fiber::access_server::ProxyAddressSelectError>
+    select_address(std::optional<std::string_view>, std::span<const std::uint64_t>) noexcept override {
+        return std::unexpected(fiber::access_server::ProxyAddressSelectError{
+                .code = fiber::access_server::ProxyAddressSelectErrorCode::NoHosts,
+                .io_error = fiber::common::IoErr::NotFound,
+                .message = "test selector has no request addresses",
+        });
+    }
+
+    [[nodiscard]] std::string_view service_name() const noexcept override { return service_; }
+
+    [[nodiscard]] std::optional<std::string_view> configured_cluster() const noexcept override { return cluster_; }
+
+private:
+    DeferredServiceReadiness *readiness_ = nullptr;
+    std::string service_;
+    std::string cluster_;
+};
+
+struct DeferredServiceSelectorFactory {
+    DeferredServiceReadiness cached{true};
+    DeferredServiceReadiness slow{false};
+
+    [[nodiscard]] fiber::access_server::ProxyAddressSelectorFactory adapter() noexcept {
+        return fiber::access_server::ProxyAddressSelectorFactory{
+                .context = this,
+                .create_service = &create,
+        };
+    }
+
+    static fiber::access_server::ProxyAddressSelectorFactory::Result create(void *context, std::string service,
+                                                                            std::string cluster) {
+        auto &factory = *static_cast<DeferredServiceSelectorFactory *>(context);
+        DeferredServiceReadiness *readiness = nullptr;
+        if (service == "cached") {
+            readiness = &factory.cached;
+        } else if (service == "slow") {
+            readiness = &factory.slow;
+        } else {
+            return std::unexpected(fiber::access_server::ProxyAddressSelectorFactory::Error{
+                    .field = "service",
+                    .message = "unexpected test service",
+            });
+        }
+        std::shared_ptr<fiber::access_server::ProxyAddressSelector> selector =
+                std::make_shared<DeferredServiceAddressSelector>(*readiness, std::move(service), std::move(cluster));
+        return selector;
+    }
+};
 
 TEST(AccessConfigWatcherTest, ReconcilesProjectsAndRetainsLastValidSnapshots) {
     fiber::event::EventLoop loop;
@@ -573,6 +681,105 @@ TEST(AccessConfigWatcherTest, InitialBatchDropsReplacedAndRemovedStagedCandidate
         EXPECT_TRUE(store.pin()->match_host("b.example.com"));
         EXPECT_FALSE(store.pin()->match_host("c.example.com"));
         EXPECT_FALSE(watcher.project_status("c"));
+
+        co_await watcher.shutdown();
+        completed = true;
+        loop.stop();
+    });
+
+    loop.run();
+    compiler_group.stop();
+    compiler_group.join();
+    EXPECT_TRUE(completed);
+}
+
+TEST(AccessConfigWatcherTest, InitialBatchWaitsForCurrentServiceReadinessAcrossArrivalOrders) {
+    fiber::event::EventLoop loop;
+    fiber::event::EventLoopGroup compiler_group(1);
+    fiber::access_server::AccessConfigCompiler compiler(compiler_group.at(0));
+    FakeConfigService service;
+    DeferredServiceSelectorFactory selector_factory;
+    fiber::access_server::RouteConfigStore store({}, selector_factory.adapter());
+    std::size_t observer_updates = 0;
+    fiber::access_server::RouteSnapshotObserver observer{
+            .context = &observer_updates,
+            .on_update =
+                    [](void *context, std::shared_ptr<const fiber::access_server::AccessRouteSnapshot>) noexcept {
+                        ++*static_cast<std::size_t *>(context);
+                    },
+    };
+    fiber::access_server::AccessConfigWatcher watcher(loop, compiler, service, store, {}, observer);
+    bool completed = false;
+
+    service.prime("ploto.unified-access.route.cached", route_config(1, "cached.example.com", "cached"), "cached-v1");
+    compiler_group.start();
+    fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
+        auto readiness = watcher.subscribe_readiness();
+        auto snapshot = readiness.current();
+        EXPECT_TRUE(watcher.start());
+        service.push(fiber::access_server::kProjectListDataId, "cached;slow");
+
+        co_await wait_for_ready_to_publish(readiness, snapshot, 1U);
+        EXPECT_TRUE(snapshot.value);
+        if (snapshot.value) {
+            EXPECT_EQ(snapshot.value->state, fiber::access_server::AccessConfigReadinessState::SynchronizingProjects);
+            EXPECT_EQ(snapshot.value->desired_projects, 2U);
+            EXPECT_EQ(snapshot.value->subscribed_projects, 2U);
+            EXPECT_EQ(snapshot.value->ready_to_publish_projects, 1U);
+            EXPECT_EQ(snapshot.value->synchronized_projects, 0U);
+        }
+        EXPECT_TRUE(store.pin()->projects().empty());
+        EXPECT_EQ(observer_updates, 0U);
+
+        service.push("ploto.unified-access.route.slow", route_config(1, "slow-v1.example.com", "slow"), "slow-v1");
+        co_await selector_factory.slow.wait_for_calls(1U);
+        auto status = watcher.project_status("slow");
+        EXPECT_TRUE(status);
+        if (status) {
+            EXPECT_EQ(status->config_state, fiber::access_server::AccessProjectConfigState::Processing);
+            EXPECT_EQ(status->generation, 1U);
+            EXPECT_EQ(status->observed_md5, "slow-v1");
+        }
+        EXPECT_TRUE(store.pin()->projects().empty());
+
+        service.push("ploto.unified-access.route.slow", route_config(2, "slow-v2.example.com", "slow"), "slow-v2");
+        co_await selector_factory.slow.wait_for_calls(2U);
+        status = watcher.project_status("slow");
+        EXPECT_TRUE(status);
+        if (status) {
+            EXPECT_EQ(status->config_state, fiber::access_server::AccessProjectConfigState::Processing);
+            EXPECT_EQ(status->generation, 2U);
+            EXPECT_EQ(status->observed_md5, "slow-v2");
+        }
+        EXPECT_TRUE(store.pin()->projects().empty());
+        EXPECT_EQ(observer_updates, 0U);
+
+        selector_factory.slow.set_ready(true);
+        co_await wait_for_readiness(readiness, snapshot, fiber::access_server::AccessConfigReadinessState::Ready);
+
+        EXPECT_TRUE(snapshot.value);
+        if (snapshot.value) {
+            EXPECT_EQ(snapshot.value->desired_projects, 2U);
+            EXPECT_EQ(snapshot.value->subscribed_projects, 2U);
+            EXPECT_EQ(snapshot.value->synchronized_projects, 2U);
+            EXPECT_EQ(snapshot.value->processing_projects, 0U);
+            EXPECT_EQ(snapshot.value->ready_to_publish_projects, 0U);
+        }
+        EXPECT_EQ(observer_updates, 1U);
+        EXPECT_EQ(watcher.successful_updates(), 2U);
+        EXPECT_EQ(watcher.failed_updates(), 0U);
+        EXPECT_EQ(store.current_version("cached"), 1);
+        EXPECT_EQ(store.current_version("slow"), 2);
+        EXPECT_TRUE(store.pin()->match_host("cached.example.com"));
+        EXPECT_FALSE(store.pin()->match_host("slow-v1.example.com"));
+        EXPECT_TRUE(store.pin()->match_host("slow-v2.example.com"));
+        status = watcher.project_status("slow");
+        EXPECT_TRUE(status);
+        if (status) {
+            EXPECT_EQ(status->config_state, fiber::access_server::AccessProjectConfigState::Accepted);
+            EXPECT_EQ(status->observed_version, 2);
+            EXPECT_EQ(status->published_generation, 2U);
+        }
 
         co_await watcher.shutdown();
         completed = true;
