@@ -5,6 +5,10 @@
 #include "runtime/TlsCertificateStore.h"
 #include "runtime/TlsCertificateWatcher.h"
 
+#include <array>
+#include <cerrno>
+#include <chrono>
+#include <cstdint>
 #include <expected>
 #include <functional>
 #include <future>
@@ -12,6 +16,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <sys/socket.h>
 #include <utility>
 
 #include <openssl/bio.h>
@@ -23,11 +28,15 @@
 #include <openssl/x509v3.h>
 
 #include <fiber/async/Spawn.h>
+#include <fiber/async/WaitGroup.h>
 #include <fiber/async/Watch.h>
+#include <fiber/async/Yield.h>
 #include <fiber/event/EventLoop.h>
 #include <fiber/event/EventLoopGroup.h>
+#include <fiber/http/HttpTransport.h>
 #include <fiber/nacos/ConfigService.h>
 #include <fiber/nacos/Subscription.h>
+#include <fiber/net/TlsContext.h>
 
 #include "NacosSnapshotTestBuilder.h"
 #include "NacosSubscriptionStub.h"
@@ -194,6 +203,108 @@ std::pair<std::string, std::string> make_test_identity() {
             std::string(certificate_data, static_cast<std::size_t>(certificate_size)),
             std::string(key_data, static_cast<std::size_t>(key_size)),
     };
+}
+
+struct TlsReclaimRecorder {
+    static constexpr std::size_t kMaxObservations = 8;
+
+    [[nodiscard]] AccessTlsMetricsObserver observer() noexcept {
+        return AccessTlsMetricsObserver{
+                .context = this,
+                .on_rotation = &record_rotation,
+                .on_reclaim = &record_reclaim,
+        };
+    }
+
+    static void record_rotation(void *context) noexcept { ++static_cast<TlsReclaimRecorder *>(context)->rotations; }
+
+    static void record_reclaim(void *context, const AccessTlsReclaimObservation &observation) noexcept {
+        auto &recorder = *static_cast<TlsReclaimRecorder *>(context);
+        if (recorder.observation_count == recorder.observations.size()) {
+            recorder.overflow = true;
+            return;
+        }
+        recorder.observations[recorder.observation_count++] = observation;
+    }
+
+    std::array<AccessTlsReclaimObservation, kMaxObservations> observations{};
+    std::size_t observation_count = 0;
+    std::size_t rotations = 0;
+    bool overflow = false;
+};
+
+struct RotateDuringTlsSelect {
+    TlsCertificateStore *store = nullptr;
+    net::TlsIdentitySelectorOps delegate;
+    std::optional<TlsCertificateStore::PreparedUpdate> prepared;
+    std::array<std::uintptr_t, 2> selected_contexts{};
+    std::size_t calls = 0;
+    bool commit_succeeded = false;
+};
+
+net::TlsContext *rotate_during_tls_select(void *context, const net::TlsIdentitySelectInput &input) noexcept {
+    auto &state = *static_cast<RotateDuringTlsSelect *>(context);
+    net::TlsContext *selected = state.delegate.select(state.delegate.ctx, input);
+    if (state.calls < state.selected_contexts.size()) {
+        state.selected_contexts[state.calls] = reinterpret_cast<std::uintptr_t>(selected);
+    }
+    ++state.calls;
+    if (state.prepared) {
+        auto committed = state.store->commit(std::move(*state.prepared));
+        state.prepared.reset();
+        state.commit_succeeded = committed && *committed == TlsCertificateUpdateStatus::Published;
+    }
+    return selected;
+}
+
+struct TlsHandshakePairResult {
+    common::IoErr server = common::IoErr::Unknown;
+    common::IoErr client = common::IoErr::Unknown;
+};
+
+async::Task<TlsHandshakePairResult> run_tls_handshake_pair(event::EventLoop &loop,
+                                                           net::TlsServerContext &server_context,
+                                                           net::TlsContext &client_context) noexcept {
+    TlsHandshakePairResult result;
+    int sockets[2] = {-1, -1};
+    if (::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, sockets) != 0) {
+        result.server = common::io_err_from_errno(errno);
+        result.client = result.server;
+        co_return result;
+    }
+
+    const net::SocketAddress peer(net::IpAddress::loopback_v4(), 443);
+    net::AcceptResult server_accept(sockets[0], peer);
+    net::AcceptResult client_accept(sockets[1], peer);
+    auto server_transport = http::TlsTransport::create(loop, std::move(server_accept), server_context, {});
+    if (!server_transport) {
+        result.server = server_transport.error();
+        result.client = result.server;
+        co_return result;
+    }
+    auto client_transport = http::TlsTransport::create(loop, std::move(client_accept), client_context, {});
+    if (!client_transport) {
+        result.server = common::IoErr::Canceled;
+        result.client = client_transport.error();
+        co_return result;
+    }
+
+    async::WaitGroup server_handshake;
+    server_handshake.add();
+    async::spawn(loop, [&]() -> async::DetachedTask {
+        auto handshake = co_await (*server_transport)->handshake(std::chrono::seconds(2));
+        result.server = handshake ? common::IoErr::None : handshake.error();
+        server_handshake.done();
+    });
+    auto client_handshake = co_await (*client_transport)->handshake(std::chrono::seconds(2));
+    result.client = client_handshake ? common::IoErr::None : client_handshake.error();
+    if (!client_handshake) {
+        (*client_transport)->close();
+    }
+    co_await server_handshake.join();
+    (*client_transport)->close();
+    (*server_transport)->close();
+    co_return result;
 }
 
 TEST(TlsCertificateConfigTest, ParsesCompleteVersionedSnapshotWithoutSniRules) {
@@ -416,6 +527,127 @@ TEST(TlsCertificateStoreTest, PostsReaperOnlyForSnapshotsStillHeldByHazards) {
         EXPECT_NE(selected, nullptr);
         after_idle_clear.schedule();
         co_return;
+    });
+
+    const std::future_status status = done.wait_for(5s);
+    workers.stop();
+    workers.join();
+    EXPECT_EQ(status, std::future_status::ready);
+}
+
+TEST(TlsCertificateStoreTest, KeepsSelectedIdentityAliveWhenRotationInterleavesWithHandshake) {
+    using namespace std::chrono_literals;
+
+    auto [certificate_pem, private_key_pem] = make_test_identity();
+    TlsCertificateSnapshotConfig initial_config{
+            .version = 1,
+            .default_certificate = "default",
+            .certificates = {{
+                    .id = "default",
+                    .certificate_pem = certificate_pem,
+                    .private_key_pem = private_key_pem,
+            }},
+    };
+    TlsCertificateSnapshotConfig rotated_config = initial_config;
+    rotated_config.version = 2;
+
+    event::EventLoopGroup workers(1);
+    event::EventLoop &loop = workers.at(0);
+    TlsReclaimRecorder recorder;
+    TlsCertificateStore store(loop, workers, false, recorder.observer());
+    std::promise<void> done_promise;
+    auto done = done_promise.get_future();
+
+    workers.start();
+    async::spawn(loop, [&]() -> async::DetachedTask {
+        bool scenario_completed = false;
+        auto published = store.apply(initial_config, "wire-v1");
+        EXPECT_TRUE(published);
+        if (published) {
+            EXPECT_EQ(*published, TlsCertificateUpdateStatus::Published);
+        }
+
+        auto prepared = TlsCertificateStore::prepare(rotated_config, TlsCertificateStore::content_digest("wire-v2"),
+                                                     false, false);
+        EXPECT_TRUE(prepared);
+        std::shared_ptr<TlsBootstrapIdentity> bootstrap = store.bootstrap_identity();
+        EXPECT_TRUE(bootstrap);
+        if (published && prepared && bootstrap) {
+            RotateDuringTlsSelect rotation{
+                    .store = &store,
+                    .delegate = store.selector_ops(),
+                    .prepared = std::move(*prepared),
+            };
+
+            net::TlsOptions server_options;
+            server_options.enabled = true;
+            server_options.cert_file = bootstrap->certificate_path();
+            server_options.key_file = bootstrap->private_key_path();
+            server_options.alpn = {"http/1.1"};
+            server_options.identity_selector_ops = net::TlsIdentitySelectorOps{
+                    .select = &rotate_during_tls_select,
+                    .ctx = &rotation,
+            };
+            net::TlsServerContext server_context(std::move(server_options));
+            auto server_initialized = server_context.init();
+            bootstrap->close();
+            EXPECT_TRUE(server_initialized);
+
+            net::TlsOptions client_options;
+            client_options.enabled = true;
+            client_options.alpn = {"http/1.1"};
+            client_options.server_name = "api.example.com";
+            net::TlsContext client_context(std::move(client_options), false);
+            auto client_initialized = client_context.init();
+            EXPECT_TRUE(client_initialized);
+
+            if (server_initialized && client_initialized) {
+                const TlsHandshakePairResult first =
+                        co_await run_tls_handshake_pair(loop, server_context, client_context);
+                EXPECT_EQ(first.server, common::IoErr::None);
+                EXPECT_EQ(first.client, common::IoErr::None);
+                EXPECT_TRUE(rotation.commit_succeeded);
+                EXPECT_EQ(store.version(), 2U);
+
+                // The selector's hazard clear and the owner-loop reaper are intentionally
+                // separate queue turns. Wait for both without relying on a timer.
+                co_await async::yield();
+                co_await async::yield();
+
+                const TlsHandshakePairResult second =
+                        co_await run_tls_handshake_pair(loop, server_context, client_context);
+                EXPECT_EQ(second.server, common::IoErr::None);
+                EXPECT_EQ(second.client, common::IoErr::None);
+                co_await async::yield();
+                co_await async::yield();
+
+                EXPECT_EQ(rotation.calls, 2U);
+                EXPECT_NE(rotation.selected_contexts[0], 0U);
+                EXPECT_NE(rotation.selected_contexts[1], 0U);
+                EXPECT_NE(rotation.selected_contexts[0], rotation.selected_contexts[1]);
+                scenario_completed = true;
+            }
+        }
+
+        co_await store.shutdown();
+        if (scenario_completed) {
+            EXPECT_FALSE(recorder.overflow);
+            EXPECT_EQ(recorder.rotations, 1U);
+            EXPECT_EQ(recorder.observation_count, 3U);
+            if (recorder.observation_count == 3U) {
+                EXPECT_EQ(recorder.observations[0].trigger, AccessTlsReclaimTrigger::Publication);
+                EXPECT_EQ(recorder.observations[0].reclaimed_snapshots, 0U);
+                EXPECT_EQ(recorder.observations[0].retired_snapshots, 1U);
+                EXPECT_EQ(recorder.observations[1].trigger, AccessTlsReclaimTrigger::HazardClear);
+                EXPECT_EQ(recorder.observations[1].reclaimed_snapshots, 1U);
+                EXPECT_EQ(recorder.observations[1].retired_snapshots, 0U);
+                EXPECT_EQ(recorder.observations[2].trigger, AccessTlsReclaimTrigger::Shutdown);
+                EXPECT_EQ(recorder.observations[2].reclaimed_snapshots, 1U);
+                EXPECT_EQ(recorder.observations[2].retired_snapshots, 0U);
+            }
+        }
+        done_promise.set_value();
+        loop.stop();
     });
 
     const std::future_status status = done.wait_for(5s);

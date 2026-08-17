@@ -639,7 +639,10 @@ TLS identity selector 使用 hazard pointer，避免握手热路径 shared owner
 - 保留 hazard publish/clear/scan 的 `seq_cst`，未把性能修改扩大为内存模型变更。
 
 确定性测试分别覆盖无 rotation 的高频 clear 不触发 reaper，以及 rotation 时旧 snapshot
-被 hazard 持有、clear 后恰好触发回收。指标契约见
+被 hazard 持有、clear 后恰好触发回收。后续真实 TLS transport 测试又把 rotation 固定插入
+ClientHello selector 已返回 v1、Fiber 尚未执行 `SSL_set_SSL_CTX` 的窗口；第一次握手继续使用 v1
+成功，第二次握手选择独立的 v2 context，并验证 publish 保留、hazard clear 回收和 shutdown 回收的
+完整事件序列。指标契约见
 [`bounded-metrics.md`](bounded-metrics.md#tls-certificate-rotation-and-reclamation)。
 
 Fiber 的 TLS selector 已能提供 ClientHello 和 context 选择；当前问题来自本项目的动态
@@ -1286,10 +1289,15 @@ metrics listener、业务 listener、worker resources 逆序等待清理完成�
 shutdown 无副作用。集成测试还用真实 loopback 端口冲突证明两种 bind 失败均不遗留 fd；metrics bind
 失败前已成功获得的业务端口在 `start()` 返回时即可重新绑定。
 
+TLS rotation/handshake 子项也已补齐。测试以非阻塞 `socketpair` 并发驱动真实 client/server TLS
+transport，并用测试 selector 把预编译 v2 的 commit 固定插入 v1 identity 已选中、Fiber
+`SSL_set_SSL_CTX` 尚未消费返回值的窗口。第一次握手必须在 rotation 中继续成功，第二次握手必须
+选择不同的 v2 context；固定容量 observer 同时验证 publish 扫描保留 v1、deferred hazard clear
+恰好回收 v1、retired 数归零，以及 shutdown 回收当前 v2。测试不使用公网、端口竞争或 sleep。
+
 上述测试已经覆盖 concrete control-plane 与 data-plane 启动阶段，但还不等价于请求并发及外部互操作
 均已完成故障注入。仍应优先增加：
 
-- TLS rotation 与握手并发、retired snapshot 回收；
 - route snapshot 更新与跨 await 请求 pin；
 - trusted proxy、IPv6、多值和非法 forwarding header；
 - 上游 TLS 验证成功、未知 CA、名称错误和客户端证书；
