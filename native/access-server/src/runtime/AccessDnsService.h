@@ -13,6 +13,7 @@
 #include <fiber/common/NonCopyable.h>
 #include <fiber/common/NonMovable.h>
 #include <fiber/dns/DnsCache2.h>
+#include <fiber/dns/DnsClient.h>
 #include <fiber/dns/DnsResolver.h>
 
 namespace fiber::event {
@@ -22,12 +23,27 @@ class EventLoopGroup;
 
 namespace fiber::access_server {
 
+struct AccessDnsResolverFactory {
+    // Cold-path factory. On false, output owners may still be populated; the
+    // service adopts them and releases them asynchronously on `loop`.
+    using CreateFunction = bool (*)(void *context, event::EventLoop &loop, dns::SharedDnsCache2 &cache,
+                                    const dns::DnsClient::Options &client_options,
+                                    std::unique_ptr<dns::DnsResolverLocal> &local,
+                                    std::unique_ptr<dns::DnsResolver> &resolver) noexcept;
+
+    void *context = nullptr;
+    CreateFunction create = nullptr;
+
+    [[nodiscard]] static AccessDnsResolverFactory system() noexcept;
+};
+
 // DnsResolver is loop-affine. This service creates one resolver stack per
 // request worker and shares only the thread-safe cache between those stacks.
 class AccessDnsService final : public common::NonCopyable, public common::NonMovable {
 public:
-    AccessDnsService() noexcept = default;
-    ~AccessDnsService();
+    AccessDnsService() noexcept;
+    explicit AccessDnsService(AccessDnsResolverFactory resolver_factory) noexcept;
+    ~AccessDnsService() noexcept;
 
     // Both operations run on one control loop. The worker group must remain serviceable until shutdown completes.
     [[nodiscard]] async::Task<bool> init(event::EventLoopGroup &group) noexcept;
@@ -54,6 +70,7 @@ private:
     resolve(void *context, std::string_view host) noexcept;
 
     dns::SharedDnsCache2 cache_;
+    AccessDnsResolverFactory resolver_factory_;
     event::EventLoop *control_loop_ = nullptr;
     event::EventLoop *cache_loop_ = nullptr;
     std::vector<LoopEntry> entries_;
