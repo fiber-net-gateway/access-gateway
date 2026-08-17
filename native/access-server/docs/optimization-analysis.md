@@ -1248,13 +1248,20 @@ data/bss 不变，文件大小从 `17,681,744` 到 `17,682,848`（`+1,104`，约
 - 两种路径都验证 `Starting -> Stopped`、后续重复 shutdown 无副作用，并且没有依赖真实
   process-global signal 或墙钟时间。
 
+DNS 生命周期子项也已补齐：`AccessDnsService` 通过两个指针大小的
+`AccessDnsResolverFactory` 注入 cold-path resolver stack 创建，默认 factory 使用 `nothrow new`
+并保留原有 resolver 参数。每个已尝试的 worker entry 无论 factory 成功或失败都先转入 service
+所有权，失败统一在各 owner loop 释放 resolver/local，最后关闭共享 cache。确定性测试在第二个
+worker 完成资源创建后注入失败，验证首次 init fail closed、同一 service 可重新 init 成功、异步
+shutdown 和重复 shutdown 完成；既有测试继续证明 shutdown 不阻塞 control loop，且 worker group
+必须在释放完成前保持可服务。
+
 该层测试证明 coordinator 的取消/回滚协议，不等价于 concrete Nacos/CAT/watcher/listener 每个
 内部阶段都已完成故障注入。仍应优先增加：
 
 - `AccessControlPlaneSupervisor` 的 CAT、Nacos client、ConfigService、NamingService、各 watcher
   和 initial readiness 失败，以及 `AccessDataPlaneService` worker/bind/metrics bind 失败的资源
   级逆序回滚；
-- DNS 部分初始化、worker 停止和异步释放；
 - project subscribe 失败、closed、retry、stale generation；
 - 初始 project-list 与 route/service readiness 的各种到达顺序；
 - TLS rotation 与握手并发、retired snapshot 回收；

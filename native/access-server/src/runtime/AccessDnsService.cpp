@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <fstream>
+#include <new>
 #include <string>
 #include <utility>
 
@@ -40,9 +41,34 @@ net::SocketAddress read_nameserver() noexcept {
     return net::SocketAddress(net::IpAddress::v4({8, 8, 8, 8}), 53);
 }
 
+bool create_system_resolver(void *, event::EventLoop &loop, dns::SharedDnsCache2 &cache,
+                            const dns::DnsClient::Options &client_options,
+                            std::unique_ptr<dns::DnsResolverLocal> &local,
+                            std::unique_ptr<dns::DnsResolver> &resolver) noexcept {
+    local.reset(new (std::nothrow) dns::DnsResolverLocal());
+    if (!local || !local->init(loop, cache, client_options)) {
+        return false;
+    }
+    resolver.reset(new (std::nothrow) dns::DnsResolver());
+    return resolver && resolver->init(*local);
+}
+
 } // namespace
 
-AccessDnsService::~AccessDnsService() { FIBER_ASSERT(state_ == State::Stopped); }
+AccessDnsResolverFactory AccessDnsResolverFactory::system() noexcept {
+    return AccessDnsResolverFactory{
+            .create = create_system_resolver,
+    };
+}
+
+AccessDnsService::AccessDnsService() noexcept : AccessDnsService(AccessDnsResolverFactory::system()) {}
+
+AccessDnsService::AccessDnsService(AccessDnsResolverFactory resolver_factory) noexcept :
+    resolver_factory_(resolver_factory) {
+    FIBER_ASSERT(resolver_factory_.create != nullptr);
+}
+
+AccessDnsService::~AccessDnsService() noexcept { FIBER_ASSERT(state_ == State::Stopped); }
 
 async::Task<bool> AccessDnsService::init(event::EventLoopGroup &group) noexcept {
     event::EventLoop *current_loop = event::EventLoop::current_or_null();
@@ -69,22 +95,19 @@ async::Task<bool> AccessDnsService::init(event::EventLoopGroup &group) noexcept 
     for (std::size_t i = 0; i < group.size(); ++i) {
         LoopEntry entry;
         entry.loop = &group.at(i);
-        entry.local = std::make_unique<dns::DnsResolverLocal>();
         dns::DnsClient::Options client_options;
         client_options.server = nameserver;
         client_options.timeout = std::chrono::milliseconds(2000);
         client_options.attempts = 2;
-        if (!entry.local->init(*entry.loop, cache_, client_options)) {
-            co_await shutdown();
-            co_return false;
-        }
-        entry.resolver = std::make_unique<dns::DnsResolver>();
-        if (!entry.resolver->init(*entry.local)) {
-            entries_.push_back(std::move(entry));
-            co_await shutdown();
-            co_return false;
-        }
+        const bool initialized = resolver_factory_.create(resolver_factory_.context, *entry.loop, cache_,
+                                                          client_options, entry.local, entry.resolver);
+        const bool valid =
+                initialized && entry.local && entry.local->valid() && entry.resolver && entry.resolver->valid();
         entries_.push_back(std::move(entry));
+        if (!valid) {
+            co_await shutdown();
+            co_return false;
+        }
     }
     state_ = State::Running;
     co_return true;

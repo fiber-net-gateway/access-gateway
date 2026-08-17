@@ -12,6 +12,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <type_traits>
 #include <utility>
 
 #include <arpa/inet.h>
@@ -26,6 +27,7 @@
 #include <fiber/event/EventLoopGroup.h>
 
 #include "../src/observability/AccessRuntimeMetrics.h"
+#include "../src/runtime/AccessDnsService.h"
 
 namespace fiber::access_server {
 namespace {
@@ -144,6 +146,65 @@ ProjectConfig response_config() {
     route.gzip = ResponseGzipConfig{.enabled = true};
     config.routes = std::vector<std::optional<RouteConfig>>{std::move(route)};
     return config;
+}
+
+struct FailingDnsResolverFactory {
+    AccessDnsResolverFactory delegate = AccessDnsResolverFactory::system();
+    std::size_t create_calls = 0;
+    std::size_t fail_on_call = 0;
+
+    [[nodiscard]] AccessDnsResolverFactory adapter() noexcept {
+        return AccessDnsResolverFactory{
+                .context = this,
+                .create = create,
+        };
+    }
+
+    [[nodiscard]] static bool create(void *context, event::EventLoop &loop, dns::SharedDnsCache2 &cache,
+                                     const dns::DnsClient::Options &client_options,
+                                     std::unique_ptr<dns::DnsResolverLocal> &local,
+                                     std::unique_ptr<dns::DnsResolver> &resolver) noexcept {
+        auto &self = *static_cast<FailingDnsResolverFactory *>(context);
+        ++self.create_calls;
+        const bool created = self.delegate.create(self.delegate.context, loop, cache, client_options, local, resolver);
+        return created && self.create_calls != self.fail_on_call;
+    }
+};
+
+TEST(AccessDnsServiceTest, KeepsResolverFactoryAsTwoPointerValueAdapter) {
+    EXPECT_TRUE(std::is_trivially_copyable_v<AccessDnsResolverFactory>);
+    EXPECT_LE(sizeof(AccessDnsResolverFactory), 2U * sizeof(void *));
+}
+
+TEST(AccessDnsServiceTest, ReleasesPartialInitializationAndCanRetry) {
+    event::EventLoop control_loop;
+    event::EventLoopGroup workers(2);
+    FailingDnsResolverFactory factory{.fail_on_call = 2};
+    AccessDnsService dns(factory.adapter());
+    bool first_initialized = true;
+    bool second_initialized = false;
+
+    workers.start();
+    async::spawn(control_loop, [&]() -> async::DetachedTask {
+        first_initialized = co_await dns.init(workers);
+        EXPECT_FALSE(first_initialized);
+        EXPECT_EQ(factory.create_calls, 2U);
+
+        factory.fail_on_call = 0;
+        second_initialized = co_await dns.init(workers);
+        EXPECT_TRUE(second_initialized);
+        EXPECT_EQ(factory.create_calls, 4U);
+
+        co_await dns.shutdown();
+        co_await dns.shutdown();
+        control_loop.stop();
+    });
+    control_loop.run();
+    workers.stop();
+    workers.join();
+
+    EXPECT_FALSE(first_initialized);
+    EXPECT_TRUE(second_initialized);
 }
 
 TEST(AccessDnsServiceTest, ShutdownDoesNotBlockTheCallingEventLoop) {
