@@ -88,6 +88,7 @@ SHA-256，再对 UTF-8 manifest 本身计算 SHA-256；仓库只记录最终 dig
 | Java 脱敏 golden | 14 个 template case、5 个 condition case 通过 | Java probe 原始产物未入库 | 有限语法样例完成 |
 | C++ 请求级 condition/template | `MatchesRecordedConditionAndTemplateSyntaxSnapshot` 通过 | 仓库内可重跑 | 一个聚合脱敏场景完成 |
 | C++ rewrite 行为 | 通用 route/proxy 测试覆盖编译、模板和最终 request target | 仓库内可重跑，但没有独立的 production rewrite corpus 测试 | 有限组件覆盖；非 corpus 全量差分 |
+| 可执行证据门禁 | `cutover-evidence/v1` 校验器和合成测试通过 | 仓库内可重跑；只验证私有 artifact 的结构、revision 和 digest | 仓库侧门禁完成；不产生外部证据 |
 | 完整生产配置 corpus | 未执行 | 无可审计 artifact | 未完成 |
 | Java/C++ 同一 request corpus 全量差分 | 未执行 | 无统一 request record | 未完成 |
 | 阶段 8 热更、慢 body、断连、超时、shutdown | 聚焦测试存在，但未以同一 Java/C++ corpus 验收 | 无阶段 8 记录 | 未完成 |
@@ -117,6 +118,10 @@ ACCESS_SERVER_SCRIPT_CORPUS_DIR=/path/to/private-dump/routes \
 
 历史快照结果：352/352 配置完成 decode 和 compiled snapshot 构建。由于该次执行没有记录
 私有输入 SHA-256，本结果是不可独立复现的历史证据；它不能升级为完整生产 corpus gate。
+
+新的配置导出会生成不含时间的 canonical `content-manifest.json`、逐文件 digest 和总
+`corpus_sha256`；最终门禁还会逐文件复核。格式、15 项必需 gate、report/差异决定和执行命令见
+[`cutover-evidence-gate.md`](cutover-evidence-gate.md)。该工具不能为历史 artifact 补造 digest。
 
 ### 5.2 Java golden 与 C++ 请求级执行
 
@@ -157,6 +162,10 @@ extension 直接读取，不改动共享脚本 VM。
   不能仅以“脚本引擎不同”跳过差分；
 - 完整生产 corpus、同一 request corpus 的 Java/C++ 全量差分、阶段 8 生命周期/性能验证、
   灰度与回滚演练仍未完成，因此当前明确不满足生产切流条件。
+
+仓库侧 `cutover-evidence/v1` 验证器只会在 production 来源、精确 Java/C++/Fiber revision、完整
+corpus 和全部必需 gate 的 hashed report 同时有效时输出 `MET`。当前没有这样的私有 record，实际
+执行结果仍应为 `NOT_MET`；合成测试得到 `MET` 只证明验证器本身，不是切流证据。
 
 后续每份差分记录必须包含：导出日期、来源环境、Java/C++ revision、脱敏流程版本、私有
 artifact 的稳定 SHA-256、项目/route/script/template 数量、各证据层完成数、未覆盖能力、

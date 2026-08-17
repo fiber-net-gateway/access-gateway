@@ -214,12 +214,22 @@ if (ACCESS_SERVER_BUILD_BENCHMARKS)
         NetworkIntegrationBenchmark.cpp fiber_lib)
 endif()
 
+if (FIBER_BUILD_TESTS)
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    add_test(NAME AccessServerCutoverEvidenceGate.PythonUnitTests
+        COMMAND
+            "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_LIST_DIR}/tests/CutoverEvidenceGateTest.py")
+    set_tests_properties(AccessServerCutoverEvidenceGate.PythonUnitTests PROPERTIES
+        LABELS "access-server"
+        TIMEOUT 30)
+endif()
+
 if (ACCESS_SERVER_BUILD_EXTERNAL_INTEROP_TESTS)
     if (NOT FIBER_BUILD_TESTS)
         message(FATAL_ERROR
             "ACCESS_SERVER_BUILD_EXTERNAL_INTEROP_TESTS requires FIBER_BUILD_TESTS=ON")
     endif()
-    find_package(Python3 REQUIRED COMPONENTS Interpreter)
     add_executable(fiber_access_server_external_interop
         "${CMAKE_CURRENT_LIST_DIR}/tests/ExternalRnacosInterop.cpp")
     target_link_libraries(fiber_access_server_external_interop PRIVATE access_server_runtime)

@@ -845,3 +845,6 @@ decode + compile-only、历史 Java golden 和一个仓库内 C++ 请求级聚�
 - Java 运行环境默认 charset 是否固定为 UTF-8。
 
 上述数据只用于建立有限兼容 corpus，不扩大通用脚本或基础设施兼容范围。
+私有 record 的精确 revision、corpus content manifest、P0/P1/阶段 8 report、逐 artifact digest、
+获批差异及最终 `MET` 判定必须通过
+[cutover-evidence-gate.md](cutover-evidence-gate.md) 的可执行门禁；仓库合成测试不属于生产证据。

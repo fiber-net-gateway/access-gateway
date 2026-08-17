@@ -138,7 +138,7 @@ Access Gateway 的配置、secret、生命周期、指标、兼容和端到端�
 
 | ID | 已完成边界 | 剩余工作 |
 | --- | --- | --- |
-| D-01 | gate 状态和证据格式已统一 | 获取完整生产 corpus，完成同请求 Java/C++ 差分、阶段 8、稳定性/灰度/回滚演练；在此之前切流 gate 仍为 `NOT_MET` |
+| D-01 | gate 状态、canonical corpus digest 和 fail-closed evidence 校验器已完成 | 获取完整生产 corpus，完成同请求 Java/C++ 差分、阶段 8、稳定性/灰度/回滚演练；在此之前切流 gate 仍为 `NOT_MET` |
 
 T-01 已于 2026-08-18 完成；聚焦 sanitizer 和外部 rnacos 故障注入的范围、复现命令与证据见
 [`sanitizer-and-interop.md`](sanitizer-and-interop.md)。
@@ -1542,7 +1542,8 @@ SWRR/RCU 或改变 Fiber DNS/connector 时，仍须先在 Fiber 上游建立组�
 
 **归属：本项目。**
 
-**实施状态：状态模型已解决（2026-08-17）；实际生产/切流 gate 仍为 `NOT_MET`。**
+**实施状态：状态模型已解决（2026-08-17），仓库侧可执行门禁已完成（2026-08-18）；实际
+生产/切流 gate 仍为 `NOT_MET`。**
 
 [`script-corpus-differential.md`](script-corpus-differential.md) 现在是唯一分层证据记录，明确
 区分：测试环境有限语法快照、外部配置 compile-only、Java golden、仓库内 C++ 请求样例、
@@ -1559,7 +1560,16 @@ compatibility contract 统一引用该矩阵，并继续声明：完整生产 co
 
 本项解决的是状态歧义和证据记账，不伪装成实际完成阶段 8。下一份私有差分记录仍必须先
 生成稳定 SHA-256 和脱敏版本，再记录项目/route/script/template 数量、未覆盖能力、获批差异、
-阶段 gate 与最终切流结论。本项不需要 Fiber 改动、Issue 或 gitlink 更新。
+阶段 gate 与最终切流结论。
+
+配置导出工具现在会生成不含导出时间的 canonical content manifest，并逐文件记录字节数和 SHA-256；
+`cutover-evidence/v1` 验证器把 production 来源、固定 Java 基线、精确 access-gateway/Fiber
+revision、完整 corpus、P0/P1、同请求差分、阶段 8 生命周期/稳定性、逐实例激活、灰度和回滚共
+15 项 report 变成 fail-closed gate。它区分 `MET`/`NOT_MET`/`INVALID`，核对 report 和明细
+artifact digest，拒绝路径穿越、symlink、状态/计数矛盾、未获批差异和未知字段，且不在输出中
+回显私有路径或内容。合成测试覆盖所有拒绝边界，但不算作生产证据。完整契约见
+[`cutover-evidence-gate.md`](cutover-evidence-gate.md)。本项不需要 Fiber 改动、Issue 或 gitlink
+更新。
 
 ## 13. Fiber 能力核对结果
 

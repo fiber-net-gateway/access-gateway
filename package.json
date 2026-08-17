@@ -35,6 +35,7 @@
     "test:native": "cmake --build native/build --target fiber_access_server_tests --parallel && ctest --test-dir native/build --output-on-failure -L access-server",
     "test:native:sanitizers": "./native/access-server/scripts/run_sanitizers.sh all",
     "benchmark:native": "./native/access-server/scripts/run_benchmarks.sh",
+    "verify:native:cutover": "python3 native/access-server/scripts/verify_cutover_evidence.py",
     "test:native:interop": "cmake -S native -B native/build-interop -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DFIBER_BUILD_TESTS=ON -DFIBER_ENABLE_LTO=OFF -DACCESS_SERVER_BUILD_EXTERNAL_INTEROP_TESTS=ON && cmake --build native/build-interop --target fiber_access_server_external_interop --parallel && ctest --test-dir native/build-interop --output-on-failure -L access-server-interop"
   },
   "devDependencies": {

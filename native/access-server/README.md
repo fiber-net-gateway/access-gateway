@@ -142,6 +142,10 @@ npm run benchmark:native
 不能计作门禁通过。测试范围、重复次数和当前证据见
 [`docs/sanitizer-and-interop.md`](docs/sanitizer-and-interop.md)。
 
+生产差分/阶段 8 私有证据由 `npm run verify:native:cutover` fail closed 校验；仓库当前没有完整
+production record，实际 gate 仍为 `NOT_MET`。所需环境变量、15 项 gate、artifact 格式和安全
+边界见 [`docs/cutover-evidence-gate.md`](docs/cutover-evidence-gate.md)。
+
 产物位于：
 
 ```text
@@ -304,8 +308,10 @@ python3 native/access-server/scripts/sync_test_nacos.py \
 ```
 
 同步完成后工具会逐项回读 rnacos 并比较原始内容；`manifest.json` 记录 dataId、group、
-字节数和 SHA-256，但不记录 token 或密码。若项目列表引用了不存在的 route，该 dataId
-保持 rnacos `NotFound` 状态，并记录在 `missingRoutes` 中。
+字节数和 SHA-256，但不记录 token 或密码。另生成与导出时间无关的 canonical
+`content-manifest.json`、`content-manifest.sha256`，并只在 stdout 输出安全的总
+`corpus_sha256`。若项目列表引用了不存在的 route，该 dataId 保持 rnacos `NotFound` 状态，并记录
+在 `missingRoutes` 中；这样的不完整 corpus 不能通过最终门禁。
 
 listener 只在 Nacos client/config/naming、project/gray watcher、项目列表首值，以及 TLS 开启时
 首个有效证书快照全部就绪后开放；若项目列表或 TLS 快照不存在，服务会等待到
@@ -342,6 +348,8 @@ listener 只在 Nacos client/config/naming、project/gray watcher、项目列表
   Release 聚合状态和部署检查；
 - `docs/script-corpus-differential.md`：测试环境有限 condition/template/rewrite 快照的证据
   元数据、完成层级、未完成的生产/阶段 8 门禁和私有 corpus 复跑方式；
+- `docs/cutover-evidence-gate.md`：production corpus、同请求差分、阶段 8、激活、灰度和回滚的
+  版本化私有 evidence schema、digest 验证与 fail-closed 状态；
 - `docs/sanitizer-and-interop.md`：ASAN/UBSAN、TSAN 和固定 rnacos 外部故障注入的设计、命令与证据；
 - `docs/benchmark-baselines.md`：十组默认关闭 benchmark 的统一 runner、覆盖矩阵、证据格式和基线；
 - `docs/optimization-analysis.md`：代码职责、生命周期、性能、安全和可观测性优化分析，
