@@ -389,8 +389,8 @@ shutdown barrier 已完成。
 
 ### 阶段 7：入口策略与观测适配
 
-状态：进行中。入口策略、本地脚本 adapter 和请求观测适配已接入；尚余现网脚本
-corpus 差分。
+状态：进行中。入口策略、本地脚本 adapter 和请求观测适配已接入；2026-07-31 测试环境
+有限语法快照已完成 compile-only 和脱敏样例验证，完整生产 corpus 仍未完成。
 
 工作：
 
@@ -399,7 +399,7 @@ corpus 差分。
 - [x] X-Entry net mask、HTTPS redirect、HSTS；
 - [x] X-Real-IP CIDR allow/deny；
 - [x] 本地脚本 engine adapter：配置发布前预编译、请求同步执行、编译失败保旧；
-- [x] 现网 condition/template/rewrite 配置样例差分，详见
+- [x] 测试环境有限 condition/template/rewrite 配置样例差分，详见证据矩阵
   [script-corpus-differential.md](script-corpus-differential.md)；
 - [x] 将 project、route、cluster、upstream、错误和最终响应映射到统一请求观测上下文；
 - [x] CAT 使用 `URL/<project><route>`、继续/生成三段 message ID、响应回传 trace ID；
@@ -414,6 +414,10 @@ corpus 差分。
 - 不以 CAT/Prometheus 内部实现和编码等价作为门槛。
 
 ### 阶段 8：差分验收与切流
+
+状态：未完成，最终切流门禁为 `NOT_MET`。测试环境 compile-only 352/352 不计作本阶段
+Java/C++ 同一 request corpus、生命周期、稳定性或回滚演练通过；分层状态以
+[script-corpus-differential.md](script-corpus-differential.md) 的证据矩阵为准。
 
 工作：
 

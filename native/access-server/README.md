@@ -98,8 +98,9 @@ connection pool，以及 Nacos、CAT、Prometheus 组件。迁移不要求这些
 - 已接入共享异步 logging 生命周期，访问日志在 `access_server.access` 以结构化
   key/value 输出 trace、请求、路由、上游、结果、耗时和字节数；队列满时丢弃新日志，
   不反向影响请求执行；
-- 现网脚本 corpus 差分和阶段 8 全量差分尚未完成；当前二进制可用于继续联调，但尚不
-  满足生产切流条件。
+- 2026-07-31 测试环境有限脚本语法快照已完成 352/352 配置 decode + compile-only；完整
+  生产 corpus、阶段 8 请求/生命周期/稳定性差分和切流演练尚未完成，当前二进制可用于
+  继续联调，但不满足生产切流条件。
 
 首个迁移基线为 `ploto-gateway` commit
 `22c2bf543b96b52c0ccecd4ceb07d4911c502f45`。后续若 Java 基线发生变化，应先更新
@@ -294,8 +295,8 @@ listener 只在 Nacos client/config/naming、project/gray watcher、项目列表
   与 CAT 指标的固定 label 集、readiness/snapshot 语义、并发成本及仍待实现的 O-02 范围；
 - `../../docs/activation-evidence.md`：实例证据协议、鉴权和分页边界、collector 租约/TTL、
   Release 聚合状态和部署检查；
-- `docs/script-corpus-differential.md`：现网 condition/template/rewrite 的脱敏统计、
-  Java golden、C++ 差分结果和私有 corpus 复跑方式；
+- `docs/script-corpus-differential.md`：测试环境有限 condition/template/rewrite 快照的证据
+  元数据、完成层级、未完成的生产/阶段 8 门禁和私有 corpus 复跑方式；
 - `docs/optimization-analysis.md`：代码职责、生命周期、性能、安全和可观测性优化分析，
   以及 Access Gateway 与 Fiber 上游的改造归属。
 

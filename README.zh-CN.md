@@ -15,7 +15,8 @@ Access Gateway 是由 C++23 数据面与 Web 管理控制台组成的高性能�
   TLS 证书快照、项目与路由配置、Host/Path/条件
   匹配、带静态响应 gzip 协商的 RESPONSE 执行、PROXY 执行、WebSocket 隧道、服务发现、
   灰度路由、CAT 链路追踪、
-  Prometheus 指标和结构化访问日志。生产脚本语料差分验证与最终切流门槛仍在推进中。
+  Prometheus 指标和结构化访问日志。2026-07-31 测试环境有限语法快照已完成 352/352
+  decode + compile-only；完整生产语料差分验证与最终切流门槛仍未完成。
 - **Console**：首个基于 MySQL 的纵向链路已经可用，包括确定性 migration、开发身份与固定
   部署 RBAC、不含环境参数的域名 Project API、加密的不可变配置版本、乐观锁、审计
   事件，以及 route-first React 工作台。每条 Route 使用独立挂载的 CodeMirror YAML 编辑器，

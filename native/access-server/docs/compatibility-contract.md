@@ -349,7 +349,7 @@ method 不匹配同样沿用 404，不新增隐式 405/`Allow`。节点已有无
 本仓库 `RoutePathMatcher` 已通过聚焦用例验证静态段、参数段、wildcard、冲突和
 condition 顺序，并用于 compiled snapshot。条件表达式在候选快照发布前由本地脚本
 adapter 编译为同步程序，请求热路径只执行已编译程序。通用脚本语法兼容仍不属于本次
-迁移门槛，但现网已观察到的有限语法集合必须通过
+迁移门槛，但差分记录快照中已观察到的有限语法集合必须通过
 [script-corpus-differential.md](script-corpus-differential.md) 的 corpus 差分。
 
 ## 8. 请求前置策略
@@ -649,8 +649,10 @@ listener。订阅暂态失败采用封顶指数退避，非法首值被记录为
 - CAT、指标或日志记录失败均为 best effort，不得改写 Java 兼容 HTTP 结果。
 
 上述接入只约束 access-server 可见的 trace/header、维度和值，不比较 CAT 编码、
-Prometheus 内部快照时点或日志行顺序。现网脚本 corpus 与阶段 8 全量差分仍未完成，
-因此当前阶段仍不进入生产切流。
+Prometheus 内部快照时点或日志行顺序。测试环境有限脚本语法快照只完成了分层记录中的
+compile-only 和脱敏样例；完整生产 corpus 与阶段 8 全量差分仍未完成，因此当前阶段仍不
+进入生产切流。证据边界和 `NOT_MET` 结论见
+[script-corpus-differential.md](script-corpus-differential.md)。
 
 ## 11. PROXY 响应
 
@@ -781,10 +783,13 @@ message、trace ID 和 null meta；Java 对 message 没有 HTML escaping，C++ �
 - HTML Accept 前缀和遗留 escaping；
 - Jackson 罕见 scalar coercion。
 
-## 14. 现网确认状态
+## 14. 生产 corpus 确认状态
 
-condition/template/rewrite 已完成脱敏统计、Java golden 和 C++ 请求级差分，结果见
-[script-corpus-differential.md](script-corpus-differential.md)。其余仍需收集并脱敏：
+2026-07-31 测试环境 condition/template/rewrite 有限语法快照已完成 352/352 配置
+decode + compile-only、历史 Java golden 和一个仓库内 C++ 请求级聚合场景；这不是完整
+生产 corpus 或阶段 8 全量差分。来源、缺失的历史 SHA/脱敏版本、各层完成数和最终
+`NOT_MET` 结论见 [script-corpus-differential.md](script-corpus-differential.md)。生产证据仍需
+收集并脱敏：
 
 - 当前项目列表 data ID 是否被覆盖；
 - production 是否覆盖 `ploto.nacos.group`；
