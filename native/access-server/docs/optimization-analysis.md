@@ -75,8 +75,8 @@ Issue/PR，合入后再审查 revision range、运行完整回归并更新 gitli
 | L-06 | P1 | 系统 DNS 配置、多 nameserver 和 failover | 双方 | 是 |
 | S-01 | P0 | access log query 脱敏 | 本项目 | 否 |
 | S-02 | P0/P1 | trusted proxy 和真实客户端地址模型 | 本项目 | 否 |
-| S-03 | P1 | 上游 TLS peer/CA/SNI 验证配置 | 双方 | 路由级配置需要 Fiber #28；进程级可先落地 |
-| S-04 | P1 | 上游 mTLS 客户端身份 | 双方 | 是 |
+| S-03 | P1 | 上游 TLS peer/CA/SNI 验证配置 | 双方 | 进程级已完成；路由级需要 Fiber #28 |
+| S-04 | P1 | 上游 mTLS 客户端身份 | 双方 | Fiber #31；连接隔离还需要 #28 |
 | P-01 | P1 | 消除 service selection 双层共享锁 | 双方 | 通用 SWRR 上游化时需要 |
 | P-02 | P1/P2 | per-worker route snapshot/RCU pin | 双方 | 采用通用原语时需要 |
 | P-03 | P1 | per-worker gray snapshot 和 PRNG | 本项目 | 否 |
@@ -101,7 +101,9 @@ P0 表示应在性能重构前处理的正确性、安全或生命周期问题�
 实施对应能力时，以下事项确定需要 Fiber 上游前置：
 
 - **L-06**：系统 DNS 配置、多 nameserver 和 failover；
-- **S-04**：TLS client context 加载客户端证书和私钥；
+- **S-04**：TLS client context 加载客户端证书和私钥；见
+  [fiber-gateway-cpp #31](https://github.com/fiber-net-gateway/fiber-gateway-cpp/issues/31)。不同客户端
+  身份的连接池隔离还依赖 #28；
 - **S-03（路由级）**：connection pool key 纳入有界 TLS transport profile，避免不同
   CA/SNI/验证名复用同一连接；见
   [fiber-gateway-cpp #28](https://github.com/fiber-net-gateway/fiber-gateway-cpp/issues/28)；
@@ -441,6 +443,11 @@ Java 行为跳过 allow/deny。
 - 可识别验证/ALPN 失败使用 502 `HTTP_CLIENT_TLS_ERROR` 和 CAT `tls` phase，且不回显
   CA 路径。
 
+真实 loopback 握手测试现已覆盖 custom CA 成功、custom CA 未知签发机构、system CA 拒绝私有
+签发机构、DNS 名称错误，以及 IP endpoint 缺少 IP SAN。测试在进程内生成相对当前时间有效的
+私有 CA 和 CA 签发 leaf，不再依赖带固定到期日的 Fiber 测试证书；成功场景同时等待 client 和
+server 两端握手完成。该测试加固只修改本项目，没有要求 Fiber 改动。
+
 配置通过 `ACCESS_SERVER_UPSTREAM_TLS_MODE` 和
 `ACCESS_SERVER_UPSTREAM_TLS_CA_FILE` 提供，默认仍为 `legacy_insecure`，因此不改变已有
 route wire 或 Java 兼容默认。策略在进程生命周期内不可变，同一进程只有一个 trust profile，
@@ -459,7 +466,9 @@ wire 字段时必须同步 codec/runtime、validator、server、web、fixture �
 
 Pinned Fiber 的 `TlsOptions` 虽包含 `cert_file/key_file`，但 `TlsContext::init()` 当前只在
 server context 中调用证书和私钥加载逻辑，client context 不会加载客户端身份。因此不能
-仅通过 access-server 设置现有字段来宣称已经支持 upstream mTLS。
+仅通过 access-server 设置现有字段来宣称已经支持 upstream mTLS。客户端身份加载由
+[fiber-gateway-cpp #31](https://github.com/fiber-net-gateway/fiber-gateway-cpp/issues/31) 跟踪；按身份
+隔离连接复用仍由 [#28](https://github.com/fiber-net-gateway/fiber-gateway-cpp/issues/28) 跟踪。
 
 Fiber 上游负责：
 
@@ -1317,10 +1326,18 @@ element 使用固定 16 槽参数名数组，拒绝大小写变体重复和非 t
 scheme，两个维度均继续 fail closed。完整 `ClientMetadataTest` 矩阵连续重复 100 次并通过
 ASAN/UBSAN。
 
+上游 TLS peer 验证矩阵也已补齐。测试运行时生成两个独立私有 CA 及其 `localhost` leaf，以真实
+loopback TLS 握手覆盖 legacy insecure、custom CA 成功、custom CA 未知签发机构、system CA
+拒绝私有签发机构、DNS 名称错误和 IP 目标缺少 IP SAN；成功路径同时确认服务端握手完成，失败
+路径确认统一归类为 `ProxyConnectErrorCode::Tls` 和 bounded `tls_failure` observation。证书有效期
+相对测试运行时间生成，因此不会因静态 fixture 到期而失效。六个握手场景连续重复 100 次并通过
+ASAN/UBSAN；该子项不修改生产实现或 Fiber。
+
 上述测试已经覆盖 concrete control-plane 与 data-plane 启动阶段，但还不等价于请求并发及外部互操作
 均已完成故障注入。仍应优先增加：
 
-- 上游 TLS 验证成功、未知 CA、名称错误和客户端证书；
+- upstream mTLS 客户端证书组合测试；该项等待 Fiber #31 的 client identity 加载和 #28 的
+  connection-pool identity 隔离，不能在本项目先行模拟完成；
 - ASAN/UBSAN、聚焦 TSAN；
 - codec、Host/CIDR、trace state、validator fuzz。
 
@@ -1384,8 +1401,8 @@ compatibility contract 统一引用该矩阵，并继续声明：完整生产 co
 | 能力 | 当前 Fiber 状态 | 结论 |
 | --- | --- | --- |
 | HTTP socket peer 地址 | `HttpExchange::remote_addr()` 已提供 | trusted proxy 在本项目实现 |
-| TLS peer/CA/SNI/验证名 | client context 已支持；pool key 未隔离 transport profile | 进程级模式已接入；路由级等待 Fiber #28 |
-| TLS 客户端证书 | 字段存在，但 client context 当前不加载身份 | Fiber 补能力，本项目接入 mTLS |
+| TLS peer/CA/SNI/验证名 | client context 已支持；pool key 未隔离 transport profile | 进程级模式及真实验证矩阵已完成；路由级等待 Fiber #28 |
+| TLS 客户端证书 | 字段存在，但 client context 当前不加载身份 | Fiber #31 补加载能力、#28 补连接隔离，本项目再接入 mTLS |
 | 异步日志丢弃统计 | LoggerManager/Appender stats 已提供 | 本项目接 Prometheus |
 | EventLoop worker index | `group_index()` 已提供 | DNS resolver 可直接 O(1) 取 slot |
 | connection pool 异步 shutdown | `shutdown_async()` 已提供 | 保持使用 |
@@ -1425,7 +1442,7 @@ compatibility contract 统一引用该矩阵，并继续声明：完整生产 co
 1. L-06 系统 DNS 配置和多 nameserver；
 2. P-08 Happy Eyeballs；
 3. S-03 route 级 TLS transport profile 隔离与配置；
-4. S-04 upstream mTLS client identity；
+4. S-04 upstream mTLS client identity（Fiber #31 + #28）；
 5. P-01 通用 SWRR 上游化或 sharding；
 6. 只有 profile 证明 route pin 成为瓶颈时，开展 P-02 RCU 设计。
 
