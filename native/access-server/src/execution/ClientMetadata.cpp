@@ -21,6 +21,7 @@ constexpr std::uint64_t kForwardedHash = http::http_header_name_hash(kForwarded)
 constexpr std::uint64_t kXForwardedForHash = http::http_header_name_hash(kXForwardedFor);
 constexpr std::uint64_t kXRealIpHash = http::http_header_name_hash(kXRealIp);
 constexpr std::uint64_t kXForwardedProtoHash = http::http_header_name_hash(kXForwardedProto);
+constexpr std::size_t kMaxForwardedParameters = 16;
 
 enum class ForwardedProto : std::uint8_t {
     Missing,
@@ -74,6 +75,45 @@ bool is_token(std::string_view value) noexcept {
     });
 }
 
+bool is_valid_quoted_string(std::string_view value) noexcept {
+    if (value.size() < 2 || value.front() != '"' || value.back() != '"') {
+        return false;
+    }
+    bool escaped = false;
+    for (std::size_t i = 1; i + 1 < value.size(); ++i) {
+        const unsigned char character = value[i];
+        if (escaped) {
+            if (character != '\t' && (character < 0x20 || character == 0x7F)) {
+                return false;
+            }
+            escaped = false;
+        } else if (character == '\\') {
+            escaped = true;
+        } else if (character == '"' || (character < 0x20 && character != '\t') || character == 0x7F) {
+            return false;
+        }
+    }
+    return !escaped;
+}
+
+bool is_valid_forwarded_parameter_value(std::string_view value) noexcept {
+    return is_token(value) || is_valid_quoted_string(value);
+}
+
+bool record_forwarded_parameter(std::array<std::string_view, kMaxForwardedParameters> &names, std::size_t &size,
+                                std::string_view name) noexcept {
+    if (size == names.size()) {
+        return false;
+    }
+    for (std::size_t i = 0; i < size; ++i) {
+        if (equals_ci(names[i], name)) {
+            return false;
+        }
+    }
+    names[size++] = name;
+    return true;
+}
+
 bool parse_port(std::string_view text) noexcept {
     if (text.empty()) {
         return false;
@@ -88,15 +128,13 @@ bool unwrap_quoted(std::string_view value, std::string_view &output) noexcept {
         output = value;
         return value.find('"') == std::string_view::npos;
     }
-    if (value.size() < 2 || value.back() != '"') {
+    if (!is_valid_quoted_string(value)) {
         return false;
     }
     value.remove_prefix(1);
     value.remove_suffix(1);
-    for (const unsigned char character: value) {
-        if (character == '\\' || character == '"' || character < 0x20 || character == 0x7F) {
-            return false;
-        }
+    if (value.find('\\') != std::string_view::npos) {
+        return false;
     }
     output = value;
     return true;
@@ -246,40 +284,36 @@ ProtoChain parse_proto_headers(const http::HttpHeaders &headers) noexcept {
 }
 
 bool parse_forwarded_element(std::string_view element, net::IpAddress &address, ForwardedProto &proto) noexcept {
+    std::array<std::string_view, kMaxForwardedParameters> parameter_names{};
+    std::size_t parameter_count = 0;
     bool found_for = false;
-    bool found_proto = false;
-    return for_each_delimited(element, ';', [&](std::string_view parameter) noexcept {
+    const bool valid = for_each_delimited(element, ';', [&](std::string_view parameter) noexcept {
         const std::size_t equals = parameter.find('=');
         if (equals == std::string_view::npos) {
             return false;
         }
         const std::string_view name = trim_ows(parameter.substr(0, equals));
         const std::string_view value = trim_ows(parameter.substr(equals + 1));
-        if (!is_token(name) || value.empty()) {
+        if (!is_token(name) || value.empty() ||
+            !record_forwarded_parameter(parameter_names, parameter_count, name)) {
             return false;
         }
         if (equals_ci(name, "for")) {
-            if (found_for || !parse_ip_endpoint(value, address)) {
+            if (!parse_ip_endpoint(value, address)) {
                 return false;
             }
             found_for = true;
         } else if (equals_ci(name, "proto")) {
-            if (found_proto) {
-                return false;
-            }
             proto = parse_proto(value);
             if (proto == ForwardedProto::Missing) {
                 return false;
             }
-            found_proto = true;
-        } else {
-            std::string_view ignored;
-            if (!unwrap_quoted(value, ignored)) {
-                return false;
-            }
+        } else if (!is_valid_forwarded_parameter_value(value)) {
+            return false;
         }
         return true;
-    }) && found_for;
+    });
+    return valid && found_for;
 }
 
 ForwardedChain parse_forwarded_headers(const http::HttpHeaders &headers) noexcept {

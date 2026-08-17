@@ -365,9 +365,11 @@ adapter 编译为同步程序，请求热路径只执行已编译程序。通用
 
 可信地址链按 client 到 proxy 的 wire 顺序保存，从 socket peer 向右到左剥离可信 CIDR，选择首个
 非可信 hop；全部 hop 都可信时选择最左项。支持 IPv4、原生/括号 IPv6 和可选端口；多字段按 wire
-顺序连接。链最多 32 项。空项、`unknown`、obfuscated、重复 `Forwarded` 参数、非法端口、非法
-proto 或 XFF/XFP 数量错位都标记为 invalid；高优先级 header 非法时不降级读取低优先级 header。
-invalid 结果使用 socket peer 和 listener scheme，且仍执行 CIDR/gray，不再 fail-open。
+顺序连接。链最多 32 项，每个 `Forwarded` element 最多 16 个参数；参数名按 ASCII 大小写去重，
+`by`、`host` 和扩展值也必须是 token 或语法完整的 quoted-string。空项、`unknown`、obfuscated、
+重复参数、非法端口、非法 proto 或 XFF/XFP 数量错位都标记为 invalid；高优先级 header 非法时不
+降级读取低优先级 header。地址链 invalid 时使用 socket peer；仅 scheme 链 invalid 时保留已经验证
+的 client address，但 scheme 回退 listener。两种情况仍执行 CIDR/gray，不再 fail-open。
 
 同一 `ClientMetadata` 被 HTTPS、Route CIDR、gray、代理 Location/Refresh、CAT 和 access log 使用。
 日志与 CAT 记录规范化 `clientIp`、`peerIp`、scheme、address/scheme source 和 forwarding status，

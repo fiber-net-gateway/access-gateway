@@ -97,6 +97,38 @@ TEST(ClientMetadataTest, GivesForwardedPriorityAndParsesBracketedIpv6WithPort) {
     EXPECT_EQ(metadata.scheme_source, ClientSchemeSource::Forwarded);
 }
 
+TEST(ClientMetadataTest, SupportsTrustedIpv6PeersAndMultiFieldIpv6Chains) {
+    ClientMetadata forwarded =
+            resolve(trusted_options(), "2001:db8:ffff::30",
+                    {{"Forwarded", "for=\"[2001:4860::1234]:8443\";proto=\"HTTPS\";by=_edge;host=\"api.example:443\";"
+                                   "ext=\"a\\\"b,c\""},
+                     {"Forwarded", "for=\"[2001:db8:ffff::20]:443\";proto=http;by=\"[2001:db8:ffff::21]\""}});
+
+    EXPECT_TRUE(forwarded.peer_trusted);
+    EXPECT_EQ(forwarded.peer_address.to_string(), "2001:db8:ffff::30");
+    EXPECT_EQ(forwarded.client_address.to_string(), "2001:4860::1234");
+    EXPECT_TRUE(forwarded.secure);
+    EXPECT_EQ(forwarded.address_source, ClientAddressSource::Forwarded);
+    EXPECT_EQ(forwarded.scheme_source, ClientSchemeSource::Forwarded);
+    EXPECT_EQ(forwarded.forwarding_status, ForwardingStatus::Trusted);
+    ASSERT_TRUE(forwarded.route_policy_target);
+    ASSERT_TRUE(forwarded.gray_target);
+    EXPECT_TRUE(forwarded.route_policy_target->matches(ip("2001:4860::1234")));
+    EXPECT_TRUE(forwarded.gray_target->matches(ip("2001:4860::1234")));
+
+    ClientMetadata x_forwarded = resolve(
+            trusted_options(), "2001:db8:ffff::30",
+            {{"X-Forwarded-For", "2001:4860::8, [2001:db8:ffff::20]:443"}, {"X-Forwarded-Proto", "https, http"}});
+    EXPECT_EQ(x_forwarded.client_address.to_string(), "2001:4860::8");
+    EXPECT_TRUE(x_forwarded.secure);
+    EXPECT_EQ(x_forwarded.address_source, ClientAddressSource::XForwardedFor);
+    EXPECT_EQ(x_forwarded.scheme_source, ClientSchemeSource::XForwardedProto);
+
+    ClientMetadata real_ip = resolve(trusted_options(), "2001:db8:ffff::30", {{"X-Real-Ip", "[2001:4860::9]:443"}});
+    EXPECT_EQ(real_ip.client_address.to_string(), "2001:4860::9");
+    EXPECT_EQ(real_ip.address_source, ClientAddressSource::XRealIp);
+}
+
 TEST(ClientMetadataTest, SupportsMultipleHeaderFieldsAndXRealIpPort) {
     ClientMetadata chained = resolve(trusted_options(), "10.0.0.3",
                                      {{"X-Forwarded-For", "203.0.113.9"},
@@ -151,6 +183,74 @@ TEST(ClientMetadataTest, RejectsDuplicateForwardedParametersAndOversizedChains) 
     ClientMetadata oversized = resolve(trusted_options(), "10.0.0.3", {{"X-Forwarded-For", chain}});
     EXPECT_EQ(oversized.client_address.to_string(), "10.0.0.3");
     EXPECT_EQ(oversized.forwarding_status, ForwardingStatus::Invalid);
+}
+
+TEST(ClientMetadataTest, RejectsMalformedForwardedElementsWithoutFallingBack) {
+    constexpr std::array<std::string_view, 10> kInvalidForwarded = {
+            "for=unknown",
+            "for=_hidden",
+            "for=\"[2001:db8::7\";proto=https",
+            "for=\"[2001:db8::7]:65536\";proto=https",
+            "for=203.0.113.7;proto=ftp",
+            "for=203.0.113.7;by=edge;BY=other",
+            "for=203.0.113.7;host=api;host=other",
+            "for=203.0.113.7;ext=bad=value",
+            "for=203.0.113.7;ext=contains space",
+            "for=203.0.113.7,,for=10.0.0.2",
+    };
+    for (const std::string_view value: kInvalidForwarded) {
+        SCOPED_TRACE(value);
+        ClientMetadata metadata =
+                resolve(trusted_options(), "10.0.0.3",
+                        {{"Forwarded", value}, {"X-Forwarded-For", "203.0.113.9"}, {"X-Forwarded-Proto", "https"}});
+        EXPECT_EQ(metadata.client_address.to_string(), "10.0.0.3");
+        EXPECT_FALSE(metadata.secure);
+        EXPECT_EQ(metadata.address_source, ClientAddressSource::SocketPeer);
+        EXPECT_EQ(metadata.scheme_source, ClientSchemeSource::Listener);
+        EXPECT_EQ(metadata.forwarding_status, ForwardingStatus::Invalid);
+        ASSERT_TRUE(metadata.route_policy_target);
+        EXPECT_TRUE(metadata.route_policy_target->matches(ip("10.0.0.3")));
+    }
+
+    std::string too_many_parameters = "for=203.0.113.7";
+    for (std::size_t i = 0; i < 16; ++i) {
+        too_many_parameters.append(";x");
+        too_many_parameters.append(std::to_string(i));
+        too_many_parameters.append("=value");
+    }
+    ClientMetadata oversized = resolve(trusted_options(), "10.0.0.3", {{"Forwarded", too_many_parameters}});
+    EXPECT_EQ(oversized.client_address.to_string(), "10.0.0.3");
+    EXPECT_EQ(oversized.forwarding_status, ForwardingStatus::Invalid);
+}
+
+TEST(ClientMetadataTest, RejectsMalformedXForwardedAndXRealIpFieldsByDimension) {
+    ClientMetadata empty_xff =
+            resolve(trusted_options(), "10.0.0.3",
+                    {{"X-Forwarded-For", "203.0.113.7, "}, {"X-Real-Ip", "192.0.2.8"}, {"X-Forwarded-Proto", "https"}});
+    EXPECT_EQ(empty_xff.client_address.to_string(), "10.0.0.3");
+    EXPECT_FALSE(empty_xff.secure);
+    EXPECT_EQ(empty_xff.forwarding_status, ForwardingStatus::Invalid);
+
+    ClientMetadata multi_real_ip = resolve(trusted_options(), "10.0.0.3", {{"X-Real-Ip", "192.0.2.8, 192.0.2.9"}});
+    EXPECT_EQ(multi_real_ip.client_address.to_string(), "10.0.0.3");
+    EXPECT_EQ(multi_real_ip.forwarding_status, ForwardingStatus::Invalid);
+
+    ClientMetadata duplicate_real_ip =
+            resolve(trusted_options(), "10.0.0.3", {{"X-Real-Ip", "192.0.2.8"}, {"X-Real-Ip", "192.0.2.9"}});
+    EXPECT_EQ(duplicate_real_ip.client_address.to_string(), "10.0.0.3");
+    EXPECT_EQ(duplicate_real_ip.forwarding_status, ForwardingStatus::Invalid);
+
+    for (const std::string_view proto: {std::string_view("https, "), std::string_view("https, ftp")}) {
+        SCOPED_TRACE(proto);
+        ClientMetadata invalid_proto =
+                resolve(trusted_options(), "10.0.0.3",
+                        {{"X-Forwarded-For", "203.0.113.7, 10.0.0.2"}, {"X-Forwarded-Proto", proto}});
+        EXPECT_EQ(invalid_proto.client_address.to_string(), "203.0.113.7");
+        EXPECT_FALSE(invalid_proto.secure);
+        EXPECT_EQ(invalid_proto.address_source, ClientAddressSource::XForwardedFor);
+        EXPECT_EQ(invalid_proto.scheme_source, ClientSchemeSource::Listener);
+        EXPECT_EQ(invalid_proto.forwarding_status, ForwardingStatus::Invalid);
+    }
 }
 
 TEST(ClientMetadataTest, LegacyModePreservesCidrSkipAndRawIpv6GrayBehavior) {

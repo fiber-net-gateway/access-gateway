@@ -426,7 +426,8 @@ matches `ACCESS_SERVER_TRUSTED_PROXY_CIDRS`, `trusted_proxy` mode considers `For
 `X-Forwarded-For`, then `X-Real-Ip`, and walks the chain right-to-left across trusted hops. Invalid or oversized
 chains fall back to the socket peer, so safe modes never skip CIDR checks because a header is absent or invalid.
 Only explicit `legacy_headers` mode preserves the Java rule that a missing or unparsable `X-Real-Ip` skips the
-check. Rejected requests return 403 `NOT_ALLOW_IP`.
+check. Address chains are limited to 32 hops. Each `Forwarded` element is limited to 16 unique parameters, and
+extension values must also be valid tokens or quoted strings. Rejected requests return 403 `NOT_ALLOW_IP`.
 
 When Console Network Policy makes Project policy authoritative, the compiler injects one allow/deny list
 into every wire Route. Route YAML must not also define `allows`, or validation reports a policy conflict.

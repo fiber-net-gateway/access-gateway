@@ -405,7 +405,8 @@ allows:
 命中 `ACCESS_SERVER_TRUSTED_PROXY_CIDRS` 后，才按 `Forwarded`、`X-Forwarded-For`、
 `X-Real-Ip` 的顺序解析，并从右向左剥离可信代理 hop。非法或超限链回退 socket peer，因此安全模式
 不会因 header 缺失或不可解析而跳过 CIDR。只有显式 `legacy_headers` 模式保留 Java 的缺失/非法
-`X-Real-Ip` 跳过规则。被拒绝返回 403 `NOT_ALLOW_IP`。
+`X-Real-Ip` 跳过规则。地址链最多 32 个 hop；每个 `Forwarded` element 最多 16 个不重复参数，
+扩展值也必须是合法 token 或 quoted-string。被拒绝返回 403 `NOT_ALLOW_IP`。
 
 当 Console 的 Network Policy 选择 Project 级策略时，编译器会把统一 allow/deny 列表注入每条 wire
 Route；此时 Route YAML 不应再声明 `allows`，否则会报策略冲突。
