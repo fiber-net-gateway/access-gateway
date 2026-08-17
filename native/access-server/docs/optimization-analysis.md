@@ -576,6 +576,48 @@ native/build-benchmark/access-server/fiber_access_service_selection_benchmark \
 
 **归属：双方，且只有 profile 证明需要时实施。**
 
+**实施状态：并发微基准已完成（2026-08-17）；所有权改造尚未实施。** 新增默认关闭的
+`fiber_access_route_lookup_benchmark`，使用 352 个 Project、1,056 条 route 和 4,096 个预生成
+查询，在真实 `EventLoopGroup` worker 上分离三种成本：
+
+- `pin_only`：每次操作只 atomic pin 全局 `shared_ptr`；
+- `pinned_lookup`：每个 worker 在计时前 pin 一次，再执行 Host + Path 查找；
+- `pin_lookup`：每次操作同时执行全局 pin、Host 和 Path 查找，模拟请求 pipeline 前半段。
+
+每个 worker/case 运行 21 个固定总操作量样本，CSV 输出的是 aggregate sample
+ns/operation 的 nearest-rank p50/p95/p99 和以 p50 推导的 ops/s，不冒充单请求 latency 分布。
+配置编译、query 字符串构造、网络和请求执行均在计时范围之外；checksum 同时验证命中、Host
+未命中和 Path 未命中结果。构建和运行方式：
+
+```bash
+cmake -S native -B native/build-benchmark -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release -DFIBER_BUILD_TESTS=OFF \
+  -DACCESS_SERVER_BUILD_BENCHMARKS=ON
+cmake --build native/build-benchmark \
+  --target fiber_access_route_lookup_benchmark --parallel
+native/build-benchmark/access-server/fiber_access_route_lookup_benchmark \
+  100000 "$(nproc)"
+```
+
+2026-08-17 在 20 vCPU、13th Gen Intel Core i7-13700H、WSL2 环境，未绑核且未隔离系统负载，
+得到以下 p50 方向性结果：
+
+| worker | pin only ops/s | pinned Host+Path ops/s | pin + Host+Path ops/s |
+| ---: | ---: | ---: | ---: |
+| 1 | 57,475,327 | 6,664,239 | 6,222,205 |
+| 2 | 13,537,570 | 13,138,714 | 7,453,079 |
+| 4 | 8,087,614 | 25,826,280 | 7,131,382 |
+| 8 | 4,305,363 | 35,705,551 | 4,310,386 |
+| 20 | 2,214,570 | 56,163,936 | 1,936,839 |
+
+预先 pin 的 matcher workload 在 20 worker 达到单 worker 的约 `8.43x`，而每请求 pin 的完整
+workload 只有约 `0.31x`；20 worker 时 `pin_lookup` 的 516.31 aggregate ns/op 已接近
+`pin_only` 的 451.55 ns/op。该基准确认当前 libstdc++ atomic `shared_ptr` 控制块在同一快照高并发
+读取下会主导这一段 pipeline，满足开展 project-local per-worker publication 方案设计的门槛。
+它仍不是生产容量数据：真实请求还有策略、脚本、proxy 和观测成本，必须继续用生产 profile
+判断端到端收益。下一阶段也不能换成裸指针；必须保留跨 await pin、并发热更新、旧 generation
+回收和 shutdown 语义，并单独提交实现与回归。本项没有修改 Fiber。
+
 每个请求都会 atomic load 一个 `shared_ptr<const AccessRouteSnapshot>`。该操作不保证
 lock-free，并带来共享控制块引用计数流量，但它目前提供了清晰可靠的请求生命周期保证。
 
@@ -594,7 +636,7 @@ lock-free，并带来共享控制块引用计数流量，但它目前提供了�
 - 本项目：route generation、worker acknowledgement、请求 pin 和 activation evidence；
 - 双方：TSAN、并发热更新、请求跨 await、shutdown 中更新等回归。
 
-在没有 profile 前保持当前 shared pointer 实现。
+在独立的 per-worker 方案完成上述生命周期设计和测试前，继续保持当前 shared pointer 实现。
 
 ### 7.3 P-03：per-worker gray snapshot 和 PRNG
 
@@ -1347,6 +1389,11 @@ gitlink 并运行完整 Fiber/native 回归。
 ### 11.2 T-02：benchmark
 
 **归属：双方，各自测试自己的抽象。**
+
+**实施状态：部分完成（2026-08-17）。** 本项目已有 service selection contention、template/header
+分配、route batch publication、Host 高 fan-out，以及本轮新增的 route pin + Host/Path 并发
+benchmark；全部默认关闭，不进入生产 binary。gray、TLS identity、loopback proxy/WebSocket 和
+CAT/logging 成本仍待补齐。
 
 本项目 benchmark：
 
