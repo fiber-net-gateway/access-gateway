@@ -14,7 +14,7 @@ export interface CapabilityView {
 }
 
 export interface AccessConfigLimits {
-  schemaVersion: 1
+  schemaVersion: 2
   projectList: {
     maxPayloadBytes: number
     maxProjects: number
@@ -39,6 +39,8 @@ export interface AccessConfigLimits {
     maxCidrBytes: number
     maxAddressesPerRoute: number
     maxAddressBytes: number
+    maxUpstreamTlsProfiles: number
+    maxUpstreamTlsCaPemBytes: number
     maxStaticResponseBodyBytes: number
     maxStaticResponseBytes: number
     maxPathVariables: number

@@ -27,6 +27,7 @@ using fiber::access_server::ProjectConfig;
 using fiber::access_server::RouteConfig;
 using fiber::access_server::RouteType;
 using fiber::access_server::StringConfigEntry;
+using fiber::access_server::UpstreamTlsVerificationMode;
 
 std::string read_fixture(std::string_view name) {
     std::string path = FIBER_ACCESS_SERVER_TEST_FIXTURE_DIR;
@@ -247,6 +248,77 @@ TEST(AccessConfigCodecTest, ParsesResponseGzipBooleanAndCompressionLevels) {
     ASSERT_TRUE(require_route(config, 4).gzip);
     EXPECT_TRUE(require_route(config, 4).gzip->enabled);
     EXPECT_EQ(require_route(config, 4).gzip->level, 9);
+}
+
+TEST(AccessConfigCodecTest, ParsesStrictRouteUpstreamTlsProfile) {
+    auto result = parse_project_config(
+            R"({"routes":[{"path":"/","type":"PROXY","service":"orders","upstream_tls":{"generation":7,"verification":"CUSTOM_CA","ca_pem":"test-ca","server_name":"sni.example.com","verify_name":"identity.example.com"}}]})");
+
+    ASSERT_TRUE(result) << result.error().message;
+    ASSERT_TRUE(*result);
+    const RouteConfig &route = require_route(**result, 0);
+    ASSERT_TRUE(route.upstream_tls);
+    EXPECT_EQ(route.upstream_tls->generation, 7U);
+    EXPECT_EQ(route.upstream_tls->verification, UpstreamTlsVerificationMode::CustomCa);
+    ASSERT_TRUE(route.upstream_tls->ca_pem);
+    EXPECT_EQ(*route.upstream_tls->ca_pem, "test-ca");
+    ASSERT_TRUE(route.upstream_tls->server_name);
+    EXPECT_EQ(*route.upstream_tls->server_name, "sni.example.com");
+    ASSERT_TRUE(route.upstream_tls->verify_name);
+    EXPECT_EQ(*route.upstream_tls->verify_name, "identity.example.com");
+
+    auto inherited =
+            parse_project_config(R"({"routes":[{"path":"/","service":"orders","upstream_tls":{"generation":1}}]})");
+    ASSERT_TRUE(inherited);
+    ASSERT_TRUE(*inherited);
+    ASSERT_TRUE(require_route(**inherited, 0).upstream_tls);
+    EXPECT_EQ(require_route(**inherited, 0).upstream_tls->verification, UpstreamTlsVerificationMode::Inherit);
+
+    auto null_profile = parse_project_config(R"({"routes":[{"upstream_tls":null}]})");
+    ASSERT_TRUE(null_profile);
+    ASSERT_TRUE(*null_profile);
+    EXPECT_FALSE(require_route(**null_profile, 0).upstream_tls);
+}
+
+TEST(AccessConfigCodecTest, PreservesNativeUpstreamTlsCompatibilityFixture) {
+    const std::string input = read_fixture("project-conf-upstream-tls.json");
+    ASSERT_FALSE(input.empty());
+
+    auto result = parse_project_config(input);
+
+    ASSERT_TRUE(result) << result.error().message;
+    ASSERT_TRUE(*result);
+    const RouteConfig &route = require_route(**result, 0);
+    ASSERT_TRUE(route.upstream_tls);
+    EXPECT_EQ(route.upstream_tls->generation, 42U);
+    EXPECT_EQ(route.upstream_tls->verification, UpstreamTlsVerificationMode::Inherit);
+    ASSERT_TRUE(route.upstream_tls->server_name);
+    EXPECT_EQ(*route.upstream_tls->server_name, "orders.internal.example");
+    ASSERT_TRUE(route.upstream_tls->verify_name);
+    EXPECT_EQ(*route.upstream_tls->verify_name, "orders.identity.example");
+}
+
+TEST(AccessConfigCodecTest, RejectsMalformedRouteUpstreamTlsProfileBeforeJavaCoercion) {
+    for (const std::string_view profile: {
+                 R"({})",
+                 R"({"generation":0})",
+                 R"({"generation":"1"})",
+                 R"({"generation":1,"verification":"FUTURE"})",
+                 R"({"generation":1,"ca_pem":7})",
+                 R"({"generation":1,"unknown":true})",
+                 R"({"generation":1,"generation":2})",
+         }) {
+        SCOPED_TRACE(profile);
+        std::string input = R"({"routes":[{"upstream_tls":)";
+        input.append(profile);
+        input.append("}]}");
+
+        auto result = parse_project_config(input);
+
+        ASSERT_FALSE(result);
+        EXPECT_EQ(result.error().code, AccessConfigErrorCode::InvalidField);
+        EXPECT_TRUE(result.error().field.starts_with("routes[0].upstream_tls"));
+    }
 }
 
 TEST(AccessConfigCodecTest, RejectsInvalidResponseGzipScalars) {

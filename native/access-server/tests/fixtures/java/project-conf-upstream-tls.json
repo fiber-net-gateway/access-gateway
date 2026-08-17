@@ -1,0 +1,21 @@
+{
+  "version": 21,
+  "host": {
+    "secure.example.com": {
+      "https": "S_NOT_MUST"
+    }
+  },
+  "routes": [
+    {
+      "path": "/secure/*",
+      "type": "PROXY",
+      "service": "orders/stable",
+      "upstream_tls": {
+        "generation": 42,
+        "verification": "INHERIT",
+        "server_name": "orders.internal.example",
+        "verify_name": "orders.identity.example"
+      }
+    }
+  ]
+}

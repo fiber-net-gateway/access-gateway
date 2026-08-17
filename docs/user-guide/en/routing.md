@@ -223,6 +223,7 @@ matcher's structural priority.
 | `websocket_timeout`    | PROXY          | Positive value enables WebSocket tunneling and sets tunnel I/O timeout   |
 | `flush`                | PROXY          | `true` reduces local buffering and adds `X-Accel-Buffering: no`          |
 | `allows`               | All            | CIDR allow/deny sequence; `!` prefixes deny entries                      |
+| `upstream_tls`         | PROXY          | Native-only immutable outbound TLS transport profile                     |
 
 Durations accept integer milliseconds or case-insensitive strings such as `500`, `500ms`, and `5s`.
 Data sizes accept integer bytes or binary units such as `64k`, `4m`, and `1g`. New configuration should
@@ -357,12 +358,37 @@ A non-empty `service` takes precedence; `addresses` is not its failure fallback.
 static addresses. Without a scheme, port 443 implies HTTPS and other ports imply HTTP. Explicitly specify
 `http://` or `https://` to avoid port-dependent meaning.
 
-Outbound HTTPS trust is process-wide: `ACCESS_SERVER_UPSTREAM_TLS_MODE` is `legacy_insecure` by default,
+The environment default for outbound HTTPS comes from process configuration:
+`ACCESS_SERVER_UPSTREAM_TLS_MODE` is `legacy_insecure` by default,
 or can be set to `system_ca` or `custom_ca` (with `ACCESS_SERVER_UPSTREAM_TLS_CA_FILE`). Secure modes verify
-the endpoint hostname or IP identity, and an invalid trust store prevents startup. Route-specific CA, SNI,
-and verification-name overrides are not currently accepted because the pinned connection pool cannot yet
-isolate connections by TLS transport profile. Changing CA bundle contents requires a rolling restart so
-existing connections established under the previous trust store are drained.
+the endpoint hostname or IP identity, and an invalid trust store prevents startup. A PROXY route can define
+an `upstream_tls` profile:
+
+```yaml
+upstream_tls:
+    generation: 3
+    verification: CUSTOM_CA # INHERIT / LEGACY_INSECURE / SYSTEM_CA / CUSTOM_CA
+    ca_pem: |
+        -----BEGIN CERTIFICATE-----
+        ...
+        -----END CERTIFICATE-----
+    server_name: sni.internal.example
+    verify_name: identity.internal.example
+```
+
+`generation` is a required positive integer and must increase whenever the CA, SNI, or verification name
+changes. `CUSTOM_CA` requires a PEM bundle; other modes reject one. A Project is capped at 256 profiles, and
+each PEM is capped at 512 KiB, validated before candidate publication, and held in a sealed in-memory fd.
+`server_name` controls SNI while `verify_name`
+independently selects the certificate DNS/IP identity; when omitted they retain endpoint-derived behavior.
+Each explicit profile receives a non-zero pool affinity, so old and new generations cannot reuse a connection,
+while requests pinned to the old snapshot can finish safely. Missing/`null` preserves the process default and
+legacy affinity `0`.
+
+This is a native-only wire extension. Old Java instances ignore it and fall back to insecure verification;
+mixed Java/native deployments and old Native Validators must therefore reject publication. An rnacos readback
+is not instance activation evidence, so activation remains unknown without typed per-instance proof. Changing
+the process-level CA file still requires a rolling restart.
 
 ### 8.3 Request and response forwarding
 

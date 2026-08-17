@@ -7,6 +7,9 @@
 - `project-conf-full.json`：覆盖统一接入配置的主要字段和默认值；
 - `project-conf-jackson-coercions.json`：覆盖未知字段、重复字段后值覆盖、primitive/string
   转型、null 和 custom Duration/DataSize codec。
+- `project-conf-upstream-tls.json`：覆盖 native-only `upstream_tls` transport profile。Java oracle
+  会按未知字段忽略它；native、validator 和 Console 则对 profile 子字段执行严格校验，因此该
+  fixture 同时记录混合 Java/native 实例不得发布此扩展的兼容边界。
 
 期望的归一化结果由 `AccessConfigCodecTest.cpp` 逐字段断言。fixture 保留重复 JSON key，
 不能经过会主动去重或排序 object 字段的格式化工具。

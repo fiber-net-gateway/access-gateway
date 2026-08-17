@@ -22,6 +22,25 @@ enum class RouteType : std::uint8_t {
     Script,
 };
 
+// INHERIT is only valid for a route transport profile. Process-level policy
+// must resolve to one of the three concrete modes before startup.
+enum class UpstreamTlsVerificationMode : std::uint8_t {
+    Inherit,
+    LegacyInsecure,
+    SystemCa,
+    CustomCa,
+};
+
+struct RouteUpstreamTlsConfig {
+    std::uint64_t generation = 0;
+    UpstreamTlsVerificationMode verification = UpstreamTlsVerificationMode::Inherit;
+    std::optional<std::string> ca_pem;
+    std::optional<std::string> server_name;
+    std::optional<std::string> verify_name;
+
+    bool operator==(const RouteUpstreamTlsConfig &) const = default;
+};
+
 enum class BodyType : std::uint8_t {
     Text,
     Base64,
@@ -109,6 +128,7 @@ struct RouteConfig {
     std::optional<bool> flush;
     NullableStringSet allows;
     std::optional<std::string> script;
+    std::optional<RouteUpstreamTlsConfig> upstream_tls;
 
     bool operator==(const RouteConfig &) const = default;
 };

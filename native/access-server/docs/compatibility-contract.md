@@ -291,6 +291,7 @@ bad routing 特殊入口返回 400、`BAD_REQUEST`、`error find router`。
 | `flush` | body flush；响应额外写 `X-Accel-Buffering: no` |
 | `allows` | CIDR allow/deny |
 | `script` | `SCRIPT` 的必填脚本正文；其他 type 不允许 |
+| `upstream_tls` | native-only PROXY TLS transport profile；缺失/null 继承进程策略且不改变旧 wire |
 
 Body：
 
@@ -538,9 +539,37 @@ upstream HTTPS 的进程级校验模式默认为 `legacy_insecure`，保留 Java
 hostname 同时作为 SNI 和默认验证名；数字 IP 不发送 IP-valued SNI，而通过独立 `verify_name`
 校验证书 IP identity。trust store 在 EventLoop 启动前验证，失败信息不包含 CA 文件路径。
 能够明确识别的证书验证或 ALPN 失败返回 502 `HTTP_CLIENT_TLS_ERROR`；TCP 建连失败仍返回
-`HTTP_CLIENT_CONNECT_ERROR`。当前策略对整个进程固定，route wire 尚不接受独立 CA/SNI/
-验证名。CA bundle 内容变更要求滚动重启并排空旧连接，不定义文件热更新语义。route 级能力等待
-Fiber connection pool 支持 TLS transport-profile 隔离。
+`HTTP_CLIENT_CONNECT_ERROR`。
+
+PROXY Route 可用 native-only `upstream_tls` 覆盖 transport profile：
+
+```json
+{
+  "generation": 3,
+  "verification": "CUSTOM_CA",
+  "ca_pem": "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----\n",
+  "server_name": "sni.internal.example",
+  "verify_name": "identity.internal.example"
+}
+```
+
+- `generation` 是必填正整数；轮换 CA、SNI、验证名或后续身份 secret 时必须递增；
+- `verification` 缺失/`INHERIT` 继承进程模式，另可显式使用 `LEGACY_INSECURE`、`SYSTEM_CA`、
+  `CUSTOM_CA`；只有 `CUSTOM_CA` 接受非空 `ca_pem`，每个 Project 最多 256 个 profile，单份 PEM
+  上限 512 KiB；
+- `server_name` 只能是非空 ASCII DNS 名，用作 SNI；缺失时 hostname endpoint 自动发送 SNI，
+  IP endpoint 不发送 IP-valued SNI；
+- `verify_name` 可为 ASCII DNS 名或 IP，独立于 SNI；缺失时使用显式 SNI 或 endpoint identity；
+- profile 子字段、重复字段和未知字段严格拒绝，不套用 Java 的宽松 object 行为；非 PROXY Route
+  上出现该对象也拒绝；
+- custom CA 在候选编译时验证并放入只读 sealed memfd。`generation` 和全部连接级内容生成稳定、
+  非零 pool affinity；相同 profile 同时用于 connection key 与 `TlsOptions`。旧请求 pin 旧 snapshot，
+  新旧 lease 不会跨 profile 复用。
+
+字段缺失时仍使用 affinity `0` 和现有进程策略，保持旧 route wire。进程级 custom CA 文件变更仍要求
+滚动重启。`upstream_tls` 不属于 Java 基线：旧 Java 实例会忽略整个对象并继续使用 insecure 行为，
+所以存在 Java 或不支持 limits schema 2 validator 的环境必须 fail closed，禁止发布该字段。rnacos
+write/readback 也不能证明实例已激活此 profile；没有逐实例 typed evidence 时状态保持 unknown。
 
 ### 10.3 Request header
 

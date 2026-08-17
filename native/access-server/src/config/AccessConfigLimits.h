@@ -35,6 +35,8 @@ struct ProjectRouteLimits {
     std::size_t max_cidr_bytes = 64;
     std::size_t max_addresses_per_route = 256;
     std::size_t max_address_bytes = 2048;
+    std::size_t max_upstream_tls_profiles = 256;
+    std::size_t max_upstream_tls_ca_pem_bytes = 512U << 10U;
     std::size_t max_static_response_body_bytes = 2U << 20U;
     std::size_t max_static_response_bytes = 8U << 20U;
     std::size_t max_path_variables = 64;
@@ -52,7 +54,7 @@ struct GrayRuleLimits {
 };
 
 struct AccessConfigLimits {
-    std::size_t schema_version = 1;
+    std::size_t schema_version = 2;
     ProjectListLimits project_list;
     ProjectRouteLimits project_route;
     GrayRuleLimits gray_rules;

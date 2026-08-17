@@ -139,6 +139,14 @@ export function ProjectRoutesPage() {
     () => model.routes.reduce((total, route) => total + utf8Bytes(route.source), 0),
     [model.routes],
   )
+  const upstreamTlsProfileCount = useMemo(
+    () =>
+      model.routes.reduce(
+        (total, route) => total + Number(analyzeRouteSource(route).hasUpstreamTls),
+        0,
+      ),
+    [model.routes],
+  )
   const limitMessages = useMemo(() => {
     if (!routeLimits) return []
     const messages: string[] = []
@@ -147,6 +155,9 @@ export function ProjectRoutesPage() {
     }
     if (sourceBytes > routeLimits.maxPayloadBytes) {
       messages.push(`Route 源码合计超过 ${routeLimits.maxPayloadBytes} UTF-8 bytes`)
+    }
+    if (upstreamTlsProfileCount > routeLimits.maxUpstreamTlsProfiles) {
+      messages.push(`上游 TLS Profile 数量超过 Native 上限 ${routeLimits.maxUpstreamTlsProfiles}`)
     }
     for (const [index, route] of model.routes.entries()) {
       const sourceLimit =
@@ -166,7 +177,7 @@ export function ProjectRoutesPage() {
       }
     }
     return messages
-  }, [model.routes, routeLimits, sourceBytes])
+  }, [model.routes, routeLimits, sourceBytes, upstreamTlsProfileCount])
   const hasLimitIssues = limitMessages.length > 0
   const hasLocalIssues = localIssueCount > 0 || hasLimitIssues
   const routeCountAtLimit = routeLimits ? model.routes.length >= routeLimits.maxRoutes : false

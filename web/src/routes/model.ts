@@ -25,6 +25,7 @@ const routeFields = new Set([
   'websocket_timeout',
   'flush',
   'allows',
+  'upstream_tls',
 ])
 
 const responseTemplate = `path: /healthz
@@ -56,6 +57,7 @@ export interface RouteSourceAnalysis {
   method: string | null
   type: 'RESPONSE' | 'PROXY' | 'SCRIPT' | null
   condition: string | null
+  hasUpstreamTls: boolean
   issues: readonly RouteValidationIssue[]
 }
 
@@ -196,6 +198,152 @@ function validateRouteFieldShapes(
     if (field in value && !isScalarValue(value[field])) addTypeIssue(field, 'scalar 或 null')
   }
   if ('body' in value && !isScalarMap(value.body)) addTypeIssue('body', 'mapping 或 null')
+  validateUpstreamTls(route, lineCounter, document, value, issues)
+}
+
+const upstreamTlsFields = new Set([
+  'generation',
+  'verification',
+  'ca_pem',
+  'server_name',
+  'verify_name',
+])
+const upstreamTlsVerificationModes = new Set([
+  'INHERIT',
+  'LEGACY_INSECURE',
+  'SYSTEM_CA',
+  'CUSTOM_CA',
+])
+
+function validTlsDnsName(value: string): boolean {
+  if (
+    value.length < 1 ||
+    value.length > 253 ||
+    value.startsWith('.') ||
+    value.endsWith('.') ||
+    validTlsIp(value)
+  ) {
+    return false
+  }
+  return value
+    .split('.')
+    .every(
+      (label) =>
+        label.length >= 1 &&
+        label.length <= 63 &&
+        /^[A-Za-z0-9-]+$/u.test(label) &&
+        !label.includes('*'),
+    )
+}
+
+function validTlsIp(value: string): boolean {
+  const ipv4 = value.split('.')
+  if (
+    ipv4.length === 4 &&
+    ipv4.every((part) => /^\d{1,3}$/u.test(part) && Number(part) >= 0 && Number(part) <= 255)
+  ) {
+    return true
+  }
+  if (!value.includes(':') || !/^[0-9A-Fa-f:.]+$/u.test(value)) return false
+  try {
+    return new URL(`http://[${value}]/`).hostname.startsWith('[')
+  } catch {
+    return false
+  }
+}
+
+function validateUpstreamTls(
+  route: RouteItemModel,
+  lineCounter: LineCounter,
+  document: ReturnType<typeof parseDocument>,
+  value: Readonly<Record<string, unknown>>,
+  issues: RouteValidationIssue[],
+): void {
+  if (!('upstream_tls' in value) || value.upstream_tls === null) return
+  const offset = fieldOffset(document, 'upstream_tls')
+  const add = (code: string, message: string, path = 'upstream_tls'): void => {
+    issues.push(sourceIssue(route.id, lineCounter, code, message, path, offset))
+  }
+  if (
+    typeof value.upstream_tls !== 'object' ||
+    value.upstream_tls === null ||
+    Array.isArray(value.upstream_tls)
+  ) {
+    add('INVALID_UPSTREAM_TLS_PROFILE', 'upstream_tls 必须是 mapping 或 null')
+    return
+  }
+  const profile = value.upstream_tls as Readonly<Record<string, unknown>>
+  for (const field of Object.keys(profile)) {
+    if (!upstreamTlsFields.has(field)) {
+      add('UNKNOWN_UPSTREAM_TLS_FIELD', `未知 upstream_tls 字段：${field}`, `upstream_tls.${field}`)
+    }
+  }
+  if (
+    typeof profile.generation !== 'number' ||
+    !Number.isSafeInteger(profile.generation) ||
+    profile.generation <= 0
+  ) {
+    add('INVALID_UPSTREAM_TLS_GENERATION', 'generation 必须是正安全整数', 'upstream_tls.generation')
+  }
+  if (
+    profile.verification !== undefined &&
+    (typeof profile.verification !== 'string' ||
+      !upstreamTlsVerificationModes.has(profile.verification))
+  ) {
+    add(
+      'INVALID_UPSTREAM_TLS_VERIFICATION',
+      'verification 必须是 INHERIT、LEGACY_INSECURE、SYSTEM_CA 或 CUSTOM_CA',
+      'upstream_tls.verification',
+    )
+  }
+  const verification = profile.verification ?? 'INHERIT'
+  if (
+    profile.ca_pem !== undefined &&
+    profile.ca_pem !== null &&
+    typeof profile.ca_pem !== 'string'
+  ) {
+    add('INVALID_UPSTREAM_TLS_CA', 'ca_pem 必须是字符串或 null', 'upstream_tls.ca_pem')
+  } else if (
+    verification === 'CUSTOM_CA' &&
+    (typeof profile.ca_pem !== 'string' || profile.ca_pem.length === 0)
+  ) {
+    add('INVALID_UPSTREAM_TLS_CA', 'CUSTOM_CA 必须提供非空 ca_pem', 'upstream_tls.ca_pem')
+  } else if (verification !== 'CUSTOM_CA' && typeof profile.ca_pem === 'string') {
+    add('UPSTREAM_TLS_CA_CONFLICT', '只有 CUSTOM_CA 可以配置 ca_pem', 'upstream_tls.ca_pem')
+  }
+  if (
+    profile.server_name !== undefined &&
+    profile.server_name !== null &&
+    (typeof profile.server_name !== 'string' || !validTlsDnsName(profile.server_name))
+  ) {
+    add(
+      'INVALID_UPSTREAM_TLS_SERVER_NAME',
+      'server_name 必须是非空 ASCII DNS 名称',
+      'upstream_tls.server_name',
+    )
+  }
+  if (
+    profile.verify_name !== undefined &&
+    profile.verify_name !== null &&
+    (typeof profile.verify_name !== 'string' ||
+      (!validTlsIp(profile.verify_name) && !validTlsDnsName(profile.verify_name)))
+  ) {
+    add(
+      'INVALID_UPSTREAM_TLS_VERIFY_NAME',
+      'verify_name 必须是非空 ASCII DNS 名称或 IP 地址',
+      'upstream_tls.verify_name',
+    )
+  }
+  if (verification === 'LEGACY_INSECURE' && typeof profile.verify_name === 'string') {
+    add(
+      'UPSTREAM_TLS_VERIFY_NAME_CONFLICT',
+      'LEGACY_INSECURE 不能配置 verify_name',
+      'upstream_tls.verify_name',
+    )
+  }
+  if (value.type !== 'PROXY') {
+    add('UPSTREAM_TLS_ROUTE_TYPE_CONFLICT', 'upstream_tls 只能用于 PROXY Route')
+  }
 }
 
 function validateResponseGzip(
@@ -372,6 +520,7 @@ function analyzeRouteSourceUncached(route: RouteItemModel): RouteSourceAnalysis 
       method: route.method ?? null,
       type: 'SCRIPT',
       condition: null,
+      hasUpstreamTls: false,
       issues,
     }
   }
@@ -443,10 +592,24 @@ function analyzeRouteSourceUncached(route: RouteItemModel): RouteSourceAnalysis 
       code: 'ROUTE_ROOT_NOT_MAPPING',
       message: '每个编辑器只能包含一条 YAML mapping',
     })
-    return { path: null, method: null, type: null, condition: null, issues }
+    return {
+      path: null,
+      method: null,
+      type: null,
+      condition: null,
+      hasUpstreamTls: false,
+      issues,
+    }
   }
   if (issues.length > 0) {
-    return { path: null, method: null, type: null, condition: null, issues }
+    return {
+      path: null,
+      method: null,
+      type: null,
+      condition: null,
+      hasUpstreamTls: false,
+      issues,
+    }
   }
   const value: unknown = document.toJS({ maxAliasCount: 0 })
   if (typeof value !== 'object' || value === null || Array.isArray(value) || !isJsonSafe(value)) {
@@ -460,7 +623,14 @@ function analyzeRouteSourceUncached(route: RouteItemModel): RouteSourceAnalysis 
         message: 'Route 值只能使用 JSON 安全的字符串、布尔值、数组、对象和安全整数',
       })
     }
-    return { path: null, method: null, type: null, condition: null, issues }
+    return {
+      path: null,
+      method: null,
+      type: null,
+      condition: null,
+      hasUpstreamTls: false,
+      issues,
+    }
   }
   const routeValue = value as Record<string, unknown>
   const type =
@@ -528,6 +698,7 @@ function analyzeRouteSourceUncached(route: RouteItemModel): RouteSourceAnalysis 
     method: typeof routeValue.method === 'string' ? routeValue.method : null,
     type,
     condition: typeof routeValue.condition === 'string' ? routeValue.condition : null,
+    hasUpstreamTls: routeValue.upstream_tls !== undefined && routeValue.upstream_tls !== null,
     issues,
   }
 }

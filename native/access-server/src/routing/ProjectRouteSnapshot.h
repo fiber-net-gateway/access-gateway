@@ -8,6 +8,7 @@
 #include "CompiledHeaderTemplates.h"
 #include "HostMatcher.h"
 #include "ProxyAddressSelector.h"
+#include "UpstreamTlsTransportProfile.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -56,6 +57,7 @@ struct CompiledResponseRoute {
 
 struct CompiledProxyRoute {
     std::shared_ptr<ProxyAddressSelector> address_selector;
+    std::optional<UpstreamTlsTransportProfile> upstream_tls;
     std::int32_t timeout_millis = 60000;
     std::optional<std::int64_t> max_response_body_size;
     std::optional<std::int32_t> websocket_timeout_millis;

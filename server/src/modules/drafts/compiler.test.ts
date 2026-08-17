@@ -222,6 +222,111 @@ test('rejects gzip values and combinations unsupported by access-server', () => 
   }
 })
 
+test('compiles a strict upstream TLS transport profile without exposing a file path', () => {
+  const result = compileProjectRoutes(
+    'api.example.com',
+    model(`path: /secure
+type: PROXY
+service: orders
+upstream_tls:
+  generation: 7
+  verification: CUSTOM_CA
+  ca_pem: test-ca
+  server_name: sni.example.com
+  verify_name: identity.example.com`),
+  )
+
+  assert.deepEqual(result.issues, [])
+  const payload = JSON.parse(result.compiled!.payloadText) as {
+    routes: Array<Record<string, unknown>>
+  }
+  assert.deepEqual(payload.routes[0]?.upstream_tls, {
+    ca_pem: 'test-ca',
+    generation: 7,
+    server_name: 'sni.example.com',
+    verification: 'CUSTOM_CA',
+    verify_name: 'identity.example.com',
+  })
+})
+
+test('rejects malformed, misleading, and oversized upstream TLS profiles', () => {
+  const cases = [
+    { source: 'generation: 0', code: 'INVALID_UPSTREAM_TLS_GENERATION' },
+    { source: 'generation: 1\n  future: true', code: 'UNKNOWN_UPSTREAM_TLS_FIELD' },
+    {
+      source: 'generation: 1\n  verification: CUSTOM_CA',
+      code: 'INVALID_UPSTREAM_TLS_CA',
+    },
+    {
+      source: 'generation: 1\n  verification: SYSTEM_CA\n  ca_pem: unexpected',
+      code: 'UPSTREAM_TLS_CA_CONFLICT',
+    },
+    {
+      source: 'generation: 1\n  verification: LEGACY_INSECURE\n  verify_name: example.com',
+      code: 'UPSTREAM_TLS_VERIFY_NAME_CONFLICT',
+    },
+    { source: 'generation: 1\n  server_name: 127.0.0.1', code: 'INVALID_UPSTREAM_TLS_SERVER_NAME' },
+  ]
+  for (const testCase of cases) {
+    const result = compileProjectRoutes(
+      'api.example.com',
+      model(`path: /secure\ntype: PROXY\nservice: orders\nupstream_tls:\n  ${testCase.source}`),
+    )
+    assert.ok(
+      result.issues.some((issue) => issue.code === testCase.code),
+      `${testCase.code}: ${JSON.stringify(result.issues)}`,
+    )
+  }
+
+  const response = compileProjectRoutes(
+    'api.example.com',
+    model('path: /\ntype: RESPONSE\nstatus: 200\nupstream_tls: { generation: 1 }'),
+  )
+  assert.ok(response.issues.some((issue) => issue.code === 'UPSTREAM_TLS_ROUTE_TYPE_CONFLICT'))
+
+  const limits = {
+    ...fallbackAccessConfigLimits,
+    projectRoute: {
+      ...fallbackAccessConfigLimits.projectRoute,
+      maxUpstreamTlsCaPemBytes: 3,
+    },
+  }
+  const oversized = compileProjectRoutes(
+    'api.example.com',
+    model(
+      'path: /\ntype: PROXY\nservice: orders\nupstream_tls: { generation: 1, verification: CUSTOM_CA, ca_pem: four }',
+    ),
+    1,
+    limits,
+  )
+  assert.ok(
+    oversized.issues.some(
+      (issue) => issue.path === 'upstream_tls.ca_pem' && issue.code === 'limit_exceeded',
+    ),
+  )
+
+  const profileLimited = compileProjectRoutes(
+    'api.example.com',
+    model(
+      'path: /one\ntype: PROXY\nservice: orders\nupstream_tls: { generation: 1 }',
+      'path: /two\ntype: PROXY\nservice: orders\nupstream_tls: { generation: 2 }',
+    ),
+    1,
+    {
+      ...fallbackAccessConfigLimits,
+      projectRoute: {
+        ...fallbackAccessConfigLimits.projectRoute,
+        maxUpstreamTlsProfiles: 1,
+      },
+    },
+  )
+  assert.ok(
+    profileLimited.issues.some(
+      (issue) => issue.path === 'upstream_tls' && issue.code === 'limit_exceeded',
+    ),
+  )
+})
+
 test('comments and formatting do not change the compiled semantic digest', () => {
   const compact = compileProjectRoutes(
     'api.example.com',

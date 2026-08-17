@@ -21,6 +21,12 @@ class Http1ClientConnection;
 
 namespace fiber::access_server {
 
+class UpstreamTlsTransportProfile;
+
+[[nodiscard]] UpstreamTlsClientPolicyView
+effective_upstream_tls_client_policy(const UpstreamTlsClientPolicy &environment,
+                                     const UpstreamTlsTransportProfile *profile) noexcept;
+
 struct ProxyDnsResolver {
     using Function = async::Task<common::IoResult<std::vector<net::IpAddress>>> (*)(void *context,
                                                                                     std::string_view host) noexcept;
@@ -80,9 +86,18 @@ struct ProxyUpstreamConnection {
 
 [[nodiscard]] async::Task<std::expected<ProxyUpstreamConnection, ProxyConnectError>>
 acquire_proxy_upstream_connection(http::StealableHttp1ConnectionPoolSet &pool, ProxyDnsResolver dns_resolver,
-                                  const http::Http1ConnectionGroupKey &key, const UpstreamTlsClientPolicy &tls_policy,
+                                  const http::Http1ConnectionGroupKey &key, UpstreamTlsClientPolicyView tls_policy,
                                   std::chrono::milliseconds connect_timeout,
                                   ProxyHappyEyeballsPolicy happy_eyeballs = {}) noexcept;
+
+[[nodiscard]] inline async::Task<std::expected<ProxyUpstreamConnection, ProxyConnectError>>
+acquire_proxy_upstream_connection(http::StealableHttp1ConnectionPoolSet &pool, ProxyDnsResolver dns_resolver,
+                                  const http::Http1ConnectionGroupKey &key, const UpstreamTlsClientPolicy &tls_policy,
+                                  std::chrono::milliseconds connect_timeout,
+                                  ProxyHappyEyeballsPolicy happy_eyeballs = {}) noexcept {
+    return acquire_proxy_upstream_connection(pool, dns_resolver, key, upstream_tls_client_policy_view(tls_policy),
+                                             connect_timeout, happy_eyeballs);
+}
 
 } // namespace fiber::access_server
 

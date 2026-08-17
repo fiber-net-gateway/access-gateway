@@ -32,9 +32,10 @@ const routeFields = new Set([
   'websocket_timeout',
   'flush',
   'allows',
+  'upstream_tls',
 ])
 
-export const ROUTE_COMPILER_REVISION = 'project-routes-mixed-v6-native-limits'
+export const ROUTE_COMPILER_REVISION = 'project-routes-upstream-tls-profile-v1'
 
 const networkPolicyRouteId = '00000000-0000-4000-8000-000000000099'
 
@@ -330,6 +331,20 @@ function validateCompiledRouteLimits(
       }
     }
   }
+  const upstreamTls = value.upstream_tls
+  if (typeof upstreamTls === 'object' && upstreamTls !== null && !Array.isArray(upstreamTls)) {
+    const caPem = (upstreamTls as Readonly<Record<string, unknown>>).ca_pem
+    if (typeof caPem === 'string' && utf8Bytes(caPem) > routeLimits.maxUpstreamTlsCaPemBytes) {
+      issues.push(
+        limitIssue(
+          route.id,
+          'upstream_tls.ca_pem',
+          'Upstream TLS CA PEM',
+          routeLimits.maxUpstreamTlsCaPemBytes,
+        ),
+      )
+    }
+  }
   return issues
 }
 
@@ -377,6 +392,148 @@ function validateRouteFieldShapes(
     }
   }
   if ('body' in value && !isScalarMap(value.body)) addTypeIssue('body', 'an object or null')
+  validateUpstreamTls(route, lineCounter, document, value, issues)
+}
+
+const upstreamTlsFields = new Set([
+  'generation',
+  'verification',
+  'ca_pem',
+  'server_name',
+  'verify_name',
+])
+const upstreamTlsVerificationModes = new Set([
+  'INHERIT',
+  'LEGACY_INSECURE',
+  'SYSTEM_CA',
+  'CUSTOM_CA',
+])
+
+function validTlsDnsName(value: string): boolean {
+  if (
+    value.length < 1 ||
+    value.length > 253 ||
+    value.startsWith('.') ||
+    value.endsWith('.') ||
+    isIP(value) !== 0
+  ) {
+    return false
+  }
+  return value
+    .split('.')
+    .every(
+      (label) =>
+        label.length >= 1 &&
+        label.length <= 63 &&
+        /^[A-Za-z0-9-]+$/u.test(label) &&
+        !label.includes('*'),
+    )
+}
+
+function validateUpstreamTls(
+  route: RouteItemModel,
+  lineCounter: LineCounter,
+  document: ReturnType<typeof parseDocument>,
+  value: Readonly<Record<string, unknown>>,
+  issues: RouteValidationIssue[],
+): void {
+  if (!('upstream_tls' in value) || value.upstream_tls === null) return
+  const offset = findFieldOffset(document, 'upstream_tls')
+  const add = (code: string, message: string, path = 'upstream_tls'): void => {
+    issues.push(issue(route, lineCounter, code, message, path, offset))
+  }
+  if (
+    typeof value.upstream_tls !== 'object' ||
+    value.upstream_tls === null ||
+    Array.isArray(value.upstream_tls)
+  ) {
+    add('INVALID_UPSTREAM_TLS_PROFILE', 'upstream_tls must be an object or null')
+    return
+  }
+  const profile = value.upstream_tls as Readonly<Record<string, unknown>>
+  for (const field of Object.keys(profile)) {
+    if (!upstreamTlsFields.has(field)) {
+      add(
+        'UNKNOWN_UPSTREAM_TLS_FIELD',
+        `Unknown upstream_tls field: ${field}`,
+        `upstream_tls.${field}`,
+      )
+    }
+  }
+  if (
+    typeof profile.generation !== 'number' ||
+    !Number.isSafeInteger(profile.generation) ||
+    profile.generation <= 0
+  ) {
+    add(
+      'INVALID_UPSTREAM_TLS_GENERATION',
+      'upstream_tls.generation must be a positive safe integer',
+      'upstream_tls.generation',
+    )
+  }
+  if (
+    profile.verification !== undefined &&
+    (typeof profile.verification !== 'string' ||
+      !upstreamTlsVerificationModes.has(profile.verification))
+  ) {
+    add(
+      'INVALID_UPSTREAM_TLS_VERIFICATION',
+      'upstream_tls.verification must be INHERIT, LEGACY_INSECURE, SYSTEM_CA, or CUSTOM_CA',
+      'upstream_tls.verification',
+    )
+  }
+  const verification = profile.verification ?? 'INHERIT'
+  if (
+    profile.ca_pem !== undefined &&
+    profile.ca_pem !== null &&
+    typeof profile.ca_pem !== 'string'
+  ) {
+    add(
+      'INVALID_UPSTREAM_TLS_CA',
+      'upstream_tls.ca_pem must be a string or null',
+      'upstream_tls.ca_pem',
+    )
+  } else if (
+    verification === 'CUSTOM_CA' &&
+    (typeof profile.ca_pem !== 'string' || profile.ca_pem.length === 0)
+  ) {
+    add('INVALID_UPSTREAM_TLS_CA', 'CUSTOM_CA requires a non-empty ca_pem', 'upstream_tls.ca_pem')
+  } else if (verification !== 'CUSTOM_CA' && typeof profile.ca_pem === 'string') {
+    add('UPSTREAM_TLS_CA_CONFLICT', 'ca_pem is only valid with CUSTOM_CA', 'upstream_tls.ca_pem')
+  }
+  if (
+    profile.server_name !== undefined &&
+    profile.server_name !== null &&
+    (typeof profile.server_name !== 'string' || !validTlsDnsName(profile.server_name))
+  ) {
+    add(
+      'INVALID_UPSTREAM_TLS_SERVER_NAME',
+      'server_name must be a non-empty ASCII DNS name',
+      'upstream_tls.server_name',
+    )
+  }
+  if (
+    profile.verify_name !== undefined &&
+    profile.verify_name !== null &&
+    (typeof profile.verify_name !== 'string' ||
+      (isIP(profile.verify_name) === 0 && !validTlsDnsName(profile.verify_name)))
+  ) {
+    add(
+      'INVALID_UPSTREAM_TLS_VERIFY_NAME',
+      'verify_name must be a non-empty ASCII DNS name or IP address',
+      'upstream_tls.verify_name',
+    )
+  }
+  if (verification === 'LEGACY_INSECURE' && typeof profile.verify_name === 'string') {
+    add(
+      'UPSTREAM_TLS_VERIFY_NAME_CONFLICT',
+      'verify_name cannot be used with LEGACY_INSECURE',
+      'upstream_tls.verify_name',
+    )
+  }
+  if (value.type !== 'PROXY') {
+    add('UPSTREAM_TLS_ROUTE_TYPE_CONFLICT', 'upstream_tls is only valid for PROXY routes')
+  }
 }
 
 function validateResponseGzip(
@@ -725,6 +882,7 @@ export function compileProjectRoutes(
   if (limitIssues.length > 0) return { compiled: null, issues: limitIssues }
   const routes: Readonly<Record<string, unknown>>[] = []
   const issues: RouteValidationIssue[] = validateNetworkPolicy(model)
+  let upstreamTlsProfileCount = 0
   for (const route of model.routes) {
     const parsed =
       route.format === 'yaml'
@@ -792,6 +950,20 @@ export function compileProjectRoutes(
       }
       if (compiledRoute) {
         const compiledLimitIssues = validateCompiledRouteLimits(route, compiledRoute, limits)
+        if (
+          compiledRoute.upstream_tls !== undefined &&
+          compiledRoute.upstream_tls !== null &&
+          ++upstreamTlsProfileCount > limits.projectRoute.maxUpstreamTlsProfiles
+        ) {
+          compiledLimitIssues.push(
+            limitIssue(
+              route.id,
+              'upstream_tls',
+              'Upstream TLS profile count',
+              limits.projectRoute.maxUpstreamTlsProfiles,
+            ),
+          )
+        }
         issues.push(...compiledLimitIssues)
         if (compiledLimitIssues.length === 0) routes.push(compiledRoute)
       }

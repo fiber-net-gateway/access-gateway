@@ -8,6 +8,9 @@
 namespace fiber::access_server {
 
 common::IoResult<void> validate_upstream_tls_client_policy(const UpstreamTlsClientPolicy &policy) noexcept {
+    if (policy.verification == UpstreamTlsVerificationMode::Inherit) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
     if (policy.verification == UpstreamTlsVerificationMode::LegacyInsecure) {
         return policy.ca_file.empty() ? common::IoResult<void>{} : std::unexpected(common::IoErr::Invalid);
     }

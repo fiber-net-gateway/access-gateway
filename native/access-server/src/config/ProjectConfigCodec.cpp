@@ -65,6 +65,82 @@ DecodeResult<std::optional<RouteBodyConfig>> route_body(const AccessJsonValue &v
     return std::optional<RouteBodyConfig>(std::move(result));
 }
 
+DecodeResult<std::optional<RouteUpstreamTlsConfig>> route_upstream_tls(const AccessJsonValue &value,
+                                                                       std::string_view field) {
+    if (value.is_null()) {
+        return std::optional<RouteUpstreamTlsConfig>{};
+    }
+    if (!value.is_object()) {
+        return invalid_field(field, "expected upstream_tls object or null");
+    }
+
+    RouteUpstreamTlsConfig result;
+    bool generation_seen = false;
+    bool verification_seen = false;
+    bool ca_pem_seen = false;
+    bool server_name_seen = false;
+    bool verify_name_seen = false;
+    for (const auto &entry: value.as_object()) {
+        const std::string path = child_path(field, entry.key);
+        bool *seen = nullptr;
+        if (entry.key == "generation") {
+            seen = &generation_seen;
+        } else if (entry.key == "verification") {
+            seen = &verification_seen;
+        } else if (entry.key == "ca_pem") {
+            seen = &ca_pem_seen;
+        } else if (entry.key == "server_name") {
+            seen = &server_name_seen;
+        } else if (entry.key == "verify_name") {
+            seen = &verify_name_seen;
+        } else {
+            return invalid_field(path, "unknown upstream_tls field");
+        }
+        if (*seen) {
+            return invalid_field(path, "duplicate upstream_tls field");
+        }
+        *seen = true;
+
+        if (entry.key == "generation") {
+            if (!entry.value.is_integer() || entry.value.as_integer() <= 0) {
+                return invalid_field(path, "generation must be a positive integer");
+            }
+            result.generation = static_cast<std::uint64_t>(entry.value.as_integer());
+        } else if (entry.key == "verification") {
+            if (!entry.value.is_text()) {
+                return invalid_field(path, "verification must be an enum name");
+            }
+            const std::string_view mode = entry.value.as_text();
+            if (mode == "INHERIT") {
+                result.verification = UpstreamTlsVerificationMode::Inherit;
+            } else if (mode == "LEGACY_INSECURE") {
+                result.verification = UpstreamTlsVerificationMode::LegacyInsecure;
+            } else if (mode == "SYSTEM_CA") {
+                result.verification = UpstreamTlsVerificationMode::SystemCa;
+            } else if (mode == "CUSTOM_CA") {
+                result.verification = UpstreamTlsVerificationMode::CustomCa;
+            } else {
+                return invalid_field(path, "unknown upstream TLS verification mode");
+            }
+        } else {
+            std::optional<std::string> *output = entry.key == "ca_pem"        ? &result.ca_pem
+                                                 : entry.key == "server_name" ? &result.server_name
+                                                                              : &result.verify_name;
+            if (entry.value.is_null()) {
+                output->reset();
+            } else if (entry.value.is_text()) {
+                output->emplace(entry.value.as_text());
+            } else {
+                return invalid_field(path, "upstream TLS string field must be a string or null");
+            }
+        }
+    }
+    if (!generation_seen) {
+        return invalid_field(child_path(field, "generation"), "generation is required");
+    }
+    return std::optional<RouteUpstreamTlsConfig>(std::move(result));
+}
+
 DecodeResult<RouteConfig> route_config(const AccessJsonValue &value, std::string_view field,
                                        const ProjectRouteLimits &limits) {
     if (!value.is_object()) {
@@ -202,6 +278,12 @@ DecodeResult<RouteConfig> route_config(const AccessJsonValue &value, std::string
                 return std::unexpected(std::move(decoded.error()));
             }
             result.script = std::move(*decoded);
+        } else if (entry.key == "upstream_tls") {
+            auto decoded = route_upstream_tls(entry.value, path);
+            if (!decoded) {
+                return std::unexpected(std::move(decoded.error()));
+            }
+            result.upstream_tls = std::move(*decoded);
         }
     }
     return result;
