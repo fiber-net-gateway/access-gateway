@@ -6,6 +6,7 @@
 #include "../observability/AccessLogPolicy.h"
 #include "AccessActivationEndpoint.h"
 #include "AccessConfigWatcher.h"
+#include "AccessDnsService.h"
 #include "AccessServiceDiscovery.h"
 #include "GrayConfigWatcher.h"
 #include "TlsCertificateWatcher.h"
@@ -24,6 +25,11 @@
 #include <fiber/net/SocketAddress.h>
 
 namespace fiber::access_server {
+
+enum class AccessDnsMode : std::uint8_t {
+    System,
+    Override,
+};
 
 enum class AccessServerConfigErrorCode : std::uint8_t {
     OpenFailed,
@@ -66,6 +72,9 @@ public:
     [[nodiscard]] const UpstreamTlsClientPolicy &upstream_tls_client_policy() const noexcept {
         return upstream_tls_client_policy_;
     }
+    [[nodiscard]] AccessDnsMode dns_mode() const noexcept { return dns_mode_; }
+    [[nodiscard]] std::string_view dns_resolver_config_path() const noexcept { return dns_resolver_config_path_; }
+    [[nodiscard]] std::expected<AccessDnsServiceOptions, AccessServerConfigError> resolve_dns_options() const;
     [[nodiscard]] const std::optional<cat::CatClientConfig> &cat_config() const noexcept { return cat_config_; }
     [[nodiscard]] const nacos::NacosClientConfig &nacos_config() const noexcept { return nacos_config_; }
     [[nodiscard]] const AccessConfigWatcherOptions &watcher_options() const noexcept { return watcher_options_; }
@@ -86,6 +95,8 @@ private:
                        std::chrono::milliseconds initial_config_timeout, std::size_t default_max_request_body_size,
                        bool test_mode, ClientMetadataResolverOptions client_metadata_options,
                        AccessLogOptions access_log_options, UpstreamTlsClientPolicy upstream_tls_client_policy,
+                       AccessDnsMode dns_mode, std::string dns_resolver_config_path,
+                       dns::DnsNameserverList dns_override_nameservers,
                        std::optional<cat::CatClientConfig> cat_config, nacos::NacosClientConfig nacos_config,
                        AccessConfigWatcherOptions watcher_options, GrayConfigWatcherOptions gray_watcher_options,
                        TlsCertificateWatcherOptions tls_certificate_watcher_options,
@@ -101,6 +112,9 @@ private:
     ClientMetadataResolverOptions client_metadata_options_;
     AccessLogOptions access_log_options_;
     UpstreamTlsClientPolicy upstream_tls_client_policy_;
+    AccessDnsMode dns_mode_ = AccessDnsMode::System;
+    std::string dns_resolver_config_path_ = "/etc/resolv.conf";
+    dns::DnsNameserverList dns_override_nameservers_;
     std::optional<cat::CatClientConfig> cat_config_;
     nacos::NacosClientConfig nacos_config_;
     AccessConfigWatcherOptions watcher_options_;

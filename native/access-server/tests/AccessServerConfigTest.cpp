@@ -3,9 +3,13 @@
 
 #include <gtest/gtest.h>
 
+#include <cstdio>
+#include <fstream>
 #include <string>
 #include <string_view>
 #include <vector>
+
+#include <unistd.h>
 
 namespace fiber::access_server {
 namespace {
@@ -36,6 +40,8 @@ TEST(AccessServerConfigTest, LoadsJavaServerDefaultsAndNacosSettings) {
     EXPECT_EQ(config->access_log_options().max_query_bytes, 2048u);
     EXPECT_EQ(config->upstream_tls_client_policy().verification, UpstreamTlsVerificationMode::LegacyInsecure);
     EXPECT_TRUE(config->upstream_tls_client_policy().ca_file.empty());
+    EXPECT_EQ(config->dns_mode(), AccessDnsMode::System);
+    EXPECT_EQ(config->dns_resolver_config_path(), "/etc/resolv.conf");
     EXPECT_TRUE(config->http_server_options().tls.enabled);
     EXPECT_TRUE(config->http_server_options().http3.enabled);
     EXPECT_TRUE(config->http_server_options().tls.cert_file.empty());
@@ -53,6 +59,104 @@ TEST(AccessServerConfigTest, LoadsJavaServerDefaultsAndNacosSettings) {
     EXPECT_EQ(config->watcher_options().project_route_group, kProjectRouteGroup);
     EXPECT_EQ(config->gray_watcher_options().data_id, kGrayConfigDataId);
     EXPECT_EQ(config->service_discovery_options().group, kDefaultNacosGroup);
+}
+
+TEST(AccessServerConfigTest, LoadsBoundedDnsOverrideWithoutSystemFileIo) {
+    auto config = AccessServerConfig::load_from_string(
+            "NACOS_SERVER_ADDRESSES=127.0.0.1\n"
+            "ACCESS_SERVER_DNS_MODE=override\n"
+            "ACCESS_SERVER_DNS_SERVERS=192.0.2.1,2001:db8::53,192.0.2.2\n");
+    ASSERT_TRUE(config) << config.error().detail;
+    ASSERT_EQ(config->dns_mode(), AccessDnsMode::Override);
+
+    auto options = config->resolve_dns_options();
+    ASSERT_TRUE(options) << options.error().detail;
+    EXPECT_EQ(options->source, AccessDnsConfigSource::Override);
+    ASSERT_EQ(options->client.nameservers.size(), 3U);
+    EXPECT_EQ(options->client.nameservers[0].to_string(), "192.0.2.1:53");
+    EXPECT_EQ(options->client.nameservers[1].to_string(), "[2001:db8::53]:53");
+    EXPECT_EQ(options->client.nameservers[2].to_string(), "192.0.2.2:53");
+    EXPECT_EQ(options->client.timeout, std::chrono::seconds(2));
+    EXPECT_EQ(options->client.attempts, 2U);
+    EXPECT_FALSE(options->client.rotate_nameservers);
+}
+
+TEST(AccessServerConfigTest, LoadsSystemDnsOptionsBeforeEventLoopsStart) {
+    char path[] = "/tmp/access-server-resolv-XXXXXX";
+    const int fd = ::mkstemp(path);
+    ASSERT_GE(fd, 0);
+    ASSERT_EQ(::close(fd), 0);
+    {
+        std::ofstream output(path, std::ios::binary);
+        ASSERT_TRUE(output);
+        output << "search internal.example\n"
+                  "nameserver 192.0.2.10\n"
+                  "nameserver 2001:db8::10\n"
+                  "options timeout:3 attempts:4 rotate ndots:2\n";
+    }
+
+    std::string input = "NACOS_SERVER_ADDRESSES=127.0.0.1\nACCESS_SERVER_DNS_RESOLV_CONF=";
+    input.append(path);
+    input.push_back('\n');
+    auto config = AccessServerConfig::load_from_string(input);
+    ASSERT_TRUE(config) << config.error().detail;
+    auto options = config->resolve_dns_options();
+    (void) std::remove(path);
+
+    ASSERT_TRUE(options) << options.error().detail;
+    EXPECT_EQ(options->source, AccessDnsConfigSource::System);
+    ASSERT_EQ(options->client.nameservers.size(), 2U);
+    EXPECT_EQ(options->client.nameservers[0].to_string(), "192.0.2.10:53");
+    EXPECT_EQ(options->client.nameservers[1].to_string(), "[2001:db8::10]:53");
+    EXPECT_EQ(options->client.timeout, std::chrono::seconds(3));
+    EXPECT_EQ(options->client.attempts, 4U);
+    EXPECT_TRUE(options->client.rotate_nameservers);
+    EXPECT_TRUE(dns::has_unsupported_feature(options->unsupported, dns::ResolverUnsupportedFeature::Search));
+    EXPECT_TRUE(dns::has_unsupported_feature(options->unsupported, dns::ResolverUnsupportedFeature::Ndots));
+}
+
+TEST(AccessServerConfigTest, RejectsInvalidDnsModeAndCrossModeSettings) {
+    const auto expect_invalid = [](std::string_view settings) {
+        std::string input = "NACOS_SERVER_ADDRESSES=127.0.0.1\n";
+        input.append(settings);
+        auto config = AccessServerConfig::load_from_string(input);
+        EXPECT_FALSE(config);
+        if (!config) {
+            EXPECT_EQ(config.error().code, AccessServerConfigErrorCode::InvalidValue);
+        }
+    };
+
+    expect_invalid("ACCESS_SERVER_DNS_MODE=automatic\n");
+    expect_invalid("ACCESS_SERVER_DNS_SERVERS=127.0.0.1\n");
+    expect_invalid("ACCESS_SERVER_DNS_MODE=override\n");
+    expect_invalid("ACCESS_SERVER_DNS_MODE=override\nACCESS_SERVER_DNS_SERVERS=\n");
+    expect_invalid("ACCESS_SERVER_DNS_MODE=override\nACCESS_SERVER_DNS_SERVERS=0.0.0.0\n");
+    expect_invalid("ACCESS_SERVER_DNS_MODE=override\nACCESS_SERVER_DNS_SERVERS=224.0.0.1\n");
+    expect_invalid("ACCESS_SERVER_DNS_MODE=override\n"
+                   "ACCESS_SERVER_DNS_SERVERS=192.0.2.1,192.0.2.2,192.0.2.3,192.0.2.4\n");
+    expect_invalid("ACCESS_SERVER_DNS_MODE=override\n"
+                   "ACCESS_SERVER_DNS_SERVERS=192.0.2.1\n"
+                   "ACCESS_SERVER_DNS_RESOLV_CONF=/tmp/resolv.conf\n");
+}
+
+TEST(AccessServerRuntimeTest, RejectsMissingSystemResolverConfigBeforeEventLoopsStart) {
+    auto config = AccessServerConfig::load_from_string(
+            "NACOS_SERVER_ADDRESSES=127.0.0.1\n"
+            "ACCESS_SERVER_DNS_RESOLV_CONF=/missing/access-server-resolv.conf\n");
+    ASSERT_TRUE(config) << config.error().detail;
+
+    event::EventLoop accept_loop;
+    event::EventLoopGroup http_workers(1);
+    event::EventLoopGroup nacos_group(1);
+    event::EventLoopGroup compiler_group(1);
+    event::EventLoopGroup cat_group(1);
+    auto runtime = AccessServerRuntime::create(accept_loop, nacos_group.at(0), compiler_group.at(0), cat_group.at(0),
+                                               http_workers, *config);
+
+    ASSERT_FALSE(runtime);
+    EXPECT_EQ(runtime.error().code, AccessServerRuntimeErrorCode::LoadDnsConfiguration);
+    EXPECT_EQ(runtime.error().io_error, common::IoErr::Invalid);
+    EXPECT_EQ(runtime.error().message.find("/missing"), std::string::npos);
 }
 
 TEST(AccessServerConfigTest, LoadsExplicitRuntimeAndCompatibilityKeys) {

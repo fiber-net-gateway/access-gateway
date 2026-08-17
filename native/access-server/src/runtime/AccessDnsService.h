@@ -2,6 +2,7 @@
 #define FIBER_ACCESS_SERVER_ACCESS_DNS_SERVICE_H
 
 #include "../execution/ProxyUpstreamConnection.h"
+#include "../observability/AccessDnsMetrics.h"
 
 #include <cstdint>
 #include <memory>
@@ -37,12 +38,26 @@ struct AccessDnsResolverFactory {
     [[nodiscard]] static AccessDnsResolverFactory system() noexcept;
 };
 
+struct AccessDnsServiceOptions {
+    dns::DnsClient::Options client;
+    AccessDnsConfigSource source = AccessDnsConfigSource::Override;
+    dns::ResolverUnsupportedFeature unsupported = dns::ResolverUnsupportedFeature::None;
+    AccessDnsMetricsObserver metrics;
+
+    // Direct unit construction uses a local, fail-closed resolver endpoint.
+    // Production always replaces this with the validated system/override
+    // options prepared before EventLoops start.
+    [[nodiscard]] static AccessDnsServiceOptions local_default() noexcept;
+};
+
 // DnsResolver is loop-affine. This service creates one resolver stack per
 // request worker and shares only the thread-safe cache between those stacks.
 class AccessDnsService final : public common::NonCopyable, public common::NonMovable {
 public:
     AccessDnsService() noexcept;
     explicit AccessDnsService(AccessDnsResolverFactory resolver_factory) noexcept;
+    explicit AccessDnsService(AccessDnsServiceOptions options,
+                              AccessDnsResolverFactory resolver_factory = AccessDnsResolverFactory::system()) noexcept;
     ~AccessDnsService() noexcept;
 
     // Both operations run on one control loop. The worker group must remain serviceable until shutdown completes.
@@ -70,6 +85,7 @@ private:
     resolve(void *context, std::string_view host) noexcept;
 
     dns::SharedDnsCache2 cache_;
+    AccessDnsServiceOptions options_;
     AccessDnsResolverFactory resolver_factory_;
     event::EventLoop *control_loop_ = nullptr;
     event::EventLoop *cache_loop_ = nullptr;

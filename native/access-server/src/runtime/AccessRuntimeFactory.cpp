@@ -15,6 +15,12 @@ AccessRuntimeFactory::create(event::EventLoop &accept_loop, event::EventLoop &na
                              event::EventLoop &compiler_loop, event::EventLoop &cat_loop,
                              event::EventLoopGroup &http_workers, const AccessServerConfig &config,
                              const net::ListenOptions &listen_options, AccessProcessMetricsSources process_metrics) {
+    auto dns_options = config.resolve_dns_options();
+    if (!dns_options) {
+        return std::unexpected(make_access_server_runtime_io_error(
+                AccessServerRuntimeErrorCode::LoadDnsConfiguration, common::IoErr::Invalid,
+                "failed to load bounded DNS resolver configuration"));
+    }
     auto upstream_tls_validated = validate_upstream_tls_client_policy(config.upstream_tls_client_policy());
     if (!upstream_tls_validated) {
         return std::unexpected(make_access_server_runtime_io_error(AccessServerRuntimeErrorCode::InitializeUpstreamTls,
@@ -89,6 +95,10 @@ AccessRuntimeFactory::create(event::EventLoop &accept_loop, event::EventLoop &na
                     .activation_endpoint = config.activation_endpoint_options(),
                     .client_metadata = config.client_metadata_options(),
                     .access_log = config.access_log_options(),
+                    .dns = [&]() {
+                        dns_options->metrics = control_plane->runtime_metrics().dns().observer();
+                        return std::move(*dns_options);
+                    }(),
                     .upstream_tls = config.upstream_tls_client_policy(),
                     .default_max_request_body_size = config.default_max_request_body_size(),
                     .test_mode = config.test_mode(),

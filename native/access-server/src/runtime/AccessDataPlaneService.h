@@ -33,6 +33,7 @@ struct AccessDataPlaneOptions {
     AccessActivationEndpointOptions activation_endpoint;
     ClientMetadataResolverOptions client_metadata;
     AccessLogOptions access_log;
+    AccessDnsServiceOptions dns = AccessDnsServiceOptions::local_default();
     AccessDnsResolverFactory dns_resolver_factory = AccessDnsResolverFactory::system();
     UpstreamTlsClientPolicy upstream_tls;
     std::size_t default_max_request_body_size = 0;

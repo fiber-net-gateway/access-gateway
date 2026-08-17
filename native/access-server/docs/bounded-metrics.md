@@ -168,6 +168,24 @@ Generation is process-local, starts at zero, and advances only when the watcher 
 global snapshot. Failed, ignored, or stale candidates do not advance it. It resets on process
 restart and is not a rnacos release number or activation token.
 
+## DNS resolver configuration and health
+
+HTTP worker DNS uses one immutable, prevalidated configuration. These fixed-schema metrics expose
+its operational state without retaining nameserver addresses or queried names:
+
+- `access_server_dns_config{source}` is one-hot for `system` or `override`;
+- `access_server_dns_nameservers` is the configured count, bounded to three;
+- `access_server_dns_resolver_state{state}` is one-hot for `stopped`, `starting`, `ready`, `failed`,
+  or `stopping`;
+- `access_server_dns_resolvers_active` counts initialized loop-affine worker resolvers;
+- `access_server_dns_initializations_total{result}` uses only `success` and `failure`;
+- `access_server_dns_config_unsupported{feature}` reports the fixed `search`, `ndots`, `sortlist`,
+  `option`, and `directive` flags retained from a system resolver file but not executed.
+
+The worker-sharded `access_server_proxy_dns_resolutions_total{result}` remains the query health
+counter. A reusable pool hit or IP-literal upstream does not increment it. Neither metric family
+contains a DNS query, nameserver, route, Project, service, or endpoint label.
+
 ## Nacos component lifecycle and service discovery
 
 `access_server_nacos_component_lifecycle{component,state}` is one-hot for `client`,
@@ -261,9 +279,9 @@ the process logger remains alive until the runtime and EventLoops have been dest
 ## Remaining scope
 
 The implemented increments cover Project List/route outcomes, route readiness and snapshot
-size/age, application-owned Nacos lifecycle, service/endpoint/cluster/selector aggregates, TLS
-rotation/reclamation, worker-sharded proxy/DNS/pool/WebSocket outcomes, and async logging/CAT
-backlog and loss. Actual Nacos transport/reconnect state is the only remaining O-02 gap and remains
-blocked on Fiber #27. Typed, authenticated, per-instance activation evidence is implemented
+size/age, bounded DNS configuration/health, application-owned Nacos lifecycle,
+service/endpoint/cluster/selector aggregates, TLS rotation/reclamation, worker-sharded
+proxy/DNS/pool/WebSocket outcomes, and async logging/CAT backlog and loss. Actual Nacos
+transport/reconnect state is the only remaining O-02 gap. Typed, authenticated, per-instance activation evidence is implemented
 separately from these metrics; see
 [`../../../docs/activation-evidence.md`](../../../docs/activation-evidence.md).

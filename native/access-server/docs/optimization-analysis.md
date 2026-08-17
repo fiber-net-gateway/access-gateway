@@ -78,7 +78,7 @@ Issue/PR，合入后再审查 revision range、运行完整回归并更新 gitli
 | L-03 | P0 | 路由配置字节、数量和编译内存上限 | 本项目 | 否 |
 | L-04 | P1 | 配置编译移出 Nacos owner loop | 本项目 | 否 |
 | L-05 | P1 | prepared/ready/published typestate | 本项目 | 否 |
-| L-06 | P1 | 系统 DNS 配置、多 nameserver 和 failover | 双方 | Fiber 前置已合入；本项目待接入 |
+| L-06 | P1 | 系统 DNS 配置、多 nameserver 和 failover | 双方（已解决） | Fiber 前置已合入并已接入 |
 | S-01 | P0 | access log query 脱敏 | 本项目 | 否 |
 | S-02 | P0/P1 | trusted proxy 和真实客户端地址模型 | 本项目 | 否 |
 | S-03 | P1 | 上游 TLS peer/CA/SNI 验证配置 | 双方 | Fiber 前置已合入；路由级待接入 |
@@ -138,7 +138,6 @@ Access Gateway 的配置、secret、生命周期、指标、兼容和端到端�
 
 | ID | 已完成边界 | 剩余工作 |
 | --- | --- | --- |
-| L-06 | Fiber system resolver 与多 nameserver 能力已合入 | 启动前解析/override、向 HTTP worker 和 Nacos hostname client 注入完整列表、移除首项加 `8.8.8.8` fallback、补 DNS 健康指标和部署回归 |
 | S-03 | 进程级 peer/CA 验证已完成；Fiber pool affinity 已合入 | 设计 route/环境级 CA、SNI、独立验证名和 profile generation，并同步 native/validator/server/web/fixture/docs |
 | S-04 | Fiber client identity 加载、pool affinity 和上游组合测试已完成 | 设计 secret 引用和轮换生命周期，接入 route/环境模型、脱敏、连接隔离及 access-server loopback e2e |
 | P-01 | service directory 外层锁已移除 | 仅在 production profile 证明全局 SWRR mutex/O(N) scan 是瓶颈后，决定 sharding 或上游化；当前是条件项 |
@@ -351,11 +350,22 @@ store；TLS Prepared 候选没有外部异步 readiness，且 commit 会在 owne
 
 **归属：双方。**
 
-**实施状态：Fiber 前置已解决（`77f1b95`）；本项目未接入（2026-08-17）。** 本次为适配
-`DnsClient::Options::server` 的破坏性删除，只把原有单一地址写入新的 fixed-capacity
-`nameservers` 列表；这不等同于完成 L-06。
+**实施状态：已解决（2026-08-17）。** Fiber 前置来自 `77f1b95`；本项目现在提供显式
+`system`/`override` 策略。system resolver 文件在 runtime 构造、任何 EventLoop 启动之前一次性
+严格加载，最多三个 nameserver、timeout、attempts 和 rotate 完整复制到每个 HTTP worker；override
+要求 1-3 个指定的 unicast IP literal。文件缺失、无 nameserver、非法地址和超限均 fail closed，
+不再选择首项，也不再追加 `8.8.8.8` 或其他隐式公网 fallback。
 
-当前 access-server 同步读取 `/etc/resolv.conf`，只采用第一条有效 nameserver，失败时
+固定 schema 指标报告配置来源、nameserver 数、resolver lifecycle/active worker、初始化结果，以及
+system 文件中已保留但未执行的 search/ndots/sortlist/option/directive 标志；实际查询健康继续使用
+worker-sharded success/empty/failure/unavailable counter。所有指标均不包含 nameserver、查询名、
+Project、route 或 endpoint。env 示例和容器 demo 显式记录 system 文件路径。
+
+`NACOS_SERVER_ADDRESSES` 继续严格限制为 IP literal，因此当前 Nacos client 不需要也不会借用 HTTP
+worker resolver。若以后开放 hostname，仍必须在 Nacos owner loop 建立独立 resolver，并保证其
+生命周期长于 Nacos client、ConfigService 和 NamingService；本项没有通过未启用的功能制造该资源。
+
+改造前 access-server 同步读取 `/etc/resolv.conf`，只采用第一条有效 nameserver，失败时
 回退到硬编码 `8.8.8.8`，而且读取仍发生在 data-plane 初始化的 EventLoop 上。当前 Fiber 已提供
 `load_system_resolver_config()`/`parse_resolver_config()`、最多三个 nameserver、顺序
 failover/rotation、mixed-family UDP transport 和同上游 TCP fallback；文件加载 API 会拒绝在
@@ -369,15 +379,14 @@ Fiber 当前已提供：
 - 明确启动时同步加载、禁止 EventLoop 文件 I/O 且不自动 reload；
 - 单元测试不得依赖宿主机真实 `/etc/resolv.conf`。
 
-本项目负责：
+本项目已完成：
 
 - 提供显式 DNS server override 和系统配置选择策略；
 - 在启动前读取/验证配置，不在请求 EventLoop 做文件 I/O；
 - 将 Fiber resolver 实例化到每个 HTTP worker；
-- Nacos 配置仍只接受 IP literal；若开放 Fiber 已支持的 hostname server，须在 Nacos owner loop
-  注入 resolver，并保证其生命周期长于 client、ConfigService 和 NamingService；
+- Nacos 配置仍只接受 IP literal；未创建无消费者的 Nacos resolver；
 - 输出有界 DNS 健康和失败指标；
-- 验证 Nacos、业务 upstream 和容器部署环境的实际行为。
+- 用完整列表注入测试、启动前失败测试和显式容器配置验证业务 upstream 部署行为。
 
 ## 6. 安全与信任边界
 
@@ -1510,7 +1519,7 @@ compatibility contract 统一引用该矩阵，并继续声明：完整生产 co
 | 异步日志丢弃统计 | LoggerManager/Appender stats 已提供 | 本项目接 Prometheus |
 | EventLoop worker index | `group_index()` 已提供 | DNS resolver 可直接 O(1) 取 slot |
 | connection pool 异步 shutdown | `shutdown_async()` 已提供 | 保持使用 |
-| DNS resolver | 系统配置、最多三个 server、failover/rotation、TCP fallback 已提供 | 本项目仍只使用第一项并硬编码 fallback，待接入 |
+| DNS resolver | 系统配置、最多三个 server、failover/rotation、TCP fallback 已提供 | 已在启动前严格加载并完整注入 HTTP worker；Nacos 仍为 IP-only |
 | Happy Eyeballs | `TcpConnector` 和 HTTP/1 多地址 connect 已提供 | 本项目仍串行 connect，待接入 |
 | Nacos 服务状态 | Config/Naming typed latest-value watch 已提供 | 本项目尚未映射 transport/reconnect metrics |
 | 通用 SWRR | 当前实现位于 access-server | 稳定后考虑上游化 |
@@ -1544,7 +1553,7 @@ compatibility contract 统一引用该矩阵，并继续声明：完整生产 co
 
 ### 阶段 C：Fiber 协同能力
 
-1. L-06 系统 DNS 配置和多 nameserver（Fiber 已合入；本项目待接入）；
+1. L-06 系统 DNS 配置和多 nameserver（已完成）；
 2. P-08 Happy Eyeballs（Fiber 已合入；本项目待接入）；
 3. S-03 route 级 TLS transport profile 隔离与配置（Fiber affinity 已合入；本项目待接入）；
 4. S-04 upstream mTLS client identity（Fiber 已合入；本项目待接入）；

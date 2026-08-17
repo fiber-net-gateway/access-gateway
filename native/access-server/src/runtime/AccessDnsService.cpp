@@ -1,9 +1,7 @@
 #include "AccessDnsService.h"
 
 #include <chrono>
-#include <fstream>
 #include <new>
-#include <string>
 #include <utility>
 
 #include <fiber/async/Spawn.h>
@@ -14,32 +12,6 @@
 
 namespace fiber::access_server {
 namespace {
-
-net::SocketAddress read_nameserver() noexcept {
-    std::ifstream file("/etc/resolv.conf");
-    std::string line;
-    while (std::getline(file, line)) {
-        std::string_view view = line;
-        while (!view.empty() && (view.front() == ' ' || view.front() == '\t')) {
-            view.remove_prefix(1);
-        }
-        constexpr std::string_view kNameserver = "nameserver";
-        if (!view.starts_with(kNameserver)) {
-            continue;
-        }
-        view.remove_prefix(kNameserver.size());
-        while (!view.empty() && (view.front() == ' ' || view.front() == '\t')) {
-            view.remove_prefix(1);
-        }
-        const std::size_t end = view.find_first_of(" \t#");
-        const std::string_view text = view.substr(0, end);
-        net::IpAddress address;
-        if (!text.empty() && net::IpAddress::parse(text, address)) {
-            return net::SocketAddress(address, 53);
-        }
-    }
-    return net::SocketAddress(net::IpAddress::v4({8, 8, 8, 8}), 53);
-}
 
 bool create_system_resolver(void *, event::EventLoop &loop, dns::SharedDnsCache2 &cache,
                             const dns::DnsClient::Options &client_options,
@@ -55,17 +27,32 @@ bool create_system_resolver(void *, event::EventLoop &loop, dns::SharedDnsCache2
 
 } // namespace
 
+AccessDnsServiceOptions AccessDnsServiceOptions::local_default() noexcept {
+    AccessDnsServiceOptions options;
+    const bool added = options.client.nameservers.add(net::SocketAddress(net::IpAddress::v4({127, 0, 0, 1}), 53));
+    FIBER_ASSERT(added);
+    options.client.timeout = std::chrono::milliseconds(2000);
+    options.client.attempts = 2;
+    return options;
+}
+
 AccessDnsResolverFactory AccessDnsResolverFactory::system() noexcept {
     return AccessDnsResolverFactory{
             .create = create_system_resolver,
     };
 }
 
-AccessDnsService::AccessDnsService() noexcept : AccessDnsService(AccessDnsResolverFactory::system()) {}
+AccessDnsService::AccessDnsService() noexcept : AccessDnsService(AccessDnsServiceOptions::local_default()) {}
 
 AccessDnsService::AccessDnsService(AccessDnsResolverFactory resolver_factory) noexcept :
-    resolver_factory_(resolver_factory) {
+    AccessDnsService(AccessDnsServiceOptions::local_default(), resolver_factory) {}
+
+AccessDnsService::AccessDnsService(AccessDnsServiceOptions options,
+                                   AccessDnsResolverFactory resolver_factory) noexcept :
+    options_(std::move(options)), resolver_factory_(resolver_factory) {
     FIBER_ASSERT(resolver_factory_.create != nullptr);
+    FIBER_ASSERT(!options_.client.nameservers.empty());
+    options_.metrics.configure(options_.source, options_.client.nameservers.size(), options_.unsupported);
 }
 
 AccessDnsService::~AccessDnsService() noexcept { FIBER_ASSERT(state_ == State::Stopped); }
@@ -79,40 +66,42 @@ async::Task<bool> AccessDnsService::init(event::EventLoopGroup &group) noexcept 
     }
     FIBER_ASSERT(state_ == State::Stopped);
     if (group.size() == 0) {
+        options_.metrics.initialized(false);
+        options_.metrics.set_state(AccessDnsResolverState::Failed, 0);
         co_return false;
     }
+    options_.metrics.set_state(AccessDnsResolverState::Starting, 0);
     control_loop_ = current_loop;
     cache_loop_ = &group.at(0);
     if (!cache_.init(*cache_loop_)) {
         control_loop_ = nullptr;
         cache_loop_ = nullptr;
+        options_.metrics.initialized(false);
+        options_.metrics.set_state(AccessDnsResolverState::Failed, 0);
         co_return false;
     }
     state_ = State::Starting;
 
-    const net::SocketAddress nameserver = read_nameserver();
     entries_.reserve(group.size());
     for (std::size_t i = 0; i < group.size(); ++i) {
         LoopEntry entry;
         entry.loop = &group.at(i);
-        dns::DnsClient::Options client_options;
-        if (!client_options.nameservers.add(nameserver)) {
-            co_await shutdown();
-            co_return false;
-        }
-        client_options.timeout = std::chrono::milliseconds(2000);
-        client_options.attempts = 2;
         const bool initialized = resolver_factory_.create(resolver_factory_.context, *entry.loop, cache_,
-                                                          client_options, entry.local, entry.resolver);
+                                                          options_.client, entry.local, entry.resolver);
         const bool valid =
                 initialized && entry.local && entry.local->valid() && entry.resolver && entry.resolver->valid();
         entries_.push_back(std::move(entry));
         if (!valid) {
+            options_.metrics.initialized(false);
+            options_.metrics.set_state(AccessDnsResolverState::Failed, entries_.size() - 1);
             co_await shutdown();
             co_return false;
         }
+        options_.metrics.set_state(AccessDnsResolverState::Starting, entries_.size());
     }
     state_ = State::Running;
+    options_.metrics.initialized(true);
+    options_.metrics.set_state(AccessDnsResolverState::Ready, entries_.size());
     co_return true;
 }
 
@@ -124,6 +113,7 @@ async::Task<void> AccessDnsService::shutdown() noexcept {
     FIBER_ASSERT(control_loop_->in_loop());
     FIBER_ASSERT(state_ == State::Starting || state_ == State::Running);
     state_ = State::Stopping;
+    options_.metrics.set_state(AccessDnsResolverState::Stopping, entries_.size());
 
     if (!entries_.empty()) {
         release_tasks_.add(entries_.size());
@@ -143,6 +133,7 @@ async::Task<void> AccessDnsService::shutdown() noexcept {
     cache_loop_ = nullptr;
     control_loop_ = nullptr;
     state_ = State::Stopped;
+    options_.metrics.set_state(AccessDnsResolverState::Stopped, 0);
 }
 
 async::Task<void> AccessDnsService::release_entry(LoopEntry *entry) noexcept {
