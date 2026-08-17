@@ -1,7 +1,6 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
-#include <charconv>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -21,20 +20,12 @@
 
 #include "runtime/AccessServiceDiscovery.h"
 
+#include "BenchmarkSupport.h"
+
 namespace {
 
 constexpr std::array<std::size_t, 4> kEndpointCounts{1, 8, 32, 128};
 constexpr std::uint64_t kDefaultOperationsPerCase = 100'000;
-
-bool parse_positive(std::string_view input, std::uint64_t &value) noexcept {
-    std::uint64_t parsed = 0;
-    const auto [end, error] = std::from_chars(input.data(), input.data() + input.size(), parsed);
-    if (error != std::errc{} || end != input.data() + input.size() || parsed == 0) {
-        return false;
-    }
-    value = parsed;
-    return true;
-}
 
 struct ServiceSnapshot {
     explicit ServiceSnapshot(std::size_t endpoint_count) {
@@ -156,11 +147,29 @@ CaseResult run_case(fiber::event::EventLoopGroup &group, fiber::access_server::A
     return result;
 }
 
-double operations_per_second(std::uint64_t operations, std::uint64_t elapsed_ns) noexcept {
-    if (elapsed_ns == 0) {
-        return 0.0;
+struct Measurement {
+    fiber::access_server::benchmark::Distribution distribution;
+    std::uint64_t checksum = 0;
+    bool failed = false;
+};
+
+Measurement measure(fiber::event::EventLoopGroup &group, fiber::access_server::AccessServiceState &state,
+                    std::size_t worker_count, std::uint64_t operations) {
+    std::vector<std::uint64_t> elapsed;
+    elapsed.reserve(fiber::access_server::benchmark::kDefaultSamples);
+    std::uint64_t checksum = 0;
+    bool failed = false;
+    for (std::size_t sample = 0; sample < fiber::access_server::benchmark::kDefaultSamples; ++sample) {
+        const CaseResult result = run_case(group, state, worker_count, operations);
+        elapsed.push_back(result.elapsed_ns);
+        checksum ^= result.checksum + sample;
+        failed = failed || result.failed;
     }
-    return static_cast<double>(operations) * 1'000'000'000.0 / static_cast<double>(elapsed_ns);
+    return {
+            .distribution = fiber::access_server::benchmark::summarize(std::move(elapsed), operations),
+            .checksum = checksum,
+            .failed = failed,
+    };
 }
 
 } // namespace
@@ -170,14 +179,18 @@ int main(int argc, char **argv) {
     const fiber::util::CpuConcurrency cpu = fiber::util::detect_cpu_concurrency();
     const std::size_t detected_cpus = cpu.effective_count;
     std::uint64_t requested_workers = detected_cpus;
-    if ((argc >= 2 && !parse_positive(argv[1], operations_per_case)) ||
-        (argc >= 3 && !parse_positive(argv[2], requested_workers)) || argc > 3 ||
+    if ((argc >= 2 && !fiber::access_server::benchmark::parse_positive(argv[1], operations_per_case)) ||
+        (argc >= 3 && !fiber::access_server::benchmark::parse_positive(argv[2], requested_workers)) || argc > 3 ||
         requested_workers > std::numeric_limits<std::size_t>::max()) {
         std::fprintf(stderr, "usage: %s [operations-per-case] [max-workers]\n", argv[0]);
         return 2;
     }
 
     const std::size_t max_workers = std::min<std::size_t>(static_cast<std::size_t>(requested_workers), detected_cpus);
+    if (operations_per_case < max_workers) {
+        std::fprintf(stderr, "operations-per-case must be at least max-workers\n");
+        return 2;
+    }
     const std::string_view cpu_source = fiber::util::cpu_concurrency_source_name(cpu.source);
     std::fprintf(stderr, "effective_cpus=%zu source=%.*s\n", detected_cpus, static_cast<int>(cpu_source.size()),
                  cpu_source.data());
@@ -186,17 +199,26 @@ int main(int argc, char **argv) {
     fiber::event::EventLoopGroup group(max_workers);
     group.start();
 
-    std::printf("endpoints,workers,operations,elapsed_ns,operations_per_second,checksum\n");
+    std::printf("endpoints,workers,operations,p50_ns_per_operation,p95_ns_per_operation,p99_ns_per_operation,"
+                "operations_per_second,throughput_scaling_efficiency,checksum\n");
     bool failed = false;
     for (const std::size_t endpoint_count: kEndpointCounts) {
         ServiceSnapshot snapshot(endpoint_count);
         state.update(snapshot.info);
+        double single_worker_throughput = 0.0;
         for (std::size_t workers = 1; workers <= max_workers; ++workers) {
-            const CaseResult result = run_case(group, state, workers, operations_per_case);
-            std::printf("%zu,%zu,%llu,%llu,%.0f,%llu\n", endpoint_count, workers,
-                        static_cast<unsigned long long>(operations_per_case),
-                        static_cast<unsigned long long>(result.elapsed_ns),
-                        operations_per_second(operations_per_case, result.elapsed_ns),
+            const Measurement result = measure(group, state, workers, operations_per_case);
+            if (workers == 1) {
+                single_worker_throughput = result.distribution.operations_per_second;
+            }
+            const double scaling_efficiency =
+                    single_worker_throughput == 0.0 ? 0.0
+                                                    : result.distribution.operations_per_second /
+                                                              (single_worker_throughput * static_cast<double>(workers));
+            std::printf("%zu,%zu,%llu,%.2f,%.2f,%.2f,%.0f,%.4f,%llu\n", endpoint_count, workers,
+                        static_cast<unsigned long long>(operations_per_case), result.distribution.p50_ns_per_operation,
+                        result.distribution.p95_ns_per_operation, result.distribution.p99_ns_per_operation,
+                        result.distribution.operations_per_second, scaling_efficiency,
                         static_cast<unsigned long long>(result.checksum));
             failed = failed || result.failed;
         }
