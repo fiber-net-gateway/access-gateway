@@ -1295,10 +1295,17 @@ transport，并用测试 selector 把预编译 v2 的 commit 固定插入 v1 ide
 选择不同的 v2 context；固定容量 observer 同时验证 publish 扫描保留 v1、deferred hazard clear
 恰好回收 v1、retired 数归零，以及 shutdown 回收当前 v2。测试不使用公网、端口竞争或 sleep。
 
+Route snapshot 请求 pin 子项也已补齐。测试用 `Watch` 门闩和 EventLoop deferred callback 保证
+proxy coroutine 已经实际登记为 suspended，随后由请求 worker 之外的测试控制线程发布同一 Project
+的 v2。此时 store 已释放 v1，但请求持有的全局 snapshot pin 必须继续保活 v1 Project、
+`CompiledProxyRoute&` 以及 `ProxyExecutionInput` 内的 `string_view`。放行 coroutine 后再次读取
+service、call source 和 timeout，结果仍必须来自 v1；请求完成后 v1 的 `weak_ptr` 必须失效，下一
+请求则必须命中 v2。该场景已连续重复 100 次并通过 ASAN/UBSAN，证明当前 shared-pointer 发布模型
+满足跨线程更新和跨 await 生命周期约束，因此本轮不需要修改请求热路径或 Fiber。
+
 上述测试已经覆盖 concrete control-plane 与 data-plane 启动阶段，但还不等价于请求并发及外部互操作
 均已完成故障注入。仍应优先增加：
 
-- route snapshot 更新与跨 await 请求 pin；
 - trusted proxy、IPv6、多值和非法 forwarding header；
 - 上游 TLS 验证成功、未知 CA、名称错误和客户端证书；
 - ASAN/UBSAN、聚焦 TSAN；

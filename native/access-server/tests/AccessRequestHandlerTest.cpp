@@ -14,6 +14,7 @@
 #include <vector>
 
 #include <fiber/async/Spawn.h>
+#include <fiber/async/Watch.h>
 #include <fiber/event/EventLoopGroup.h>
 #include <fiber/http/Http1Connection.h>
 #include <fiber/http/HttpBodySpec.h>
@@ -37,6 +38,7 @@ using fiber::access_server::BodyType;
 using fiber::access_server::ClientMetadataMode;
 using fiber::access_server::ClientMetadataResolver;
 using fiber::access_server::ClientMetadataResolverOptions;
+using fiber::access_server::ConfigUpdateStatus;
 using fiber::access_server::Err;
 using fiber::access_server::Exception;
 using fiber::access_server::HostConfigEntry;
@@ -458,6 +460,59 @@ AccessProxyAdapter proxy_adapter(CapturedProxyRequest &capture) {
     return AccessProxyAdapter{
             .context = &capture,
             .execute = capture_proxy_request,
+    };
+}
+
+struct SnapshotRotationProxyState {
+    std::weak_ptr<const fiber::access_server::AccessRouteSnapshot> old_snapshot;
+    std::promise<void> suspended;
+    fiber::async::Watch<bool> release{false};
+    fiber::event::EventLoop::DeferEntry suspended_entry;
+    CapturedProxyRequest capture;
+    std::string service_before_suspend;
+    std::string service_after_resume;
+    std::string call_source_before_suspend;
+    std::string call_source_after_resume;
+    std::int32_t timeout_before_suspend = 0;
+    std::int32_t timeout_after_resume = 0;
+    bool old_snapshot_alive_after_resume = false;
+
+    void signal_suspended() noexcept {
+        fiber::event::EventLoop::current()
+                .post_local<SnapshotRotationProxyState, &SnapshotRotationProxyState::suspended_entry,
+                            &SnapshotRotationProxyState::on_suspended>(*this);
+    }
+
+    static void on_suspended(SnapshotRotationProxyState *state) noexcept { state->suspended.set_value(); }
+};
+
+fiber::async::Task<Result<void>>
+rotate_snapshot_while_proxy_suspended(void *context, fiber::http::HttpExchange &exchange,
+                                      const fiber::access_server::CompiledProxyRoute &proxy, ProxyExecutionInput input,
+                                      fiber::access_server::AccessRequestTelemetry &telemetry) noexcept {
+    auto &state = *static_cast<SnapshotRotationProxyState *>(context);
+    state.service_before_suspend.assign(proxy.address_selector ? proxy.address_selector->service_name()
+                                                               : std::string_view{});
+    state.call_source_before_suspend.assign(input.call_source);
+    state.timeout_before_suspend = proxy.timeout_millis;
+
+    auto release = state.release.subscribe();
+    const fiber::async::Watch<bool>::Snapshot release_snapshot = release.current();
+    state.signal_suspended();
+    (void) co_await release.next(release_snapshot.version);
+
+    state.service_after_resume.assign(proxy.address_selector ? proxy.address_selector->service_name()
+                                                             : std::string_view{});
+    state.call_source_after_resume.assign(input.call_source);
+    state.timeout_after_resume = proxy.timeout_millis;
+    state.old_snapshot_alive_after_resume = !state.old_snapshot.expired();
+    co_return co_await capture_proxy_request(&state.capture, exchange, proxy, input, telemetry);
+}
+
+AccessProxyAdapter snapshot_rotation_proxy_adapter(SnapshotRotationProxyState &state) {
+    return AccessProxyAdapter{
+            .context = &state,
+            .execute = rotate_snapshot_while_proxy_suspended,
     };
 }
 
@@ -1170,6 +1225,81 @@ TEST(AccessRequestHandlerTest, PassesPinnedProxyRouteAndExecutionInputToAdapter)
     EXPECT_TRUE(capture.rewrite_configured);
     EXPECT_TRUE(capture.flush);
     EXPECT_TRUE(capture.template_evaluator_configured);
+}
+
+TEST(AccessRequestHandlerTest, PinsRouteSnapshotAcrossSuspendedProxyExecutionDuringUpdate) {
+    RouteConfig initial = proxy_route("/pinned", "orders/gray");
+    initial.timeout_millis = 111;
+    RouteConfigStore store;
+    publish(store, project({}, {std::move(initial)}));
+
+    std::shared_ptr<const fiber::access_server::AccessRouteSnapshot> initial_snapshot = store.pin();
+    SnapshotRotationProxyState state{
+            .old_snapshot = initial_snapshot,
+    };
+    initial_snapshot.reset();
+
+    auto release = state.release.acquire_publisher();
+    ASSERT_TRUE(release);
+    auto suspended = state.suspended.get_future();
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    std::string response;
+    std::promise<void> done;
+    auto completed = done.get_future();
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_request_on_loop(&group.at(0), &store, {}, {}, snapshot_rotation_proxy_adapter(state),
+                                   legacy_client_metadata_options(),
+                                   "GET /pinned HTTP/1.1\r\n"
+                                   "Host: api.example.com\r\n"
+                                   "Connection: close\r\n\r\n",
+                                   &response, &done);
+    });
+
+    const bool request_suspended = suspended.wait_for(2s) == std::future_status::ready;
+    bool update_published = false;
+    bool old_snapshot_alive_after_publish = false;
+    if (request_suspended) {
+        RouteConfig replacement = proxy_route("/pinned", "payments/canary");
+        replacement.timeout_millis = 222;
+        ProjectConfig next = project({}, {std::move(replacement)});
+        next.version = 2;
+        auto updated = store.apply("orders", next);
+        update_published = updated && updated->status == ConfigUpdateStatus::Published;
+        old_snapshot_alive_after_publish = !state.old_snapshot.expired();
+        release->publish(true);
+    }
+    const bool request_completed = completed.wait_for(2s) == std::future_status::ready;
+    group.stop();
+    group.join();
+
+    EXPECT_TRUE(request_suspended);
+    EXPECT_TRUE(request_completed);
+    EXPECT_TRUE(response.starts_with("HTTP/1.1 200 OK\r\n"));
+    EXPECT_EQ(response_body(response), "proxied");
+    EXPECT_TRUE(update_published);
+    EXPECT_TRUE(old_snapshot_alive_after_publish);
+    EXPECT_TRUE(state.old_snapshot_alive_after_resume);
+    EXPECT_EQ(state.service_before_suspend, "orders");
+    EXPECT_EQ(state.service_after_resume, "orders");
+    EXPECT_EQ(state.call_source_before_suspend, "orders.unifiedAccess");
+    EXPECT_EQ(state.call_source_after_resume, "orders.unifiedAccess");
+    EXPECT_EQ(state.timeout_before_suspend, 111);
+    EXPECT_EQ(state.timeout_after_resume, 111);
+    EXPECT_TRUE(state.old_snapshot.expired());
+
+    CapturedProxyRequest current;
+    const std::string current_response = run_request(store,
+                                                     "GET /pinned HTTP/1.1\r\n"
+                                                     "Host: api.example.com\r\n"
+                                                     "Connection: close\r\n\r\n",
+                                                     {}, {}, proxy_adapter(current));
+    EXPECT_TRUE(current_response.starts_with("HTTP/1.1 200 OK\r\n"));
+    EXPECT_EQ(current.service, "payments");
+    ASSERT_TRUE(current.cluster);
+    EXPECT_EQ(*current.cluster, "canary");
+    EXPECT_EQ(current.timeout_millis, 222);
 }
 
 TEST(AccessRequestHandlerTest, PassesJavaTestHostClusterAndOriginHostToProxyExecutor) {
