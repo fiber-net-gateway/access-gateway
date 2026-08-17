@@ -313,9 +313,9 @@ std::expected<void, AccessServerConfigError> parse_cat_endpoints(std::string_vie
     return {};
 }
 
-std::expected<std::vector<net::IpAddress>, AccessServerConfigError> parse_nacos_servers(std::string_view input,
-                                                                                        std::size_t line) {
-    std::vector<net::IpAddress> servers;
+std::expected<std::vector<std::string>, AccessServerConfigError> parse_nacos_servers(std::string_view input,
+                                                                                     std::size_t line) {
+    std::vector<std::string> servers;
     while (!input.empty()) {
         const std::size_t comma = input.find(',');
         const std::string_view token = trim(comma == std::string_view::npos ? input : input.substr(0, comma));
@@ -324,7 +324,7 @@ std::expected<std::vector<net::IpAddress>, AccessServerConfigError> parse_nacos_
             return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, line, kNacosServers,
                                          "expected a comma-separated list of IP literals"));
         }
-        servers.push_back(address);
+        servers.push_back(address.to_string());
         input = comma == std::string_view::npos ? std::string_view{} : input.substr(comma + 1);
     }
     return servers;
@@ -563,7 +563,7 @@ AccessServerConfig::load_from_string(std::string_view input) {
             if (!parsed) {
                 return std::unexpected(std::move(parsed.error()));
             }
-            nacos_params.server_ips = std::move(*parsed);
+            nacos_params.server_hosts = std::move(*parsed);
         } else if (entry.key == kNacosHttpPort) {
             if (!parse_unsigned(value, nacos_params.http_port) || nacos_params.http_port == 0) {
                 return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, entry.line, entry.key,

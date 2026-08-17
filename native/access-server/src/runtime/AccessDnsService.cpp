@@ -96,7 +96,10 @@ async::Task<bool> AccessDnsService::init(event::EventLoopGroup &group) noexcept 
         LoopEntry entry;
         entry.loop = &group.at(i);
         dns::DnsClient::Options client_options;
-        client_options.server = nameserver;
+        if (!client_options.nameservers.add(nameserver)) {
+            co_await shutdown();
+            co_return false;
+        }
         client_options.timeout = std::chrono::milliseconds(2000);
         client_options.attempts = 2;
         const bool initialized = resolver_factory_.create(resolver_factory_.context, *entry.loop, cache_,

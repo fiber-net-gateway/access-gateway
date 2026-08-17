@@ -12,6 +12,7 @@
 #include <fiber/http/HttpExchange.h>
 #include <fiber/http/HttpHeaders.h>
 #include <fiber/http/HttpProxyCore.h>
+#include <fiber/http/HttpResponseWriter.h>
 #include <fiber/http/HttpWebSocketProxy.h>
 #include "ProxyRequestPlan.h"
 #include "ProxyResponsePlan.h"
@@ -814,8 +815,9 @@ async::Task<Result<void>> UpstreamAttempt::run() noexcept {
             .read_timeout = std::chrono::milliseconds::max(),
             .write_timeout = options_.downstream_write_timeout,
     };
+    auto response_writer = http::make_http_response_writer(exchange_);
     auto piped = co_await http::pipe_http_body(http::make_http_body_pipe_reader(body_reader),
-                                               http::make_http_body_pipe_writer(exchange_),
+                                               http::make_http_body_pipe_writer(response_writer),
                                                event::EventLoop::current().io_buf_node_pool(), pipe_options);
     if (!piped) {
         const http::HttpBodyPipeError pipe_error = piped.error();

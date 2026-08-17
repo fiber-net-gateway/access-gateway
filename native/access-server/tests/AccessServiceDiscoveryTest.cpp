@@ -31,6 +31,7 @@ public:
 
     fiber::common::IoResult<void> start() noexcept override { return {}; }
     fiber::async::Task<void> shutdown() noexcept override { co_return; }
+    StatusSubscriber subscribe_status() override { return status_.subscribe(); }
 
     fiber::async::Task<
             std::expected<std::shared_ptr<const fiber::nacos::ServiceInfo>, fiber::nacos::NamingServiceError>>
@@ -92,6 +93,7 @@ private:
 
     std::map<std::string, std::unique_ptr<Entry>, std::less<>> entries_;
     std::optional<fiber::nacos::NamingServiceError> subscribe_error_;
+    fiber::async::Watch<fiber::nacos::NamingServiceStatus> status_{fiber::nacos::NamingServiceStatus{}};
 };
 
 fiber::async::Task<void> yield_updates() {
