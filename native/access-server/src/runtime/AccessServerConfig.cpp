@@ -36,6 +36,9 @@ constexpr std::string_view kAccessLogMaxPathBytes = "ACCESS_SERVER_ACCESS_LOG_MA
 constexpr std::string_view kAccessLogMaxQueryBytes = "ACCESS_SERVER_ACCESS_LOG_MAX_QUERY_BYTES";
 constexpr std::string_view kUpstreamTlsMode = "ACCESS_SERVER_UPSTREAM_TLS_MODE";
 constexpr std::string_view kUpstreamTlsCaFile = "ACCESS_SERVER_UPSTREAM_TLS_CA_FILE";
+constexpr std::string_view kDnsMode = "ACCESS_SERVER_DNS_MODE";
+constexpr std::string_view kDnsServers = "ACCESS_SERVER_DNS_SERVERS";
+constexpr std::string_view kDnsResolverConfig = "ACCESS_SERVER_DNS_RESOLV_CONF";
 constexpr std::string_view kProjectsDataId = "ACCESS_SERVER_PROJECTS_DATA_ID";
 constexpr std::string_view kRouteDataIdPrefix = "ACCESS_SERVER_ROUTE_DATA_ID_PREFIX";
 constexpr std::string_view kRouteGroup = "ACCESS_SERVER_ROUTE_GROUP";
@@ -56,6 +59,7 @@ constexpr std::string_view kCatIp = "CAT_IP";
 constexpr std::string_view kCatRouters = "CAT_ROUTER_ADDRESSES";
 constexpr std::string_view kCatCollectors = "CAT_COLLECTOR_ADDRESSES";
 constexpr std::size_t kMaxUpstreamTlsCaFileBytes = 4096;
+constexpr std::size_t kMaxDnsResolverConfigPathBytes = 4096;
 constexpr std::size_t kMinActivationTokenBytes = 32;
 constexpr std::size_t kMaxActivationTokenBytes = 512;
 
@@ -330,6 +334,38 @@ std::expected<std::vector<std::string>, AccessServerConfigError> parse_nacos_ser
     return servers;
 }
 
+std::expected<dns::DnsNameserverList, AccessServerConfigError>
+parse_dns_nameservers(std::string_view input, std::size_t line) {
+    dns::DnsNameserverList nameservers;
+    if (input.empty()) {
+        return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, line, kDnsServers,
+                                     "DNS override requires at least one nameserver IP literal"));
+    }
+    while (true) {
+        const std::size_t comma = input.find(',');
+        const std::string_view token = trim(comma == std::string_view::npos ? input : input.substr(0, comma));
+        net::IpAddress address;
+        if (token.empty() || !net::IpAddress::parse(token, address) || address.is_unspecified() ||
+            address.is_multicast()) {
+            return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, line, kDnsServers,
+                                         "expected up to three specified unicast IP literals"));
+        }
+        if (!nameservers.add(net::SocketAddress(address, 53))) {
+            return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, line, kDnsServers,
+                                         "DNS nameserver list exceeds three entries"));
+        }
+        if (comma == std::string_view::npos) {
+            break;
+        }
+        input.remove_prefix(comma + 1);
+        if (input.empty()) {
+            return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, line, kDnsServers,
+                                         "DNS nameserver list contains an empty entry"));
+        }
+    }
+    return nameservers;
+}
+
 AccessServerConfigError nacos_error(const nacos::NacosConfigError &source) {
     std::string detail = "invalid Nacos client configuration";
     if (source.code == nacos::NacosConfigErrorCode::EmptyServerList) {
@@ -349,7 +385,9 @@ AccessServerConfig::AccessServerConfig(
         net::SocketAddress metrics_listen_address, AccessActivationEndpointOptions activation_endpoint_options,
         std::chrono::milliseconds initial_config_timeout, std::size_t default_max_request_body_size, bool test_mode,
         ClientMetadataResolverOptions client_metadata_options, AccessLogOptions access_log_options,
-        UpstreamTlsClientPolicy upstream_tls_client_policy, std::optional<cat::CatClientConfig> cat_config,
+        UpstreamTlsClientPolicy upstream_tls_client_policy, AccessDnsMode dns_mode,
+        std::string dns_resolver_config_path, dns::DnsNameserverList dns_override_nameservers,
+        std::optional<cat::CatClientConfig> cat_config,
         nacos::NacosClientConfig nacos_config, AccessConfigWatcherOptions watcher_options,
         GrayConfigWatcherOptions gray_watcher_options, TlsCertificateWatcherOptions tls_certificate_watcher_options,
         AccessServiceDiscoveryOptions service_discovery_options) noexcept :
@@ -359,7 +397,9 @@ AccessServerConfig::AccessServerConfig(
     initial_config_timeout_(initial_config_timeout), default_max_request_body_size_(default_max_request_body_size),
     test_mode_(test_mode), client_metadata_options_(std::move(client_metadata_options)),
     access_log_options_(std::move(access_log_options)),
-    upstream_tls_client_policy_(std::move(upstream_tls_client_policy)), cat_config_(std::move(cat_config)),
+    upstream_tls_client_policy_(std::move(upstream_tls_client_policy)), dns_mode_(dns_mode),
+    dns_resolver_config_path_(std::move(dns_resolver_config_path)),
+    dns_override_nameservers_(std::move(dns_override_nameservers)), cat_config_(std::move(cat_config)),
     nacos_config_(std::move(nacos_config)), watcher_options_(std::move(watcher_options)),
     gray_watcher_options_(std::move(gray_watcher_options)),
     tls_certificate_watcher_options_(std::move(tls_certificate_watcher_options)),
@@ -399,6 +439,11 @@ AccessServerConfig::load_from_string(std::string_view input) {
     ClientMetadataResolverOptions client_metadata_options;
     AccessLogOptions access_log_options;
     UpstreamTlsClientPolicy upstream_tls_client_policy;
+    AccessDnsMode dns_mode = AccessDnsMode::System;
+    std::string dns_resolver_config_path = "/etc/resolv.conf";
+    dns::DnsNameserverList dns_override_nameservers;
+    bool dns_servers_present = false;
+    bool dns_resolver_config_present = false;
     cat::CatClientConfigParams cat_params{
             .thread_group_name = "access-server-cat",
             .thread_id = "0",
@@ -545,6 +590,30 @@ AccessServerConfig::load_from_string(std::string_view input) {
                                              "expected a path no longer than 4096 bytes"));
             }
             upstream_tls_client_policy.ca_file = entry.value;
+        } else if (entry.key == kDnsMode) {
+            if (value == "system") {
+                dns_mode = AccessDnsMode::System;
+            } else if (value == "override") {
+                dns_mode = AccessDnsMode::Override;
+            } else {
+                return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, entry.line, entry.key,
+                                             "expected system or override"));
+            }
+        } else if (entry.key == kDnsServers) {
+            auto parsed = parse_dns_nameservers(value, entry.line);
+            if (!parsed) {
+                return std::unexpected(std::move(parsed.error()));
+            }
+            dns_override_nameservers = *parsed;
+            dns_servers_present = true;
+        } else if (entry.key == kDnsResolverConfig) {
+            if (value.empty() || value.size() > kMaxDnsResolverConfigPathBytes ||
+                value.find('\0') != std::string_view::npos) {
+                return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, entry.line, entry.key,
+                                             "expected a non-empty path no longer than 4096 bytes"));
+            }
+            dns_resolver_config_path = entry.value;
+            dns_resolver_config_present = true;
         } else if (entry.key == kProjectsDataId) {
             watcher_options.project_list_data_id = entry.value;
         } else if (entry.key == kRouteDataIdPrefix) {
@@ -636,6 +705,18 @@ AccessServerConfig::load_from_string(std::string_view input) {
         return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, 0, kUpstreamTlsCaFile,
                                      "a CA file path is only valid in custom_ca mode"));
     }
+    if (dns_mode == AccessDnsMode::System && dns_servers_present) {
+        return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, 0, kDnsServers,
+                                     "DNS server overrides require ACCESS_SERVER_DNS_MODE=override"));
+    }
+    if (dns_mode == AccessDnsMode::Override && !dns_servers_present) {
+        return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, 0, kDnsServers,
+                                     "override mode requires at least one DNS server"));
+    }
+    if (dns_mode == AccessDnsMode::Override && dns_resolver_config_present) {
+        return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, 0, kDnsResolverConfig,
+                                     "a resolver configuration path is only valid in system mode"));
+    }
     if (activation_endpoint_options.enabled) {
         if (!valid_instance_id(activation_endpoint_options.instance_id)) {
             return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, 0, kActivationInstanceId,
@@ -683,9 +764,42 @@ AccessServerConfig::load_from_string(std::string_view input) {
             net::SocketAddress(listen_ip, listen_port), std::move(http_options),
             net::SocketAddress(metrics_ip.value_or(listen_ip), *metrics_port), std::move(activation_endpoint_options),
             std::chrono::milliseconds(timeout_millis), max_request_body, test_mode, std::move(client_metadata_options),
-            std::move(access_log_options), std::move(upstream_tls_client_policy), std::move(cat_config),
+            std::move(access_log_options), std::move(upstream_tls_client_policy), dns_mode,
+            std::move(dns_resolver_config_path), std::move(dns_override_nameservers), std::move(cat_config),
             std::move(*nacos_config), std::move(watcher_options), std::move(gray_options),
             std::move(tls_certificate_options), std::move(service_discovery_options));
+}
+
+std::expected<AccessDnsServiceOptions, AccessServerConfigError> AccessServerConfig::resolve_dns_options() const {
+    AccessDnsServiceOptions options;
+    if (dns_mode_ == AccessDnsMode::Override) {
+        options.client.nameservers = dns_override_nameservers_;
+        options.client.timeout = std::chrono::milliseconds(2000);
+        options.client.attempts = 2;
+        options.source = AccessDnsConfigSource::Override;
+        return options;
+    }
+
+    auto loaded = dns::load_system_resolver_config(dns_resolver_config_path_.c_str());
+    if (!loaded) {
+        const dns::ResolverConfigError &source = loaded.error();
+        AccessServerConfigErrorCode code = AccessServerConfigErrorCode::InvalidValue;
+        if (source.code == dns::ResolverConfigErrorCode::OpenFailed) {
+            code = AccessServerConfigErrorCode::OpenFailed;
+        } else if (source.code == dns::ResolverConfigErrorCode::ReadFailed) {
+            code = AccessServerConfigErrorCode::ReadFailed;
+        }
+        std::string detail = "failed to load DNS resolver configuration: ";
+        detail.append(dns::resolver_config_error_name(source.code));
+        return std::unexpected(error(code, source.line, kDnsResolverConfig, std::move(detail)));
+    }
+    options.client.nameservers = loaded->nameservers;
+    options.client.timeout = loaded->timeout;
+    options.client.attempts = loaded->attempts;
+    options.client.rotate_nameservers = loaded->rotate;
+    options.source = AccessDnsConfigSource::System;
+    options.unsupported = loaded->unsupported;
+    return options;
 }
 
 } // namespace fiber::access_server

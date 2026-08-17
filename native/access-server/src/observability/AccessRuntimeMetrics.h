@@ -2,6 +2,7 @@
 #define FIBER_ACCESS_SERVER_ACCESS_RUNTIME_METRICS_H
 
 #include "AccessConfigMetrics.h"
+#include "AccessDnsMetrics.h"
 #include "AccessDiscoveryMetrics.h"
 #include "AccessProcessMetrics.h"
 #include "AccessTlsMetrics.h"
@@ -22,6 +23,8 @@ public:
                                   AccessProcessMetricsSources process_sources = {}) noexcept;
 
     [[nodiscard]] AccessConfigMetrics &config() noexcept { return config_; }
+    [[nodiscard]] AccessDnsMetrics &dns() noexcept { return dns_; }
+    [[nodiscard]] const AccessDnsMetrics &dns() const noexcept { return dns_; }
     [[nodiscard]] AccessDiscoveryMetrics &discovery() noexcept { return discovery_; }
     [[nodiscard]] const AccessDiscoveryMetrics &discovery() const noexcept { return discovery_; }
     [[nodiscard]] AccessTlsMetrics &tls() noexcept { return tls_; }
@@ -30,6 +33,7 @@ public:
 
 private:
     AccessConfigMetrics config_;
+    AccessDnsMetrics dns_;
     AccessDiscoveryMetrics discovery_;
     AccessTlsMetrics tls_;
     AccessProcessMetrics process_;

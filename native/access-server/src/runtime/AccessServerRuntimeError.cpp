@@ -31,6 +31,8 @@ std::string_view access_server_runtime_stage_name(AccessServerRuntimeErrorCode c
             return "create Nacos naming service";
         case AccessServerRuntimeErrorCode::CreateCatClient:
             return "create CAT client";
+        case AccessServerRuntimeErrorCode::LoadDnsConfiguration:
+            return "load DNS resolver configuration";
         case AccessServerRuntimeErrorCode::InitializeUpstreamTls:
             return "initialize upstream TLS trust store";
         case AccessServerRuntimeErrorCode::AllocateRuntime:

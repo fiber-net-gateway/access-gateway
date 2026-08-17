@@ -15,6 +15,7 @@ enum class AccessServerRuntimeErrorCode : std::uint8_t {
     CreateConfigService,
     CreateNamingService,
     CreateCatClient,
+    LoadDnsConfiguration,
     InitializeUpstreamTls,
     AllocateRuntime,
     InitializeWorkers,

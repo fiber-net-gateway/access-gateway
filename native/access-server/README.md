@@ -184,6 +184,8 @@ cp native/access-server/access-server.env.example access-server.env
 - 默认 request body 上限 400 MiB；
 - upstream HTTPS 默认保持 Java `legacy_insecure` 兼容模式；可显式切换系统 CA 或挂载的
   自定义 CA bundle 校验；
+- upstream hostname DNS 默认在 EventLoop 启动前严格读取 `/etc/resolv.conf`，将最多三个
+  nameserver 及 timeout/attempts/rotate 完整注入每个 HTTP worker；不会隐式回退公共 DNS；
 - 客户端地址默认取 socket peer，忽略所有 forwarding header；
 - access log 默认只记录经安全编码的 path，不记录 query value；正常请求默认采样率为
   10000 bps（全量），失败请求始终保留；
@@ -200,7 +202,16 @@ cp native/access-server/access-server.env.example access-server.env
 `ploto.unified-access.tls-certificates` / `ACCESS-SERVER` 等待首个完整证书快照；缺失、过期、
 私钥不匹配或 TCP/UDP 绑定失败时 fail closed。文件证书配置已移除。兼容明文 HTTP 时必须同时
 显式关闭 TLS 与 HTTP/3。
-`NACOS_SERVER_ADDRESSES` 当前要求逗号分隔的 IP literal。
+`ACCESS_SERVER_DNS_MODE=system`（默认）会从 `ACCESS_SERVER_DNS_RESOLV_CONF` 指定的文件加载
+Fiber 有界 resolver 配置；文件缺失、无 nameserver、地址非法或超过三个 nameserver 时启动前
+fail closed。`search`/`ndots` 等尚未执行的设置会显式进入固定维度指标，不会被当作已经支持。
+`ACCESS_SERVER_DNS_MODE=override` 则要求通过 `ACCESS_SERVER_DNS_SERVERS` 提供 1-3 个逗号分隔的
+unicast IPv4/IPv6 literal，端口固定为 53。两种模式均不会添加 `8.8.8.8` 或其他隐式 fallback。
+解析结果在进程生命周期内不可变；修改系统 resolver 文件需要滚动重启。
+
+`NACOS_SERVER_ADDRESSES` 当前仍要求逗号分隔的 IP literal。Nacos 因而不借用 HTTP worker 的
+loop-affine resolver；若未来开放 hostname，必须在 Nacos owner loop 建立并按 service/client 之前
+关闭独立 resolver 生命周期。
 CAT 默认关闭；任一 `CAT_*` 设置非空后必须给出完整 app key、hostname、IP，以及
 至少一个 router 或 bootstrap collector。CAT 不可用会在启动阶段 fail closed，不会
 静默退化为无 trace 的生产实例。

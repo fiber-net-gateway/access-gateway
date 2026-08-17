@@ -8,6 +8,7 @@ AccessRuntimeMetrics::AccessRuntimeMetrics(event::EventLoop &nacos_owner,
 
 void AccessRuntimeMetrics::append_prometheus(std::string &output, std::chrono::steady_clock::time_point now) const {
     config_.append_prometheus(output, now);
+    dns_.append_prometheus(output);
     discovery_.append_prometheus(output);
     tls_.append_prometheus(output, now);
     process_.append_prometheus(output);

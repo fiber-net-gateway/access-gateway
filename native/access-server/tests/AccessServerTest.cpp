@@ -171,6 +171,39 @@ struct FailingDnsResolverFactory {
     }
 };
 
+struct ObservingDnsResolverFactory {
+    AccessDnsResolverFactory delegate = AccessDnsResolverFactory::system();
+    std::size_t create_calls = 0;
+    std::size_t nameserver_count = 0;
+    std::array<net::SocketAddress, dns::kMaxDnsNameservers> nameservers{};
+    std::chrono::milliseconds timeout{0};
+    std::uint8_t attempts = 0;
+    bool rotate = false;
+
+    [[nodiscard]] AccessDnsResolverFactory adapter() noexcept {
+        return AccessDnsResolverFactory{
+                .context = this,
+                .create = create,
+        };
+    }
+
+    [[nodiscard]] static bool create(void *context, event::EventLoop &loop, dns::SharedDnsCache2 &cache,
+                                     const dns::DnsClient::Options &client_options,
+                                     std::unique_ptr<dns::DnsResolverLocal> &local,
+                                     std::unique_ptr<dns::DnsResolver> &resolver) noexcept {
+        auto &self = *static_cast<ObservingDnsResolverFactory *>(context);
+        ++self.create_calls;
+        self.nameserver_count = client_options.nameservers.size();
+        for (std::size_t i = 0; i < self.nameserver_count; ++i) {
+            self.nameservers[i] = client_options.nameservers[i];
+        }
+        self.timeout = client_options.timeout;
+        self.attempts = client_options.attempts;
+        self.rotate = client_options.rotate_nameservers;
+        return self.delegate.create(self.delegate.context, loop, cache, client_options, local, resolver);
+    }
+};
+
 TEST(AccessDnsServiceTest, KeepsResolverFactoryAsTwoPointerValueAdapter) {
     EXPECT_TRUE(std::is_trivially_copyable_v<AccessDnsResolverFactory>);
     EXPECT_LE(sizeof(AccessDnsResolverFactory), 2U * sizeof(void *));
@@ -205,6 +238,51 @@ TEST(AccessDnsServiceTest, ReleasesPartialInitializationAndCanRetry) {
 
     EXPECT_FALSE(first_initialized);
     EXPECT_TRUE(second_initialized);
+}
+
+TEST(AccessDnsServiceTest, InjectsCompleteValidatedOptionsIntoEveryWorker) {
+    AccessDnsMetrics metrics;
+    AccessDnsServiceOptions options;
+    ASSERT_TRUE(options.client.nameservers.add(net::SocketAddress(net::IpAddress::v4({192, 0, 2, 1}), 53)));
+    ASSERT_TRUE(options.client.nameservers.add(
+            net::SocketAddress(net::IpAddress::v6({0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}),
+                               53)));
+    ASSERT_TRUE(options.client.nameservers.add(net::SocketAddress(net::IpAddress::v4({192, 0, 2, 2}), 53)));
+    options.client.timeout = 3s;
+    options.client.attempts = 4;
+    options.client.rotate_nameservers = true;
+    options.source = AccessDnsConfigSource::System;
+    options.unsupported = dns::ResolverUnsupportedFeature::Search;
+    options.metrics = metrics.observer();
+
+    event::EventLoop control_loop;
+    event::EventLoopGroup workers(2);
+    ObservingDnsResolverFactory factory;
+    AccessDnsService service(std::move(options), factory.adapter());
+    workers.start();
+    async::spawn(control_loop, [&]() -> async::DetachedTask {
+        EXPECT_TRUE(co_await service.init(workers));
+        co_await service.shutdown();
+        control_loop.stop();
+    });
+    control_loop.run();
+    workers.stop();
+    workers.join();
+
+    EXPECT_EQ(factory.create_calls, 2U);
+    EXPECT_EQ(factory.nameserver_count, 3U);
+    EXPECT_EQ(factory.nameservers[0].to_string(), "192.0.2.1:53");
+    EXPECT_EQ(factory.nameservers[1].to_string(), "[2001:db8::1]:53");
+    EXPECT_EQ(factory.nameservers[2].to_string(), "192.0.2.2:53");
+    EXPECT_EQ(factory.timeout, 3s);
+    EXPECT_EQ(factory.attempts, 4U);
+    EXPECT_TRUE(factory.rotate);
+    const AccessDnsMetricsStatus status = metrics.status();
+    EXPECT_EQ(status.configured_nameservers, 3U);
+    EXPECT_EQ(status.initialization_successes, 1U);
+    EXPECT_EQ(status.initialization_failures, 0U);
+    EXPECT_EQ(status.state, AccessDnsResolverState::Stopped);
+    EXPECT_EQ(status.active_resolvers, 0U);
 }
 
 TEST(AccessDnsServiceTest, ShutdownDoesNotBlockTheCallingEventLoop) {

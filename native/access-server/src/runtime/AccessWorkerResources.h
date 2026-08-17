@@ -35,6 +35,7 @@ struct AccessWorkerResourcesOptions {
     ClientMetadataResolverOptions client_metadata;
     bool connection_secure = false;
     AccessLogOptions access_log;
+    AccessDnsServiceOptions dns = AccessDnsServiceOptions::local_default();
     AccessDnsResolverFactory dns_resolver_factory = AccessDnsResolverFactory::system();
     AccessRequestScriptAdapter script_adapter;
     ProxyExecutorOptions executor;
