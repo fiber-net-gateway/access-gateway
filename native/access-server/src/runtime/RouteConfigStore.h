@@ -18,6 +18,12 @@
 
 #include <fiber/async/Task.h>
 
+namespace fiber::event {
+
+class EventLoopGroup;
+
+} // namespace fiber::event
+
 namespace fiber::access_server {
 
 enum class ConfigUpdateStatus : std::uint8_t {
@@ -122,8 +128,13 @@ class RouteConfigStore {
 public:
     explicit RouteConfigStore(ScriptCompilerAdapter script_compiler = {},
                               ProxyAddressSelectorFactory selector_factory = {});
+    RouteConfigStore(event::EventLoopGroup &workers, ScriptCompilerAdapter script_compiler = {},
+                     ProxyAddressSelectorFactory selector_factory = {});
     RouteConfigStore(ScriptCompilerAdapter script_compiler, AccessServiceDiscovery &service_discovery,
                      AccessServiceDiscoveryOptions discovery_options = {},
+                     AccessDiscoveryMetricsObserver metrics_observer = {});
+    RouteConfigStore(event::EventLoopGroup &workers, ScriptCompilerAdapter script_compiler,
+                     AccessServiceDiscovery &service_discovery, AccessServiceDiscoveryOptions discovery_options = {},
                      AccessDiscoveryMetricsObserver metrics_observer = {});
 
     [[nodiscard]] PreparedProjectUpdateOutcome prepare(std::string_view project,

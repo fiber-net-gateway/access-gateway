@@ -8,6 +8,7 @@
 #include <utility>
 
 #include <fiber/common/Assert.h>
+#include <fiber/event/EventLoopGroup.h>
 
 namespace fiber::access_server {
 namespace {
@@ -127,12 +128,24 @@ RouteConfigStore::RouteConfigStore(ScriptCompilerAdapter script_compiler,
                                    ProxyAddressSelectorFactory selector_factory) :
     project_compiler_(script_compiler), selector_factory_(selector_factory) {}
 
+RouteConfigStore::RouteConfigStore(event::EventLoopGroup &workers, ScriptCompilerAdapter script_compiler,
+                                   ProxyAddressSelectorFactory selector_factory) :
+    project_compiler_(script_compiler), selector_factory_(selector_factory), publisher_(workers) {}
+
 RouteConfigStore::RouteConfigStore(ScriptCompilerAdapter script_compiler, AccessServiceDiscovery &service_discovery,
                                    AccessServiceDiscoveryOptions discovery_options,
                                    AccessDiscoveryMetricsObserver metrics_observer) :
     project_compiler_(script_compiler),
     service_selector_factory_(service_discovery, std::move(discovery_options), metrics_observer),
     selector_factory_(service_selector_factory_.adapter()) {}
+
+RouteConfigStore::RouteConfigStore(event::EventLoopGroup &workers, ScriptCompilerAdapter script_compiler,
+                                   AccessServiceDiscovery &service_discovery,
+                                   AccessServiceDiscoveryOptions discovery_options,
+                                   AccessDiscoveryMetricsObserver metrics_observer) :
+    project_compiler_(script_compiler),
+    service_selector_factory_(service_discovery, std::move(discovery_options), metrics_observer),
+    selector_factory_(service_selector_factory_.adapter()), publisher_(workers) {}
 
 PreparedProjectUpdateOutcome RouteConfigStore::prepare(std::string_view project,
                                                        const std::optional<ProjectConfig> &config) {

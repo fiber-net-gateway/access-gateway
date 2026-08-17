@@ -46,9 +46,11 @@ constexpr std::size_t kSamples = 21;
 constexpr std::uint64_t kDefaultOperationsPerSample = 100'000;
 
 enum class CaseKind : std::uint8_t {
-    PinOnly,
+    GlobalPinOnly,
+    WorkerPinOnly,
     PinnedLookup,
-    PinAndLookup,
+    GlobalPinAndLookup,
+    WorkerPinAndLookup,
 };
 
 struct Query {
@@ -199,15 +201,20 @@ std::vector<Query> build_queries(const AccessRouteSnapshot &snapshot) {
 
 class BenchmarkFixture {
 public:
-    BenchmarkFixture() : snapshot_(build_snapshot()), queries_(build_queries(*snapshot_)) {
-        publisher_.publish(snapshot_);
+    explicit BenchmarkFixture(fiber::event::EventLoopGroup &workers) :
+        worker_publisher_(workers), snapshot_(build_snapshot()), queries_(build_queries(*snapshot_)) {
+        global_publisher_.publish(snapshot_);
+        worker_publisher_.publish(snapshot_);
     }
 
-    [[nodiscard]] const RouteSnapshotPublisher &publisher() const noexcept { return publisher_; }
+    [[nodiscard]] const RouteSnapshotPublisher &global_publisher() const noexcept { return global_publisher_; }
+    [[nodiscard]] const RouteSnapshotPublisher &worker_publisher() const noexcept { return worker_publisher_; }
+    [[nodiscard]] const std::shared_ptr<const AccessRouteSnapshot> &snapshot() const noexcept { return snapshot_; }
     [[nodiscard]] const std::vector<Query> &queries() const noexcept { return queries_; }
 
 private:
-    RouteSnapshotPublisher publisher_;
+    RouteSnapshotPublisher global_publisher_;
+    RouteSnapshotPublisher worker_publisher_;
     std::shared_ptr<const AccessRouteSnapshot> snapshot_;
     std::vector<Query> queries_;
 };
@@ -219,7 +226,7 @@ struct CaseState {
         checksums(value_workers) {}
 
     const BenchmarkFixture *fixture = nullptr;
-    CaseKind kind = CaseKind::PinOnly;
+    CaseKind kind = CaseKind::GlobalPinOnly;
     std::size_t workers = 0;
     std::uint64_t operations = 0;
     std::vector<std::uint64_t> checksums;
@@ -235,6 +242,37 @@ struct SampleResult {
     bool failed = false;
 };
 
+std::uint64_t run_pin_operations(const RouteSnapshotPublisher &publisher, std::uint64_t operations) noexcept {
+    std::uint64_t checksum = 0;
+    for (std::uint64_t operation = 0; operation < operations; ++operation) {
+        const auto snapshot = publisher.pin();
+        checksum += snapshot->projects().size();
+    }
+    return checksum;
+}
+
+template<bool PinEachOperation>
+std::uint64_t run_lookup_operations(CaseState &run, std::size_t worker, std::uint64_t operations,
+                                    const RouteSnapshotPublisher *publisher,
+                                    const std::shared_ptr<const AccessRouteSnapshot> &pinned) noexcept {
+    std::uint64_t checksum = 0;
+    for (std::uint64_t operation = 0; operation < operations; ++operation) {
+        const Query &query = run.fixture->queries()[(operation + worker * 977U) % kQueryCount];
+        std::uint64_t result;
+        if constexpr (PinEachOperation) {
+            const auto snapshot = publisher->pin();
+            result = lookup(*snapshot, query);
+        } else {
+            result = lookup(*pinned, query);
+        }
+        if (result != query.expected) {
+            run.failed.store(true, std::memory_order_relaxed);
+        }
+        checksum += result;
+    }
+    return checksum;
+}
+
 SampleResult run_sample(fiber::event::EventLoopGroup &group, const BenchmarkFixture &fixture, CaseKind kind,
                         std::size_t worker_count, std::uint64_t operations) {
     auto run = std::make_shared<CaseState>(fixture, kind, worker_count, operations);
@@ -242,7 +280,7 @@ SampleResult run_sample(fiber::event::EventLoopGroup &group, const BenchmarkFixt
         fiber::async::spawn(group.at(worker), [run, worker]() -> fiber::async::DetachedTask {
             std::shared_ptr<const AccessRouteSnapshot> pinned;
             if (run->kind == CaseKind::PinnedLookup) {
-                pinned = run->fixture->publisher().pin();
+                pinned = run->fixture->snapshot();
             }
             run->ready.fetch_add(1, std::memory_order_release);
             run->ready.notify_all();
@@ -252,23 +290,26 @@ SampleResult run_sample(fiber::event::EventLoopGroup &group, const BenchmarkFixt
 
             const std::uint64_t base_operations = run->operations / run->workers;
             const std::uint64_t worker_operations = base_operations + (worker < run->operations % run->workers);
-            std::uint64_t checksum = 0;
-            for (std::uint64_t operation = 0; operation < worker_operations; ++operation) {
-                if (run->kind == CaseKind::PinOnly) {
-                    const auto snapshot = run->fixture->publisher().pin();
-                    checksum += snapshot->projects().size();
-                    continue;
-                }
-                const Query &query = run->fixture->queries()[(operation + worker * 977U) % kQueryCount];
-                const std::uint64_t result = run->kind == CaseKind::PinnedLookup
-                                                     ? lookup(*pinned, query)
-                                                     : lookup(*run->fixture->publisher().pin(), query);
-                if (result != query.expected) {
-                    run->failed.store(true, std::memory_order_relaxed);
-                }
-                checksum += result;
+            switch (run->kind) {
+                case CaseKind::GlobalPinOnly:
+                    run->checksums[worker] = run_pin_operations(run->fixture->global_publisher(), worker_operations);
+                    break;
+                case CaseKind::WorkerPinOnly:
+                    run->checksums[worker] = run_pin_operations(run->fixture->worker_publisher(), worker_operations);
+                    break;
+                case CaseKind::PinnedLookup:
+                    run->checksums[worker] =
+                            run_lookup_operations<false>(*run, worker, worker_operations, nullptr, pinned);
+                    break;
+                case CaseKind::GlobalPinAndLookup:
+                    run->checksums[worker] = run_lookup_operations<true>(*run, worker, worker_operations,
+                                                                         &run->fixture->global_publisher(), {});
+                    break;
+                case CaseKind::WorkerPinAndLookup:
+                    run->checksums[worker] = run_lookup_operations<true>(*run, worker, worker_operations,
+                                                                         &run->fixture->worker_publisher(), {});
+                    break;
             }
-            run->checksums[worker] = checksum;
             run->done.fetch_add(1, std::memory_order_release);
             run->done.notify_all();
             co_return;
@@ -350,12 +391,16 @@ bool parse_positive(std::string_view input, std::uint64_t &value) noexcept {
 
 std::string_view case_name(CaseKind kind) noexcept {
     switch (kind) {
-        case CaseKind::PinOnly:
-            return "pin_only";
+        case CaseKind::GlobalPinOnly:
+            return "global_pin_only";
+        case CaseKind::WorkerPinOnly:
+            return "worker_pin_only";
         case CaseKind::PinnedLookup:
             return "pinned_lookup";
-        case CaseKind::PinAndLookup:
-            return "pin_lookup";
+        case CaseKind::GlobalPinAndLookup:
+            return "global_pin_lookup";
+        case CaseKind::WorkerPinAndLookup:
+            return "worker_pin_lookup";
     }
     return "unknown";
 }
@@ -392,13 +437,14 @@ int main(int argc, char **argv) {
                  kProjectCount, kProjectCount * 3U, kQueryCount, kSamples, detected_cpus,
                  static_cast<int>(cpu_source.size()), cpu_source.data());
 
-    BenchmarkFixture fixture;
     fiber::event::EventLoopGroup group(max_workers);
+    BenchmarkFixture fixture(group);
     group.start();
     std::printf("case,workers,operations,p50_ns_per_operation,p95_ns_per_operation,p99_ns_per_operation,"
                 "operations_per_second,checksum\n");
     for (std::size_t workers = 1; workers <= max_workers; ++workers) {
-        for (const CaseKind kind: {CaseKind::PinOnly, CaseKind::PinnedLookup, CaseKind::PinAndLookup}) {
+        for (const CaseKind kind: {CaseKind::GlobalPinOnly, CaseKind::WorkerPinOnly, CaseKind::PinnedLookup,
+                                   CaseKind::GlobalPinAndLookup, CaseKind::WorkerPinAndLookup}) {
             print_case(kind, workers, operations_per_sample,
                        measure_case(group, fixture, kind, workers, operations_per_sample));
         }
