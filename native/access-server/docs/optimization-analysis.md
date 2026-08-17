@@ -19,17 +19,18 @@ Issue/PR，合入后再审查 revision range、运行完整回归并更新 gitli
 
 ## 2. 审阅范围和结论可信度
 
-本次审阅基于：
+初始审阅基于：
 
 - Access Gateway revision：`0f7b557`；
 - Fiber pinned revision：`0fda7764bf94944aca4b674ab5ab311184703118`；
 - 审阅日期：2026-08-16；
+- 实施状态和验证结果持续更新至：2026-08-17；
 - `native/access-server/src/` 约 1.37 万行代码；
 - 当前 Release/ThinLTO 构建、CMake target、兼容文档和测试注册；
-- `ctest --test-dir native/build --output-on-failure -L access-server`：共发现 170 个测试，
+- `ctest --test-dir native/build --output-on-failure -L access-server`：共发现 297 个测试，
   0 失败，其中
   `ProductionScriptCorpusTest.CompilesExternalSnapshotWhenProvided` 因未设置私有 corpus 而
-  skip。
+  skip；完整 CTest 共 1,888 项，0 失败、5 项按环境条件 skip。
 
 本文将结论分成两类：
 
@@ -54,12 +55,14 @@ Issue/PR，合入后再审查 revision range、运行完整回归并更新 gitli
 - 异步日志采用有界队列和明确的过载丢弃策略；
 - C++ 错误通过 `expected`/result 类型传播，没有在请求路径引入异常。
 
-当前主要问题不是基础架构方向错误，而是以下几类系统性缺口：
+初始审阅确认的主要问题不是基础架构方向错误，而是以下几类系统性缺口；已经完成的子项在
+总表和对应章节持续标记：
 
 1. 生命周期中仍存在 EventLoop 同步阻塞；
 2. “收到配置”“编译发布”“实例可服务”之间的状态没有完整建模；
 3. Nacos owner loop 承担了过多 CPU 和分配工作；
-4. service selection、gray sampling 和 snapshot pin 存在跨 worker 共享状态；
+4. service selection 仍有全局 SWRR 状态；gray sampling 和 route snapshot pin 已完成
+   worker-local 隔离；
 5. 安全边界依赖部署约定，未在代码中显式表达；
 6. 大类内部边界和 CMake target 边界不足，限制了测试和后续演进。
 
@@ -78,7 +81,7 @@ Issue/PR，合入后再审查 revision range、运行完整回归并更新 gitli
 | S-03 | P1 | 上游 TLS peer/CA/SNI 验证配置 | 双方 | 进程级已完成；路由级需要 Fiber #28 |
 | S-04 | P1 | 上游 mTLS 客户端身份 | 双方 | Fiber #31；连接隔离还需要 #28 |
 | P-01 | P1 | 消除 service selection 双层共享锁 | 双方 | 通用 SWRR 上游化时需要 |
-| P-02 | P1/P2 | per-worker route snapshot/RCU pin | 双方 | 采用通用原语时需要 |
+| P-02 | P1/P2 | per-worker route snapshot pin | 本项目（已解决） | 否；进一步通用化才需要 |
 | P-03 | P1 | per-worker gray snapshot 和 PRNG | 本项目 | 否 |
 | P-04 | P1 | TLS hazard reaper 只在有退休对象时调度 | 本项目 | 否 |
 | P-05 | P1 | 模板、request target、header 分配优化 | 本项目 | 否 |
@@ -115,7 +118,8 @@ P0 表示应在性能重构前处理的正确性、安全或生命周期问题�
 
 - **P-01**：将通用 SWRR、selection token 和 circuit state 上游化或提供 sharded
   balancer；
-- **P-02**：提供通用 loop-local immutable snapshot/epoch/RCU 原语；
+- **P-02（可选后续）**：只有其他 Fiber 应用也需要，或新的 profile 证明 project-local slot
+  仍是瓶颈时，再提供通用 loop-local immutable snapshot/epoch/RCU 原语；
 - **T-02**：为上述通用组件建立 Fiber benchmark。
 
 其余事项均可由本项目独立完成。即使归属为“双方”，端到端交付也必然包括本项目的配置、
@@ -574,15 +578,40 @@ native/build-benchmark/access-server/fiber_access_service_selection_benchmark \
 
 ### 7.2 P-02：per-worker route snapshot 和请求 pin
 
-**归属：双方，且只有 profile 证明需要时实施。**
+**归属：本项目。Fiber 无前置改动。** 只有后续要抽取通用 epoch/RCU 原语时才涉及 Fiber。
 
-**实施状态：并发微基准已完成（2026-08-17）；所有权改造尚未实施。** 新增默认关闭的
-`fiber_access_route_lookup_benchmark`，使用 352 个 Project、1,056 条 route 和 4,096 个预生成
-查询，在真实 `EventLoopGroup` worker 上分离三种成本：
+**实施状态：已解决（2026-08-17）。** 基线确认同一个 atomic `shared_ptr` 控制块在多 worker
+请求中发生严重 cache-line 争用后，生产 `RouteConfigStore` 已显式绑定 HTTP `EventLoopGroup`，
+并采用 canonical snapshot 加 per-worker wrapper 的发布模型：
 
-- `pin_only`：每次操作只 atomic pin 全局 `shared_ptr`；
-- `pinned_lookup`：每个 worker 在计时前 pin 一次，再执行 Host + Path 查找；
-- `pin_lookup`：每次操作同时执行全局 pin、Host 和 Path 查找，模拟请求 pipeline 前半段。
+1. 路由配置仍只编译和存储一份不可变 `AccessRouteSnapshot`；非服务线程、validator 以及错误
+   worker group 通过 canonical atomic `shared_ptr` 获取快照。
+2. 每个 HTTP worker 拥有 cache-line 对齐的 atomic slot。slot 中是该 worker 独占控制块的
+   小型 wrapper，wrapper 再强引用同一份 canonical snapshot，不复制 Project、matcher 或 route。
+3. 请求根据当前 EventLoop 的 group 和 `group_index()` acquire-load 对应 slot，再返回 aliasing
+   `shared_ptr`：其 `.get()` 是 `AccessRouteSnapshot`，所有权则绑定 worker wrapper。请求跨 await
+   继续持有该 pin，旧 generation 只有在该 worker 的最后一个请求释放后才回收。
+4. 更新在任何 slot 可见前先为全部固定 worker 构造候选 wrapper；随后逐 slot release-store，最后
+   才 release-store canonical snapshot。更新返回并记录激活结果时，所有服务 slot 已发布完整的
+   新 generation；更新过程中已经开始的请求仍可合法使用完整旧 generation。
+5. worker group 是 runtime 生命周期内的借用对象。停机顺序先由 data plane
+   `shutdown_and_wait()` 排空请求，再关闭 control plane；runtime 在 worker group 析构前销毁，
+   因而 publisher、slot 和跨 await pin 的所有权边界明确。
+
+该方案没有异步 fan-out、worker acknowledgement、裸指针或 hazard epoch；配置更新冷路径每次
+增加 `O(worker)` 个小 wrapper/control block 分配，预构造阶段失败不会留下半批 slot，而路由模型
+本体仍只分配一次。请求热路径只在所属 worker 的控制块上增减引用计数，保留原有的 immutable
+snapshot、热更新和协程生命周期语义。`WorkerState` 通过 PImpl 隐藏，`RouteSnapshotPublisher`
+本体继续保持有界尺寸。
+
+默认关闭的 `fiber_access_route_lookup_benchmark` 使用 352 个 Project、1,056 条 route 和 4,096
+个预生成查询，在真实 `EventLoopGroup` worker 上分离五种成本：
+
+- `global_pin_only`：改造前的 canonical atomic pin；
+- `worker_pin_only`：改造后的当前 worker slot pin；
+- `pinned_lookup`：每 worker 预先持有快照，仅执行 Host + Path 查找，作为 matcher 上限基线；
+- `global_pin_lookup`：改造前的 canonical pin 加 Host + Path 查找；
+- `worker_pin_lookup`：生产路径的 worker-local pin 加 Host + Path 查找。
 
 每个 worker/case 运行 21 个固定总操作量样本，CSV 输出的是 aggregate sample
 ns/operation 的 nearest-rank p50/p95/p99 和以 p50 推导的 ops/s，不冒充单请求 latency 分布。
@@ -602,41 +631,34 @@ native/build-benchmark/access-server/fiber_access_route_lookup_benchmark \
 2026-08-17 在 20 vCPU、13th Gen Intel Core i7-13700H、WSL2 环境，未绑核且未隔离系统负载，
 得到以下 p50 方向性结果：
 
-| worker | pin only ops/s | pinned Host+Path ops/s | pin + Host+Path ops/s |
-| ---: | ---: | ---: | ---: |
-| 1 | 57,475,327 | 6,664,239 | 6,222,205 |
-| 2 | 13,537,570 | 13,138,714 | 7,453,079 |
-| 4 | 8,087,614 | 25,826,280 | 7,131,382 |
-| 8 | 4,305,363 | 35,705,551 | 4,310,386 |
-| 20 | 2,214,570 | 56,163,936 | 1,936,839 |
+| worker | global pin ops/s | worker pin ops/s | pinned lookup ops/s | global pin+lookup ops/s | worker pin+lookup ops/s |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 53,396,640 | 52,806,089 | 6,971,822 | 6,326,438 | 6,417,208 |
+| 2 | 13,911,830 | 108,947,890 | 13,629,214 | 8,295,282 | 12,692,072 |
+| 4 | 7,971,110 | 200,170,145 | 27,865,834 | 7,203,433 | 24,679,262 |
+| 8 | 4,112,262 | 287,538,099 | 35,884,558 | 4,032,290 | 32,836,808 |
+| 20 | 2,081,447 | 260,357,002 | 61,666,234 | 2,041,877 | 57,542,233 |
 
-预先 pin 的 matcher workload 在 20 worker 达到单 worker 的约 `8.43x`，而每请求 pin 的完整
-workload 只有约 `0.31x`；20 worker 时 `pin_lookup` 的 516.31 aggregate ns/op 已接近
-`pin_only` 的 451.55 ns/op。该基准确认当前 libstdc++ atomic `shared_ptr` 控制块在同一快照高并发
-读取下会主导这一段 pipeline，满足开展 project-local per-worker publication 方案设计的门槛。
-它仍不是生产容量数据：真实请求还有策略、脚本、proxy 和观测成本，必须继续用生产 profile
-判断端到端收益。下一阶段也不能换成裸指针；必须保留跨 await pin、并发热更新、旧 generation
-回收和 shutdown 语义，并单独提交实现与回归。本项没有修改 Fiber。
+20 worker 时，worker-local pin 是 canonical global pin 的约 `125.08x`，worker-local
+pin+lookup 是 global pin+lookup 的约 `28.18x`，并达到预先固定快照 matcher 基线的约 `93.32%`。
+单 worker 下两种 pin 基本持平，说明改造没有用显著单线程成本换取扩展性。结果符合“共享控制块
+跨核争用被限制到单 EventLoop”的设计预期。
 
-每个请求都会 atomic load 一个 `shared_ptr<const AccessRouteSnapshot>`。该操作不保证
-lock-free，并带来共享控制块引用计数流量，但它目前提供了清晰可靠的请求生命周期保证。
+这些仍是 aggregate sample 的方向性微基准，不是单请求延迟或生产容量结论；真实请求还包含
+策略、脚本、proxy 和观测成本，机器也未绑核或隔离系统负载。后续应通过生产 profile 判断端到端
+收益，但不再需要为本项等待 Fiber RCU。
 
 代码位置：
 
-- [`RouteConfigStore.h`](../src/runtime/RouteConfigStore.h#L62)；
-- [`AccessRequestHandler.cpp`](../src/execution/AccessRequestHandler.cpp#L320)。
+- [`RouteConfigStore.h`](../src/runtime/RouteConfigStore.h#L128)；
+- [`AccessRequestHandler.cpp`](../src/execution/AccessRequestHandler.cpp#L258)。
 
-候选方案是每 worker snapshot slot 加 epoch/RCU：更新通过 EventLoop fan-out，旧快照等
-该 worker 的旧 generation 请求全部结束后回收。不能简单换成裸指针。
-
-归属边界：
-
-- Fiber：若实现通用 loop-local immutable snapshot、epoch 或 RCU 原语，其生命周期、取消、
-  loop shutdown 和内存顺序属于框架；
-- 本项目：route generation、worker acknowledgement、请求 pin 和 activation evidence；
-- 双方：TSAN、并发热更新、请求跨 await、shutdown 中更新等回归。
-
-在独立的 per-worker 方案完成上述生命周期设计和测试前，继续保持当前 shared pointer 实现。
+回归测试直接验证同一 worker 的 pin 共享 wrapper owner、不同 worker owner 隔离、非服务 group
+回退 canonical、新 generation 发布、旧 generation 跨请求持有和最后一个 pin 后回收。真实
+`AccessRequestHandler` 测试在 proxy coroutine 暂停期间发布新路由，确认挂起请求继续使用旧
+route，而后续请求命中新 route。另有两个 worker 持续 pin、控制线程交替发布 2,048 次完整
+generation 的并发测试。聚焦用例在普通 Release、ASAN/UBSAN 和 TSAN 下均连续重复 100 次；
+若未来抽取 Fiber 通用 RCU，再在上游增加读取、更新、回收、取消和 shutdown 的独立测试。
 
 ### 7.3 P-03：per-worker gray snapshot 和 PRNG
 
@@ -1383,7 +1405,7 @@ ASAN/UBSAN；该子项不修改生产实现或 Fiber。
 - ASAN/UBSAN、聚焦 TSAN；
 - codec、Host/CIDR、trace state、validator fuzz。
 
-Fiber DNS、connector、SWRR 或 RCU 有上游改动时，必须在 Fiber 仓库先补独立测试，再更新
+Fiber DNS、connector、SWRR 或通用 RCU 有上游改动时，必须在 Fiber 仓库先补独立测试，再更新
 gitlink 并运行完整 Fiber/native 回归。
 
 ### 11.2 T-02：benchmark
@@ -1391,9 +1413,9 @@ gitlink 并运行完整 Fiber/native 回归。
 **归属：双方，各自测试自己的抽象。**
 
 **实施状态：部分完成（2026-08-17）。** 本项目已有 service selection contention、template/header
-分配、route batch publication、Host 高 fan-out，以及本轮新增的 route pin + Host/Path 并发
-benchmark；全部默认关闭，不进入生产 binary。gray、TLS identity、loopback proxy/WebSocket 和
-CAT/logging 成本仍待补齐。
+分配、route batch publication、Host 高 fan-out，以及 route global/worker-local pin + Host/Path
+前后对照 benchmark；全部默认关闭，不进入生产 binary。gray、TLS identity、loopback
+proxy/WebSocket 和 CAT/logging 成本仍待补齐。
 
 本项目 benchmark：
 
@@ -1456,7 +1478,7 @@ compatibility contract 统一引用该矩阵，并继续声明：完整生产 co
 | DNS resolver | 单 server、cache、A/AAAA policy 已提供 | 系统配置和多 server 需上游增强 |
 | Happy Eyeballs | 未发现通用实现 | Fiber 实现，本项目接入 |
 | 通用 SWRR | 当前实现位于 access-server | 稳定后考虑上游化 |
-| 通用 loop-local RCU | 当前未作为公共能力使用 | 仅在 profile 证明需要时设计 |
+| 通用 loop-local RCU | 当前未作为公共能力使用 | P-02 已用项目内 worker slot 解决；复用需求或剩余瓶颈成立时再设计 |
 
 ## 14. 推荐落地顺序
 
@@ -1491,7 +1513,8 @@ compatibility contract 统一引用该矩阵，并继续声明：完整生产 co
 3. S-03 route 级 TLS transport profile 隔离与配置；
 4. S-04 upstream mTLS client identity（Fiber #31 + #28）；
 5. P-01 通用 SWRR 上游化或 sharding；
-6. 只有 profile 证明 route pin 成为瓶颈时，开展 P-02 RCU 设计。
+6. P-02 已由本项目完成；只有新 profile 证明 worker-local slot 仍是瓶颈或 Fiber 出现复用需求时，
+   才开展通用 RCU 设计。
 
 每项先在 Fiber 上游合入并测试，再更新本仓库 gitlink 和 provenance，最后运行完整
 Fiber/native 回归。

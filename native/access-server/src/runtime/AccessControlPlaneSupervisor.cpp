@@ -67,7 +67,8 @@ AccessControlPlaneSupervisor::AccessControlPlaneSupervisor(event::EventLoop &coo
                        AccessServiceOps{.swrr_options = options.service_discovery.swrr_options,
                                         .zone = options.service_discovery.zone,
                                         .metrics_observer = runtime_metrics_.discovery().observer()}),
-    route_store_({}, service_discovery_, std::move(options.service_discovery), runtime_metrics_.discovery().observer()),
+    route_store_(http_workers, {}, service_discovery_, std::move(options.service_discovery),
+                 runtime_metrics_.discovery().observer()),
     config_watcher_(nacos_loop, config_compiler_, *config_service_, route_store_, std::move(options.config_watcher), {},
                     runtime_metrics_.config().observer(),
                     options.activation_endpoint.enabled ? activation_evidence_.route_observer()

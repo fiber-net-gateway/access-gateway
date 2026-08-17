@@ -1228,9 +1228,10 @@ TEST(AccessRequestHandlerTest, PassesPinnedProxyRouteAndExecutionInputToAdapter)
 }
 
 TEST(AccessRequestHandlerTest, PinsRouteSnapshotAcrossSuspendedProxyExecutionDuringUpdate) {
+    fiber::event::EventLoopGroup group(1);
     RouteConfig initial = proxy_route("/pinned", "orders/gray");
     initial.timeout_millis = 111;
-    RouteConfigStore store;
+    RouteConfigStore store(group);
     publish(store, project({}, {std::move(initial)}));
 
     std::shared_ptr<const fiber::access_server::AccessRouteSnapshot> initial_snapshot = store.pin();
@@ -1242,7 +1243,6 @@ TEST(AccessRequestHandlerTest, PinsRouteSnapshotAcrossSuspendedProxyExecutionDur
     auto release = state.release.acquire_publisher();
     ASSERT_TRUE(release);
     auto suspended = state.suspended.get_future();
-    fiber::event::EventLoopGroup group(1);
     group.start();
 
     std::string response;
