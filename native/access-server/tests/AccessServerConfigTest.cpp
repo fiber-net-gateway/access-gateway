@@ -40,6 +40,12 @@ TEST(AccessServerConfigTest, LoadsJavaServerDefaultsAndNacosSettings) {
     EXPECT_EQ(config->access_log_options().max_query_bytes, 2048u);
     EXPECT_EQ(config->upstream_tls_client_policy().verification, UpstreamTlsVerificationMode::LegacyInsecure);
     EXPECT_TRUE(config->upstream_tls_client_policy().ca_file.empty());
+    EXPECT_EQ(config->upstream_connect_timeout(), std::chrono::seconds(3));
+    EXPECT_TRUE(config->happy_eyeballs_policy().enabled);
+    EXPECT_EQ(config->happy_eyeballs_policy().connection_attempt_delay, std::chrono::milliseconds(250));
+    EXPECT_EQ(config->happy_eyeballs_policy().max_concurrent_attempts, 2U);
+    EXPECT_EQ(config->happy_eyeballs_policy().first_address_family_count, 1U);
+    EXPECT_EQ(config->happy_eyeballs_policy().address_policy, net::HappyEyeballsAddressPolicy::V6First);
     EXPECT_EQ(config->dns_mode(), AccessDnsMode::System);
     EXPECT_EQ(config->dns_resolver_config_path(), "/etc/resolv.conf");
     EXPECT_TRUE(config->http_server_options().tls.enabled);
@@ -266,6 +272,57 @@ TEST(AccessServerConfigTest, LoadsUpstreamTlsVerificationModes) {
     ASSERT_TRUE(custom_ca) << custom_ca.error().detail;
     EXPECT_EQ(custom_ca->upstream_tls_client_policy().verification, UpstreamTlsVerificationMode::CustomCa);
     EXPECT_EQ(custom_ca->upstream_tls_client_policy().ca_file, "/run/secrets/upstream-ca.pem");
+}
+
+TEST(AccessServerConfigTest, LoadsBoundedHappyEyeballsPolicy) {
+    auto config = AccessServerConfig::load_from_string(
+            "NACOS_SERVER_ADDRESSES=127.0.0.1\n"
+            "ACCESS_SERVER_UPSTREAM_CONNECT_TIMEOUT_MILLIS=5000\n"
+            "ACCESS_SERVER_HAPPY_EYEBALLS_ENABLED=false\n"
+            "ACCESS_SERVER_HAPPY_EYEBALLS_DELAY_MILLIS=40\n"
+            "ACCESS_SERVER_HAPPY_EYEBALLS_MAX_CONCURRENT_ATTEMPTS=4\n"
+            "ACCESS_SERVER_HAPPY_EYEBALLS_FIRST_ADDRESS_FAMILY_COUNT=3\n"
+            "ACCESS_SERVER_HAPPY_EYEBALLS_ADDRESS_POLICY=v4_first\n");
+
+    ASSERT_TRUE(config) << config.error().detail;
+    EXPECT_EQ(config->upstream_connect_timeout(), std::chrono::seconds(5));
+    EXPECT_FALSE(config->happy_eyeballs_policy().enabled);
+    EXPECT_EQ(config->happy_eyeballs_policy().connection_attempt_delay, std::chrono::milliseconds(40));
+    EXPECT_EQ(config->happy_eyeballs_policy().max_concurrent_attempts, 4U);
+    EXPECT_EQ(config->happy_eyeballs_policy().first_address_family_count, 3U);
+    EXPECT_EQ(config->happy_eyeballs_policy().address_policy, net::HappyEyeballsAddressPolicy::V4First);
+
+    auto serial = AccessServerConfig::load_from_string(
+            "NACOS_SERVER_ADDRESSES=127.0.0.1\n"
+            "ACCESS_SERVER_UPSTREAM_CONNECT_TIMEOUT_MILLIS=100\n"
+            "ACCESS_SERVER_HAPPY_EYEBALLS_ENABLED=false\n");
+    ASSERT_TRUE(serial) << serial.error().detail;
+    EXPECT_EQ(serial->upstream_connect_timeout(), std::chrono::milliseconds(100));
+}
+
+TEST(AccessServerConfigTest, RejectsInvalidHappyEyeballsSettings) {
+    const auto expect_invalid = [](std::string_view settings) {
+        std::string input = "NACOS_SERVER_ADDRESSES=127.0.0.1\n";
+        input.append(settings);
+        auto config = AccessServerConfig::load_from_string(input);
+        EXPECT_FALSE(config) << settings;
+        if (!config) {
+            EXPECT_EQ(config.error().code, AccessServerConfigErrorCode::InvalidValue);
+        }
+    };
+
+    expect_invalid("ACCESS_SERVER_UPSTREAM_CONNECT_TIMEOUT_MILLIS=9\n");
+    expect_invalid("ACCESS_SERVER_UPSTREAM_CONNECT_TIMEOUT_MILLIS=60001\n");
+    expect_invalid("ACCESS_SERVER_HAPPY_EYEBALLS_ENABLED=yes\n");
+    expect_invalid("ACCESS_SERVER_HAPPY_EYEBALLS_DELAY_MILLIS=9\n");
+    expect_invalid("ACCESS_SERVER_HAPPY_EYEBALLS_DELAY_MILLIS=2001\n");
+    expect_invalid("ACCESS_SERVER_HAPPY_EYEBALLS_MAX_CONCURRENT_ATTEMPTS=0\n");
+    expect_invalid("ACCESS_SERVER_HAPPY_EYEBALLS_MAX_CONCURRENT_ATTEMPTS=5\n");
+    expect_invalid("ACCESS_SERVER_HAPPY_EYEBALLS_FIRST_ADDRESS_FAMILY_COUNT=0\n");
+    expect_invalid("ACCESS_SERVER_HAPPY_EYEBALLS_FIRST_ADDRESS_FAMILY_COUNT=17\n");
+    expect_invalid("ACCESS_SERVER_HAPPY_EYEBALLS_ADDRESS_POLICY=resolver_order\n");
+    expect_invalid("ACCESS_SERVER_UPSTREAM_CONNECT_TIMEOUT_MILLIS=100\n"
+                   "ACCESS_SERVER_HAPPY_EYEBALLS_DELAY_MILLIS=101\n");
 }
 
 TEST(AccessServerConfigTest, RejectsInvalidUpstreamTlsVerificationSettings) {

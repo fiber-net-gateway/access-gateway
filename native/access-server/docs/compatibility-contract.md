@@ -591,7 +591,9 @@ context 模板先计算后更新 trace user data：
 `ProxyExecutor`，不再固化跨层的 prepared request。executor 先计算 selector 所需 context，
 选择并 pin service/static endpoint，再构造实际 `Http1RequestHead`；随后通过独立的
 `ProxyUpstreamConnection` 以 `Http1ConnectionGroupKey` 查询 local pool，仅在 miss 且 key
-为 hostname 时调用异步 DNS adapter，并依次尝试全部地址。连接失败重选时只更新由 endpoint
+为 hostname 时调用异步 DNS adapter。默认对最多 16 个地址执行共享 deadline、固定并发上限的
+Happy Eyeballs 竞速，并在显式关闭时保留依次尝试全部地址的兼容路径；一次竞速只占用一个 pool
+lease。连接失败重选时只更新由 endpoint
 派生的 Host，不重复计算 request 模板；CAT attempt header 在连接成功后、发送 request header
 前注入。executor coroutine 保持 pool lease、选中 generation 和栈上的
 `ClientHttp1Exchange`，直到消费或放弃 upstream response。真实 loopback upstream 已覆盖

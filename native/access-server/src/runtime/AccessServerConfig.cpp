@@ -36,6 +36,12 @@ constexpr std::string_view kAccessLogMaxPathBytes = "ACCESS_SERVER_ACCESS_LOG_MA
 constexpr std::string_view kAccessLogMaxQueryBytes = "ACCESS_SERVER_ACCESS_LOG_MAX_QUERY_BYTES";
 constexpr std::string_view kUpstreamTlsMode = "ACCESS_SERVER_UPSTREAM_TLS_MODE";
 constexpr std::string_view kUpstreamTlsCaFile = "ACCESS_SERVER_UPSTREAM_TLS_CA_FILE";
+constexpr std::string_view kUpstreamConnectTimeout = "ACCESS_SERVER_UPSTREAM_CONNECT_TIMEOUT_MILLIS";
+constexpr std::string_view kHappyEyeballsEnabled = "ACCESS_SERVER_HAPPY_EYEBALLS_ENABLED";
+constexpr std::string_view kHappyEyeballsDelay = "ACCESS_SERVER_HAPPY_EYEBALLS_DELAY_MILLIS";
+constexpr std::string_view kHappyEyeballsMaxConcurrent = "ACCESS_SERVER_HAPPY_EYEBALLS_MAX_CONCURRENT_ATTEMPTS";
+constexpr std::string_view kHappyEyeballsFirstFamily = "ACCESS_SERVER_HAPPY_EYEBALLS_FIRST_ADDRESS_FAMILY_COUNT";
+constexpr std::string_view kHappyEyeballsAddressPolicy = "ACCESS_SERVER_HAPPY_EYEBALLS_ADDRESS_POLICY";
 constexpr std::string_view kDnsMode = "ACCESS_SERVER_DNS_MODE";
 constexpr std::string_view kDnsServers = "ACCESS_SERVER_DNS_SERVERS";
 constexpr std::string_view kDnsResolverConfig = "ACCESS_SERVER_DNS_RESOLV_CONF";
@@ -60,6 +66,9 @@ constexpr std::string_view kCatRouters = "CAT_ROUTER_ADDRESSES";
 constexpr std::string_view kCatCollectors = "CAT_COLLECTOR_ADDRESSES";
 constexpr std::size_t kMaxUpstreamTlsCaFileBytes = 4096;
 constexpr std::size_t kMaxDnsResolverConfigPathBytes = 4096;
+constexpr std::uint64_t kMinUpstreamConnectTimeoutMillis = 10;
+constexpr std::uint64_t kMaxUpstreamConnectTimeoutMillis = 60000;
+constexpr std::uint64_t kMaxHappyEyeballsDelayMillis = 2000;
 constexpr std::size_t kMinActivationTokenBytes = 32;
 constexpr std::size_t kMaxActivationTokenBytes = 512;
 
@@ -385,7 +394,8 @@ AccessServerConfig::AccessServerConfig(
         net::SocketAddress metrics_listen_address, AccessActivationEndpointOptions activation_endpoint_options,
         std::chrono::milliseconds initial_config_timeout, std::size_t default_max_request_body_size, bool test_mode,
         ClientMetadataResolverOptions client_metadata_options, AccessLogOptions access_log_options,
-        UpstreamTlsClientPolicy upstream_tls_client_policy, AccessDnsMode dns_mode,
+        UpstreamTlsClientPolicy upstream_tls_client_policy, std::chrono::milliseconds upstream_connect_timeout,
+        ProxyHappyEyeballsPolicy happy_eyeballs_policy, AccessDnsMode dns_mode,
         std::string dns_resolver_config_path, dns::DnsNameserverList dns_override_nameservers,
         std::optional<cat::CatClientConfig> cat_config,
         nacos::NacosClientConfig nacos_config, AccessConfigWatcherOptions watcher_options,
@@ -397,7 +407,9 @@ AccessServerConfig::AccessServerConfig(
     initial_config_timeout_(initial_config_timeout), default_max_request_body_size_(default_max_request_body_size),
     test_mode_(test_mode), client_metadata_options_(std::move(client_metadata_options)),
     access_log_options_(std::move(access_log_options)),
-    upstream_tls_client_policy_(std::move(upstream_tls_client_policy)), dns_mode_(dns_mode),
+    upstream_tls_client_policy_(std::move(upstream_tls_client_policy)),
+    upstream_connect_timeout_(upstream_connect_timeout), happy_eyeballs_policy_(happy_eyeballs_policy),
+    dns_mode_(dns_mode),
     dns_resolver_config_path_(std::move(dns_resolver_config_path)),
     dns_override_nameservers_(std::move(dns_override_nameservers)), cat_config_(std::move(cat_config)),
     nacos_config_(std::move(nacos_config)), watcher_options_(std::move(watcher_options)),
@@ -439,6 +451,9 @@ AccessServerConfig::load_from_string(std::string_view input) {
     ClientMetadataResolverOptions client_metadata_options;
     AccessLogOptions access_log_options;
     UpstreamTlsClientPolicy upstream_tls_client_policy;
+    std::uint64_t upstream_connect_timeout_millis = 3000;
+    std::uint64_t happy_eyeballs_delay_millis = 250;
+    ProxyHappyEyeballsPolicy happy_eyeballs_policy;
     AccessDnsMode dns_mode = AccessDnsMode::System;
     std::string dns_resolver_config_path = "/etc/resolv.conf";
     dns::DnsNameserverList dns_override_nameservers;
@@ -590,6 +605,49 @@ AccessServerConfig::load_from_string(std::string_view input) {
                                              "expected a path no longer than 4096 bytes"));
             }
             upstream_tls_client_policy.ca_file = entry.value;
+        } else if (entry.key == kUpstreamConnectTimeout) {
+            if (!parse_unsigned(value, upstream_connect_timeout_millis) ||
+                upstream_connect_timeout_millis < kMinUpstreamConnectTimeoutMillis ||
+                upstream_connect_timeout_millis > kMaxUpstreamConnectTimeoutMillis) {
+                return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, entry.line, entry.key,
+                                             "expected milliseconds in range 10..60000"));
+            }
+        } else if (entry.key == kHappyEyeballsEnabled) {
+            if (!parse_boolean(value, happy_eyeballs_policy.enabled)) {
+                return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, entry.line, entry.key,
+                                             "expected true or false"));
+            }
+        } else if (entry.key == kHappyEyeballsDelay) {
+            if (!parse_unsigned(value, happy_eyeballs_delay_millis) ||
+                happy_eyeballs_delay_millis <
+                        static_cast<std::uint64_t>(net::kHappyEyeballsMinimumConnectionAttemptDelay.count()) ||
+                happy_eyeballs_delay_millis > kMaxHappyEyeballsDelayMillis) {
+                return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, entry.line, entry.key,
+                                             "expected milliseconds in range 10..2000"));
+            }
+        } else if (entry.key == kHappyEyeballsMaxConcurrent) {
+            if (!parse_unsigned(value, happy_eyeballs_policy.max_concurrent_attempts) ||
+                happy_eyeballs_policy.max_concurrent_attempts == 0 ||
+                happy_eyeballs_policy.max_concurrent_attempts > net::kHappyEyeballsMaxConcurrentAttempts) {
+                return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, entry.line, entry.key,
+                                             "expected an attempt count in range 1..4"));
+            }
+        } else if (entry.key == kHappyEyeballsFirstFamily) {
+            if (!parse_unsigned(value, happy_eyeballs_policy.first_address_family_count) ||
+                happy_eyeballs_policy.first_address_family_count == 0 ||
+                happy_eyeballs_policy.first_address_family_count > net::kHappyEyeballsMaxAddresses) {
+                return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, entry.line, entry.key,
+                                             "expected an address count in range 1..16"));
+            }
+        } else if (entry.key == kHappyEyeballsAddressPolicy) {
+            if (value == "v6_first") {
+                happy_eyeballs_policy.address_policy = net::HappyEyeballsAddressPolicy::V6First;
+            } else if (value == "v4_first") {
+                happy_eyeballs_policy.address_policy = net::HappyEyeballsAddressPolicy::V4First;
+            } else {
+                return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, entry.line, entry.key,
+                                             "expected v6_first or v4_first"));
+            }
         } else if (entry.key == kDnsMode) {
             if (value == "system") {
                 dns_mode = AccessDnsMode::System;
@@ -705,6 +763,11 @@ AccessServerConfig::load_from_string(std::string_view input) {
         return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, 0, kUpstreamTlsCaFile,
                                      "a CA file path is only valid in custom_ca mode"));
     }
+    if (happy_eyeballs_policy.enabled && happy_eyeballs_delay_millis > upstream_connect_timeout_millis) {
+        return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, 0, kHappyEyeballsDelay,
+                                     "Happy Eyeballs delay must not exceed the total connect timeout"));
+    }
+    happy_eyeballs_policy.connection_attempt_delay = std::chrono::milliseconds(happy_eyeballs_delay_millis);
     if (dns_mode == AccessDnsMode::System && dns_servers_present) {
         return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, 0, kDnsServers,
                                      "DNS server overrides require ACCESS_SERVER_DNS_MODE=override"));
@@ -764,7 +827,8 @@ AccessServerConfig::load_from_string(std::string_view input) {
             net::SocketAddress(listen_ip, listen_port), std::move(http_options),
             net::SocketAddress(metrics_ip.value_or(listen_ip), *metrics_port), std::move(activation_endpoint_options),
             std::chrono::milliseconds(timeout_millis), max_request_body, test_mode, std::move(client_metadata_options),
-            std::move(access_log_options), std::move(upstream_tls_client_policy), dns_mode,
+            std::move(access_log_options), std::move(upstream_tls_client_policy),
+            std::chrono::milliseconds(upstream_connect_timeout_millis), happy_eyeballs_policy, dns_mode,
             std::move(dns_resolver_config_path), std::move(dns_override_nameservers), std::move(cat_config),
             std::move(*nacos_config), std::move(watcher_options), std::move(gray_options),
             std::move(tls_certificate_options), std::move(service_discovery_options));

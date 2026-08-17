@@ -35,7 +35,7 @@ struct AccessDataPlaneOptions {
     AccessLogOptions access_log;
     AccessDnsServiceOptions dns = AccessDnsServiceOptions::local_default();
     AccessDnsResolverFactory dns_resolver_factory = AccessDnsResolverFactory::system();
-    UpstreamTlsClientPolicy upstream_tls;
+    ProxyExecutorOptions executor;
     std::size_t default_max_request_body_size = 0;
     bool test_mode = false;
 };

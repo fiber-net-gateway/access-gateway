@@ -6,6 +6,7 @@
 #include <fiber/async/Task.h>
 #include <fiber/common/IoError.h>
 #include <fiber/http/StealableHttp1ConnectionPoolSet.h>
+#include <fiber/net/HappyEyeballs.h>
 #include <fiber/net/IpAddress.h>
 
 #include <chrono>
@@ -26,6 +27,14 @@ struct ProxyDnsResolver {
 
     void *context = nullptr;
     Function resolve = nullptr;
+};
+
+struct ProxyHappyEyeballsPolicy {
+    bool enabled = true;
+    std::chrono::milliseconds connection_attempt_delay{250};
+    std::uint8_t max_concurrent_attempts = 2;
+    std::uint8_t first_address_family_count = 1;
+    net::HappyEyeballsAddressPolicy address_policy = net::HappyEyeballsAddressPolicy::V6First;
 };
 
 enum class ProxyConnectErrorCode : std::uint8_t {
@@ -50,6 +59,9 @@ struct ProxyConnectionObservation {
     std::uint32_t connect_failure = 0;
     std::uint32_t tls_failure = 0;
     std::uint32_t create_failure = 0;
+    std::uint16_t connect_candidates = 0;
+    std::uint8_t happy_eyeballs_success = 0;
+    std::uint8_t happy_eyeballs_failure = 0;
 };
 static_assert(sizeof(ProxyConnectionObservation) <= 48);
 
@@ -69,7 +81,8 @@ struct ProxyUpstreamConnection {
 [[nodiscard]] async::Task<std::expected<ProxyUpstreamConnection, ProxyConnectError>>
 acquire_proxy_upstream_connection(http::StealableHttp1ConnectionPoolSet &pool, ProxyDnsResolver dns_resolver,
                                   const http::Http1ConnectionGroupKey &key, const UpstreamTlsClientPolicy &tls_policy,
-                                  std::chrono::milliseconds connect_timeout) noexcept;
+                                  std::chrono::milliseconds connect_timeout,
+                                  ProxyHappyEyeballsPolicy happy_eyeballs = {}) noexcept;
 
 } // namespace fiber::access_server
 

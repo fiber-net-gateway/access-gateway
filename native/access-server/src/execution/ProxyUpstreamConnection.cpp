@@ -5,6 +5,9 @@
 #include <fiber/http/Http1ConnectionGroupKey.h>
 #include <fiber/net/SocketAddress.h>
 
+#include <algorithm>
+#include <array>
+#include <limits>
 #include <span>
 #include <utility>
 
@@ -59,7 +62,8 @@ http::Http1ClientConnectionOptions connection_options(const http::Http1Connectio
 async::Task<std::expected<ProxyUpstreamConnection, ProxyConnectError>>
 acquire_proxy_upstream_connection(http::StealableHttp1ConnectionPoolSet &pool, ProxyDnsResolver dns_resolver,
                                   const http::Http1ConnectionGroupKey &key, const UpstreamTlsClientPolicy &tls_policy,
-                                  std::chrono::milliseconds connect_timeout) noexcept {
+                                  std::chrono::milliseconds connect_timeout,
+                                  ProxyHappyEyeballsPolicy happy_eyeballs) noexcept {
     ProxyUpstreamConnection output;
     output.lease = co_await pool.acquire(key);
     if (!output.lease.valid()) {
@@ -105,6 +109,59 @@ acquire_proxy_upstream_connection(http::StealableHttp1ConnectionPoolSet &pool, P
     if (addresses.empty()) {
         co_return std::unexpected(error(ProxyConnectErrorCode::Resolve, "upstream DNS returned no address",
                                         common::IoErr::NotFound, std::move(output.observation)));
+    }
+
+    output.observation.connect_candidates = static_cast<std::uint16_t>(
+            std::min<std::size_t>(addresses.size(), std::numeric_limits<std::uint16_t>::max()));
+
+    if (happy_eyeballs.enabled && addresses.size() > 1) {
+        if (addresses.size() > net::kHappyEyeballsMaxAddresses) {
+            ++output.observation.connect_failure;
+            ++output.observation.happy_eyeballs_failure;
+            co_return std::unexpected(error(ProxyConnectErrorCode::Connect,
+                                            "upstream DNS returned too many connection candidates",
+                                            common::IoErr::Invalid, std::move(output.observation)));
+        }
+
+        std::array<net::SocketAddress, net::kHappyEyeballsMaxAddresses> candidates;
+        for (std::size_t i = 0; i < addresses.size(); ++i) {
+            candidates[i] = net::SocketAddress(addresses[i], key.port());
+        }
+        auto emplaced = output.lease.emplace_connection(connection_options(key, addresses.front(), tls_policy));
+        if (!emplaced) {
+            ++output.observation.create_failure;
+            co_return std::unexpected(error(ProxyConnectErrorCode::Connect,
+                                            "failed to create upstream connection", emplaced.error(),
+                                            std::move(output.observation)));
+        }
+        net::HappyEyeballsOptions options{
+                .total_timeout = connect_timeout,
+                .connection_attempt_delay = happy_eyeballs.connection_attempt_delay,
+                .max_concurrent_attempts = happy_eyeballs.max_concurrent_attempts,
+                .first_address_family_count = happy_eyeballs.first_address_family_count,
+                .address_policy = happy_eyeballs.address_policy,
+        };
+        auto connected = co_await (*emplaced)->connect(
+                std::span<const net::SocketAddress>(candidates.data(), addresses.size()), options);
+        if (connected) {
+            ++output.observation.connect_success;
+            ++output.observation.happy_eyeballs_success;
+            output.connection = *emplaced;
+            co_return std::move(output);
+        }
+        const common::IoErr connect_error = connected.error();
+        if (identifiable_tls_failure(key, tls_policy, connect_error)) {
+            ++output.observation.tls_failure;
+        } else {
+            ++output.observation.connect_failure;
+        }
+        ++output.observation.happy_eyeballs_failure;
+        output.lease.reset();
+        const bool tls_failure = identifiable_tls_failure(key, tls_policy, connect_error);
+        co_return std::unexpected(error(tls_failure ? ProxyConnectErrorCode::Tls : ProxyConnectErrorCode::Connect,
+                                        tls_failure ? "upstream TLS negotiation failed"
+                                                    : "upstream connection failed",
+                                        connect_error, std::move(output.observation)));
     }
 
     common::IoErr last_error = common::IoErr::NotFound;

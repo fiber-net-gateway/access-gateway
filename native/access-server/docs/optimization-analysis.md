@@ -90,7 +90,7 @@ Issue/PR，合入后再审查 revision range、运行完整回归并更新 gitli
 | P-05 | P1 | 模板、request target、header 分配优化 | 本项目 | 否 |
 | P-06 | P1 | 初始项目批量发布和全局 matcher 重建优化 | 本项目 | 否 |
 | P-07 | P2 | Host matcher 高 fan-out 搜索优化 | 本项目 | 否 |
-| P-08 | P1 | Happy Eyeballs/交错多地址连接 | 双方 | Fiber 前置已合入；本项目待接入 |
+| P-08 | P1 | Happy Eyeballs/交错多地址连接 | 双方（已解决） | Fiber 前置与本项目接入均已完成 |
 | O-01 | P0/P1 | 实例级配置激活证据 | 本项目（已解决） | 否 |
 | O-02 | P1 | 配置、发现、DNS、pool、proxy、TLS、日志指标 | 双方 | Fiber 前置已合入；Nacos 状态待接入 |
 | C-01 | P1/P2 | 大类职责拆分 | 本项目 | 否 |
@@ -141,9 +141,8 @@ Access Gateway 的配置、secret、生命周期、指标、兼容和端到端�
 | S-03 | 进程级 peer/CA 验证已完成；Fiber pool affinity 已合入 | 设计 route/环境级 CA、SNI、独立验证名和 profile generation，并同步 native/validator/server/web/fixture/docs |
 | S-04 | Fiber client identity 加载、pool affinity 和上游组合测试已完成 | 设计 secret 引用和轮换生命周期，接入 route/环境模型、脱敏、连接隔离及 access-server loopback e2e |
 | P-01 | service directory 外层锁已移除 | 仅在 production profile 证明全局 SWRR mutex/O(N) scan 是瓶颈后，决定 sharding 或上游化；当前是条件项 |
-| P-08 | Fiber connector 和 HTTP/1 多地址入口已合入 | 替换逐地址串行 connect，定义配置上限、lease/取消/错误与指标映射，补 IPv4/IPv6 和 shutdown 回归 |
 | O-02 | 除 Nacos transport 状态外的固定 schema 指标已完成；Fiber status watch 已合入 | 在 Nacos owner loop 订阅两个 status watch，映射 bounded metrics/readiness，正确关闭 subscriber，且不把 `running` 当 `connected` |
-| T-01 | 生命周期、竞态、TLS rotation、snapshot pin 等 focused 测试已补齐 | 完成 access-server mTLS/Happy Eyeballs/DNS/Nacos status 集成测试以及聚焦 ASAN/UBSAN/TSAN 和外部互操作故障注入 |
+| T-01 | 生命周期、竞态、TLS rotation、snapshot pin、DNS 和 Happy Eyeballs focused/integration 测试已补齐 | 完成 access-server mTLS/Nacos status 集成测试以及聚焦 ASAN/UBSAN/TSAN 和外部互操作故障注入 |
 | T-02 | 五组 microbenchmark 已有基线 | 补 gray、TLS identity、loopback proxy/WebSocket、CAT/logging，以及新 Fiber DNS/connector 的集成基线 |
 | D-01 | gate 状态和证据格式已统一 | 获取完整生产 corpus，完成同请求 Java/C++ 差分、阶段 8、稳定性/灰度/回滚演练；在此之前切流 gate 仍为 `NOT_MET` |
 
@@ -951,12 +950,14 @@ native/build/access-server/fiber_access_host_matcher_benchmark
 
 ### 7.8 P-08：Happy Eyeballs
 
-**归属：双方。Fiber 前置已解决，本项目尚未接入。**
+**归属：双方。**
 
-**实施状态：Fiber connector 已完成（`621a47e`）；access-server 仍按地址顺序串行 connect。**
+**实施状态：已解决（2026-08-17）。** Fiber connector 已由 `621a47e` 提供，access-server 已
+完成产品接入。
 
-当前 proxy 按 DNS 地址顺序串行 connect。首个 IPv6/IPv4 地址不可达时，尾延迟可能叠加
-多个完整 connect timeout。
+改造前 proxy 按 DNS 地址顺序串行 connect。首个 IPv6/IPv4 地址不可达时，尾延迟可能叠加
+多个完整 connect timeout。现在 hostname 的多地址结果会交给 Fiber connector；IP literal、
+单地址结果和 pool hit 不启动竞速。
 
 代码位置：[`ProxyUpstreamConnection.cpp`](../src/execution/ProxyUpstreamConnection.cpp#L39)。
 
@@ -969,13 +970,27 @@ Fiber 当前已提供可复用的异步多地址 connector：
 - fixed-capacity attempted/failed mask 和错误摘要，不需要动态分配或泄露日志字段；
 - 为 HTTP/其他协议复用，不依赖 access-server route 类型。
 
-本项目负责：
+本项目接入采用以下边界：
 
-- 使用该 connector 组装 `Http1ClientConnection`；
-- 保持 connection pool lease 和 Java 最大尝试次数；
-- 配置是否启用、stagger/timeout 上限；
-- DNS、connect、selection report、CAT 和 metrics 映射；
-- loopback IPv4/IPv6、取消、downstream close、pool shutdown 回归。
+- `ACCESS_SERVER_UPSTREAM_CONNECT_TIMEOUT_MILLIS` 是全部候选共享的总 deadline，限制在
+  10-60000 ms；默认 3000 ms；
+- Happy Eyeballs 默认开启，delay 限制在 10-2000 ms 且不得超过总 deadline；最大并发限制在
+  1-4，首地址族连续数量限制在 1-16，策略只允许 `v6_first`/`v4_first`；显式关闭会保留旧的
+  逐地址串行路径；
+- DNS 返回的候选转换进固定 16 槽 `SocketAddress` 数组。超过 Fiber 容量会 fail closed，不截断
+  后悄悄改变选择；没有在请求路径新增候选 vector、`std::function` 或共享锁；
+- 一次多地址竞速只取得一次 pool lease，并只构造一个 `Http1ClientConnection`；首个 TCP 成功者
+  继续既有 socket option/TLS 初始化，其余连接由 Fiber 取消并关闭。外层 endpoint 选择和
+  `kMaxJavaAttempts=3` 不变，竞速失败只对当前 selection report 一次失败；
+- connection observation 仍是 48-byte、无 identifier 的 POD。新增候选总数以及竞速
+  success/failure 字段，映射为无 label 的候选 counter 和固定 `result` label；connect/TLS/CAT
+  的稳定错误分类保持不变；
+- 测试覆盖同地址族 fallback、IPv6-first 到 IPv4 loopback、关闭开关的串行兼容、超出固定容量、
+  单 lease、pool hit/shutdown、service selection 失败后重选，以及竞速成功后的 downstream close、
+  metrics 和 pool shutdown。Fiber 自身的 connector 测试继续覆盖 pending attempt 取消、awaiter
+  销毁和 EventLoop shutdown。
+
+本项没有修改 `third_party/fiber-gateway-cpp`，直接消费当前 pin 的公开 API。
 
 ## 8. 类职责优化
 
@@ -1520,7 +1535,7 @@ compatibility contract 统一引用该矩阵，并继续声明：完整生产 co
 | EventLoop worker index | `group_index()` 已提供 | DNS resolver 可直接 O(1) 取 slot |
 | connection pool 异步 shutdown | `shutdown_async()` 已提供 | 保持使用 |
 | DNS resolver | 系统配置、最多三个 server、failover/rotation、TCP fallback 已提供 | 已在启动前严格加载并完整注入 HTTP worker；Nacos 仍为 IP-only |
-| Happy Eyeballs | `TcpConnector` 和 HTTP/1 多地址 connect 已提供 | 本项目仍串行 connect，待接入 |
+| Happy Eyeballs | `TcpConnector` 和 HTTP/1 多地址 connect 已提供 | 已接入单 lease、共享 deadline 的多地址竞速 |
 | Nacos 服务状态 | Config/Naming typed latest-value watch 已提供 | 本项目尚未映射 transport/reconnect metrics |
 | 通用 SWRR | 当前实现位于 access-server | 稳定后考虑上游化 |
 | 通用 loop-local RCU | 当前未作为公共能力使用 | P-02 已用项目内 worker slot 解决；复用需求或剩余瓶颈成立时再设计 |
@@ -1554,7 +1569,7 @@ compatibility contract 统一引用该矩阵，并继续声明：完整生产 co
 ### 阶段 C：Fiber 协同能力
 
 1. L-06 系统 DNS 配置和多 nameserver（已完成）；
-2. P-08 Happy Eyeballs（Fiber 已合入；本项目待接入）；
+2. P-08 Happy Eyeballs（已完成）；
 3. S-03 route 级 TLS transport profile 隔离与配置（Fiber affinity 已合入；本项目待接入）；
 4. S-04 upstream mTLS client identity（Fiber 已合入；本项目待接入）；
 5. O-02 Nacos config/naming status watch（Fiber 已合入；本项目待接入）；

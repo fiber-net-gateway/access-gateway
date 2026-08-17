@@ -72,6 +72,7 @@ struct UpstreamState {
         std::chrono::milliseconds body_chunk_delay{};
         bool chunked = false;
         bool websocket = false;
+        std::promise<void> *request_received = nullptr;
         std::promise<void> *first_body_chunk_sent = nullptr;
         std::promise<void> *completion = nullptr;
     };
@@ -93,6 +94,18 @@ struct ServiceSelectorState {
     std::optional<fiber::access_server::ProxyAddressSelectErrorCode> select_error;
     std::vector<std::pair<std::uint64_t, bool>> reports;
 };
+
+struct ProxyResolverState {
+    std::vector<fiber::net::IpAddress> addresses;
+    std::size_t calls = 0;
+};
+
+fiber::async::Task<fiber::common::IoResult<std::vector<fiber::net::IpAddress>>>
+resolve_proxy_addresses(void *context, std::string_view) noexcept {
+    auto &state = *static_cast<ProxyResolverState *>(context);
+    ++state.calls;
+    co_return state.addresses;
+}
 
 bool never_match_gray(void *context, std::string_view, const fiber::access_server::ClientMetadata &) noexcept {
     ++static_cast<ServiceSelectorState *>(context)->cluster_match_count;
@@ -416,6 +429,9 @@ fiber::async::Task<void> serve_upstream(fiber::http::HttpExchange &exchange, Ups
     }
     observed.body = std::move(*body);
     state->requests.push_back(std::move(observed));
+    if (state->response.request_received) {
+        state->response.request_received->set_value();
+    }
 
     if (state->response.delay > 0ms) {
         co_await fiber::async::sleep(state->response.delay);
@@ -1143,9 +1159,8 @@ TEST(ProxyExecutorTest, RetriesAServiceSelectionBeforeSendingRequestHeaders) {
             .bad_host_header = "127.0.0.2:" + std::to_string(port),
             .good_connection_key = fiber::http::Http1ConnectionGroupKey::from_ip(
                     fiber::net::IpAddress::loopback_v4(), port, fiber::http::Http1ConnectionGroupKey::Scheme::Http),
-            .bad_connection_key =
-                    fiber::http::Http1ConnectionGroupKey::from_ip(fiber::net::IpAddress::v4({127, 0, 0, 2}), port,
-                                                                  fiber::http::Http1ConnectionGroupKey::Scheme::Http),
+            .bad_connection_key = fiber::http::Http1ConnectionGroupKey::from_name(
+                    "unreachable.example", port, fiber::http::Http1ConnectionGroupKey::Scheme::Http),
     };
     fiber::access_server::AccessScriptCompiler scripts;
     fiber::access_server::RouteConfigStore store(scripts.adapter(),
@@ -1164,10 +1179,23 @@ TEST(ProxyExecutorTest, RetriesAServiceSelectionBeforeSendingRequestHeaders) {
     auto published = store.apply("orders", std::move(config));
     ASSERT_TRUE(published) << published.error().message;
 
-    fiber::access_server::ProxyExecutor executor(pool, fiber::access_server::ProxyClusterMatcher{
-                                                               .context = &selector_state,
-                                                               .matches = never_match_gray,
-                                                       });
+    ProxyResolverState resolver{
+            .addresses = {fiber::net::IpAddress::v4({127, 0, 0, 2}),
+                          fiber::net::IpAddress::v4({127, 0, 0, 3})},
+    };
+    fiber::access_server::ProxyExecutorOptions executor_options;
+    executor_options.happy_eyeballs.connection_attempt_delay = 10ms;
+    fiber::access_server::ProxyExecutor executor(
+            pool,
+            fiber::access_server::ProxyClusterMatcher{
+                    .context = &selector_state,
+                    .matches = never_match_gray,
+            },
+            fiber::access_server::ProxyDnsResolver{
+                    .context = &resolver,
+                    .resolve = resolve_proxy_addresses,
+            },
+            executor_options);
     std::string output;
     std::promise<void> request_promise;
     auto request_future = request_promise.get_future();
@@ -1187,6 +1215,7 @@ TEST(ProxyExecutorTest, RetriesAServiceSelectionBeforeSendingRequestHeaders) {
     ASSERT_EQ(request_future.wait_for(5s), std::future_status::ready);
     EXPECT_EQ(selector_state.select_count, 2U);
     EXPECT_EQ(selector_state.cluster_match_count, 1U);
+    EXPECT_EQ(resolver.calls, 1U);
     EXPECT_EQ(template_state.count, 1U);
     EXPECT_EQ(selector_state.reports, (std::vector<std::pair<std::uint64_t, bool>>{
                                               {1, false},
@@ -1842,11 +1871,14 @@ TEST(ProxyExecutorTest, CancelsUpstreamWhenDownstreamClosesBeforeResponseHeaders
 
     std::promise<void> response_promise;
     auto response_future = response_promise.get_future();
+    std::promise<void> request_received_promise;
+    auto request_received_future = request_received_promise.get_future();
     UpstreamState upstream_state{
             .response =
                     {
                             .body = "late-response",
                             .delay = 250ms,
+                            .request_received = &request_received_promise,
                             .completion = &response_promise,
                     },
     };
@@ -1863,10 +1895,25 @@ TEST(ProxyExecutorTest, CancelsUpstreamWhenDownstreamClosesBeforeResponseHeaders
     ASSERT_NE(port, 0);
 
     fiber::access_server::RouteConfigStore store;
-    auto published = store.apply("orders", proxy_response_project_config(port));
+    auto config = proxy_response_project_config(port);
+    (**config.routes->begin()).addresses = {
+            std::optional<std::string>("http://upstream.example:" + std::to_string(port)),
+    };
+    auto published = store.apply("orders", std::move(config));
     ASSERT_TRUE(published) << published.error().message;
 
-    fiber::access_server::ProxyExecutor executor(pool);
+    ProxyResolverState resolver{
+            .addresses = {fiber::net::IpAddress::loopback_v6(), fiber::net::IpAddress::loopback_v4()},
+    };
+    fiber::access_server::ProxyExecutorOptions options;
+    options.happy_eyeballs.connection_attempt_delay = 10ms;
+    fiber::access_server::ProxyExecutor executor(
+            pool, {},
+            fiber::access_server::ProxyDnsResolver{
+                    .context = &resolver,
+                    .resolve = resolve_proxy_addresses,
+            },
+            options);
     std::string output;
     std::promise<void> request_promise;
     std::promise<RecordingTransport *> transport_promise;
@@ -1881,6 +1928,7 @@ TEST(ProxyExecutorTest, CancelsUpstreamWhenDownstreamClosesBeforeResponseHeaders
 
     RecordingTransport *transport = transport_future.get();
     ASSERT_NE(transport, nullptr);
+    ASSERT_EQ(request_received_future.wait_for(1s), std::future_status::ready);
     fiber::async::spawn(group.at(0), [transport]() { return disconnect_after(10ms, transport); });
 
     ASSERT_EQ(request_future.wait_for(1s), std::future_status::ready);
@@ -1896,6 +1944,12 @@ TEST(ProxyExecutorTest, CancelsUpstreamWhenDownstreamClosesBeforeResponseHeaders
     EXPECT_NE(metric_text->find("access_server_proxy_executions_total{result=\"canceled\"} 1"), std::string::npos);
     EXPECT_NE(metric_text->find("access_server_proxy_attempts_total{result=\"aborted\"} 1"), std::string::npos);
     EXPECT_NE(metric_text->find("access_server_proxy_attempts_inflight 0"), std::string::npos);
+    EXPECT_NE(metric_text->find("access_server_proxy_dns_resolutions_total{result=\"success\"} 1"),
+              std::string::npos);
+    EXPECT_NE(metric_text->find("access_server_proxy_connect_candidates_total 2"), std::string::npos);
+    EXPECT_NE(metric_text->find("access_server_proxy_happy_eyeballs_total{result=\"success\"} 1"),
+              std::string::npos);
+    EXPECT_EQ(resolver.calls, 1U);
 
     std::promise<void> shutdown_promise;
     auto shutdown_future = shutdown_promise.get_future();

@@ -14,6 +14,7 @@ namespace fiber::access_server {
 
 struct ProxyExecutorOptions {
     std::chrono::milliseconds connect_timeout{3000};
+    ProxyHappyEyeballsPolicy happy_eyeballs;
     UpstreamTlsClientPolicy upstream_tls;
     std::size_t request_body_chunk_size = 64 * 1024;
     std::size_t response_body_chunk_size = 64 * 1024;
