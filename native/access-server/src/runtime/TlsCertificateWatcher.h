@@ -30,6 +30,12 @@ enum class TlsCertificateWatcherState : std::uint8_t {
     Stopped,
 };
 
+enum class TlsCertificateReadiness : std::uint8_t {
+    Awaiting,
+    Ready,
+    Failed,
+};
+
 struct TlsCertificateWatcherOptions {
     std::string data_id = std::string(kTlsCertificatesDataId);
     std::string group = std::string(kTlsCertificatesGroup);
@@ -52,7 +58,9 @@ public:
 
     [[nodiscard]] std::expected<void, nacos::ConfigServiceError> start();
     [[nodiscard]] async::Task<void> shutdown() noexcept;
-    [[nodiscard]] async::Watch<bool>::Subscriber subscribe_ready() { return ready_.subscribe(); }
+    [[nodiscard]] async::Watch<TlsCertificateReadiness>::Subscriber subscribe_readiness() {
+        return readiness_.subscribe();
+    }
     [[nodiscard]] async::Watch<bool>::Subscriber subscribe_processing() { return processing_.subscribe(); }
 
     [[nodiscard]] TlsCertificateWatcherState state() const noexcept { return state_; }
@@ -85,10 +93,11 @@ private:
     AccessTlsActivationEvidenceObserver observer_;
     SubscriptionLifecycle subscription_;
     std::optional<TlsCertificateWatcherFailure> last_failure_;
+    std::shared_ptr<const nacos::ConfigData> startup_replay_data_;
     std::shared_ptr<const nacos::ConfigData> pending_compile_data_;
     CompileJob *active_compile_job_ = nullptr;
-    async::Watch<bool> ready_{false};
-    std::optional<async::Watch<bool>::Publisher> ready_publisher_;
+    async::Watch<TlsCertificateReadiness> readiness_{TlsCertificateReadiness::Awaiting};
+    std::optional<async::Watch<TlsCertificateReadiness>::Publisher> readiness_publisher_;
     async::Watch<bool> processing_{false};
     std::optional<async::Watch<bool>::Publisher> processing_publisher_;
     async::WaitGroup compile_tasks_;
@@ -98,6 +107,7 @@ private:
     std::string active_md5_;
     std::int64_t observed_at_unix_millis_ = 0;
     std::int64_t active_at_unix_millis_ = 0;
+    bool starting_subscription_ = false;
     bool pending_force_compile_ = false;
     bool published_processing_ = false;
     std::uint64_t successful_updates_ = 0;

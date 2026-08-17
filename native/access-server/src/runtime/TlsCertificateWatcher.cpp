@@ -56,6 +56,14 @@ std::string_view error_code_name(TlsCertificateConfigErrorCode code) noexcept {
     return "invalid_tls_configuration";
 }
 
+nacos::ConfigServiceError subscription_closed_error() {
+    return nacos::ConfigServiceError{
+            .code = nacos::ConfigServiceErrorCode::Shutdown,
+            .io_error = common::IoErr::NotConnected,
+            .message = "TLS certificate subscription closed before shutdown",
+    };
+}
+
 } // namespace
 
 struct TlsCertificateWatcher::CompileJob final : public common::NonCopyable, public common::NonMovable {
@@ -79,14 +87,16 @@ TlsCertificateWatcher::TlsCertificateWatcher(event::EventLoop &loop, AccessConfi
     loop_(&loop), compiler_(&compiler), config_service_(&config_service), store_(&store), options_(std::move(options)),
     observer_(observer), subscription_(loop) {
     FIBER_ASSERT(loop_ != &compiler_->loop());
-    ready_publisher_ = ready_.acquire_publisher();
-    FIBER_ASSERT(ready_publisher_.has_value());
+    readiness_publisher_ = readiness_.acquire_publisher();
+    FIBER_ASSERT(readiness_publisher_.has_value());
     processing_publisher_ = processing_.acquire_publisher();
     FIBER_ASSERT(processing_publisher_.has_value());
 }
 
 TlsCertificateWatcher::~TlsCertificateWatcher() noexcept {
     FIBER_ASSERT(state_ == TlsCertificateWatcherState::Created || state_ == TlsCertificateWatcherState::Stopped);
+    FIBER_ASSERT(!starting_subscription_);
+    FIBER_ASSERT(!startup_replay_data_);
     FIBER_ASSERT(!pending_compile_data_);
     FIBER_ASSERT(active_compile_job_ == nullptr);
     FIBER_ASSERT(compile_tasks_.empty());
@@ -102,11 +112,25 @@ std::expected<void, nacos::ConfigServiceError> TlsCertificateWatcher::start() {
         });
     }
     state_ = TlsCertificateWatcherState::Running;
+    starting_subscription_ = true;
     auto subscribed = subscription_.subscribe(*config_service_, options_.data_id, options_.group, &on_notify, this);
+    starting_subscription_ = false;
     if (!subscribed) {
+        startup_replay_data_.reset();
         state_ = TlsCertificateWatcherState::Created;
         subscription_.reset_start_failure();
         return std::unexpected(std::move(subscribed.error()));
+    }
+    if (subscription_.state() == SubscriptionLifecycleState::Failed) {
+        FIBER_ASSERT(!startup_replay_data_);
+        state_ = TlsCertificateWatcherState::Created;
+        subscription_.reset_start_failure();
+        return std::unexpected(subscription_closed_error());
+    }
+    if (startup_replay_data_) {
+        auto data = std::exchange(startup_replay_data_, {});
+        (void) subscription_.observe_value();
+        apply(std::move(data));
     }
     publish_evidence();
     return {};
@@ -137,14 +161,17 @@ void TlsCertificateWatcher::on_notify(void *context,
     auto &owner = *static_cast<TlsCertificateWatcher *>(context);
     if (result.kind == nacos::ResultKind::Closed) {
         if (owner.state_ == TlsCertificateWatcherState::Running) {
-            owner.subscription_.fail(nacos::ConfigServiceError{
-                    .code = nacos::ConfigServiceErrorCode::Shutdown,
-                    .io_error = common::IoErr::NotConnected,
-                    .message = "TLS certificate subscription closed before shutdown",
-            });
+            owner.subscription_.fail(subscription_closed_error());
+            if (owner.starting_subscription_) {
+                owner.startup_replay_data_.reset();
+                return;
+            }
             owner.cancel_compile();
             owner.state_ = TlsCertificateWatcherState::Failed;
             ++owner.failed_updates_;
+            if (owner.candidate_status_ == AccessActivationCandidateStatus::Processing) {
+                owner.candidate_status_ = AccessActivationCandidateStatus::Rejected;
+            }
             owner.last_failure_ = TlsCertificateWatcherFailure{
                     .stage = "subscription",
                     .code = "subscription_closed",
@@ -157,11 +184,19 @@ void TlsCertificateWatcher::on_notify(void *context,
                             },
                     .observed_at_unix_millis = access_activation_unix_millis(*owner.loop_),
             };
+            const auto readiness = owner.readiness_.current();
+            if (!readiness.value || *readiness.value == TlsCertificateReadiness::Awaiting) {
+                owner.readiness_publisher_->publish(TlsCertificateReadiness::Failed);
+            }
             owner.publish_evidence();
         }
         return;
     }
     if (result.data && owner.state_ == TlsCertificateWatcherState::Running) {
+        if (owner.starting_subscription_) {
+            owner.startup_replay_data_ = result.data;
+            return;
+        }
         (void) owner.subscription_.observe_value();
         owner.apply(result.data);
     }
@@ -330,7 +365,7 @@ void TlsCertificateWatcher::apply_result(CompileJob &job) {
             ++successful_updates_;
             active_md5_ = std::string(job.data->md5);
             active_at_unix_millis_ = access_activation_unix_millis(*loop_);
-            ready_publisher_->publish(true);
+            readiness_publisher_->publish(TlsCertificateReadiness::Ready);
         } else if (**classified == TlsCertificateUpdateStatus::VersionUnchanged) {
             active_md5_ = std::string(job.data->md5);
             active_at_unix_millis_ = access_activation_unix_millis(*loop_);
@@ -356,7 +391,7 @@ void TlsCertificateWatcher::apply_result(CompileJob &job) {
         ++successful_updates_;
         active_md5_ = std::string(job.data->md5);
         active_at_unix_millis_ = access_activation_unix_millis(*loop_);
-        ready_publisher_->publish(true);
+        readiness_publisher_->publish(TlsCertificateReadiness::Ready);
     }
     candidate_status_ = AccessActivationCandidateStatus::Accepted;
     publish_evidence();
