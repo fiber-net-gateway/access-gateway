@@ -55,6 +55,37 @@ TEST(SmoothWeightedRoundRobinTest, SupportsRequestLevelExclusion) {
     EXPECT_EQ(retry->selection_token(), 102U);
 }
 
+TEST(SmoothWeightedRoundRobinTest, SupportsAllocationFreeCallerAvailabilityFilterAndCancel) {
+    TestSwrr state;
+    ASSERT_TRUE(state.update({instance(101, "first", 1.0), instance(102, "second", 1.0)}));
+
+    auto selected = state.select_if({}, TestSwrr::TimePoint{},
+                                    [](const std::string &, std::uint64_t token) { return token != 101; });
+    ASSERT_TRUE(selected);
+    EXPECT_EQ(selected->selection_token(), 102U);
+    EXPECT_TRUE(selected->pending());
+    selected->cancel();
+    EXPECT_FALSE(selected->pending());
+}
+
+TEST(SmoothWeightedRoundRobinTest, ExternalAvailabilityIsTheSoleCircuitAuthority) {
+    TestSwrr state(TestSwrr::Options{
+            .max_fails = 1,
+            .fail_timeout = 10s,
+    });
+    ASSERT_TRUE(state.update({instance(101, "first", 1.0)}));
+
+    auto failed = state.select({}, TestSwrr::TimePoint{});
+    ASSERT_TRUE(failed);
+    failed->report(false, TestSwrr::TimePoint{});
+    EXPECT_EQ(state.select({}, TestSwrr::TimePoint{} + 1ms).error(), SwrrSelectError::NoAvailableInstance);
+
+    auto shared_circuit_recovered = state.select_with_external_availability(
+            {}, TestSwrr::TimePoint{} + 1ms, [](const std::string &, std::uint64_t) noexcept { return true; });
+    ASSERT_TRUE(shared_circuit_recovered);
+    EXPECT_EQ(shared_circuit_recovered->selection_token(), 101U);
+}
+
 TEST(SmoothWeightedRoundRobinTest, CircuitStateSurvivesUpdatesAndRecovers) {
     TestSwrr state(TestSwrr::Options{
             .max_fails = 1,

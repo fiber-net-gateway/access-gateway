@@ -16,20 +16,48 @@
 #include <fiber/common/NonMovable.h>
 #include <fiber/nacos/discovery/ServiceDiscovery.h>
 
+namespace fiber::event {
+
+class EventLoopGroup;
+
+} // namespace fiber::event
+
 namespace fiber::access_server {
 
 class AccessServiceState final : public common::NonCopyable, public common::NonMovable {
 public:
-    using Selection = AccessUpstreamSwrr::Selection;
+    class Selection final {
+    public:
+        Selection() noexcept = default;
+        Selection(AccessUpstreamSwrr::Selection selection, AccessUpstreamCircuit::Permit circuit_permit) noexcept;
+        Selection(const Selection &) = delete;
+        Selection &operator=(const Selection &) = delete;
+        Selection(Selection &&) noexcept = default;
+        Selection &operator=(Selection &&) noexcept = default;
+        ~Selection() = default;
+
+        [[nodiscard]] bool valid() const noexcept { return selection_.valid(); }
+        [[nodiscard]] bool pending() const noexcept { return selection_.pending(); }
+        [[nodiscard]] const AccessUpstreamInstance &instance() const noexcept { return selection_.instance(); }
+        [[nodiscard]] std::uint64_t generation() const noexcept { return selection_.generation(); }
+        [[nodiscard]] std::uint64_t selection_token() const noexcept { return selection_.selection_token(); }
+        void report(bool success) noexcept;
+        [[nodiscard]] ProxyUpstreamEndpoint into_proxy_endpoint(std::string_view provider_name) && noexcept;
+
+    private:
+        AccessUpstreamSwrr::Selection selection_;
+        AccessUpstreamCircuit::Permit circuit_permit_;
+    };
 
     AccessServiceState() noexcept;
     ~AccessServiceState() noexcept;
 
     // Lifecycle callbacks run only on ServiceDiscovery's owner EventLoop.
-    // select() is the sole cross-loop operation and reads a published immutable
-    // cluster directory before entering the selected balancer.
+    // select() is the sole cross-loop operation. Serving EventLoops pin their
+    // own directory wrapper and enter only their worker-local SWRR shard.
     void initialize(AccessUpstreamSwrr::Options options, std::string_view zone,
-                    AccessDiscoveryMetricsObserver metrics_observer = {}) noexcept;
+                    AccessDiscoveryMetricsObserver metrics_observer = {},
+                    event::EventLoopGroup *workers = nullptr) noexcept;
     void update(const nacos::ServiceInfo &snapshot) noexcept;
     void retire(nacos::ServiceRetireReason reason) noexcept;
 
@@ -52,6 +80,7 @@ struct AccessServiceOps {
     AccessUpstreamSwrr::Options swrr_options{};
     std::string zone;
     AccessDiscoveryMetricsObserver metrics_observer;
+    event::EventLoopGroup *workers = nullptr;
 };
 
 using AccessServiceDiscovery = nacos::ServiceDiscovery<AccessServiceOps>;

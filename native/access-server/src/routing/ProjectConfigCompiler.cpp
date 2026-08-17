@@ -665,19 +665,13 @@ std::optional<AccessUpstreamInstance> compile_java_http_host(std::string_view va
             https ? http::Http1ConnectionGroupKey::Scheme::Https : http::Http1ConnectionGroupKey::Scheme::Http;
     net::IpAddress ip;
     if (net::IpAddress::parse(host, ip)) {
-        return AccessUpstreamInstance{
-                .connection_key = http::Http1ConnectionGroupKey::from_ip(ip, port, scheme),
-                .authority = std::move(authority),
-        };
+        return AccessUpstreamInstance(http::Http1ConnectionGroupKey::from_ip(ip, port, scheme), std::move(authority));
     }
     auto key = http::Http1ConnectionGroupKey::from_name(host, port, scheme);
     if (!key) {
         return std::nullopt;
     }
-    return AccessUpstreamInstance{
-            .connection_key = std::move(*key),
-            .authority = std::move(authority),
-    };
+    return AccessUpstreamInstance(std::move(*key), std::move(authority));
 }
 
 std::expected<std::vector<Cidr>, AccessConfigError> compile_cidr_list(const std::vector<std::string_view> &items,

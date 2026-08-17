@@ -61,6 +61,7 @@ public:
         [[nodiscard]] const Instance &instance() const noexcept;
         [[nodiscard]] std::uint64_t generation() const noexcept;
         [[nodiscard]] std::uint64_t selection_token() const noexcept;
+        void cancel() noexcept { pending_ = false; }
         void report(bool success) noexcept;
         void report(bool success, TimePoint now) noexcept;
 
@@ -92,11 +93,30 @@ public:
     select(std::span<const std::uint64_t> excluded_selection_tokens = {}) noexcept;
     [[nodiscard]] std::expected<Selection, SwrrSelectError>
     select(std::span<const std::uint64_t> excluded_selection_tokens, TimePoint now) noexcept;
+    template<typename Availability>
+        requires std::predicate<Availability, const Instance &, std::uint64_t>
+    [[nodiscard]] std::expected<Selection, SwrrSelectError>
+    select_if(std::span<const std::uint64_t> excluded_selection_tokens, TimePoint now,
+              Availability &&availability) noexcept;
+    // The caller-provided predicate is the sole circuit authority. Selection
+    // and completion still retain this shard's SWRR progress and adaptive
+    // effective weight, but its private failure count cannot hide an endpoint
+    // which a shared circuit has recovered.
+    template<typename Availability>
+        requires std::predicate<Availability, const Instance &, std::uint64_t>
+    [[nodiscard]] std::expected<Selection, SwrrSelectError>
+    select_with_external_availability(std::span<const std::uint64_t> excluded_selection_tokens, TimePoint now,
+                                      Availability &&availability) noexcept;
 
     [[nodiscard]] std::uint64_t generation() const noexcept;
     [[nodiscard]] std::size_t configured_instance_count() const noexcept;
 
 private:
+    template<typename Availability>
+        requires std::predicate<Availability, const Instance &, std::uint64_t>
+    [[nodiscard]] std::expected<Selection, SwrrSelectError>
+    select_if_impl(std::span<const std::uint64_t> excluded_selection_tokens, TimePoint now,
+                   bool enforce_internal_circuit, Availability &&availability) noexcept;
     static void complete(Selection &selection, bool success, TimePoint now) noexcept;
 
     std::shared_ptr<State> state_;
