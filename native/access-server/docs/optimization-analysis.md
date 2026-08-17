@@ -19,18 +19,21 @@ Issue/PR，合入后再审查 revision range、运行完整回归并更新 gitli
 
 ## 2. 审阅范围和结论可信度
 
-初始审阅基于：
+初始审阅及本次复核基于：
 
 - Access Gateway revision：`0f7b557`；
-- Fiber pinned revision：`0fda7764bf94944aca4b674ab5ab311184703118`；
+- 当前 Access Gateway 复核基线：`6755a7b`（本次工作开始时的 `HEAD`）；
+- Fiber 初始 pinned revision：`0fda7764bf94944aca4b674ab5ab311184703118`；
+- Fiber 当前 pinned revision：`abc8c34ba13bd50554a55e10389c6b3da2dcc048`；
+- 本次审阅的 Fiber revision range：`0fda7764..abc8c34`；
 - 审阅日期：2026-08-16；
 - 实施状态和验证结果持续更新至：2026-08-17；
 - `native/access-server/src/` 约 1.37 万行代码；
 - 当前 Release/ThinLTO 构建、CMake target、兼容文档和测试注册；
-- `ctest --test-dir native/build --output-on-failure -L access-server`：共发现 297 个测试，
+- `ctest --test-dir native/build --output-on-failure -L access-server`：共发现 299 个测试，
   0 失败，其中
   `ProductionScriptCorpusTest.CompilesExternalSnapshotWhenProvided` 因未设置私有 corpus 而
-  skip；完整 CTest 共 1,888 项，0 失败、5 项按环境条件 skip。
+  skip；完整 CTest 共 1,936 项，0 失败、5 项按环境条件 skip。
 
 本文将结论分成两类：
 
@@ -55,16 +58,16 @@ Issue/PR，合入后再审查 revision range、运行完整回归并更新 gitli
 - 异步日志采用有界队列和明确的过载丢弃策略；
 - C++ 错误通过 `expected`/result 类型传播，没有在请求路径引入异常。
 
-初始审阅确认的主要问题不是基础架构方向错误，而是以下几类系统性缺口；已经完成的子项在
-总表和对应章节持续标记：
+初始审阅确认的主要问题不是基础架构方向错误，而是当时存在以下几类系统性缺口；各项当前
+状态见总表、4.2 节和对应章节：
 
-1. 生命周期中仍存在 EventLoop 同步阻塞；
-2. “收到配置”“编译发布”“实例可服务”之间的状态没有完整建模；
-3. Nacos owner loop 承担了过多 CPU 和分配工作；
+1. 生命周期中存在 EventLoop 同步阻塞；
+2. “收到配置”“编译发布”“实例可服务”之间的状态建模不完整；
+3. Nacos owner loop 承担过多 CPU 和分配工作；
 4. service selection 仍有全局 SWRR 状态；gray sampling 和 route snapshot pin 已完成
    worker-local 隔离；
 5. 安全边界依赖部署约定，未在代码中显式表达；
-6. 大类内部边界和 CMake target 边界不足，限制了测试和后续演进。
+6. 大类内部边界和 CMake target 边界不足，限制测试和后续演进。
 
 ## 4. 优先级与归属总表
 
@@ -75,11 +78,11 @@ Issue/PR，合入后再审查 revision range、运行完整回归并更新 gitli
 | L-03 | P0 | 路由配置字节、数量和编译内存上限 | 本项目 | 否 |
 | L-04 | P1 | 配置编译移出 Nacos owner loop | 本项目 | 否 |
 | L-05 | P1 | prepared/ready/published typestate | 本项目 | 否 |
-| L-06 | P1 | 系统 DNS 配置、多 nameserver 和 failover | 双方 | 是 |
+| L-06 | P1 | 系统 DNS 配置、多 nameserver 和 failover | 双方 | Fiber 前置已合入；本项目待接入 |
 | S-01 | P0 | access log query 脱敏 | 本项目 | 否 |
 | S-02 | P0/P1 | trusted proxy 和真实客户端地址模型 | 本项目 | 否 |
-| S-03 | P1 | 上游 TLS peer/CA/SNI 验证配置 | 双方 | 进程级已完成；路由级需要 Fiber #28 |
-| S-04 | P1 | 上游 mTLS 客户端身份 | 双方 | Fiber #31；连接隔离还需要 #28 |
+| S-03 | P1 | 上游 TLS peer/CA/SNI 验证配置 | 双方 | Fiber 前置已合入；路由级待接入 |
+| S-04 | P1 | 上游 mTLS 客户端身份 | 双方 | Fiber 前置已合入；本项目待接入 |
 | P-01 | P1 | 消除 service selection 双层共享锁 | 双方 | 通用 SWRR 上游化时需要 |
 | P-02 | P1/P2 | per-worker route snapshot pin | 本项目（已解决） | 否；进一步通用化才需要 |
 | P-03 | P1 | per-worker gray snapshot 和 PRNG | 本项目 | 否 |
@@ -87,9 +90,9 @@ Issue/PR，合入后再审查 revision range、运行完整回归并更新 gitli
 | P-05 | P1 | 模板、request target、header 分配优化 | 本项目 | 否 |
 | P-06 | P1 | 初始项目批量发布和全局 matcher 重建优化 | 本项目 | 否 |
 | P-07 | P2 | Host matcher 高 fan-out 搜索优化 | 本项目 | 否 |
-| P-08 | P1 | Happy Eyeballs/交错多地址连接 | 双方 | 是 |
+| P-08 | P1 | Happy Eyeballs/交错多地址连接 | 双方 | Fiber 前置已合入；本项目待接入 |
 | O-01 | P0/P1 | 实例级配置激活证据 | 本项目（已解决） | 否 |
-| O-02 | P1 | 配置、发现、DNS、pool、proxy、TLS、日志指标 | 双方 | 是，Nacos 连接证据需 Fiber #27 |
+| O-02 | P1 | 配置、发现、DNS、pool、proxy、TLS、日志指标 | 双方 | Fiber 前置已合入；Nacos 状态待接入 |
 | C-01 | P1/P2 | 大类职责拆分 | 本项目 | 否 |
 | C-02 | P2 | 拆分 `access_server_core` 构建边界 | 本项目 | 否 |
 | T-01 | P0/P1 | 生命周期、并发、sanitizer 测试 | 本项目 | Fiber 改动另跑上游测试 |
@@ -99,20 +102,24 @@ Issue/PR，合入后再审查 revision range、运行完整回归并更新 gitli
 P0 表示应在性能重构前处理的正确性、安全或生命周期问题；P1 表示高收益改造；P2 表示
 应由 profile、规模数据或维护成本触发的结构优化。
 
-### 4.1 需要 Fiber 实际改动的清单
+### 4.1 Fiber 前置能力复核
 
-实施对应能力时，以下事项确定需要 Fiber 上游前置：
+当前 pin 已包含此前确定的五项 Fiber 前置能力：
 
-- **L-06**：系统 DNS 配置、多 nameserver 和 failover；
-- **S-04**：TLS client context 加载客户端证书和私钥；见
-  [fiber-gateway-cpp #31](https://github.com/fiber-net-gateway/fiber-gateway-cpp/issues/31)。不同客户端
-  身份的连接池隔离还依赖 #28；
-- **S-03（路由级）**：connection pool key 纳入有界 TLS transport profile，避免不同
-  CA/SNI/验证名复用同一连接；见
-  [fiber-gateway-cpp #28](https://github.com/fiber-net-gateway/fiber-gateway-cpp/issues/28)；
-- **P-08**：可取消、可复用的 Happy Eyeballs 多地址 connector；
-- **O-02**：暴露 Nacos config/naming transport、认证和 reconnect 的 typed bounded
-  snapshot/watch；见 [fiber-gateway-cpp #27](https://github.com/fiber-net-gateway/fiber-gateway-cpp/issues/27)。
+- **L-06**：`77f1b95` 提供有界系统 resolver 配置解析、最多三个 nameserver、顺序
+  failover/rotation、混合 IPv4/IPv6 transport 和同上游 TCP fallback；
+- **S-03（路由级）/S-04**：`2a642a5` 让 client context 加载证书链和匹配私钥，并把非敏感
+  `Http1ConnectionPoolAffinity` 纳入 HTTP/1 pool key；`58aa0a9` 补充 TCP TLS 1.2/1.3 和 QUIC
+  mTLS 组合回归；
+- **P-08**：`621a47e` 提供可取消、固定容量、共享 deadline 的 Happy Eyeballs connector 以及
+  `Http1ClientConnection` 多地址入口；
+- **O-02**：`2dcf467` 为 ConfigService/NamingService 提供只含有界 enum、布尔值和固定宽度计数器的
+  latest-value status watch，覆盖 connection phase、failure category、reconnect 和订阅/注册聚合。
+
+因此当前已列出的产品项不再被缺少 Fiber 公共 API 阻塞，但上述 commit 只提供通用机制，未完成
+Access Gateway 的配置、secret、生命周期、指标、兼容和端到端测试。尤其 pool affinity 由应用分配，
+连接池不会从 CA、SNI 或证书内容自动推导 profile；本项目必须把不可变 TLS profile 与 affinity 一起
+编译和发布。
 
 以下事项只有在 benchmark 或多应用复用需求成立后，才建议引入 Fiber 改动：
 
@@ -124,6 +131,22 @@ P0 表示应在性能重构前处理的正确性、安全或生命周期问题�
 
 其余事项均可由本项目独立完成。即使归属为“双方”，端到端交付也必然包括本项目的配置、
 兼容、指标和测试工作，因此没有仅更新 Fiber gitlink 即可完成的产品优化项。
+
+### 4.2 当前未完成工作
+
+以 `abc8c34` 和本仓库当前实现为准，仍未完成的工作如下；其余表中项目已经解决：
+
+| ID | 已完成边界 | 剩余工作 |
+| --- | --- | --- |
+| L-06 | Fiber system resolver 与多 nameserver 能力已合入 | 启动前解析/override、向 HTTP worker 和 Nacos hostname client 注入完整列表、移除首项加 `8.8.8.8` fallback、补 DNS 健康指标和部署回归 |
+| S-03 | 进程级 peer/CA 验证已完成；Fiber pool affinity 已合入 | 设计 route/环境级 CA、SNI、独立验证名和 profile generation，并同步 native/validator/server/web/fixture/docs |
+| S-04 | Fiber client identity 加载、pool affinity 和上游组合测试已完成 | 设计 secret 引用和轮换生命周期，接入 route/环境模型、脱敏、连接隔离及 access-server loopback e2e |
+| P-01 | service directory 外层锁已移除 | 仅在 production profile 证明全局 SWRR mutex/O(N) scan 是瓶颈后，决定 sharding 或上游化；当前是条件项 |
+| P-08 | Fiber connector 和 HTTP/1 多地址入口已合入 | 替换逐地址串行 connect，定义配置上限、lease/取消/错误与指标映射，补 IPv4/IPv6 和 shutdown 回归 |
+| O-02 | 除 Nacos transport 状态外的固定 schema 指标已完成；Fiber status watch 已合入 | 在 Nacos owner loop 订阅两个 status watch，映射 bounded metrics/readiness，正确关闭 subscriber，且不把 `running` 当 `connected` |
+| T-01 | 生命周期、竞态、TLS rotation、snapshot pin 等 focused 测试已补齐 | 完成 access-server mTLS/Happy Eyeballs/DNS/Nacos status 集成测试以及聚焦 ASAN/UBSAN/TSAN 和外部互操作故障注入 |
+| T-02 | 五组 microbenchmark 已有基线 | 补 gray、TLS identity、loopback proxy/WebSocket、CAT/logging，以及新 Fiber DNS/connector 的集成基线 |
+| D-01 | gate 状态和证据格式已统一 | 获取完整生产 corpus，完成同请求 Java/C++ 差分、阶段 8、稳定性/灰度/回滚演练；在此之前切流 gate 仍为 `NOT_MET` |
 
 ## 5. 生命周期、配置和并发正确性
 
@@ -328,16 +351,22 @@ store；TLS Prepared 候选没有外部异步 readiness，且 commit 会在 owne
 
 **归属：双方。**
 
-当前 access-server 同步读取 `/etc/resolv.conf`，只采用第一条有效 nameserver，失败时
-回退到硬编码 `8.8.8.8`。Fiber `DnsClient::Options` 当前只持有一个 server，没有通用的
-系统 resolver 配置或多上游 failover。
+**实施状态：Fiber 前置已解决（`77f1b95`）；本项目未接入（2026-08-17）。** 本次为适配
+`DnsClient::Options::server` 的破坏性删除，只把原有单一地址写入新的 fixed-capacity
+`nameservers` 列表；这不等同于完成 L-06。
 
-Fiber 上游应负责：
+当前 access-server 同步读取 `/etc/resolv.conf`，只采用第一条有效 nameserver，失败时
+回退到硬编码 `8.8.8.8`，而且读取仍发生在 data-plane 初始化的 EventLoop 上。当前 Fiber 已提供
+`load_system_resolver_config()`/`parse_resolver_config()`、最多三个 nameserver、顺序
+failover/rotation、mixed-family UDP transport 和同上游 TCP fallback；文件加载 API 会拒绝在
+EventLoop 上调用，并明确不做隐式 fallback 或 reload。
+
+Fiber 当前已提供：
 
 - 有界、可测试的系统 DNS 配置解析；
 - nameserver 列表和轮转/failover；
-- search/ndots 等能力应按明确范围逐步实现，不能静默部分支持；
-- 配置 reload 是否支持及其线程/loop 所有权；
+- 保留并显式标记尚不执行的 search/ndots 等字段，不静默部分支持；
+- 明确启动时同步加载、禁止 EventLoop 文件 I/O 且不自动 reload；
 - 单元测试不得依赖宿主机真实 `/etc/resolv.conf`。
 
 本项目负责：
@@ -345,6 +374,8 @@ Fiber 上游应负责：
 - 提供显式 DNS server override 和系统配置选择策略；
 - 在启动前读取/验证配置，不在请求 EventLoop 做文件 I/O；
 - 将 Fiber resolver 实例化到每个 HTTP worker；
+- Nacos 配置仍只接受 IP literal；若开放 Fiber 已支持的 hostname server，须在 Nacos owner loop
+  注入 resolver，并保证其生命周期长于 client、ConfigService 和 NamingService；
 - 输出有界 DNS 健康和失败指标；
 - 验证 Nacos、业务 upstream 和容器部署环境的实际行为。
 
@@ -427,7 +458,7 @@ Java 行为跳过 allow/deny。
 
 ### 6.3 S-03：上游 TLS 验证
 
-**归属：双方。进程级策略由本项目完成；路由级策略依赖 Fiber #28。**
+**归属：双方。进程级策略由本项目完成；路由级 Fiber 前置已解决，本项目尚未接入。**
 
 改造前 HTTPS upstream 固定设置 `verify_peer=false`，以匹配 Java 基线。Fiber
 `TlsOptions` 和客户端 transport 已支持 `verify_peer`、`ca_file`、`server_name` 和
@@ -455,37 +486,34 @@ server 两端握手完成。该测试加固只修改本项目，没有要求 Fib
 配置通过 `ACCESS_SERVER_UPSTREAM_TLS_MODE` 和
 `ACCESS_SERVER_UPSTREAM_TLS_CA_FILE` 提供，默认仍为 `legacy_insecure`，因此不改变已有
 route wire 或 Java 兼容默认。策略在进程生命周期内不可变，同一进程只有一个 trust profile，
-不会触发当前 endpoint-only pool key 的跨策略复用。
+当前仍使用默认 affinity `0`；因为同一进程只有一个不可变 trust profile，不会跨策略复用。
 
-完整的 route/环境级 CA、SNI 和独立验证名仍不能安全发布：Fiber 的
-`Http1ConnectionGroupKey` 当前只包含 endpoint 与 scheme，pool hit 会绕过新连接 options，可能
-复用由其他 TLS profile 创建的连接。该前置能力由
-[fiber-gateway-cpp #28](https://github.com/fiber-net-gateway/fiber-gateway-cpp/issues/28) 跟踪。
-在上游完成前，native codec、validator、server 和 web 均不接受或模拟 route 级字段；之后新增
-wire 字段时必须同步 codec/runtime、validator、server、web、fixture 和兼容文档。
+当前 Fiber 的 `Http1ConnectionGroupKey` 已包含应用分配的
+`Http1ConnectionPoolAffinity`，本地命中和跨 worker steal 都按 affinity 隔离，因此 route/环境级
+CA、SNI 和独立验证名不再缺少上游机制。但 access-server 尚未定义不可变 TLS transport profile、
+profile generation 或 route 字段，也尚未把同一 profile 同时用于 connection key 和
+`TlsOptions`。native codec、validator、server 和 web 仍不得接受或模拟这些字段；交付时必须同步
+codec/runtime、validator、server、web、fixture 和兼容文档，并覆盖 profile 轮换期间的旧 lease。
 
 ### 6.4 S-04：上游 mTLS 客户端身份
 
-**归属：双方，Fiber 为前置实现方。**
+**归属：双方。Fiber 前置已解决，本项目尚未接入。**
 
-Pinned Fiber 的 `TlsOptions` 虽包含 `cert_file/key_file`，但 `TlsContext::init()` 当前只在
-server context 中调用证书和私钥加载逻辑，client context 不会加载客户端身份。因此不能
-仅通过 access-server 设置现有字段来宣称已经支持 upstream mTLS。客户端身份加载由
-[fiber-gateway-cpp #31](https://github.com/fiber-net-gateway/fiber-gateway-cpp/issues/31) 跟踪；按身份
-隔离连接复用仍由 [#28](https://github.com/fiber-net-gateway/fiber-gateway-cpp/issues/28) 跟踪。
-
-Fiber 上游负责：
+当前 Fiber client context 已加载 PEM leaf/intermediate chain 和匹配私钥，初始化失败不会发布
+半初始化 context，也不会把路径或 OpenSSL error queue 暴露给调用方；HTTP/1 pool affinity 可隔离
+身份、trust root、SNI、验证名和 ALPN。上游测试已覆盖 TLS 1.2/1.3、QUIC、可信身份、匿名身份和
+未知 CA。已完成的 Fiber 边界包括：
 
 - client context 加载证书链和私钥；
 - 私钥匹配、证书格式、失败状态和敏感错误处理；
 - 与 `verify_peer`、SNI、`verify_name` 和 ALPN 的组合测试；
-- 明确证书 context 的复用、热更新和连接池 key 语义。
+- 明确证书 context 的复用、热更新和连接池 affinity 语义。
 
-本项目负责：
+access-server 仍未提供任何 upstream mTLS 产品配置。剩余工作为：
 
 - route/环境级 mTLS 配置模型和 secret 引用；
 - 不回显私钥、证书 secret 和路径；
-- 将客户端身份纳入 connection pool key，禁止不同身份错误复用连接；
+- 为每个不可变 profile 分配非零 affinity，轮换时先发布新 context/generation，并让旧 lease 安全退役；
 - native codec、validator、server、web、fixture 和兼容文档；
 - 与确定性 loopback TLS upstream 的端到端验证。
 
@@ -914,20 +942,22 @@ native/build/access-server/fiber_access_host_matcher_benchmark
 
 ### 7.8 P-08：Happy Eyeballs
 
-**归属：双方，Fiber 为前置实现方。**
+**归属：双方。Fiber 前置已解决，本项目尚未接入。**
+
+**实施状态：Fiber connector 已完成（`621a47e`）；access-server 仍按地址顺序串行 connect。**
 
 当前 proxy 按 DNS 地址顺序串行 connect。首个 IPv6/IPv4 地址不可达时，尾延迟可能叠加
 多个完整 connect timeout。
 
 代码位置：[`ProxyUpstreamConnection.cpp`](../src/execution/ProxyUpstreamConnection.cpp#L39)。
 
-Fiber 上游应实现可复用的异步多地址 connector：
+Fiber 当前已提供可复用的异步多地址 connector：
 
 - RFC 8305 风格的地址交错和 stagger delay；
 - 并发拨号上限；
 - 首个成功者获胜，其余任务可取消并安全关闭；
 - EventLoop 所有权、timeout 和 shutdown 明确；
-- 返回稳定、可诊断但不泄露敏感地址的错误摘要；
+- fixed-capacity attempted/failed mask 和错误摘要，不需要动态分配或泄露日志字段；
 - 为 HTTP/其他协议复用，不依赖 access-server route 类型。
 
 本项目负责：
@@ -1137,16 +1167,19 @@ owner-loop start time 和 `request_started`，再初始化 trace，保持原先 
 析构体在成员逆序析构前显式完成 metrics、CAT 和 access log，因此 finish 时所有借用对象仍然存活。
 简单 façade 委托保持 header-inline，Release 调用点不会多经过一层 trampoline。
 
-新增 `AccessRequestTelemetryTest` 锁定 64-bit façade 的 864-byte 基线和非多态组件，分别覆盖 CAT
+`AccessRequestTelemetryTest` 锁定 64-bit façade 的 912-byte 基线和非多态组件，分别覆盖 CAT
 禁用及 CAT wrong-loop 创建失败、W3C 常量 bind、context update/remove、tracestate upstream 注入、
 无 CAT 时的 header 行为和 request-pool storage。原 Handler/Proxy 集成测试继续覆盖真实 CAT root、
 `Access.Provider`、`RemoteCall`、`CALL_ERROR`、`FiberException`、`ResponseError`、指标、代理 header
 和脚本结果。
 
-Clang 22 `-O3` 布局复测中，四个成员分别为 432、112、184、136 bytes，总计仍为 864 bytes；没有
-新增堆包装、虚表、`std::function`、共享所有权、锁或 coroutine。相同 Release ThinLTO build tree
-的最终 access-server text 从 6,913,705 增至 6,914,941 bytes（+1,236，约 +0.018%），文件大小
-增加 1,744 bytes（约 +0.010%）；拆分后的五个无 LTO 实现对象 text 合计 19,309 bytes，低于拆分前
+更新 Fiber 后，`ScriptExchangeCtx` 新增显式 `HttpResponseWriter` 与有界 `ScriptRequestBody` 值适配，
+使 `ScriptExecutionContext` 从 432 增至 480 bytes；其余三个成员仍为 112、184、136 bytes，四者
+总计 912 bytes。该增长来自 request-lifetime 内嵌的非 owning function-table，不增加堆包装、虚表、
+`std::function`、共享所有权、锁或 coroutine。本次未把 48-byte 上游布局变化外推为整程序体积
+结论；旧 Fiber pin 上完成的 C-01 拆分测量为：相同 Release ThinLTO build tree 的最终
+access-server text 从 6,913,705 增至 6,914,941 bytes（+1,236，约 +0.018%），文件大小增加
+1,744 bytes（约 +0.010%）；拆分后的五个无 LTO 实现对象 text 合计 19,309 bytes，低于拆分前
 单对象的 19,569 bytes。
 
 ### 8.8 C-01：`AccessConfigCodec`
@@ -1207,7 +1240,7 @@ Bearer 认证、分页和 `no-store`；server 的独立进程负责认证采集�
 
 ### 9.2 O-02：有界运行指标
 
-**归属：双方。聚合与产品语义属于本项目；真实 Nacos 连接证据需要 Fiber。**
+**归属：双方。Fiber status watch 已提供；聚合与产品语义仍属于本项目。**
 
 **实施状态：部分解决（2026-08-17）。** 第一阶段新增 Nacos owner loop 单写、metrics worker
 无锁读取的 `AccessConfigMetrics`。Project List/route 的 success、ignored、failure stage 使用
@@ -1241,14 +1274,17 @@ stopped、普通与 system backlog、submitted/sent 以及 15 个固定 loss rea
 app key、host、collector/router 地址或 trace。内部阶段 loss 可能重叠，不能求和冒充唯一消息数。
 详见 [`bounded-metrics.md`](bounded-metrics.md#asynchronous-logging-and-cat-pipeline-metrics)。
 
-`start()` 成功只报告 `running`，绝不冒充 transport connected。真实连接、认证和 reconnect
-状态需要 Fiber 公共 typed snapshot/watch，已提交
-[fiber-gateway-cpp #27](https://github.com/fiber-net-gateway/fiber-gateway-cpp/issues/27)。O-02 当前唯一
-未覆盖项是该上游连接证据：
+`start()` 成功只报告 `running`，绝不冒充 transport connected。当前 Fiber 已通过
+`ConfigService::subscribe_status()` 和 `NamingService::subscribe_status()` 提供 bounded latest-value
+watch，包含 `Created/Connecting/Ready/ReconnectBackoff/Stopping/Stopped`、固定 failure category、
+`rpc_available`、连接/断开/重连计数和订阅/注册聚合。O-02 当前唯一未覆盖项已经从“缺少上游 API”
+变成“本项目尚未消费该 API”：
 
 建议增加：
 
-- Fiber #27 落地后接入 Nacos config/naming transport/reconnect state；
+- 在 Nacos owner loop 订阅 config/naming status，映射到固定 schema transport/reconnect metrics；
+- 明确 subscriber 的 shutdown 次序，并保持 `running`、`rpc_available`、readiness 和 activation 四者独立；
+- 使用 fake watch 覆盖同步首值、reconnect、failure reset、停止和重复 shutdown。
 
 project、route、cluster、host、Data ID、service name、header 和用户数据不得成为无界 label。
 Fiber 的 pool lease、LoggerManager queue stats 等已有接口应直接消费；只有确实缺少通用、
@@ -1400,8 +1436,8 @@ ASAN/UBSAN；该子项不修改生产实现或 Fiber。
 上述测试已经覆盖 concrete control-plane 与 data-plane 启动阶段，但还不等价于请求并发及外部互操作
 均已完成故障注入。仍应优先增加：
 
-- upstream mTLS 客户端证书组合测试；该项等待 Fiber #31 的 client identity 加载和 #28 的
-  connection-pool identity 隔离，不能在本项目先行模拟完成；
+- access-server upstream mTLS 客户端证书、profile affinity 和 rotation 组合测试；Fiber 的基础
+  TLS 1.2/1.3/QUIC 组合矩阵已完成，但本项目的配置/secret/连接池集成尚不存在；
 - ASAN/UBSAN、聚焦 TSAN。
 
 Fiber DNS、connector、SWRR 或通用 RCU 有上游改动时，必须在 Fiber 仓库先补独立测试，再更新
@@ -1464,18 +1500,19 @@ compatibility contract 统一引用该矩阵，并继续声明：完整生产 co
 
 ## 13. Fiber 能力核对结果
 
-为了避免不必要的上游修改，本次已核对 pinned Fiber API：
+为了避免把“上游已提供”误写成“产品已交付”，本次已核对 `abc8c34` 的 Fiber API：
 
 | 能力 | 当前 Fiber 状态 | 结论 |
 | --- | --- | --- |
 | HTTP socket peer 地址 | `HttpExchange::remote_addr()` 已提供 | trusted proxy 在本项目实现 |
-| TLS peer/CA/SNI/验证名 | client context 已支持；pool key 未隔离 transport profile | 进程级模式及真实验证矩阵已完成；路由级等待 Fiber #28 |
-| TLS 客户端证书 | 字段存在，但 client context 当前不加载身份 | Fiber #31 补加载能力、#28 补连接隔离，本项目再接入 mTLS |
+| TLS peer/CA/SNI/验证名 | client context 已支持；pool key 已包含应用分配的 affinity | 进程级模式已完成；route profile 模型和接入待完成 |
+| TLS 客户端证书 | client context 已加载证书链/私钥；上游组合测试已覆盖 | 本项目补 secret/profile/轮换和 e2e |
 | 异步日志丢弃统计 | LoggerManager/Appender stats 已提供 | 本项目接 Prometheus |
 | EventLoop worker index | `group_index()` 已提供 | DNS resolver 可直接 O(1) 取 slot |
 | connection pool 异步 shutdown | `shutdown_async()` 已提供 | 保持使用 |
-| DNS resolver | 单 server、cache、A/AAAA policy 已提供 | 系统配置和多 server 需上游增强 |
-| Happy Eyeballs | 未发现通用实现 | Fiber 实现，本项目接入 |
+| DNS resolver | 系统配置、最多三个 server、failover/rotation、TCP fallback 已提供 | 本项目仍只使用第一项并硬编码 fallback，待接入 |
+| Happy Eyeballs | `TcpConnector` 和 HTTP/1 多地址 connect 已提供 | 本项目仍串行 connect，待接入 |
+| Nacos 服务状态 | Config/Naming typed latest-value watch 已提供 | 本项目尚未映射 transport/reconnect metrics |
 | 通用 SWRR | 当前实现位于 access-server | 稳定后考虑上游化 |
 | 通用 loop-local RCU | 当前未作为公共能力使用 | P-02 已用项目内 worker slot 解决；复用需求或剩余瓶颈成立时再设计 |
 
@@ -1507,16 +1544,18 @@ compatibility contract 统一引用该矩阵，并继续声明：完整生产 co
 
 ### 阶段 C：Fiber 协同能力
 
-1. L-06 系统 DNS 配置和多 nameserver；
-2. P-08 Happy Eyeballs；
-3. S-03 route 级 TLS transport profile 隔离与配置；
-4. S-04 upstream mTLS client identity（Fiber #31 + #28）；
-5. P-01 通用 SWRR 上游化或 sharding；
-6. P-02 已由本项目完成；只有新 profile 证明 worker-local slot 仍是瓶颈或 Fiber 出现复用需求时，
+1. L-06 系统 DNS 配置和多 nameserver（Fiber 已合入；本项目待接入）；
+2. P-08 Happy Eyeballs（Fiber 已合入；本项目待接入）；
+3. S-03 route 级 TLS transport profile 隔离与配置（Fiber affinity 已合入；本项目待接入）；
+4. S-04 upstream mTLS client identity（Fiber 已合入；本项目待接入）；
+5. O-02 Nacos config/naming status watch（Fiber 已合入；本项目待接入）；
+6. P-01 通用 SWRR 上游化或 sharding；
+7. P-02 已由本项目完成；只有新 profile 证明 worker-local slot 仍是瓶颈或 Fiber 出现复用需求时，
    才开展通用 RCU 设计。
 
-每项先在 Fiber 上游合入并测试，再更新本仓库 gitlink 和 provenance，最后运行完整
-Fiber/native 回归。
+前五项的 Fiber 前置已合入当前 pin；后续直接进入本项目接入、兼容和端到端测试。P-01/P-02
+仍由 profile 或复用需求触发，不因为本次 gitlink 更新自动启动。任何后续 Fiber revision 更新仍须
+审阅 range、更新 provenance 并运行完整 Fiber/native 回归。
 
 ### 阶段 D：结构收敛和最终门禁
 

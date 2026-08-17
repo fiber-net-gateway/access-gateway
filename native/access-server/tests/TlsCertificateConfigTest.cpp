@@ -50,6 +50,7 @@ public:
 
     common::IoResult<void> start() noexcept override { return {}; }
     async::Task<void> shutdown() noexcept override { co_return; }
+    StatusSubscriber subscribe_status() override { return status_.subscribe(); }
 
     async::Task<std::expected<std::shared_ptr<const nacos::ConfigData>, nacos::ConfigServiceError>>
     get_config(std::string, std::string) noexcept override {
@@ -85,6 +86,7 @@ public:
 
 private:
     tests::NacosSubscriptionStub<nacos::ConfigData> subscriptions_;
+    async::Watch<nacos::ConfigServiceStatus> status_{nacos::ConfigServiceStatus{}};
 };
 
 std::string json_string(std::string_view value) {

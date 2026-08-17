@@ -30,6 +30,7 @@ public:
 
     fiber::common::IoResult<void> start() noexcept override { return {}; }
     fiber::async::Task<void> shutdown() noexcept override { co_return; }
+    StatusSubscriber subscribe_status() override { return status_.subscribe(); }
 
     fiber::async::Task<std::expected<std::shared_ptr<const fiber::nacos::ConfigData>, fiber::nacos::ConfigServiceError>>
     get_config(std::string, std::string) noexcept override {
@@ -74,6 +75,7 @@ public:
 private:
     fiber::tests::NacosSubscriptionStub<fiber::nacos::ConfigData> subscriptions_;
     std::optional<fiber::nacos::ConfigServiceError> next_failure_;
+    fiber::async::Watch<fiber::nacos::ConfigServiceStatus> status_{fiber::nacos::ConfigServiceStatus{}};
 };
 
 struct CallbackCapture {

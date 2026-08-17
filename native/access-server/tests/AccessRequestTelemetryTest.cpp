@@ -252,7 +252,7 @@ ComponentResult run_component_request(bool wrong_cat_loop = false) {
 }
 
 TEST(AccessRequestTelemetryTest, KeepsFacadeAtBaselineSizeWithoutPolymorphicComponents) {
-    EXPECT_EQ(sizeof(fiber::access_server::AccessRequestTelemetry), 864U);
+    EXPECT_EQ(sizeof(fiber::access_server::AccessRequestTelemetry), 912U);
     EXPECT_EQ(sizeof(fiber::access_server::AccessRequestTelemetry),
               sizeof(fiber::access_server::ScriptExecutionContext) + sizeof(fiber::access_server::ClientMetadata) +
                       sizeof(fiber::access_server::TracePropagation) +

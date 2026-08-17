@@ -40,7 +40,11 @@ TEST(AccessServerConfigTest, LoadsJavaServerDefaultsAndNacosSettings) {
     EXPECT_TRUE(config->http_server_options().http3.enabled);
     EXPECT_TRUE(config->http_server_options().tls.cert_file.empty());
     EXPECT_TRUE(config->http_server_options().tls.key_file.empty());
-    EXPECT_EQ(config->nacos_config().server_ips().size(), 2U);
+    ASSERT_EQ(config->nacos_config().server_hosts().size(), 2U);
+    EXPECT_TRUE(config->nacos_config().server_hosts()[0].is_ip_literal());
+    EXPECT_EQ(config->nacos_config().server_hosts()[0].value(), "127.0.0.1");
+    EXPECT_TRUE(config->nacos_config().server_hosts()[1].is_ip_literal());
+    EXPECT_EQ(config->nacos_config().server_hosts()[1].value(), "127.0.0.2");
     EXPECT_EQ(config->nacos_config().http_port(), 8848);
     EXPECT_EQ(config->nacos_config().grpc_port(), 9848);
     EXPECT_EQ(config->nacos_config().namespace_id(), "public");

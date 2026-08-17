@@ -242,7 +242,7 @@ int main(int argc, char **argv) {
         std::cout << "access-server listening on " << (tls_enabled ? "https://" : "http://") << address.to_string()
                   << ", protocols=" << (tls_enabled ? "http/1.1,h2" : "http/1.1") << (http3_enabled ? ",h3" : "")
                   << ", metrics=http://" << metrics_address.to_string() << ", http workers=" << http_workers.size()
-                  << ", nacos servers=" << config.nacos_config().server_ips().size() << std::endl;
+                  << ", nacos servers=" << config.nacos_config().server_hosts().size() << std::endl;
         LOG(LOG_LIFECYCLE, INFO) << "server listening address=" << fiber::log::quoted(address.to_string())
                                  << " metrics_address=" << fiber::log::quoted(metrics_address.to_string())
                                  << " http_workers=" << http_workers.size() << " cpu_affinity=" << cpu.affinity_count
@@ -250,7 +250,7 @@ int main(int argc, char **argv) {
                                  << " cpu_period_us=" << cpu.period_us
                                  << " cpu_concurrency_source=" << fiber::util::cpu_concurrency_source_name(cpu.source)
                                  << " cgroup_probe_failed=" << cpu.cgroup_probe_failed
-                                 << " nacos_servers=" << config.nacos_config().server_ips().size()
+                                 << " nacos_servers=" << config.nacos_config().server_hosts().size()
                                  << " cat_enabled=" << config.cat_config().has_value() << " tls_enabled=" << tls_enabled
                                  << " http2_enabled=" << tls_enabled << " http3_enabled=" << http3_enabled;
 

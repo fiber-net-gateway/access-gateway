@@ -100,6 +100,8 @@ public:
         co_return;
     }
 
+    StatusSubscriber subscribe_status() override { return status_.subscribe(); }
+
     fiber::async::Task<std::expected<std::shared_ptr<const fiber::nacos::ConfigData>, fiber::nacos::ConfigServiceError>>
     get_config(std::string, std::string) noexcept override {
         co_return fiber::tests::make_config_data(fiber::nacos::ConfigState::NotFound);
@@ -173,6 +175,7 @@ private:
     std::string failed_subscription_;
     ProjectListReplay project_list_replay_ = ProjectListReplay::NotFound;
     bool tls_closed_replay_ = false;
+    fiber::async::Watch<fiber::nacos::ConfigServiceStatus> status_{fiber::nacos::ConfigServiceStatus{}};
 };
 
 class FakeNamingService final : public fiber::nacos::NamingService {
@@ -191,6 +194,8 @@ public:
         events_->add("naming.stop");
         co_return;
     }
+
+    StatusSubscriber subscribe_status() override { return status_.subscribe(); }
 
     fiber::async::Task<
             std::expected<std::shared_ptr<const fiber::nacos::ServiceInfo>, fiber::nacos::NamingServiceError>>
@@ -221,6 +226,7 @@ public:
 private:
     LifecycleEvents *events_ = nullptr;
     bool fail_start_ = false;
+    fiber::async::Watch<fiber::nacos::NamingServiceStatus> status_{fiber::nacos::NamingServiceStatus{}};
 };
 
 enum class FailurePoint : std::uint8_t {
