@@ -16,8 +16,9 @@ The repository is under active development in two first-class areas:
   Nacos-driven atomic TLS certificate snapshots plus project and route configuration,
   Host/Path/condition matching, RESPONSE execution with negotiated static gzip, PROXY execution,
   WebSocket tunneling, service
-  discovery, gray routing, CAT tracing, Prometheus metrics, and structured access logs. Production
-  script-corpus differential verification and final cutover gates are still in progress.
+  discovery, gray routing, CAT tracing, Prometheus metrics, and structured access logs. A limited
+  2026-07-31 test-environment syntax snapshot passed 352/352 decode-and-compile checks; full
+  production corpus differential verification and the final cutover gates are still incomplete.
 - **Console** — the first MySQL-backed vertical slice is available: deterministic migrations,
   development identity and single-deployment RBAC, environment-free domain project APIs, encrypted
   immutable configuration versions, optimistic locking, audit events, and a route-first React

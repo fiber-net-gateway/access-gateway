@@ -1285,18 +1285,24 @@ Fiber benchmark：
 
 **归属：本项目。**
 
-`script-corpus-differential.md` 记录当前脱敏快照 352/352 完成 decode 和 compiled snapshot
-构建；README 和 compatibility contract 仍说明完整生产 corpus、阶段 8 和切流门禁未完成。
-二者不一定矛盾，但表述容易被理解成同一个 gate。
+**实施状态：状态模型已解决（2026-08-17）；实际生产/切流 gate 仍为 `NOT_MET`。**
 
-建议每份差分记录包含：
+[`script-corpus-differential.md`](script-corpus-differential.md) 现在是唯一分层证据记录，明确
+区分：测试环境有限语法快照、外部配置 compile-only、Java golden、仓库内 C++ 请求样例、
+完整生产 corpus、阶段 8 全量差分和最终切流。原有 `352/352` 被严格限定为 2026-07-31
+测试环境配置的 decode + compiled snapshot，不再外推为 352 个项目的请求级差分；文档中
+引用但代码中不存在的 `MatchesProductionRewriteCorpus` 也已删除；仓库内聚合场景改名为
+`MatchesRecordedConditionAndTemplateSyntaxSnapshot`，rewrite 组件测试与 corpus 差分分别记账。
 
-- corpus 获取日期、脱敏版本和 SHA-256；
-- 项目/route/script/template 数量；
-- compile-only、Java golden、请求级 differential 分别完成多少；
-- 未覆盖能力和已知差异；
-- 是否满足当次阶段 gate；
-- 最终切流 gate 明确保持未完成，直到所有要求实际通过。
+记录新增 record ID、来源环境、导出日期、Java/C++ revision、脱敏流程版本、artifact SHA-256、
+各层完成数和 gate 结论。历史私有 artifact 未保留 SHA、脱敏流程也未版本化，因此明确写为
+“未记录”，不补造 digest、不把历史结果称为可独立复现。README、migration plan 和
+compatibility contract 统一引用该矩阵，并继续声明：完整生产 corpus、同一 request corpus
+的 Java/C++ 差分、生命周期/稳定性验证、灰度与回滚演练全部完成前，不满足生产切流条件。
+
+本项解决的是状态歧义和证据记账，不伪装成实际完成阶段 8。下一份私有差分记录仍必须先
+生成稳定 SHA-256 和脱敏版本，再记录项目/route/script/template 数量、未覆盖能力、获批差异、
+阶段 gate 与最终切流结论。本项不需要 Fiber 改动、Issue 或 gitlink 更新。
 
 ## 13. Fiber 能力核对结果
 

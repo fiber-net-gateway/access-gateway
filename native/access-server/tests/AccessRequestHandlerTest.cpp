@@ -735,7 +735,7 @@ TEST(AccessRequestHandlerTest, ExecutesPrecompiledLocalConditionAndTemplates) {
     EXPECT_EQ(response_body(fallback_response), "fallback");
 }
 
-TEST(AccessRequestHandlerTest, MatchesProductionConditionAndTemplateCorpus) {
+TEST(AccessRequestHandlerTest, MatchesRecordedConditionAndTemplateSyntaxSnapshot) {
     AccessScriptRuntime scripts;
     RouteConfig conditional =
             response_route("/corpus/*tail",
