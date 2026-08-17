@@ -7,6 +7,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <fiber/async/Spawn.h>
 #include <fiber/async/Yield.h>
@@ -204,6 +205,23 @@ std::string conditional_route_config(std::int32_t version, std::string_view host
            "\":{}},\"routes\":[{\"path\":\"/"
            "\",\"condition\":\"true\",\"service\":\"" +
            std::string(service) + "\"}]}";
+}
+
+fiber::access_server::ProjectConfig stored_route_config(std::int32_t version, std::string host, std::string service) {
+    fiber::access_server::RouteConfig route;
+    route.path = "/";
+    route.service = std::move(service);
+
+    fiber::access_server::ProjectConfig config;
+    config.version = version;
+    config.hosts = std::vector<fiber::access_server::HostConfigEntry>{
+            fiber::access_server::HostConfigEntry{
+                    .pattern = std::move(host),
+                    .strategy = fiber::access_server::HostStrategyConfig{},
+            },
+    };
+    config.routes = std::vector<std::optional<fiber::access_server::RouteConfig>>{std::move(route)};
+    return config;
 }
 
 TEST(AccessConfigWatcherTest, ReconcilesProjectsAndRetainsLastValidSnapshots) {
@@ -631,6 +649,117 @@ TEST(AccessConfigWatcherTest, KeepsOwnerLoopResponsiveAndCoalescesQueuedGenerati
         compiler_group.join();
     }
     EXPECT_TRUE(owner_progressed);
+    EXPECT_TRUE(completed);
+}
+
+TEST(AccessConfigWatcherTest, ClosedProjectSubscriptionCancelsStaleCompileAndRecoversAfterReconcile) {
+    fiber::event::EventLoop loop;
+    fiber::event::EventLoopGroup compiler_group(1);
+    fiber::access_server::AccessConfigCompiler compiler(compiler_group.at(0));
+    FakeConfigService service;
+    fiber::access_server::RouteConfigStore store;
+    auto seeded = store.apply("orders", stored_route_config(1, "v1.example.com", "orders"));
+    ASSERT_TRUE(seeded);
+    fiber::access_server::AccessConfigWatcher watcher(loop, compiler, service, store);
+    bool compiler_started = false;
+    bool completed = false;
+
+    fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
+        auto readiness = watcher.subscribe_readiness();
+        EXPECT_TRUE(watcher.start());
+        service.push(fiber::access_server::kProjectListDataId, "orders");
+        service.push("ploto.unified-access.route.orders", route_config(2, "v2.example.com", "orders"), "v2");
+
+        auto status = watcher.project_status("orders");
+        EXPECT_TRUE(status);
+        if (status) {
+            EXPECT_EQ(status->subscription_state, fiber::access_server::AccessProjectSubscriptionState::Subscribed);
+            EXPECT_EQ(status->config_state, fiber::access_server::AccessProjectConfigState::Processing);
+            EXPECT_EQ(status->generation, 1U);
+            EXPECT_EQ(status->observed_md5, "v2");
+        }
+
+        service.close("ploto.unified-access.route.orders");
+
+        status = watcher.project_status("orders");
+        EXPECT_TRUE(status);
+        if (status) {
+            EXPECT_EQ(status->subscription_state, fiber::access_server::AccessProjectSubscriptionState::Failed);
+            EXPECT_EQ(status->config_state, fiber::access_server::AccessProjectConfigState::AwaitingValue);
+            EXPECT_FALSE(status->first_value_received);
+            EXPECT_FALSE(status->synchronized);
+            EXPECT_EQ(status->retry_attempt, 0U);
+            EXPECT_EQ(status->next_retry_at, std::chrono::steady_clock::time_point{});
+            EXPECT_EQ(status->generation, 2U);
+            EXPECT_TRUE(status->last_failure);
+            if (status->last_failure) {
+                EXPECT_EQ(status->last_failure->stage,
+                          fiber::access_server::AccessConfigWatcherFailureStage::Subscription);
+                EXPECT_EQ(status->last_failure->io_error, fiber::common::IoErr::NotConnected);
+            }
+        }
+        EXPECT_EQ(watcher.active_project_subscription_count(), 0U);
+
+        auto snapshot = readiness.current();
+        EXPECT_TRUE(snapshot.value);
+        if (snapshot.value) {
+            EXPECT_EQ(snapshot.value->state, fiber::access_server::AccessConfigReadinessState::SynchronizingProjects);
+            EXPECT_EQ(snapshot.value->subscribed_projects, 0U);
+            EXPECT_EQ(snapshot.value->synchronized_projects, 0U);
+            EXPECT_EQ(snapshot.value->retrying_projects, 0U);
+        }
+
+        co_await yield_updates();
+        EXPECT_EQ(service.subscribe_attempts("ploto.unified-access.route.orders"), 1U);
+        EXPECT_EQ(store.current_version("orders"), 1);
+        EXPECT_TRUE(store.pin()->match_host("v1.example.com"));
+        EXPECT_FALSE(store.pin()->match_host("v2.example.com"));
+
+        service.prime("ploto.unified-access.route.orders", route_config(3, "v3.example.com", "orders"), "v3");
+        service.push_not_found(fiber::access_server::kProjectListDataId);
+        EXPECT_FALSE(watcher.project_status("orders"));
+        EXPECT_FALSE(store.current_version("orders"));
+        service.push(fiber::access_server::kProjectListDataId, "orders");
+
+        status = watcher.project_status("orders");
+        EXPECT_TRUE(status);
+        if (status) {
+            EXPECT_EQ(status->subscription_state, fiber::access_server::AccessProjectSubscriptionState::Subscribed);
+            EXPECT_EQ(status->config_state, fiber::access_server::AccessProjectConfigState::Processing);
+            EXPECT_EQ(status->generation, 1U);
+            EXPECT_EQ(status->observed_md5, "v3");
+        }
+        EXPECT_EQ(service.subscribe_attempts("ploto.unified-access.route.orders"), 2U);
+
+        compiler_group.start();
+        compiler_started = true;
+        co_await wait_for_readiness(readiness, snapshot, fiber::access_server::AccessConfigReadinessState::Ready);
+
+        status = watcher.project_status("orders");
+        EXPECT_TRUE(status);
+        if (status) {
+            EXPECT_EQ(status->subscription_state, fiber::access_server::AccessProjectSubscriptionState::Subscribed);
+            EXPECT_EQ(status->config_state, fiber::access_server::AccessProjectConfigState::Accepted);
+            EXPECT_EQ(status->observed_version, 3);
+            EXPECT_EQ(status->published_generation, 1U);
+        }
+        EXPECT_EQ(store.current_version("orders"), 3);
+        EXPECT_FALSE(store.pin()->match_host("v1.example.com"));
+        EXPECT_FALSE(store.pin()->match_host("v2.example.com"));
+        EXPECT_TRUE(store.pin()->match_host("v3.example.com"));
+        EXPECT_EQ(watcher.successful_updates(), 2U);
+        EXPECT_EQ(watcher.failed_updates(), 1U);
+
+        co_await watcher.shutdown();
+        completed = true;
+        loop.stop();
+    });
+
+    loop.run();
+    if (compiler_started) {
+        compiler_group.stop();
+        compiler_group.join();
+    }
     EXPECT_TRUE(completed);
 }
 

@@ -1256,6 +1256,13 @@ worker 完成资源创建后注入失败，验证首次 init fail closed、同�
 shutdown 和重复 shutdown 完成；既有测试继续证明 shutdown 不阻塞 control loop，且 worker group
 必须在释放完成前保持可服务。
 
+Project route 订阅竞态子项也已补齐：测试先保留一个已发布的 v1 快照，将 v2 编译确定性地挂起在
+尚未启动的 compiler EventLoop，然后注入非预期 `Closed`。测试验证关闭会推进 generation、取消
+编译、进入不可重试的 `Failed`、保持 readiness 为 synchronizing，并继续保留 v1；随后通过
+project-list 显式删除/重加和同步缓存回放恢复到新 entry。compiler 启动后旧 v2 completion 与新
+v3 job 依次返回，最终只有 v3 可以发布，从 watcher 集成层覆盖 subscription closed、stale
+generation、旧快照保留和显式 reconcile 恢复的组合边界。
+
 该层测试证明 coordinator 的取消/回滚协议，不等价于 concrete Nacos/CAT/watcher/listener 每个
 内部阶段都已完成故障注入。仍应优先增加：
 
