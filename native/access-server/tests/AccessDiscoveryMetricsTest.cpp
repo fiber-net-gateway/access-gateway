@@ -43,8 +43,60 @@ TEST(AccessDiscoveryMetricsTest, RendersFixedLifecycleEventsAndResourceAggregate
 
     async::spawn(loop, [&]() -> async::DetachedTask {
         observer.set_lifecycle(AccessNacosComponent::Client, AccessNacosLifecycleState::Running);
-        observer.set_lifecycle(AccessNacosComponent::ConfigService, AccessNacosLifecycleState::Failed);
+        observer.set_lifecycle(AccessNacosComponent::ConfigService, AccessNacosLifecycleState::Running);
         observer.set_lifecycle(AccessNacosComponent::NamingService, AccessNacosLifecycleState::Stopped);
+        observer.update_transport(AccessNacosTransportComponent::ConfigService,
+                                  AccessNacosTransportStatus{
+                                          .phase = AccessNacosTransportPhase::ReconnectBackoff,
+                                          .failure = AccessNacosTransportFailure::Transport,
+                                          .connection_ready_count = 2,
+                                          .disconnect_count = 2,
+                                          .reconnect_attempt_count = 3,
+                                          .subscriptions =
+                                                  {
+                                                          .active = 4,
+                                                          .pending = 2,
+                                                          .registered = 2,
+                                                          .synchronized = 1,
+                                                  },
+                                  });
+        const AccessDiscoveryStatus reconnecting = metrics.status();
+        EXPECT_EQ(reconnecting.lifecycle[static_cast<std::size_t>(AccessNacosComponent::ConfigService)],
+                  AccessNacosLifecycleState::Running);
+        EXPECT_FALSE(reconnecting.transport[static_cast<std::size_t>(AccessNacosTransportComponent::ConfigService)]
+                             .rpc_available);
+
+        observer.update_transport(AccessNacosTransportComponent::ConfigService,
+                                  AccessNacosTransportStatus{
+                                          .phase = AccessNacosTransportPhase::Ready,
+                                          .failure = AccessNacosTransportFailure::None,
+                                          .rpc_available = true,
+                                          .connection_ready_count = 3,
+                                          .disconnect_count = 2,
+                                          .reconnect_attempt_count = 3,
+                                          .subscriptions =
+                                                  {
+                                                          .active = 4,
+                                                          .registered = 4,
+                                                          .synchronized = 4,
+                                                  },
+                                  });
+        observer.update_transport(AccessNacosTransportComponent::NamingService,
+                                  AccessNacosTransportStatus{
+                                          .phase = AccessNacosTransportPhase::Stopped,
+                                          .failure = AccessNacosTransportFailure::Shutdown,
+                                          .connection_ready_count = 1,
+                                          .disconnect_count = 1,
+                                          .subscriptions =
+                                                  {
+                                                          .active = 5,
+                                                          .pending = 5,
+                                                  },
+                                          .registrations =
+                                                  {
+                                                          .pending = 1,
+                                                  },
+                                  });
 
         const AccessDiscoveryServiceAggregate first{
                 .ready = true,
@@ -84,10 +136,32 @@ TEST(AccessDiscoveryMetricsTest, RendersFixedLifecycleEventsAndResourceAggregate
               std::string::npos);
     EXPECT_NE(output.find("access_server_nacos_component_lifecycle{component=\"client\",state=\"created\"} 0"),
               std::string::npos);
-    EXPECT_NE(output.find("access_server_nacos_component_lifecycle{component=\"config_service\",state=\"failed\"} 1"),
+    EXPECT_NE(output.find("access_server_nacos_component_lifecycle{component=\"config_service\",state=\"running\"} 1"),
               std::string::npos);
     EXPECT_NE(output.find("access_server_nacos_component_lifecycle{component=\"naming_service\",state=\"stopped\"} 1"),
               std::string::npos);
+    EXPECT_NE(output.find("access_server_nacos_transport_phase{component=\"config_service\",phase=\"ready\"} 1"),
+              std::string::npos);
+    EXPECT_NE(
+            output.find(
+                    "access_server_nacos_transport_phase{component=\"config_service\",phase=\"reconnect_backoff\"} 0"),
+            std::string::npos);
+    EXPECT_NE(output.find("access_server_nacos_transport_failure{component=\"config_service\",category=\"none\"} 1"),
+              std::string::npos);
+    EXPECT_NE(
+            output.find("access_server_nacos_transport_failure{component=\"config_service\",category=\"transport\"} 0"),
+            std::string::npos);
+    EXPECT_NE(output.find("access_server_nacos_rpc_available{component=\"config_service\"} 1"), std::string::npos);
+    EXPECT_NE(output.find("access_server_nacos_rpc_available{component=\"naming_service\"} 0"), std::string::npos);
+    EXPECT_NE(
+            output.find("access_server_nacos_connection_events_total{component=\"config_service\",event=\"ready\"} 3"),
+            std::string::npos);
+    EXPECT_NE(output.find("access_server_nacos_connection_events_total{component=\"config_service\",event=\"reconnect_"
+                          "attempt\"} 3"),
+              std::string::npos);
+    EXPECT_NE(output.find("access_server_nacos_subscriptions{component=\"config_service\",state=\"synchronized\"} 4"),
+              std::string::npos);
+    EXPECT_NE(output.find("access_server_nacos_registrations{state=\"pending\"} 1"), std::string::npos);
     EXPECT_NE(output.find("access_server_discovery_events_total{operation=\"update\",result=\"success\",reason="
                           "\"changed\"} 3"),
               std::string::npos);
@@ -107,7 +181,7 @@ TEST(AccessDiscoveryMetricsTest, RendersFixedLifecycleEventsAndResourceAggregate
     EXPECT_EQ(output.find("orders-secret"), std::string::npos);
 }
 
-TEST(AccessDiscoveryMetricsTest, ReadersNeverObserveTornServiceAggregates) {
+TEST(AccessDiscoveryMetricsTest, ReadersNeverObserveTornStatusAggregates) {
     event::EventLoop loop;
     AccessDiscoveryMetrics metrics(loop);
     const AccessDiscoveryMetricsObserver observer = metrics.observer();
@@ -125,11 +199,20 @@ TEST(AccessDiscoveryMetricsTest, ReadersNeverObserveTornServiceAggregates) {
                     metric_value(output, "access_server_discovery_resources{resource=\"selectable_endpoint\"} ");
             const auto clusters =
                     metric_value(output, "access_server_discovery_resources{resource=\"logical_cluster\"} ");
+            const auto ready = metric_value(
+                    output,
+                    "access_server_nacos_connection_events_total{component=\"config_service\",event=\"ready\"} ");
+            const auto disconnected = metric_value(
+                    output,
+                    "access_server_nacos_connection_events_total{component=\"config_service\",event=\"disconnect\"} ");
+            const auto synchronized = metric_value(
+                    output, "access_server_nacos_subscriptions{component=\"config_service\",state=\"synchronized\"} ");
             if (first) {
                 first = false;
                 reader_started.count_down();
             }
-            if (!endpoints || !clusters || *endpoints != *clusters) {
+            if (!endpoints || !clusters || *endpoints != *clusters || !ready || !disconnected || !synchronized ||
+                *ready != *disconnected || *ready != *synchronized) {
                 inconsistent.store(true, std::memory_order_release);
                 break;
             }
@@ -144,6 +227,17 @@ TEST(AccessDiscoveryMetricsTest, ReadersNeverObserveTornServiceAggregates) {
         };
         observer.transition_service(AccessDiscoveryMetricEvent::ServiceUpdateChanged, {}, current);
         for (std::uint64_t value = 1; value <= 10000; ++value) {
+            observer.update_transport(AccessNacosTransportComponent::ConfigService,
+                                      AccessNacosTransportStatus{
+                                              .phase = AccessNacosTransportPhase::Ready,
+                                              .rpc_available = true,
+                                              .connection_ready_count = value,
+                                              .disconnect_count = value,
+                                              .subscriptions =
+                                                      {
+                                                              .synchronized = value,
+                                                      },
+                                      });
             AccessDiscoveryServiceAggregate next{
                     .ready = true,
                     .selectable_endpoints = value,

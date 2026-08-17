@@ -203,10 +203,30 @@ contains a DNS query, nameserver, route, Project, service, or endpoint label.
 
 This metric reports only access-server's calls into each component and their immediate start
 result. In particular, `running` means that `start()` succeeded; it does **not** mean that a Nacos
-transport is connected, authenticated, or currently able to reconnect. Fiber does not yet expose
-that evidence through its public API. The required upstream API is tracked by
-[fiber-gateway-cpp #27](https://github.com/fiber-net-gateway/fiber-gateway-cpp/issues/27). Until a
-pinned Fiber revision provides it, access-server intentionally emits no `connected` metric.
+transport is connected, authenticated, or currently able to reconnect.
+
+The pinned Fiber revision now exposes bounded latest-value ConfigService and NamingService status
+watches. `NacosStatusMonitor` subscribes on the Nacos owner EventLoop before either service starts
+and maps them into the following fixed-schema families:
+
+- `access_server_nacos_transport_phase{component,phase}` is one-hot for `config_service` and
+  `naming_service`, with phases `created`, `connecting`, `ready`, `reconnect_backoff`, `stopping`,
+  and `stopped`;
+- `access_server_nacos_transport_failure{component,category}` is one-hot for `none`,
+  `authentication_unavailable`, `transport`, `grpc_status`, `protocol`, `server`, and `shutdown`;
+  Fiber resets the current category to `none` on `ready`;
+- `access_server_nacos_rpc_available{component}` copies Fiber's explicit current RPC availability;
+  it is never inferred from the application lifecycle or transport phase;
+- `access_server_nacos_connection_events_total{component,event}` exposes Fiber's saturating
+  `ready`, `disconnect`, and `reconnect_attempt` counters;
+- `access_server_nacos_subscriptions{component,state}` exposes aggregate logical `active`,
+  `pending`, `registered`, and `synchronized` subscription counts;
+- `access_server_nacos_registrations{state}` exposes NamingService `active`, `pending`, and
+  `registered` registration handles.
+
+The status contains no identifier, address, credential, or error text. A running component can
+therefore correctly report `rpc_available=0` during initial connect or reconnect backoff. This
+transport readiness is also independent from Project synchronization and per-instance activation.
 
 `access_server_discovery_events_total{operation,result,reason}` uses this fixed matrix:
 
@@ -265,11 +285,17 @@ only during the short interval in which a real retirement is pending.
 ## Concurrency and cost
 
 The Nacos owner EventLoop is the sole writer for configuration snapshots, Nacos component
-lifecycle, service aggregates, and TLS retirement aggregates. Events use fixed atomic arrays.
-Configuration, discovery, and TLS aggregates use sequence-checked groups of atomics so metrics
-workers take lock-free coherent samples. Service selector destruction may occur on a request worker
-and updates only one relaxed atomic lease counter; it never posts, blocks, or calls back into
-ServiceDiscovery. TLS hazard clear posts only while a retirement is pending.
+lifecycle, transport status, service aggregates, and TLS retirement aggregates. Events use fixed
+atomic arrays. Configuration, transport/discovery, and TLS aggregates use sequence-checked groups
+of atomics so metrics workers take lock-free coherent samples. Service selector destruction may
+occur on a request worker and updates only one relaxed atomic lease counter; it never posts, blocks,
+or calls back into ServiceDiscovery. TLS hazard clear posts only while a retirement is pending.
+
+Status subscribers consume synchronous initial snapshots and are kept alive while ConfigService and
+NamingService run. Shutdown first lets those services publish their final status, then signals both
+subscriber tasks. Each task reads one final latest snapshot, destroys its subscriber on the owner
+loop, and joins before the Nacos client is stopped. Partial startup and repeated shutdown use the
+same bounded cleanup path.
 
 Route counts and byte totals are cached during the global snapshot's existing build traversal, so
 the configuration observer update is O(1). Discovery endpoint and cluster totals are derived from
@@ -288,9 +314,9 @@ the process logger remains alive until the runtime and EventLoops have been dest
 ## Remaining scope
 
 The implemented increments cover Project List/route outcomes, route readiness and snapshot
-size/age, bounded DNS configuration/health, application-owned Nacos lifecycle,
-service/endpoint/cluster/selector aggregates, TLS rotation/reclamation, worker-sharded
-proxy/DNS/pool/WebSocket outcomes, and async logging/CAT backlog and loss. Actual Nacos
-transport/reconnect state is the only remaining O-02 gap. Typed, authenticated, per-instance activation evidence is implemented
+size/age, bounded DNS configuration/health, application-owned Nacos lifecycle, typed Nacos
+transport/reconnect state, service/endpoint/cluster/selector aggregates, TLS rotation/reclamation,
+worker-sharded proxy/DNS/pool/WebSocket outcomes, and async logging/CAT backlog and loss. O-02 has
+no remaining schema item. Typed, authenticated, per-instance activation evidence is implemented
 separately from these metrics; see
 [`../../../docs/activation-evidence.md`](../../../docs/activation-evidence.md).

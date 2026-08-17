@@ -85,18 +85,57 @@ public:
     FakeConfigService(LifecycleEvents &events, bool fail_start, std::string failed_subscription,
                       ProjectListReplay project_list_replay, bool tls_closed_replay) :
         events_(&events), fail_start_(fail_start), failed_subscription_(std::move(failed_subscription)),
-        project_list_replay_(project_list_replay), tls_closed_replay_(tls_closed_replay) {}
+        project_list_replay_(project_list_replay), tls_closed_replay_(tls_closed_replay) {
+        status_publisher_ = status_.acquire_publisher();
+        FIBER_ASSERT(status_publisher_);
+    }
 
     fiber::common::IoResult<void> start() noexcept override {
         events_->add("config.start");
+        status_publisher_->publish(fiber::nacos::ConfigServiceStatus{
+                .connection =
+                        {
+                                .phase = fiber::nacos::NacosServicePhase::Connecting,
+                        },
+        });
         if (fail_start_) {
+            status_publisher_->publish(fiber::nacos::ConfigServiceStatus{
+                    .connection =
+                            {
+                                    .phase = fiber::nacos::NacosServicePhase::ReconnectBackoff,
+                                    .failure = fiber::nacos::NacosServiceFailureCategory::Transport,
+                                    .reconnect_attempt_count = 1,
+                            },
+            });
             return std::unexpected(fiber::common::IoErr::NotConnected);
         }
+        status_publisher_->publish(fiber::nacos::ConfigServiceStatus{
+                .connection =
+                        {
+                                .phase = fiber::nacos::NacosServicePhase::Ready,
+                                .rpc_available = true,
+                                .connection_ready_count = 1,
+                        },
+        });
         return {};
     }
 
     fiber::async::Task<void> shutdown() noexcept override {
         events_->add("config.stop");
+        status_publisher_->publish(fiber::nacos::ConfigServiceStatus{
+                .connection =
+                        {
+                                .phase = fiber::nacos::NacosServicePhase::Stopping,
+                                .failure = fiber::nacos::NacosServiceFailureCategory::Shutdown,
+                        },
+        });
+        status_publisher_->publish(fiber::nacos::ConfigServiceStatus{
+                .connection =
+                        {
+                                .phase = fiber::nacos::NacosServicePhase::Stopped,
+                                .failure = fiber::nacos::NacosServiceFailureCategory::Shutdown,
+                        },
+        });
         co_return;
     }
 
@@ -176,22 +215,62 @@ private:
     ProjectListReplay project_list_replay_ = ProjectListReplay::NotFound;
     bool tls_closed_replay_ = false;
     fiber::async::Watch<fiber::nacos::ConfigServiceStatus> status_{fiber::nacos::ConfigServiceStatus{}};
+    std::optional<fiber::async::Watch<fiber::nacos::ConfigServiceStatus>::Publisher> status_publisher_;
 };
 
 class FakeNamingService final : public fiber::nacos::NamingService {
 public:
-    FakeNamingService(LifecycleEvents &events, bool fail_start) : events_(&events), fail_start_(fail_start) {}
+    FakeNamingService(LifecycleEvents &events, bool fail_start) : events_(&events), fail_start_(fail_start) {
+        status_publisher_ = status_.acquire_publisher();
+        FIBER_ASSERT(status_publisher_);
+    }
 
     fiber::common::IoResult<void> start() noexcept override {
         events_->add("naming.start");
+        status_publisher_->publish(fiber::nacos::NamingServiceStatus{
+                .connection =
+                        {
+                                .phase = fiber::nacos::NacosServicePhase::Connecting,
+                        },
+        });
         if (fail_start_) {
+            status_publisher_->publish(fiber::nacos::NamingServiceStatus{
+                    .connection =
+                            {
+                                    .phase = fiber::nacos::NacosServicePhase::ReconnectBackoff,
+                                    .failure = fiber::nacos::NacosServiceFailureCategory::Transport,
+                                    .reconnect_attempt_count = 1,
+                            },
+            });
             return std::unexpected(fiber::common::IoErr::NotConnected);
         }
+        status_publisher_->publish(fiber::nacos::NamingServiceStatus{
+                .connection =
+                        {
+                                .phase = fiber::nacos::NacosServicePhase::Ready,
+                                .rpc_available = true,
+                                .connection_ready_count = 1,
+                        },
+        });
         return {};
     }
 
     fiber::async::Task<void> shutdown() noexcept override {
         events_->add("naming.stop");
+        status_publisher_->publish(fiber::nacos::NamingServiceStatus{
+                .connection =
+                        {
+                                .phase = fiber::nacos::NacosServicePhase::Stopping,
+                                .failure = fiber::nacos::NacosServiceFailureCategory::Shutdown,
+                        },
+        });
+        status_publisher_->publish(fiber::nacos::NamingServiceStatus{
+                .connection =
+                        {
+                                .phase = fiber::nacos::NacosServicePhase::Stopped,
+                                .failure = fiber::nacos::NacosServiceFailureCategory::Shutdown,
+                        },
+        });
         co_return;
     }
 
@@ -227,6 +306,7 @@ private:
     LifecycleEvents *events_ = nullptr;
     bool fail_start_ = false;
     fiber::async::Watch<fiber::nacos::NamingServiceStatus> status_{fiber::nacos::NamingServiceStatus{}};
+    std::optional<fiber::async::Watch<fiber::nacos::NamingServiceStatus>::Publisher> status_publisher_;
 };
 
 enum class FailurePoint : std::uint8_t {
