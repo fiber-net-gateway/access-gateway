@@ -7,7 +7,9 @@
 #include <vector>
 
 #include <fiber/async/Spawn.h>
+#include <fiber/async/TaskSelect.h>
 #include <fiber/async/WaitGroup.h>
+#include <fiber/async/WhenAny.h>
 #include <fiber/async/Yield.h>
 #include <fiber/event/EventLoop.h>
 
@@ -34,6 +36,8 @@ enum class LifecycleEvent {
 struct FakeControlPlane {
     std::vector<LifecycleEvent> *events = nullptr;
     std::optional<AccessServerRuntimeError> start_error;
+    bool suspend_start = false;
+    bool start_resumed = false;
     bool yield_shutdown = false;
 
     [[nodiscard]] AccessControlPlaneLifecycle lifecycle() noexcept {
@@ -48,6 +52,10 @@ struct FakeControlPlane {
     start(void *context) noexcept {
         auto &self = *static_cast<FakeControlPlane *>(context);
         self.events->push_back(LifecycleEvent::ControlStart);
+        if (self.suspend_start) {
+            co_await fiber::async::yield();
+            self.start_resumed = true;
+        }
         if (self.start_error) {
             co_return std::unexpected(*self.start_error);
         }
@@ -66,6 +74,8 @@ struct FakeControlPlane {
 struct FakeDataPlane {
     std::vector<LifecycleEvent> *events = nullptr;
     std::optional<AccessServerRuntimeError> start_error;
+    bool suspend_start = false;
+    bool start_resumed = false;
     bool yield_shutdown = false;
 
     [[nodiscard]] AccessDataPlaneLifecycle lifecycle() noexcept {
@@ -80,6 +90,10 @@ struct FakeDataPlane {
     start(void *context, AccessControlPlaneReady) noexcept {
         auto &self = *static_cast<FakeDataPlane *>(context);
         self.events->push_back(LifecycleEvent::DataStart);
+        if (self.suspend_start) {
+            co_await fiber::async::yield();
+            self.start_resumed = true;
+        }
         if (self.start_error) {
             co_return std::unexpected(*self.start_error);
         }
@@ -193,6 +207,71 @@ TEST(AccessRuntimeCoordinatorTest, RollsBackDataPlaneFailureInReverseOrder) {
 
     EXPECT_EQ(events, (std::vector<LifecycleEvent>{LifecycleEvent::ControlStart, LifecycleEvent::DataStart,
                                                    LifecycleEvent::DataShutdown, LifecycleEvent::ControlShutdown}));
+}
+
+TEST(AccessRuntimeCoordinatorTest, SignalRaceCancelsControlPlaneStartupBeforeRollback) {
+    std::vector<LifecycleEvent> events;
+    FakeControlPlane control{.events = &events, .suspend_start = true};
+    FakeDataPlane data{.events = &events};
+
+    run_on_loop([&]() -> fiber::async::Task<void> {
+        AccessRuntimeCoordinator coordinator(control.lifecycle(), data.lifecycle());
+
+        // main.cpp races this selectable task against SIGINT/SIGTERM. A yield is
+        // a deterministic already-scheduled signal winner without process-wide state.
+        auto startup = co_await fiber::async::when_any([&coordinator]() { return coordinator.start().select(); },
+                                                       []() { return fiber::async::yield(); });
+        EXPECT_TRUE(startup.is<1>());
+        if (!startup.is<1>()) {
+            auto started = std::move(startup).get<0>();
+            if (started) {
+                co_await coordinator.shutdown();
+            }
+            co_return;
+        }
+        std::move(startup).get<1>();
+
+        EXPECT_EQ(coordinator.state(), AccessServerRuntimeState::Starting);
+        EXPECT_FALSE(control.start_resumed);
+        co_await coordinator.shutdown();
+        co_await coordinator.shutdown();
+        EXPECT_EQ(coordinator.state(), AccessServerRuntimeState::Stopped);
+    });
+
+    EXPECT_EQ(events, (std::vector<LifecycleEvent>{LifecycleEvent::ControlStart, LifecycleEvent::ControlShutdown}));
+    EXPECT_FALSE(control.start_resumed);
+}
+
+TEST(AccessRuntimeCoordinatorTest, SignalRaceCancelsDataPlaneStartupBeforeReverseRollback) {
+    std::vector<LifecycleEvent> events;
+    FakeControlPlane control{.events = &events};
+    FakeDataPlane data{.events = &events, .suspend_start = true};
+
+    run_on_loop([&]() -> fiber::async::Task<void> {
+        AccessRuntimeCoordinator coordinator(control.lifecycle(), data.lifecycle());
+
+        auto startup = co_await fiber::async::when_any([&coordinator]() { return coordinator.start().select(); },
+                                                       []() { return fiber::async::yield(); });
+        EXPECT_TRUE(startup.is<1>());
+        if (!startup.is<1>()) {
+            auto started = std::move(startup).get<0>();
+            if (started) {
+                co_await coordinator.shutdown();
+            }
+            co_return;
+        }
+        std::move(startup).get<1>();
+
+        EXPECT_EQ(coordinator.state(), AccessServerRuntimeState::Starting);
+        EXPECT_FALSE(data.start_resumed);
+        co_await coordinator.shutdown();
+        co_await coordinator.shutdown();
+        EXPECT_EQ(coordinator.state(), AccessServerRuntimeState::Stopped);
+    });
+
+    EXPECT_EQ(events, (std::vector<LifecycleEvent>{LifecycleEvent::ControlStart, LifecycleEvent::DataStart,
+                                                   LifecycleEvent::DataShutdown, LifecycleEvent::ControlShutdown}));
+    EXPECT_FALSE(data.start_resumed);
 }
 
 TEST(AccessRuntimeCoordinatorTest, ShutdownBeforeStartReleasesOwnedControlPlaneOnly) {
