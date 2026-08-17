@@ -288,6 +288,12 @@ duplicate keys fail startup. Do not commit local environment files, private keys
 [`native/access-server/access-server.env.example`](native/access-server/access-server.env.example)
 for the full configuration surface.
 
+The TLS certificate subscription also runs when the business listener is explicitly plaintext,
+because a Route may reference an immutable certificate-version UUID as an upstream mTLS client
+identity. Plaintext listener startup does not wait for a TLS snapshot. Publish the TLS Release before
+the referencing Route; a missing identity rejects only that Route candidate and retains its previous
+snapshot. Nacos readback remains publication evidence, not instance activation evidence.
+
 Project HTTPS redirect is evaluated after HTTP Host/`:authority` selection and before route matching.
 With TLS enabled, the business listener does not accept plaintext HTTP, so a direct client cannot
 reach the redirect rule. To execute this rule behind an ingress, the trusted ingress must terminate

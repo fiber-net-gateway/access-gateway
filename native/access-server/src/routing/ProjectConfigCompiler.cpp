@@ -161,9 +161,11 @@ public:
                 if (!profile) {
                     return profile;
                 }
-                for (auto result: {add_optional(route.upstream_tls->ca_pem, "upstream_tls.ca_pem", 1U),
-                                   add_optional(route.upstream_tls->server_name, "upstream_tls.server_name"),
-                                   add_optional(route.upstream_tls->verify_name, "upstream_tls.verify_name")}) {
+                for (auto result:
+                     {add_optional(route.upstream_tls->ca_pem, "upstream_tls.ca_pem", 1U),
+                      add_optional(route.upstream_tls->server_name, "upstream_tls.server_name"),
+                      add_optional(route.upstream_tls->verify_name, "upstream_tls.verify_name"),
+                      add_optional(route.upstream_tls->client_identity_ref, "upstream_tls.client_identity_ref")}) {
                     if (!result) {
                         return result;
                     }

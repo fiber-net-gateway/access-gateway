@@ -1,5 +1,6 @@
 #include "UpstreamTlsTransportProfile.h"
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <fcntl.h>
@@ -66,6 +67,38 @@ bool valid_verify_name(std::string_view name) noexcept {
     return net::IpAddress::parse(name, ignored) || valid_dns_name(name);
 }
 
+bool ascii_hex(char value) noexcept {
+    return (value >= '0' && value <= '9') || (value >= 'a' && value <= 'f') || (value >= 'A' && value <= 'F');
+}
+
+bool valid_uuid(std::string_view value) noexcept {
+    if (value.size() != 36 || value[8] != '-' || value[13] != '-' || value[18] != '-' || value[23] != '-' ||
+        value[14] < '1' || value[14] > '8' ||
+        !((value[19] >= '8' && value[19] <= '9') || (value[19] >= 'a' && value[19] <= 'b') ||
+          (value[19] >= 'A' && value[19] <= 'B'))) {
+        return false;
+    }
+    for (std::size_t index = 0; index < value.size(); ++index) {
+        if (index == 8 || index == 13 || index == 18 || index == 23) {
+            continue;
+        }
+        if (!ascii_hex(value[index])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::string ascii_lower(std::string_view value) {
+    std::string result(value);
+    for (char &ch: result) {
+        if (ch >= 'A' && ch <= 'Z') {
+            ch = static_cast<char>(ch + ('a' - 'A'));
+        }
+    }
+    return result;
+}
+
 void append_u64(std::string &output, std::uint64_t value) {
     for (int shift = 56; shift >= 0; shift -= 8) {
         output.push_back(static_cast<char>((value >> shift) & 0xffU));
@@ -97,6 +130,25 @@ std::uint64_t profile_affinity(const RouteUpstreamTlsConfig &config) {
     std::uint64_t affinity = 0;
     for (std::size_t i = 0; i < sizeof(affinity); ++i) {
         affinity = (affinity << 8U) | digest[i];
+    }
+    return affinity == 0 ? 1 : affinity;
+}
+
+std::uint64_t identity_affinity(std::uint64_t transport_affinity,
+                                const UpstreamTlsClientIdentityDigest &identity_digest) noexcept {
+    std::array<std::uint8_t, sizeof(transport_affinity) + 32 + 8> canonical{};
+    constexpr std::array<std::uint8_t, 8> prefix{'m', 't', 'l', 's', '-', 'v', '1', 0};
+    std::copy(prefix.begin(), prefix.end(), canonical.begin());
+    for (std::size_t index = 0; index < sizeof(transport_affinity); ++index) {
+        canonical[prefix.size() + index] =
+                static_cast<std::uint8_t>(transport_affinity >> ((sizeof(transport_affinity) - index - 1U) * 8U));
+    }
+    std::copy(identity_digest.begin(), identity_digest.end(), canonical.begin() + prefix.size() + 8U);
+    std::array<std::uint8_t, SHA256_DIGEST_LENGTH> digest{};
+    SHA256(canonical.data(), canonical.size(), digest.data());
+    std::uint64_t affinity = 0;
+    for (std::size_t index = 0; index < sizeof(affinity); ++index) {
+        affinity = (affinity << 8U) | digest[index];
     }
     return affinity == 0 ? 1 : affinity;
 }
@@ -201,6 +253,14 @@ std::string_view UpstreamTlsTransportProfile::ca_file() const noexcept {
     return ca_bundle_ ? ca_bundle_->path() : std::string_view{};
 }
 
+std::string_view UpstreamTlsTransportProfile::client_certificate_file() const noexcept {
+    return client_identity_ ? client_identity_->certificate_path() : std::string_view{};
+}
+
+std::string_view UpstreamTlsTransportProfile::client_private_key_file() const noexcept {
+    return client_identity_ ? client_identity_->private_key_path() : std::string_view{};
+}
+
 std::optional<http::Http1ConnectionGroupKey>
 UpstreamTlsTransportProfile::connection_key(const http::Http1ConnectionGroupKey &base) const noexcept {
     const http::Http1ConnectionPoolAffinity affinity(pool_affinity_);
@@ -237,6 +297,10 @@ compile_upstream_tls_transport_profile(const RouteUpstreamTlsConfig &config, std
         return std::unexpected(profile_error(AccessConfigErrorCode::InvalidCombination, route_index, "verify_name",
                                              "verify_name cannot be used with LEGACY_INSECURE"));
     }
+    if (config.client_identity_ref && !valid_uuid(*config.client_identity_ref)) {
+        return std::unexpected(profile_error(AccessConfigErrorCode::InvalidField, route_index, "client_identity_ref",
+                                             "client_identity_ref must be a valid UUID"));
+    }
 
     UpstreamTlsTransportProfile result;
     result.generation_ = config.generation;
@@ -247,6 +311,9 @@ compile_upstream_tls_transport_profile(const RouteUpstreamTlsConfig &config, std
     }
     if (config.verify_name) {
         result.verify_name_ = *config.verify_name;
+    }
+    if (config.client_identity_ref) {
+        result.client_identity_ref_ = ascii_lower(*config.client_identity_ref);
     }
     if (has_ca) {
         auto sealed = seal_ca_bundle(*config.ca_pem, route_index);
@@ -260,6 +327,27 @@ compile_upstream_tls_transport_profile(const RouteUpstreamTlsConfig &config, std
         return std::unexpected(std::move(trusted.error()));
     }
     return result;
+}
+
+std::expected<void, AccessConfigError> bind_upstream_tls_client_identity(UpstreamTlsTransportProfile &profile,
+                                                                         UpstreamTlsClientIdentityResolver resolver,
+                                                                         std::size_t route_index) {
+    if (profile.client_identity_ref_.empty()) {
+        return {};
+    }
+    if (profile.client_identity_) {
+        return {};
+    }
+    std::shared_ptr<const UpstreamTlsClientIdentity> identity =
+            resolver ? resolver.find(resolver.context, profile.client_identity_ref_) : nullptr;
+    if (!identity) {
+        return std::unexpected(profile_error(AccessConfigErrorCode::MissingDependency, route_index,
+                                             "client_identity_ref",
+                                             "referenced upstream TLS client identity is unavailable"));
+    }
+    profile.pool_affinity_ = identity_affinity(profile.pool_affinity_, identity->digest());
+    profile.client_identity_ = std::move(identity);
+    return {};
 }
 
 } // namespace fiber::access_server

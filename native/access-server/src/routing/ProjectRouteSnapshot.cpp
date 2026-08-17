@@ -54,4 +54,19 @@ bool ProjectRouteSnapshot::ready_for_publish() const noexcept {
     return true;
 }
 
+std::expected<void, AccessConfigError> bind_project_tls_client_identities(ProjectRouteSnapshot &snapshot,
+                                                                          UpstreamTlsClientIdentityResolver resolver) {
+    for (std::size_t index = 0; index < snapshot.routes_.size(); ++index) {
+        CompiledRoute &route = snapshot.routes_[index];
+        if (!route.proxy || !route.proxy->upstream_tls) {
+            continue;
+        }
+        auto bound = bind_upstream_tls_client_identity(*route.proxy->upstream_tls, resolver, index);
+        if (!bound) {
+            return std::unexpected(std::move(bound.error()));
+        }
+    }
+    return {};
+}
+
 } // namespace fiber::access_server

@@ -140,6 +140,10 @@ public:
 
     [[nodiscard]] std::expected<void, nacos::ConfigServiceError> start();
     [[nodiscard]] async::Task<void> shutdown() noexcept;
+    // Replays only latest candidates rejected because their referenced TLS
+    // identity was absent. Called on the same owner loop after a TLS snapshot
+    // publication; published same-version routes remain ignored.
+    void retry_missing_tls_identities();
     [[nodiscard]] async::Watch<AccessConfigReadiness>::Subscriber subscribe_readiness() {
         return readiness_.subscribe();
     }

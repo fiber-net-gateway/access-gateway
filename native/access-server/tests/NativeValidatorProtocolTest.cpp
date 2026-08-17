@@ -90,6 +90,35 @@ TEST(NativeValidatorProtocolTest, CompilesMixedMethodAndJavaScriptRoutes) {
     EXPECT_NE(response.find(R"("routeCount":2)"), std::string::npos) << response;
 }
 
+TEST(NativeValidatorProtocolTest, ValidatesClientIdentityReferenceWithoutClaimingRuntimeResolution) {
+    constexpr std::string_view payload = R"({
+        "version": 5,
+        "host": {"example.com": {}},
+        "routes": [{
+            "path": "/secure",
+            "type": "PROXY",
+            "addresses": ["https://upstream.example"],
+            "upstream_tls": {
+                "generation": 1,
+                "client_identity_ref": "123e4567-e89b-42d3-a456-426614174000"
+            }
+        }]
+    })";
+    const std::string accepted =
+            fiber::access_server::process_native_validator_request(request("project_route", "example", payload));
+    EXPECT_NE(accepted.find(R"("valid":true)"), std::string::npos) << accepted;
+
+    constexpr std::string_view invalid_marker = "private-identity-marker";
+    const std::string invalid_payload =
+            R"({"host":{"example.com":{}},"routes":[{"path":"/","type":"PROXY","addresses":["https://upstream.example"],"upstream_tls":{"generation":1,"client_identity_ref":")" +
+            std::string(invalid_marker) + R"("}}]})";
+    const std::string rejected = fiber::access_server::process_native_validator_request(
+            request("project_route", "example", invalid_payload));
+    EXPECT_NE(rejected.find(R"("valid":false)"), std::string::npos) << rejected;
+    EXPECT_NE(rejected.find(R"("field":"routes[0].upstream_tls.client_identity_ref")"), std::string::npos) << rejected;
+    EXPECT_EQ(rejected.find(invalid_marker), std::string::npos) << rejected;
+}
+
 TEST(NativeValidatorProtocolTest, ReportsJavaScriptCompileErrorsWithoutEchoingSource) {
     constexpr std::string_view payload = R"({
         "host": {"example.com": {}},

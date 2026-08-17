@@ -126,6 +126,8 @@ private:
     friend class ProjectConfigCompiler;
     friend std::expected<void, AccessConfigError>
     bind_project_service_selectors(ProjectRouteSnapshot &snapshot, ProxyAddressSelectorFactory selector_factory);
+    friend std::expected<void, AccessConfigError>
+    bind_project_tls_client_identities(ProjectRouteSnapshot &snapshot, UpstreamTlsClientIdentityResolver resolver);
 
     std::string project_;
     std::string call_source_;
@@ -140,6 +142,9 @@ private:
     std::size_t static_response_bytes_ = 0;
     std::size_t compiled_program_count_ = 0;
 };
+
+[[nodiscard]] std::expected<void, AccessConfigError>
+bind_project_tls_client_identities(ProjectRouteSnapshot &snapshot, UpstreamTlsClientIdentityResolver resolver);
 
 } // namespace fiber::access_server
 

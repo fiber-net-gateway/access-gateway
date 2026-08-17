@@ -15,6 +15,7 @@ enum class AccessConfigErrorCode : std::uint8_t {
     InvalidCombination,
     Conflict,
     LimitExceeded,
+    MissingDependency,
 };
 
 struct AccessConfigError {

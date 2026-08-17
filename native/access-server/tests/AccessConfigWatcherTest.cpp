@@ -21,12 +21,28 @@
 
 #include "NacosSnapshotTestBuilder.h"
 #include "NacosSubscriptionStub.h"
+#include "TlsClientIdentityTestData.h"
 #include "observability/AccessConfigMetrics.h"
 #include "runtime/AccessConfigWatcher.h"
 
 namespace {
 
 using namespace std::chrono_literals;
+
+struct WatcherTlsIdentityResolverState {
+    std::string id;
+    std::shared_ptr<const fiber::access_server::UpstreamTlsClientIdentity> identity;
+
+    static std::shared_ptr<const fiber::access_server::UpstreamTlsClientIdentity> find(void *context,
+                                                                                       std::string_view id) noexcept {
+        auto &state = *static_cast<WatcherTlsIdentityResolverState *>(context);
+        return state.id == id ? state.identity : nullptr;
+    }
+
+    [[nodiscard]] fiber::access_server::UpstreamTlsClientIdentityResolver adapter() noexcept {
+        return {.context = this, .find = &find};
+    }
+};
 
 class FakeConfigService final : public fiber::nacos::ConfigService {
 public:
@@ -203,6 +219,13 @@ struct ActivationEvidenceCapture {
 std::string route_config(std::int32_t version, std::string_view host, std::string_view service) {
     return std::string("{\"version\":") + std::to_string(version) + ",\"host\":{\"" + std::string(host) +
            "\":{}},\"routes\":[{\"path\":\"/\",\"service\":\"" + std::string(service) + "\"}]}";
+}
+
+std::string mtls_route_config(std::int32_t version, std::string_view identity_ref) {
+    return std::string("{\"version\":") + std::to_string(version) +
+           ",\"host\":{\"secure.example.com\":{}},\"routes\":[{\"path\":\"/\",\"service\":\"orders\","
+           "\"upstream_tls\":{\"generation\":1,\"client_identity_ref\":\"" +
+           std::string(identity_ref) + "\"}}]}";
 }
 
 std::string conditional_route_config(std::int32_t version, std::string_view host, std::string_view service) {
@@ -557,6 +580,71 @@ TEST(AccessConfigWatcherTest, ReconcilesProjectsAndRetainsLastValidSnapshots) {
     EXPECT_NE(metrics.find("access_server_route_snapshot_resources{resource=\"project\"} 0"), std::string::npos);
     EXPECT_EQ(metrics.find("ploto.unified-access"), std::string::npos);
     EXPECT_EQ(metrics.find("example.com"), std::string::npos);
+}
+
+TEST(AccessConfigWatcherTest, RetriesLatestCandidateAfterTlsIdentityPublication) {
+    constexpr std::string_view identity_id = "123e4567-e89b-42d3-a456-426614174000";
+    fiber::event::EventLoop loop;
+    fiber::event::EventLoopGroup compiler_group(1);
+    fiber::access_server::AccessConfigCompiler compiler(compiler_group.at(0));
+    FakeConfigService service;
+    WatcherTlsIdentityResolverState identity_resolver;
+    fiber::access_server::RouteConfigStore store;
+    store.set_tls_client_identity_resolver(identity_resolver.adapter());
+    fiber::access_server::AccessConfigWatcher watcher(loop, compiler, service, store);
+    bool completed = false;
+    compiler_group.start();
+
+    fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
+        auto readiness = watcher.subscribe_readiness();
+        auto snapshot = readiness.current();
+        EXPECT_TRUE(watcher.start());
+        service.push(fiber::access_server::kProjectListDataId, "secure");
+        service.push("ploto.unified-access.route.secure", mtls_route_config(1, identity_id), "route-v1");
+        co_await wait_for_readiness(readiness, snapshot, fiber::access_server::AccessConfigReadinessState::Ready);
+        EXPECT_FALSE(store.current_version("secure"));
+        auto rejected = watcher.project_status("secure");
+        EXPECT_TRUE(rejected);
+        if (rejected && rejected->last_failure) {
+            EXPECT_EQ(rejected->last_failure->error.code,
+                      fiber::access_server::AccessConfigErrorCode::MissingDependency);
+            EXPECT_EQ(rejected->last_failure->error.message.find(identity_id), std::string::npos);
+        } else {
+            ADD_FAILURE() << "missing TLS dependency failure was not retained";
+        }
+
+        const std::string certificate_chain =
+                std::string(fiber::test::kClientCertPem) + fiber::test::kIntermediateCertPem;
+        auto identity =
+                fiber::access_server::UpstreamTlsClientIdentity::create(certificate_chain, fiber::test::kClientKeyPem);
+        EXPECT_TRUE(identity);
+        if (identity) {
+            identity_resolver.id = identity_id;
+            identity_resolver.identity = *identity;
+        }
+        watcher.retry_missing_tls_identities();
+        co_await wait_for_readiness(readiness, snapshot, fiber::access_server::AccessConfigReadinessState::Ready);
+
+        EXPECT_EQ(store.current_version("secure"), 1);
+        EXPECT_TRUE(store.pin()->match_host("secure.example.com"));
+        auto accepted = watcher.project_status("secure");
+        EXPECT_TRUE(accepted);
+        if (accepted) {
+            EXPECT_EQ(accepted->config_state, fiber::access_server::AccessProjectConfigState::Accepted);
+            EXPECT_FALSE(accepted->last_failure);
+        }
+        EXPECT_EQ(watcher.successful_updates(), 1U);
+        EXPECT_EQ(watcher.failed_updates(), 1U);
+
+        co_await watcher.shutdown();
+        completed = true;
+        loop.stop();
+    });
+
+    loop.run();
+    compiler_group.stop();
+    compiler_group.join();
+    EXPECT_TRUE(completed);
 }
 
 TEST(AccessConfigWatcherTest, InitialBatchIsolatesHostConflictsAndPublishesOnce) {

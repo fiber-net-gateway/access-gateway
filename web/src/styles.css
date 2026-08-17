@@ -2006,7 +2006,7 @@ button:disabled {
 
 .certificate-version-row {
   display: grid;
-  grid-template-columns: 42px 76px minmax(100px, 1fr) minmax(90px, auto);
+  grid-template-columns: 42px 76px minmax(100px, 0.7fr) minmax(180px, 1.4fr) minmax(90px, auto);
   gap: 8px;
   padding: 9px 10px;
   border: 1px solid #dce2da;
@@ -2685,6 +2685,10 @@ button:disabled {
   .network-cidr-grid,
   .network-policy-form fieldset,
   .certificate-card dl {
+    grid-template-columns: 1fr;
+  }
+
+  .certificate-version-row {
     grid-template-columns: 1fr;
   }
 

@@ -353,6 +353,7 @@ TEST(TlsCertificateConfigTest, RejectsUnknownDuplicateAndOversizedFields) {
 
 TEST(TlsCertificateStoreTest, PublishesOnlyIncreasingValidSnapshotsAndKeepsNoPemCopies) {
     auto [certificate_pem, private_key_pem] = make_test_identity();
+    auto [replacement_certificate_pem, replacement_private_key_pem] = make_test_identity();
     TlsCertificateSnapshotConfig config{
             .version = 7,
             .default_certificate = "version-a",
@@ -376,6 +377,14 @@ TEST(TlsCertificateStoreTest, PublishesOnlyIncreasingValidSnapshotsAndKeepsNoPem
         EXPECT_EQ(store.version(), 7u);
         EXPECT_EQ(store.certificate_count(), 1u);
         EXPECT_TRUE(store.bootstrap_identity());
+        auto resolver = store.client_identity_resolver();
+        auto identity = resolver.find(resolver.context, "version-a");
+        EXPECT_TRUE(identity);
+        if (identity) {
+            EXPECT_TRUE(identity->certificate_path().starts_with("/proc/self/fd/"));
+            EXPECT_TRUE(identity->private_key_path().starts_with("/proc/self/fd/"));
+        }
+        EXPECT_FALSE(resolver.find(resolver.context, "missing"));
 
         auto unchanged = store.apply(config, "wire-v7");
         EXPECT_TRUE(unchanged);
@@ -397,7 +406,20 @@ TEST(TlsCertificateStoreTest, PublishesOnlyIncreasingValidSnapshotsAndKeepsNoPem
         EXPECT_EQ(store.version(), 7u);
         EXPECT_EQ(store.certificate_count(), 1u);
 
+        config.version = 9;
+        config.certificates.front().certificate_pem = replacement_certificate_pem;
+        config.certificates.front().private_key_pem = replacement_private_key_pem;
+        auto immutable_id_conflict = store.apply(config, "wire-v9");
+        EXPECT_FALSE(immutable_id_conflict);
+        if (!immutable_id_conflict) {
+            EXPECT_EQ(immutable_id_conflict.error().code, TlsCertificateConfigErrorCode::VersionConflict);
+            EXPECT_EQ(immutable_id_conflict.error().field, "certificates.id");
+            EXPECT_EQ(immutable_id_conflict.error().message.find("version-a"), std::string::npos);
+        }
+        EXPECT_EQ(store.version(), 7u);
+
         config.version = 6;
+        config.certificates.front().certificate_pem = certificate_pem;
         config.certificates.front().private_key_pem = private_key_pem;
         auto older = store.apply(config, "wire-v6");
         EXPECT_TRUE(older);
@@ -406,6 +428,7 @@ TEST(TlsCertificateStoreTest, PublishesOnlyIncreasingValidSnapshotsAndKeepsNoPem
         }
         EXPECT_EQ(store.version(), 7u);
 
+        identity.reset();
         co_await store.shutdown();
         completed = true;
         owner_loop.stop();

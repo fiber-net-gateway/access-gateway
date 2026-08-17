@@ -282,6 +282,12 @@ export function CertificatesPage() {
                   <span>V{version.version}</span>
                   <span>{statusLabel[version.status]}</span>
                   <span>{new Date(version.notAfter).toLocaleDateString()}</span>
+                  <code
+                    aria-label={`证书版本 V${version.version} 的客户端身份引用`}
+                    title={`Route client_identity_ref: ${version.id}`}
+                  >
+                    {version.id}
+                  </code>
                   <code title={version.fingerprintSha256}>
                     {version.fingerprintSha256.slice(0, 12)}…
                   </code>

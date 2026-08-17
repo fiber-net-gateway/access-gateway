@@ -178,6 +178,10 @@ body。跨 workspace 或无权对象继续返回 404，防止枚举。
 - native 在 Nacos owner loop 上限制 4 MiB/128 证书/8192 SAN，解析链与私钥、检查当前有效期、
   构建 TCP/QUIC context 和排序索引后一次原子发布。空值、NotFound、非法候选、低 version 与
   same-version/different-content 都保留旧快照。
+- 每个不可变证书版本 ID 同时可作为 Route `upstream_tls.client_identity_ref`。native 为其证书链/
+  私钥创建只读 sealed memfd；Route snapshot 只持有共享材料和摘要，不持有 PEM 字符串。相同 ID 在后续
+  TLS snapshot 中对应不同内容时整份候选失败；轮换必须创建新证书版本 ID，并按 TLS Release → Route
+  顺序发布，删除时反序。
 - ClientHello 热路径只做原子读、ASCII 无分配比较与有序数组二分查找；每 worker 预分配 hazard
   slot 延长旧快照到 Fiber 完成 `SSL_set_SSL_CTX`，不使用 mutex、shared_ptr refcount 或字符串分配。
 - 逐实例 fingerprint 回执已实现；Release Published 后仍等待精确 active MD5/version，缺失或过期为 unknown。

@@ -30,7 +30,7 @@ Issue/PR，合入后再审查 revision range、运行完整回归并更新 gitli
 - 实施状态和验证结果持续更新至：2026-08-17；
 - `native/access-server/src/` 约 1.37 万行代码；
 - 当前 Release/ThinLTO 构建、CMake target、兼容文档和测试注册；
-- `ctest --test-dir native/build --output-on-failure -L access-server`：共发现 318 个测试，
+- `ctest --test-dir native/build --output-on-failure -L access-server`：共发现 323 个测试，
   0 失败，其中
   `ProductionScriptCorpusTest.CompilesExternalSnapshotWhenProvided` 因未设置私有 corpus 而
   skip；完整 CTest 共 1,936 项，0 失败、5 项按环境条件 skip。
@@ -82,7 +82,7 @@ Issue/PR，合入后再审查 revision range、运行完整回归并更新 gitli
 | S-01 | P0 | access log query 脱敏 | 本项目 | 否 |
 | S-02 | P0/P1 | trusted proxy 和真实客户端地址模型 | 本项目 | 否 |
 | S-03 | P1 | 上游 TLS peer/CA/SNI 验证配置 | 双方（已解决） | Fiber 前置与本项目接入均已完成 |
-| S-04 | P1 | 上游 mTLS 客户端身份 | 双方 | Fiber 前置已合入；本项目待接入 |
+| S-04 | P1 | 上游 mTLS 客户端身份 | 双方（已解决） | Fiber 前置与本项目接入均已完成 |
 | P-01 | P1 | 消除 service selection 双层共享锁 | 双方 | 通用 SWRR 上游化时需要 |
 | P-02 | P1/P2 | per-worker route snapshot pin | 本项目（已解决） | 否；进一步通用化才需要 |
 | P-03 | P1 | per-worker gray snapshot 和 PRNG | 本项目 | 否 |
@@ -138,10 +138,9 @@ Access Gateway 的配置、secret、生命周期、指标、兼容和端到端�
 
 | ID | 已完成边界 | 剩余工作 |
 | --- | --- | --- |
-| S-04 | Fiber client identity 加载、pool affinity 和上游组合测试已完成 | 设计 secret 引用和轮换生命周期，接入 route/环境模型、脱敏、连接隔离及 access-server loopback e2e |
 | P-01 | service directory 外层锁已移除 | 仅在 production profile 证明全局 SWRR mutex/O(N) scan 是瓶颈后，决定 sharding 或上游化；当前是条件项 |
 | O-02 | 除 Nacos transport 状态外的固定 schema 指标已完成；Fiber status watch 已合入 | 在 Nacos owner loop 订阅两个 status watch，映射 bounded metrics/readiness，正确关闭 subscriber，且不把 `running` 当 `connected` |
-| T-01 | 生命周期、竞态、TLS rotation、snapshot pin、DNS 和 Happy Eyeballs focused/integration 测试已补齐 | 完成 access-server mTLS/Nacos status 集成测试以及聚焦 ASAN/UBSAN/TSAN 和外部互操作故障注入 |
+| T-01 | 生命周期、竞态、TLS/mTLS rotation、snapshot pin、DNS 和 Happy Eyeballs focused/integration 测试已补齐 | 完成 Nacos status 集成测试以及聚焦 ASAN/UBSAN/TSAN 和外部互操作故障注入 |
 | T-02 | 五组 microbenchmark 已有基线 | 补 gray、TLS identity、loopback proxy/WebSocket、CAT/logging，以及新 Fiber DNS/connector 的集成基线 |
 | D-01 | gate 状态和证据格式已统一 | 获取完整生产 corpus，完成同请求 Java/C++ 差分、阶段 8、稳定性/灰度/回滚演练；在此之前切流 gate 仍为 `NOT_MET` |
 
@@ -517,7 +516,7 @@ custom CA、SNI 与独立验证名。该字段不属于 Java 基线，旧 Java �
 
 ### 6.4 S-04：上游 mTLS 客户端身份
 
-**归属：双方。Fiber 前置已解决，本项目尚未接入。**
+**归属：双方。实施状态：已解决（2026-08-17）。**
 
 当前 Fiber client context 已加载 PEM leaf/intermediate chain 和匹配私钥，初始化失败不会发布
 半初始化 context，也不会把路径或 OpenSSL error queue 暴露给调用方；HTTP/1 pool affinity 可隔离
@@ -529,13 +528,26 @@ custom CA、SNI 与独立验证名。该字段不属于 Java 基线，旧 Java �
 - 与 `verify_peer`、SNI、`verify_name` 和 ALPN 的组合测试；
 - 明确证书 context 的复用、热更新和连接池 affinity 语义。
 
-access-server 仍未提供任何 upstream mTLS 产品配置。剩余工作为：
+本项目复用现有加密 TLS Release 和 `ploto.unified-access.tls-certificates` 资源作为环境级身份目录，
+Route `upstream_tls.client_identity_ref` 只接受不可变 Certificate Version UUID。Route wire、API、审计、
+日志和错误均不含 PEM、私钥或 fd 路径；offline validator 只验证引用形状，不伪造实例解析成功。
 
-- route/环境级 mTLS 配置模型和 secret 引用；
-- 不回显私钥、证书 secret 和路径；
-- 为每个不可变 profile 分配非零 affinity，轮换时先发布新 context/generation，并让旧 lease 安全退役；
-- native codec、validator、server、web、fixture 和兼容文档；
-- 与确定性 loopback TLS upstream 的端到端验证。
+TLS compiler 为目录中的每个身份创建只读 sealed certificate/key memfd 和内容摘要。相同 ID 若在后续
+snapshot 中出现不同内容，整份候选以固定 `VersionConflict` 拒绝并保留旧目录，轮换必须使用新版本 ID。
+Route 候选返回 Nacos owner loop 后、冻结 snapshot 前解析引用；缺失身份用脱敏
+`MissingDependency` 拒绝并保留旧 Route。TLS snapshot 后续成功发布时，只强制重编译这类最新失败候选，
+不重试其他错误，也不绕过已发布 Route 的 same-version 忽略语义。TLS watcher 因而在下游 plaintext
+listener 模式也启动，但只有下游 TLS listener 才把 TLS snapshot readiness 作为进程启动门闩。
+
+不可变 Route snapshot 共享持有身份 sealed material；内容摘要与 route generation、trust、SNI 和验证名
+共同形成非零 pool affinity，并同时进入 connection key 与 client `TlsOptions`。轮换按 TLS Release
+新增身份 -> Route 引用新 UUID/generation 的顺序，删除反序；旧请求和 pool lease 保活旧材料直至安全
+退役。rnacos write/readback 仍只证明 published，逐实例 activation 必须依赖 typed evidence。
+
+native codec/validator、server compiler、web 预检和证书版本 ID 展示、fixture、双语用户文档及兼容
+契约已同步。测试覆盖 UUID/strict codec、offline structural validation、缺失依赖重试、同 ID 内容篡改、
+旧 snapshot pin、affinity 轮换，以及要求客户端证书的确定性 loopback TLS upstream；持证 Route 成功，
+匿名客户端在 upstream 侧被拒绝。
 
 ## 7. 请求热路径和性能
 
@@ -1469,12 +1481,10 @@ loopback TLS 握手覆盖 legacy insecure、custom CA 成功、custom CA 未知�
 相对测试运行时间生成，因此不会因静态 fixture 到期而失效。六个握手场景连续重复 100 次并通过
 ASAN/UBSAN；该子项不修改生产实现或 Fiber。
 
-上述测试已经覆盖 concrete control-plane 与 data-plane 启动阶段，但还不等价于请求并发及外部互操作
-均已完成故障注入。仍应优先增加：
-
-- access-server upstream mTLS 客户端证书、profile affinity 和 rotation 组合测试；Fiber 的基础
-  TLS 1.2/1.3/QUIC 组合矩阵已完成，但本项目的配置/secret/连接池集成尚不存在；
-- ASAN/UBSAN、聚焦 TSAN。
+access-server upstream mTLS 子项也已补齐：strict secret 引用、profile affinity、缺失身份重试、
+同 ID 篡改拒绝、rotation 下旧 snapshot 保活以及真实 loopback mutual-TLS 均有覆盖；Fiber 继续承载
+TLS 1.2/1.3/QUIC 的基础组合矩阵。上述测试仍不等价于所有请求并发及外部互操作故障注入，后续重点为
+ASAN/UBSAN、聚焦 TSAN 和外部实现互操作。
 
 Fiber DNS、connector、SWRR 或通用 RCU 有上游改动时，必须在 Fiber 仓库先补独立测试，再更新
 gitlink 并运行完整 Fiber/native 回归。
@@ -1542,7 +1552,7 @@ compatibility contract 统一引用该矩阵，并继续声明：完整生产 co
 | --- | --- | --- |
 | HTTP socket peer 地址 | `HttpExchange::remote_addr()` 已提供 | trusted proxy 在本项目实现 |
 | TLS peer/CA/SNI/验证名 | client context 已支持；pool key 已包含应用分配的 affinity | 进程级与 route profile 模型、隔离、validator/Console 接入已完成 |
-| TLS 客户端证书 | client context 已加载证书链/私钥；上游组合测试已覆盖 | 本项目补 secret/profile/轮换和 e2e |
+| TLS 客户端证书 | client context 已加载证书链/私钥；上游组合测试已覆盖 | secret 引用、轮换、隔离和 access-server e2e 已完成 |
 | 异步日志丢弃统计 | LoggerManager/Appender stats 已提供 | 本项目接 Prometheus |
 | EventLoop worker index | `group_index()` 已提供 | DNS resolver 可直接 O(1) 取 slot |
 | connection pool 异步 shutdown | `shutdown_async()` 已提供 | 保持使用 |
@@ -1583,13 +1593,14 @@ compatibility contract 统一引用该矩阵，并继续声明：完整生产 co
 1. L-06 系统 DNS 配置和多 nameserver（已完成）；
 2. P-08 Happy Eyeballs（已完成）；
 3. S-03 route 级 TLS transport profile 隔离与配置（已完成）；
-4. S-04 upstream mTLS client identity（Fiber 已合入；本项目待接入）；
+4. S-04 upstream mTLS client identity（已完成）；
 5. O-02 Nacos config/naming status watch（Fiber 已合入；本项目待接入）；
 6. P-01 通用 SWRR 上游化或 sharding；
 7. P-02 已由本项目完成；只有新 profile 证明 worker-local slot 仍是瓶颈或 Fiber 出现复用需求时，
    才开展通用 RCU 设计。
 
-前五项的 Fiber 前置已合入当前 pin；后续直接进入本项目接入、兼容和端到端测试。P-01/P-02
+前五项的 Fiber 前置已合入当前 pin；L-06、P-08、S-03、S-04 已完成本项目接入，O-02 仍待接入。
+P-01/P-02
 仍由 profile 或复用需求触发，不因为本次 gitlink 更新自动启动。任何后续 Fiber revision 更新仍须
 审阅 range、更新 provenance 并运行完整 Fiber/native 回归。
 
