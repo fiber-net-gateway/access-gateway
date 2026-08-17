@@ -66,6 +66,7 @@ AccessControlPlaneSupervisor::AccessControlPlaneSupervisor(event::EventLoop &coo
     naming_service_(std::move(dependencies.naming_service)), cat_lifecycle_(dependencies.cat_lifecycle),
     nacos_lifecycle_(dependencies.nacos_lifecycle), config_compiler_(compiler_loop),
     runtime_metrics_(nacos_loop, options.process_metrics),
+    nacos_status_monitor_(nacos_loop, *config_service_, *naming_service_, runtime_metrics_.discovery().observer()),
     activation_evidence_(nacos_loop, activation_identity(options.activation_endpoint)), gray_store_(http_workers),
     service_discovery_(nacos_loop, *naming_service_,
                        AccessServiceOps{.swrr_options = options.service_discovery.swrr_options,
@@ -176,6 +177,7 @@ async::DetachedTask AccessControlPlaneSupervisor::start_nacos_on_owner() noexcep
     FIBER_ASSERT(nacos_loop_->in_loop());
     FIBER_ASSERT(nacos_lifecycle_);
     const AccessDiscoveryMetricsObserver metrics = runtime_metrics_.discovery().observer();
+    nacos_status_monitor_.start();
     metrics.set_lifecycle(AccessNacosComponent::Client, AccessNacosLifecycleState::Starting);
     nacos_client_start_attempted_ = true;
     auto client_started = nacos_lifecycle_.start(nacos_lifecycle_.context);
@@ -283,6 +285,7 @@ async::DetachedTask AccessControlPlaneSupervisor::shutdown_nacos_on_owner() noex
         metrics.set_lifecycle(AccessNacosComponent::ConfigService, AccessNacosLifecycleState::Stopped);
         config_service_start_attempted_ = false;
     }
+    co_await nacos_status_monitor_.shutdown();
     if (nacos_client_start_attempted_) {
         metrics.set_lifecycle(AccessNacosComponent::Client, AccessNacosLifecycleState::Stopping);
         co_await nacos_lifecycle_.shutdown(nacos_lifecycle_.context);

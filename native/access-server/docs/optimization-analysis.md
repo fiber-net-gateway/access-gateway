@@ -30,10 +30,10 @@ Issue/PR，合入后再审查 revision range、运行完整回归并更新 gitli
 - 实施状态和验证结果持续更新至：2026-08-17；
 - `native/access-server/src/` 约 1.37 万行代码；
 - 当前 Release/ThinLTO 构建、CMake target、兼容文档和测试注册；
-- `ctest --test-dir native/build --output-on-failure -L access-server`：共发现 323 个测试，
+- `ctest --test-dir native/build --output-on-failure -L access-server`：共发现 324 个测试，
   0 失败，其中
   `ProductionScriptCorpusTest.CompilesExternalSnapshotWhenProvided` 因未设置私有 corpus 而
-  skip；完整 CTest 共 1,936 项，0 失败、5 项按环境条件 skip。
+  skip；完整 CTest 共 1,961 项，0 失败、5 项按环境条件 skip。
 
 本文将结论分成两类：
 
@@ -92,7 +92,7 @@ Issue/PR，合入后再审查 revision range、运行完整回归并更新 gitli
 | P-07 | P2 | Host matcher 高 fan-out 搜索优化 | 本项目 | 否 |
 | P-08 | P1 | Happy Eyeballs/交错多地址连接 | 双方（已解决） | Fiber 前置与本项目接入均已完成 |
 | O-01 | P0/P1 | 实例级配置激活证据 | 本项目（已解决） | 否 |
-| O-02 | P1 | 配置、发现、DNS、pool、proxy、TLS、日志指标 | 双方 | Fiber 前置已合入；Nacos 状态待接入 |
+| O-02 | P1 | 配置、发现、DNS、pool、proxy、TLS、日志指标 | 双方（已解决） | Fiber 前置与本项目接入均已完成 |
 | C-01 | P1/P2 | 大类职责拆分 | 本项目 | 否 |
 | C-02 | P2 | 拆分 `access_server_core` 构建边界 | 本项目 | 否 |
 | T-01 | P0/P1 | 生命周期、并发、sanitizer 测试 | 本项目 | Fiber 改动另跑上游测试 |
@@ -139,8 +139,7 @@ Access Gateway 的配置、secret、生命周期、指标、兼容和端到端�
 | ID | 已完成边界 | 剩余工作 |
 | --- | --- | --- |
 | P-01 | service directory 外层锁已移除 | 仅在 production profile 证明全局 SWRR mutex/O(N) scan 是瓶颈后，决定 sharding 或上游化；当前是条件项 |
-| O-02 | 除 Nacos transport 状态外的固定 schema 指标已完成；Fiber status watch 已合入 | 在 Nacos owner loop 订阅两个 status watch，映射 bounded metrics/readiness，正确关闭 subscriber，且不把 `running` 当 `connected` |
-| T-01 | 生命周期、竞态、TLS/mTLS rotation、snapshot pin、DNS 和 Happy Eyeballs focused/integration 测试已补齐 | 完成 Nacos status 集成测试以及聚焦 ASAN/UBSAN/TSAN 和外部互操作故障注入 |
+| T-01 | 生命周期、竞态、TLS/mTLS rotation、snapshot pin、DNS、Happy Eyeballs 和 Nacos status focused/integration 测试已补齐 | 完成聚焦 ASAN/UBSAN/TSAN 和外部互操作故障注入 |
 | T-02 | 五组 microbenchmark 已有基线 | 补 gray、TLS identity、loopback proxy/WebSocket、CAT/logging，以及新 Fiber DNS/connector 的集成基线 |
 | D-01 | gate 状态和证据格式已统一 | 获取完整生产 corpus，完成同请求 Java/C++ 差分、阶段 8、稳定性/灰度/回滚演练；在此之前切流 gate 仍为 `NOT_MET` |
 
@@ -1290,7 +1289,7 @@ Bearer 认证、分页和 `no-store`；server 的独立进程负责认证采集�
 
 **归属：双方。Fiber status watch 已提供；聚合与产品语义仍属于本项目。**
 
-**实施状态：部分解决（2026-08-17）。** 第一阶段新增 Nacos owner loop 单写、metrics worker
+**实施状态：已解决（2026-08-17）。** 第一阶段新增 Nacos owner loop 单写、metrics worker
 无锁读取的 `AccessConfigMetrics`。Project List/route 的 success、ignored、failure stage 使用
 编译期固定 `resource/result/reason` 表；readiness 使用固定 one-hot state 和六个 Project 聚合；
 每次实际发布同时更新 process-local snapshot generation、age、Project/Host/route/program 数量、
@@ -1325,14 +1324,15 @@ app key、host、collector/router 地址或 trace。内部阶段 loss 可能重�
 `start()` 成功只报告 `running`，绝不冒充 transport connected。当前 Fiber 已通过
 `ConfigService::subscribe_status()` 和 `NamingService::subscribe_status()` 提供 bounded latest-value
 watch，包含 `Created/Connecting/Ready/ReconnectBackoff/Stopping/Stopped`、固定 failure category、
-`rpc_available`、连接/断开/重连计数和订阅/注册聚合。O-02 当前唯一未覆盖项已经从“缺少上游 API”
-变成“本项目尚未消费该 API”：
+`rpc_available`、连接/断开/重连计数和订阅/注册聚合。新增 owner-loop-only
+`NacosStatusMonitor` 在两个 service start 前订阅并同步消费首值，随后把 Fiber enum 显式映射到
+application-owned 固定 schema。Prometheus 现在输出 transport phase、当前 failure、RPC availability、
+三个连接计数，以及 subscription/registration 聚合；没有地址、凭据、错误文本或运行时标识。
 
-建议增加：
-
-- 在 Nacos owner loop 订阅 config/naming status，映射到固定 schema transport/reconnect metrics；
-- 明确 subscriber 的 shutdown 次序，并保持 `running`、`rpc_available`、readiness 和 activation 四者独立；
-- 使用 fake watch 覆盖同步首值、reconnect、failure reset、停止和重复 shutdown。
+monitor 在 ConfigService/NamingService shutdown 期间继续消费状态；服务返回后再发停止信号，每个任务
+读取最终 latest snapshot、在 owner loop 析构 subscriber，并由 WaitGroup join 后才关闭 Nacos client。
+partial startup 与重复 shutdown 走同一清理路径。测试覆盖同步首值、reconnect backoff、failure 在 Ready
+清零、`running` 但 `rpc_available=false`、最终 Stopped、subscriber join 和重复 shutdown。
 
 project、route、cluster、host、Data ID、service name、header 和用户数据不得成为无界 label。
 Fiber 的 pool lease、LoggerManager queue stats 等已有接口应直接消费；只有确实缺少通用、
@@ -1486,6 +1486,11 @@ access-server upstream mTLS 子项也已补齐：strict secret 引用、profile 
 TLS 1.2/1.3/QUIC 的基础组合矩阵。上述测试仍不等价于所有请求并发及外部互操作故障注入，后续重点为
 ASAN/UBSAN、聚焦 TSAN 和外部实现互操作。
 
+Nacos status 集成子项也已补齐。fake latest-value watch 覆盖 start 前同步首值、Connecting、Ready、
+ReconnectBackoff、failure reset、订阅/注册聚合和最终 Stopped；supervisor 的所有 partial-start 回滚路径
+均在 subscriber join 后才停止 Nacos client，重复 shutdown 不会遗留等待任务。应用生命周期 `running`
+与 Fiber `rpc_available` 使用独立字段和指标，测试明确验证前者不会推导后者。
+
 Fiber DNS、connector、SWRR 或通用 RCU 有上游改动时，必须在 Fiber 仓库先补独立测试，再更新
 gitlink 并运行完整 Fiber/native 回归。
 
@@ -1558,7 +1563,7 @@ compatibility contract 统一引用该矩阵，并继续声明：完整生产 co
 | connection pool 异步 shutdown | `shutdown_async()` 已提供 | 保持使用 |
 | DNS resolver | 系统配置、最多三个 server、failover/rotation、TCP fallback 已提供 | 已在启动前严格加载并完整注入 HTTP worker；Nacos 仍为 IP-only |
 | Happy Eyeballs | `TcpConnector` 和 HTTP/1 多地址 connect 已提供 | 已接入单 lease、共享 deadline 的多地址竞速 |
-| Nacos 服务状态 | Config/Naming typed latest-value watch 已提供 | 本项目尚未映射 transport/reconnect metrics |
+| Nacos 服务状态 | Config/Naming typed latest-value watch 已提供 | 已映射 bounded transport/reconnect metrics，并在服务后、client 前关闭 subscriber |
 | 通用 SWRR | 当前实现位于 access-server | 稳定后考虑上游化 |
 | 通用 loop-local RCU | 当前未作为公共能力使用 | P-02 已用项目内 worker slot 解决；复用需求或剩余瓶颈成立时再设计 |
 
@@ -1594,12 +1599,12 @@ compatibility contract 统一引用该矩阵，并继续声明：完整生产 co
 2. P-08 Happy Eyeballs（已完成）；
 3. S-03 route 级 TLS transport profile 隔离与配置（已完成）；
 4. S-04 upstream mTLS client identity（已完成）；
-5. O-02 Nacos config/naming status watch（Fiber 已合入；本项目待接入）；
+5. O-02 Nacos config/naming status watch（已完成）；
 6. P-01 通用 SWRR 上游化或 sharding；
 7. P-02 已由本项目完成；只有新 profile 证明 worker-local slot 仍是瓶颈或 Fiber 出现复用需求时，
    才开展通用 RCU 设计。
 
-前五项的 Fiber 前置已合入当前 pin；L-06、P-08、S-03、S-04 已完成本项目接入，O-02 仍待接入。
+前五项的 Fiber 前置及本项目接入均已完成。
 P-01/P-02
 仍由 profile 或复用需求触发，不因为本次 gitlink 更新自动启动。任何后续 Fiber revision 更新仍须
 审阅 range、更新 provenance 并运行完整 Fiber/native 回归。

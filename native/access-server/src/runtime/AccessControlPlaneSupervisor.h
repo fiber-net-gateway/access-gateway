@@ -10,6 +10,7 @@
 #include "AccessServiceDiscovery.h"
 #include "GrayConfigWatcher.h"
 #include "GrayMatchStore.h"
+#include "NacosStatusMonitor.h"
 #include "RouteConfigStore.h"
 #include "TlsCertificateStore.h"
 #include "TlsCertificateWatcher.h"
@@ -132,6 +133,7 @@ private:
     AccessControlResourceLifecycle nacos_lifecycle_;
     AccessConfigCompiler config_compiler_;
     AccessRuntimeMetrics runtime_metrics_;
+    NacosStatusMonitor nacos_status_monitor_;
     AccessActivationEvidenceStore activation_evidence_;
     GrayMatchStore gray_store_;
     AccessServiceDiscovery service_discovery_;
