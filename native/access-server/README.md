@@ -186,6 +186,8 @@ cp native/access-server/access-server.env.example access-server.env
   自定义 CA bundle 校验；
 - upstream hostname DNS 默认在 EventLoop 启动前严格读取 `/etc/resolv.conf`，将最多三个
   nameserver 及 timeout/attempts/rotate 完整注入每个 HTTP worker；不会隐式回退公共 DNS；
+- 多地址 upstream 默认使用单一 3 秒 deadline 的 Happy Eyeballs 连接，250 ms 后交错启动另一
+  地址族，最多并发 2 个 TCP attempt；一次逻辑连接只持有一个 pool lease；
 - 客户端地址默认取 socket peer，忽略所有 forwarding header；
 - access log 默认只记录经安全编码的 path，不记录 query value；正常请求默认采样率为
   10000 bps（全量），失败请求始终保留；
@@ -208,6 +210,14 @@ fail closed。`search`/`ndots` 等尚未执行的设置会显式进入固定维�
 `ACCESS_SERVER_DNS_MODE=override` 则要求通过 `ACCESS_SERVER_DNS_SERVERS` 提供 1-3 个逗号分隔的
 unicast IPv4/IPv6 literal，端口固定为 53。两种模式均不会添加 `8.8.8.8` 或其他隐式 fallback。
 解析结果在进程生命周期内不可变；修改系统 resolver 文件需要滚动重启。
+
+`ACCESS_SERVER_UPSTREAM_CONNECT_TIMEOUT_MILLIS` 是一次 selected-upstream 连接的共享总期限，范围
+为 10-60000 ms。`ACCESS_SERVER_HAPPY_EYEBALLS_ENABLED=true`（默认）在 DNS 返回多个地址时调用
+Fiber 固定容量 connector；`ACCESS_SERVER_HAPPY_EYEBALLS_DELAY_MILLIS` 范围为 10-2000 ms 且不得
+超过总期限，`MAX_CONCURRENT_ATTEMPTS` 范围为 1-4，`FIRST_ADDRESS_FAMILY_COUNT` 范围为 1-16，
+地址族策略只能为 `v6_first` 或 `v4_first`。所有 TCP attempt 共用上述期限；首个成功者继续 TLS，
+其余 attempt 被取消并关闭。连接池只为整次竞速取得一个 lease，外层 service selection 仍最多执行
+Java 兼容的三次 endpoint 尝试。显式关闭 Happy Eyeballs 时保留逐地址串行兼容路径。
 
 `NACOS_SERVER_ADDRESSES` 当前仍要求逗号分隔的 IP literal。Nacos 因而不借用 HTTP worker 的
 loop-affine resolver；若未来开放 hostname，必须在 Nacos owner loop 建立并按 service/client 之前

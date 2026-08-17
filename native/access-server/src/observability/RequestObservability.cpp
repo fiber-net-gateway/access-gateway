@@ -285,6 +285,17 @@ void RequestObservability::record_proxy_connection(const ProxyConnectionObservat
     if (observation.create_failure != 0) {
         metrics_->proxy_connect_attempted(AccessProxyConnectResult::CreateFailure, observation.create_failure);
     }
+    if (observation.connect_candidates != 0) {
+        metrics_->proxy_connect_candidates_observed(observation.connect_candidates);
+    }
+    if (observation.happy_eyeballs_success != 0) {
+        metrics_->happy_eyeballs_finished(AccessHappyEyeballsResult::Success,
+                                          observation.happy_eyeballs_success);
+    }
+    if (observation.happy_eyeballs_failure != 0) {
+        metrics_->happy_eyeballs_finished(AccessHappyEyeballsResult::Failure,
+                                          observation.happy_eyeballs_failure);
+    }
 }
 
 void RequestObservability::record_websocket_handshake(AccessWebSocketHandshakeResult result) noexcept {

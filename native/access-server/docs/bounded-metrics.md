@@ -58,7 +58,16 @@ owner. It feeds:
 - `access_server_proxy_dns_resolutions_total{result}` with `success`, `empty`, `failure`, or
   `unavailable`; literal IP targets and reusable pool hits do not perform or increment DNS;
 - `access_server_proxy_connect_attempts_total{result}` with `success`, `failure`, `tls_failure`, or
-  `create_failure` for new transport construction and connection attempts.
+  `create_failure` for new logical transport construction and connection outcomes;
+- `access_server_proxy_connect_candidates_total` counts bounded resolved addresses supplied to new
+  connections, without an address or hostname label;
+- `access_server_proxy_happy_eyeballs_total{result}` uses `success` and `failure` only when a
+  multi-address race is actually started. A pool hit, IP literal, single-address DNS result, or
+  explicitly disabled race does not increment it.
+
+A Happy Eyeballs race occupies one pool lease and reports one logical connect outcome even when
+Fiber started more than one TCP attempt. This keeps request-level success/failure accounting stable;
+the candidate counter exposes the bounded fan-out without inventing per-address labels.
 
 WebSocket routing exposes `access_server_websocket_handshakes_total{result}` with `accepted`,
 `rejected`, or `failed`, plus `access_server_websocket_sessions_total{result}` with `closed` or

@@ -976,7 +976,8 @@ async::Task<Result<void>> ProxyExecutor::execute_impl(http::HttpExchange &exchan
         ProxyAttemptMetricScope attempt_metrics(telemetry);
 
         auto connected = co_await acquire_proxy_upstream_connection(pool_, dns_resolver_, *selected->connection_key,
-                                                                    options_.upstream_tls, options_.connect_timeout);
+                                                                    options_.upstream_tls, options_.connect_timeout,
+                                                                    options_.happy_eyeballs);
         if (!connected) {
             telemetry.record_proxy_connection(connected.error().observation);
             ProxyFailure connect_failure = from_connect_error(connected.error());

@@ -99,7 +99,12 @@ AccessRuntimeFactory::create(event::EventLoop &accept_loop, event::EventLoop &na
                         dns_options->metrics = control_plane->runtime_metrics().dns().observer();
                         return std::move(*dns_options);
                     }(),
-                    .upstream_tls = config.upstream_tls_client_policy(),
+                    .executor =
+                            ProxyExecutorOptions{
+                                    .connect_timeout = config.upstream_connect_timeout(),
+                                    .happy_eyeballs = config.happy_eyeballs_policy(),
+                                    .upstream_tls = config.upstream_tls_client_policy(),
+                            },
                     .default_max_request_body_size = config.default_max_request_body_size(),
                     .test_mode = config.test_mode(),
             }));

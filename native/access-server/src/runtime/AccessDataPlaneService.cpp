@@ -62,10 +62,7 @@ AccessDataPlaneService::start(AccessControlPlaneReady ready) noexcept {
                     .dns = std::move(options_.dns),
                     .dns_resolver_factory = options_.dns_resolver_factory,
                     .script_adapter = script_runtime_.request_adapter(),
-                    .executor =
-                            ProxyExecutorOptions{
-                                    .upstream_tls = std::move(options_.upstream_tls),
-                            },
+                    .executor = std::move(options_.executor),
                     .runtime_metrics = runtime_metrics_,
                     .activation_evidence = activation_evidence_,
                     .activation_endpoint = std::move(options_.activation_endpoint),

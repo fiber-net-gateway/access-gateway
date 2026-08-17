@@ -107,6 +107,15 @@ void AccessServerMetrics::Worker::proxy_connect_attempted(AccessProxyConnectResu
     proxy_connect_attempts_[metric_index(result, AccessProxyConnectResult::Count)].add(count);
 }
 
+void AccessServerMetrics::Worker::proxy_connect_candidates_observed(std::uint64_t count) noexcept {
+    proxy_connect_candidates_.add(count);
+}
+
+void AccessServerMetrics::Worker::happy_eyeballs_finished(AccessHappyEyeballsResult result,
+                                                          std::uint64_t count) noexcept {
+    happy_eyeballs_[metric_index(result, AccessHappyEyeballsResult::Count)].add(count);
+}
+
 void AccessServerMetrics::Worker::websocket_handshake_finished(AccessWebSocketHandshakeResult result) noexcept {
     websocket_handshakes_[metric_index(result, AccessWebSocketHandshakeResult::Count)].inc();
 }
@@ -189,6 +198,10 @@ bool AccessServerMetrics::initialize(event::EventLoopGroup &worker_group) {
             "tls_failure",
             "create_failure",
     };
+    constexpr std::array<std::string_view, 2> kHappyEyeballsResults{
+            "success",
+            "failure",
+    };
     constexpr std::array<std::string_view, 3> kWebSocketHandshakeResults{
             "accepted",
             "rejected",
@@ -208,6 +221,7 @@ bool AccessServerMetrics::initialize(event::EventLoopGroup &worker_group) {
     static_assert(kProxyPoolResults.size() == static_cast<std::size_t>(AccessProxyPoolResult::Count));
     static_assert(kProxyDnsResults.size() == static_cast<std::size_t>(AccessProxyDnsResult::Count));
     static_assert(kProxyConnectResults.size() == static_cast<std::size_t>(AccessProxyConnectResult::Count));
+    static_assert(kHappyEyeballsResults.size() == static_cast<std::size_t>(AccessHappyEyeballsResult::Count));
     static_assert(kWebSocketHandshakeResults.size() == static_cast<std::size_t>(AccessWebSocketHandshakeResult::Count));
     static_assert(kWebSocketSessionResults.size() == static_cast<std::size_t>(AccessWebSocketSessionResult::Count));
 
@@ -241,6 +255,12 @@ bool AccessServerMetrics::initialize(event::EventLoopGroup &worker_group) {
     auto proxy_connect_attempts =
             registry_.register_counter("access_server_proxy_connect_attempts_total",
                                        "New upstream transport connection attempt outcomes.", kResultLabel);
+    auto proxy_connect_candidates = registry_.register_counter(
+            "access_server_proxy_connect_candidates_total",
+            "Address candidates supplied to new upstream connections.");
+    auto happy_eyeballs = registry_.register_counter(
+            "access_server_proxy_happy_eyeballs_total", "Multi-address upstream connection race outcomes.",
+            kResultLabel);
     auto websocket_handshakes = registry_.register_counter("access_server_websocket_handshakes_total",
                                                            "WebSocket proxy handshake outcomes.", kResultLabel);
     auto websocket_sessions = registry_.register_counter("access_server_websocket_sessions_total",
@@ -250,7 +270,8 @@ bool AccessServerMetrics::initialize(event::EventLoopGroup &worker_group) {
             prometheus::GaugeReduction::Sum);
     if (!requests || !response_compression || !duration || !inflight || !proxy_executions || !proxy_attempts ||
         !proxy_attempts_inflight || !proxy_failures || !proxy_pool_acquires || !proxy_dns_resolutions ||
-        !proxy_connect_attempts || !websocket_handshakes || !websocket_sessions || !websocket_sessions_inflight) {
+        !proxy_connect_attempts || !proxy_connect_candidates || !happy_eyeballs || !websocket_handshakes ||
+        !websocket_sessions || !websocket_sessions_inflight) {
         return false;
     }
 
@@ -262,6 +283,7 @@ bool AccessServerMetrics::initialize(event::EventLoopGroup &worker_group) {
     std::array<prometheus::SeriesId, kProxyPoolResults.size()> proxy_pool_series;
     std::array<prometheus::SeriesId, kProxyDnsResults.size()> proxy_dns_series;
     std::array<prometheus::SeriesId, kProxyConnectResults.size()> proxy_connect_series;
+    std::array<prometheus::SeriesId, kHappyEyeballsResults.size()> happy_eyeballs_series;
     std::array<prometheus::SeriesId, kWebSocketHandshakeResults.size()> websocket_handshake_series;
     std::array<prometheus::SeriesId, kWebSocketSessionResults.size()> websocket_session_series;
     if (!register_labeled_series(registry_, *requests, kRequestResults, request_series) ||
@@ -272,6 +294,7 @@ bool AccessServerMetrics::initialize(event::EventLoopGroup &worker_group) {
         !register_labeled_series(registry_, *proxy_pool_acquires, kProxyPoolResults, proxy_pool_series) ||
         !register_labeled_series(registry_, *proxy_dns_resolutions, kProxyDnsResults, proxy_dns_series) ||
         !register_labeled_series(registry_, *proxy_connect_attempts, kProxyConnectResults, proxy_connect_series) ||
+        !register_labeled_series(registry_, *happy_eyeballs, kHappyEyeballsResults, happy_eyeballs_series) ||
         !register_labeled_series(registry_, *websocket_handshakes, kWebSocketHandshakeResults,
                                  websocket_handshake_series) ||
         !register_labeled_series(registry_, *websocket_sessions, kWebSocketSessionResults, websocket_session_series)) {
@@ -280,8 +303,9 @@ bool AccessServerMetrics::initialize(event::EventLoopGroup &worker_group) {
     auto duration_series = registry_.register_series(*duration);
     auto inflight_series = registry_.register_series(*inflight);
     auto proxy_attempts_inflight_series = registry_.register_series(*proxy_attempts_inflight);
+    auto proxy_connect_candidates_series = registry_.register_series(*proxy_connect_candidates);
     auto websocket_sessions_inflight_series = registry_.register_series(*websocket_sessions_inflight);
-    if (!duration_series || !inflight_series || !proxy_attempts_inflight_series ||
+    if (!duration_series || !inflight_series || !proxy_attempts_inflight_series || !proxy_connect_candidates_series ||
         !websocket_sessions_inflight_series) {
         return false;
     }
@@ -314,6 +338,7 @@ bool AccessServerMetrics::initialize(event::EventLoopGroup &worker_group) {
             !bind_counters(*shard, proxy_pool_series, worker.proxy_pool_acquires_) ||
             !bind_counters(*shard, proxy_dns_series, worker.proxy_dns_resolutions_) ||
             !bind_counters(*shard, proxy_connect_series, worker.proxy_connect_attempts_) ||
+            !bind_counters(*shard, happy_eyeballs_series, worker.happy_eyeballs_) ||
             !bind_counters(*shard, websocket_handshake_series, worker.websocket_handshakes_) ||
             !bind_counters(*shard, websocket_session_series, worker.websocket_sessions_)) {
             return false;
@@ -321,14 +346,17 @@ bool AccessServerMetrics::initialize(event::EventLoopGroup &worker_group) {
         auto duration_value = shard->histogram(*duration_series);
         auto inflight_value = shard->gauge(*inflight_series);
         auto proxy_attempts_inflight_value = shard->gauge(*proxy_attempts_inflight_series);
+        auto proxy_connect_candidates_value = shard->counter(*proxy_connect_candidates_series);
         auto websocket_sessions_inflight_value = shard->gauge(*websocket_sessions_inflight_series);
         if (!duration_value || !inflight_value || !proxy_attempts_inflight_value ||
+            !proxy_connect_candidates_value ||
             !websocket_sessions_inflight_value) {
             return false;
         }
         worker.request_duration_ = *duration_value;
         worker.inflight_ = *inflight_value;
         worker.proxy_attempts_inflight_ = *proxy_attempts_inflight_value;
+        worker.proxy_connect_candidates_ = *proxy_connect_candidates_value;
         worker.websocket_sessions_inflight_ = *websocket_sessions_inflight_value;
     }
     return true;

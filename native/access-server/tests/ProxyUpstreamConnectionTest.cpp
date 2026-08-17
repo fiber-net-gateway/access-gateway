@@ -331,12 +331,14 @@ ConnectionScenarioResult run_tls_scenario(const std::string &certificate_path, c
 
 fiber::async::DetachedTask run_ip_scenario(fiber::http::StealableHttp1ConnectionPoolSet *pool,
                                            fiber::http::Http1ConnectionGroupKey key, ResolverState *resolver,
-                                           std::promise<ConnectionScenarioResult> *promise) {
+                                           std::promise<ConnectionScenarioResult> *promise,
+                                           fiber::access_server::ProxyHappyEyeballsPolicy happy_eyeballs = {}) {
     ConnectionScenarioResult result;
     const fiber::access_server::ProxyDnsResolver dns_resolver =
             resolver ? resolver_adapter(*resolver) : fiber::access_server::ProxyDnsResolver{};
     auto connected = co_await fiber::access_server::acquire_proxy_upstream_connection(*pool, dns_resolver, key,
-                                                                                      kLegacyUpstreamTls, 500ms);
+                                                                                      kLegacyUpstreamTls, 500ms,
+                                                                                      happy_eyeballs);
     result.resolver_calls = resolver ? resolver->calls : 0;
     if (!connected) {
         result.error = connected.error().io_error;
@@ -484,7 +486,7 @@ TEST(ProxyUpstreamConnectionTest, IpKeyBypassesDns) {
     group.join();
 }
 
-TEST(ProxyUpstreamConnectionTest, NameKeyTriesEveryResolvedAddress) {
+TEST(ProxyUpstreamConnectionTest, NameKeyRacesResolvedAddressesUnderOnePoolLease) {
     fiber::event::EventLoopGroup group(1);
     fiber::http::StealableHttp1ConnectionPoolSet pool(group);
     ASSERT_TRUE(pool.init());
@@ -512,13 +514,102 @@ TEST(ProxyUpstreamConnectionTest, NameKeyTriesEveryResolvedAddress) {
     EXPECT_EQ(result.error, fiber::common::IoErr::None);
     EXPECT_EQ(result.resolver_calls, 1U);
     EXPECT_EQ(result.connected_ip, fiber::net::IpAddress::loopback_v4());
-    EXPECT_EQ(result.observation.pool_misses, 2U);
+    EXPECT_EQ(result.observation.pool_misses, 1U);
     EXPECT_EQ(result.observation.dns_success, 1U);
-    EXPECT_EQ(result.observation.connect_failure, 1U);
+    EXPECT_EQ(result.observation.connect_candidates, 2U);
+    EXPECT_EQ(result.observation.connect_failure, 0U);
     EXPECT_EQ(result.observation.connect_success, 1U);
+    EXPECT_EQ(result.observation.happy_eyeballs_success, 1U);
+    EXPECT_EQ(result.observation.happy_eyeballs_failure, 0U);
     listener.close();
     group.stop();
     group.join();
+}
+
+TEST(ProxyUpstreamConnectionTest, V6FirstFallsBackToV4LoopbackAndShutsDownPool) {
+    fiber::event::EventLoopGroup group(1);
+    fiber::http::StealableHttp1ConnectionPoolSet pool(group);
+    ASSERT_TRUE(pool.init());
+    fiber::net::TcpListener listener(group.at(0));
+    ASSERT_TRUE(listener.bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), {}));
+    auto port = bound_port(listener.fd());
+    ASSERT_TRUE(port);
+    auto key = fiber::http::Http1ConnectionGroupKey::from_name("dual-stack.example", *port,
+                                                               fiber::http::Http1ConnectionGroupKey::Scheme::Http);
+    ASSERT_TRUE(key);
+
+    ResolverState resolver{
+            .addresses = {fiber::net::IpAddress::loopback_v6(), fiber::net::IpAddress::loopback_v4()},
+    };
+    std::promise<ConnectionScenarioResult> promise;
+    auto future = promise.get_future();
+    group.start();
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_ip_scenario(&pool, *key, &resolver, &promise,
+                               fiber::access_server::ProxyHappyEyeballsPolicy{
+                                       .connection_attempt_delay = 10ms,
+                               });
+    });
+
+    const ConnectionScenarioResult result = future.get();
+    EXPECT_EQ(result.error, fiber::common::IoErr::None);
+    EXPECT_EQ(result.connected_ip, fiber::net::IpAddress::loopback_v4());
+    EXPECT_EQ(result.observation.pool_misses, 1U);
+    EXPECT_EQ(result.observation.connect_candidates, 2U);
+    EXPECT_EQ(result.observation.connect_success, 1U);
+    EXPECT_EQ(result.observation.happy_eyeballs_success, 1U);
+    listener.close();
+    group.stop();
+    group.join();
+}
+
+TEST(ProxyUpstreamConnectionTest, DisabledHappyEyeballsPreservesSerialAddressFallback) {
+    fiber::event::EventLoopGroup group(1);
+    fiber::http::StealableHttp1ConnectionPoolSet pool(group);
+    ASSERT_TRUE(pool.init());
+    fiber::net::TcpListener listener(group.at(0));
+    ASSERT_TRUE(listener.bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), {}));
+    auto port = bound_port(listener.fd());
+    ASSERT_TRUE(port);
+    auto key = fiber::http::Http1ConnectionGroupKey::from_name("upstream.example", *port,
+                                                               fiber::http::Http1ConnectionGroupKey::Scheme::Http);
+    ASSERT_TRUE(key);
+    ResolverState resolver{
+            .addresses = {fiber::net::IpAddress::v4({127, 0, 0, 2}), fiber::net::IpAddress::loopback_v4()},
+    };
+    std::promise<ConnectionScenarioResult> promise;
+    auto future = promise.get_future();
+    group.start();
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_ip_scenario(&pool, *key, &resolver, &promise,
+                               fiber::access_server::ProxyHappyEyeballsPolicy{
+                                       .enabled = false,
+                               });
+    });
+
+    const ConnectionScenarioResult result = future.get();
+    EXPECT_EQ(result.error, fiber::common::IoErr::None);
+    EXPECT_EQ(result.observation.pool_misses, 2U);
+    EXPECT_EQ(result.observation.connect_candidates, 2U);
+    EXPECT_EQ(result.observation.connect_failure, 1U);
+    EXPECT_EQ(result.observation.connect_success, 1U);
+    EXPECT_EQ(result.observation.happy_eyeballs_success, 0U);
+    listener.close();
+    group.stop();
+    group.join();
+}
+
+TEST(ProxyUpstreamConnectionTest, RejectsAddressSetsBeyondConnectorCapacity) {
+    ResolverState resolver;
+    resolver.addresses.assign(fiber::net::kHappyEyeballsMaxAddresses + 1, fiber::net::IpAddress::loopback_v4());
+
+    const ConnectionScenarioResult result = run_resolution_scenario(&resolver);
+    EXPECT_EQ(result.error_code, fiber::access_server::ProxyConnectErrorCode::Connect);
+    EXPECT_EQ(result.error, fiber::common::IoErr::Invalid);
+    EXPECT_EQ(result.observation.pool_misses, 1U);
+    EXPECT_EQ(result.observation.connect_candidates, fiber::net::kHappyEyeballsMaxAddresses + 1);
+    EXPECT_EQ(result.observation.connect_failure, 1U);
+    EXPECT_EQ(result.observation.happy_eyeballs_failure, 1U);
 }
 
 TEST(ProxyUpstreamConnectionTest, ReportsBoundedDnsFailureOutcomes) {

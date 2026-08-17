@@ -72,6 +72,12 @@ public:
     [[nodiscard]] const UpstreamTlsClientPolicy &upstream_tls_client_policy() const noexcept {
         return upstream_tls_client_policy_;
     }
+    [[nodiscard]] std::chrono::milliseconds upstream_connect_timeout() const noexcept {
+        return upstream_connect_timeout_;
+    }
+    [[nodiscard]] const ProxyHappyEyeballsPolicy &happy_eyeballs_policy() const noexcept {
+        return happy_eyeballs_policy_;
+    }
     [[nodiscard]] AccessDnsMode dns_mode() const noexcept { return dns_mode_; }
     [[nodiscard]] std::string_view dns_resolver_config_path() const noexcept { return dns_resolver_config_path_; }
     [[nodiscard]] std::expected<AccessDnsServiceOptions, AccessServerConfigError> resolve_dns_options() const;
@@ -95,6 +101,8 @@ private:
                        std::chrono::milliseconds initial_config_timeout, std::size_t default_max_request_body_size,
                        bool test_mode, ClientMetadataResolverOptions client_metadata_options,
                        AccessLogOptions access_log_options, UpstreamTlsClientPolicy upstream_tls_client_policy,
+                       std::chrono::milliseconds upstream_connect_timeout,
+                       ProxyHappyEyeballsPolicy happy_eyeballs_policy,
                        AccessDnsMode dns_mode, std::string dns_resolver_config_path,
                        dns::DnsNameserverList dns_override_nameservers,
                        std::optional<cat::CatClientConfig> cat_config, nacos::NacosClientConfig nacos_config,
@@ -112,6 +120,8 @@ private:
     ClientMetadataResolverOptions client_metadata_options_;
     AccessLogOptions access_log_options_;
     UpstreamTlsClientPolicy upstream_tls_client_policy_;
+    std::chrono::milliseconds upstream_connect_timeout_{3000};
+    ProxyHappyEyeballsPolicy happy_eyeballs_policy_;
     AccessDnsMode dns_mode_ = AccessDnsMode::System;
     std::string dns_resolver_config_path_ = "/etc/resolv.conf";
     dns::DnsNameserverList dns_override_nameservers_;

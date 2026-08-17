@@ -85,6 +85,12 @@ enum class AccessProxyConnectResult : std::uint8_t {
     Count,
 };
 
+enum class AccessHappyEyeballsResult : std::uint8_t {
+    Success,
+    Failure,
+    Count,
+};
+
 enum class AccessWebSocketHandshakeResult : std::uint8_t {
     Accepted,
     Rejected,
@@ -113,6 +119,8 @@ public:
         void proxy_pool_acquired(AccessProxyPoolResult result, std::uint64_t count = 1) noexcept;
         void proxy_dns_resolved(AccessProxyDnsResult result, std::uint64_t count = 1) noexcept;
         void proxy_connect_attempted(AccessProxyConnectResult result, std::uint64_t count = 1) noexcept;
+        void proxy_connect_candidates_observed(std::uint64_t count) noexcept;
+        void happy_eyeballs_finished(AccessHappyEyeballsResult result, std::uint64_t count = 1) noexcept;
         void websocket_handshake_finished(AccessWebSocketHandshakeResult result) noexcept;
         void websocket_session_started() noexcept;
         void websocket_session_finished(AccessWebSocketSessionResult result) noexcept;
@@ -131,6 +139,8 @@ public:
         static constexpr std::size_t kProxyDnsResultCount = static_cast<std::size_t>(AccessProxyDnsResult::Count);
         static constexpr std::size_t kProxyConnectResultCount =
                 static_cast<std::size_t>(AccessProxyConnectResult::Count);
+        static constexpr std::size_t kHappyEyeballsResultCount =
+                static_cast<std::size_t>(AccessHappyEyeballsResult::Count);
         static constexpr std::size_t kWebSocketHandshakeResultCount =
                 static_cast<std::size_t>(AccessWebSocketHandshakeResult::Count);
         static constexpr std::size_t kWebSocketSessionResultCount =
@@ -144,6 +154,8 @@ public:
         std::array<prometheus::CounterRef, kProxyPoolResultCount> proxy_pool_acquires_;
         std::array<prometheus::CounterRef, kProxyDnsResultCount> proxy_dns_resolutions_;
         std::array<prometheus::CounterRef, kProxyConnectResultCount> proxy_connect_attempts_;
+        prometheus::CounterRef proxy_connect_candidates_;
+        std::array<prometheus::CounterRef, kHappyEyeballsResultCount> happy_eyeballs_;
         std::array<prometheus::CounterRef, kWebSocketHandshakeResultCount> websocket_handshakes_;
         std::array<prometheus::CounterRef, kWebSocketSessionResultCount> websocket_sessions_;
         prometheus::HistogramRef request_duration_;

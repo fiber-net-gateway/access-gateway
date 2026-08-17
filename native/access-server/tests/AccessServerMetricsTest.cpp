@@ -33,6 +33,9 @@ fiber::async::DetachedTask record_and_collect(fiber::access_server::AccessServer
     worker.proxy_dns_resolved(AccessProxyDnsResult::Failure, 3);
     worker.proxy_connect_attempted(AccessProxyConnectResult::TlsFailure);
     worker.proxy_connect_attempted(AccessProxyConnectResult::CreateFailure, 2);
+    worker.proxy_connect_candidates_observed(5);
+    worker.happy_eyeballs_finished(AccessHappyEyeballsResult::Success);
+    worker.happy_eyeballs_finished(AccessHappyEyeballsResult::Failure, 2);
 
     worker.websocket_handshake_finished(AccessWebSocketHandshakeResult::Rejected);
     worker.websocket_handshake_finished(AccessWebSocketHandshakeResult::Failed);
@@ -87,6 +90,11 @@ TEST(AccessServerMetricsTest, AggregatesOnlyFixedProxyAndWebSocketDimensions) {
     EXPECT_NE(collected->find("access_server_proxy_connect_attempts_total{result=\"tls_failure\"} 1"),
               std::string::npos);
     EXPECT_NE(collected->find("access_server_proxy_connect_attempts_total{result=\"create_failure\"} 2"),
+              std::string::npos);
+    EXPECT_NE(collected->find("access_server_proxy_connect_candidates_total 5"), std::string::npos);
+    EXPECT_NE(collected->find("access_server_proxy_happy_eyeballs_total{result=\"success\"} 1"),
+              std::string::npos);
+    EXPECT_NE(collected->find("access_server_proxy_happy_eyeballs_total{result=\"failure\"} 2"),
               std::string::npos);
     EXPECT_NE(collected->find("access_server_websocket_handshakes_total{result=\"rejected\"} 1"), std::string::npos);
     EXPECT_NE(collected->find("access_server_websocket_handshakes_total{result=\"failed\"} 1"), std::string::npos);
