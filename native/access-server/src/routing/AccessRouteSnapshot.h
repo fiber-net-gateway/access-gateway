@@ -53,6 +53,13 @@ private:
     std::size_t static_response_bytes_ = 0;
 };
 
+struct AccessRouteSnapshotProvider {
+    using PinFunction = std::shared_ptr<const AccessRouteSnapshot> (*)(const void *context) noexcept;
+
+    const void *context = nullptr;
+    PinFunction pin = nullptr;
+};
+
 } // namespace fiber::access_server
 
 #endif // FIBER_ACCESS_SERVER_ACCESS_ROUTE_SNAPSHOT_H

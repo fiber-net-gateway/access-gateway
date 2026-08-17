@@ -20,7 +20,7 @@ AccessWorkerResources::AccessWorkerResources(event::EventLoopGroup &workers, con
     }()),
     access_log_policy_(std::move(options.access_log)), pool_(workers),
     executor_(pool_, cluster_matcher, dns_.adapter(), std::move(options.executor)),
-    handler_(config_store, options.script_adapter,
+    handler_(config_store.snapshot_provider(), options.script_adapter,
              AccessRequestHandlerOptions{
                      .default_max_request_body_size = options.default_max_request_body_size,
                      .test_mode = options.test_mode,

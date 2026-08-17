@@ -28,7 +28,8 @@
 #include "fiber/cat/CatClient.h"
 #include "fiber/cat/CatClientConfig.h"
 #include "observability/AccessRequestTelemetry.h"
-#include "runtime/AccessScriptRuntime.h"
+#include "routing/AccessScriptCompiler.h"
+#include "runtime/RouteConfigStore.h"
 
 namespace {
 
@@ -560,7 +561,8 @@ run_downstream(fiber::event::EventLoop *loop, const fiber::access_server::RouteC
     if (transport_ready) {
         transport_ready->set_value(transport.get());
     }
-    fiber::access_server::AccessRequestHandler handler(*store, script_adapter, handler_options, proxy_adapter);
+    fiber::access_server::AccessRequestHandler handler(store->snapshot_provider(), script_adapter, handler_options,
+                                                       proxy_adapter);
     fiber::access_server::ClientMetadataResolver client_metadata_resolver(
             fiber::access_server::ClientMetadataResolverOptions{
                     .mode = fiber::access_server::ClientMetadataMode::LegacyHeaders,
@@ -1145,8 +1147,8 @@ TEST(ProxyExecutorTest, RetriesAServiceSelectionBeforeSendingRequestHeaders) {
                     fiber::http::Http1ConnectionGroupKey::from_ip(fiber::net::IpAddress::v4({127, 0, 0, 2}), port,
                                                                   fiber::http::Http1ConnectionGroupKey::Scheme::Http),
     };
-    fiber::access_server::AccessScriptRuntime scripts;
-    fiber::access_server::RouteConfigStore store(scripts.compiler_adapter(),
+    fiber::access_server::AccessScriptCompiler scripts;
+    fiber::access_server::RouteConfigStore store(scripts.adapter(),
                                                  fiber::access_server::ProxyAddressSelectorFactory{
                                                          .context = &selector_state,
                                                          .create_service = make_test_service_selector,
@@ -1288,8 +1290,8 @@ TEST(ProxyExecutorTest, StopsBeforeConnectionAcquisitionWhenRequestHeadPreparati
                     fiber::net::IpAddress::v4({127, 0, 0, 2}), kUnusedPort,
                     fiber::http::Http1ConnectionGroupKey::Scheme::Http),
     };
-    fiber::access_server::AccessScriptRuntime scripts;
-    fiber::access_server::RouteConfigStore store(scripts.compiler_adapter(),
+    fiber::access_server::AccessScriptCompiler scripts;
+    fiber::access_server::RouteConfigStore store(scripts.adapter(),
                                                  fiber::access_server::ProxyAddressSelectorFactory{
                                                          .context = &selector_state,
                                                          .create_service = make_test_service_selector,
@@ -2029,8 +2031,8 @@ TEST(ProxyExecutorTest, AbortsUpgradeBeforeRenderingAResponseTemplateFailure) {
     route.response_headers = {
             {.name = "X-Fail", .value = "${null}"},
     };
-    fiber::access_server::AccessScriptRuntime scripts;
-    fiber::access_server::RouteConfigStore store(scripts.compiler_adapter());
+    fiber::access_server::AccessScriptCompiler scripts;
+    fiber::access_server::RouteConfigStore store(scripts.adapter());
     auto published = store.apply("orders", std::move(config));
     ASSERT_TRUE(published) << published.error().message;
 

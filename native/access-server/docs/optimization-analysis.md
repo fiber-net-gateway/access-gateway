@@ -270,7 +270,7 @@ Nacos owner loop
   -> 原子发布
 ```
 
-脚本 compiler 在 compiler loop 内拥有独立、长生命周期的 `AccessScriptRuntime`；OpenSSL
+脚本 compiler 在 compiler loop 内拥有独立、长生命周期的 `AccessScriptCompiler`；OpenSSL
 context 也只在该 worker 构造。队列容量、取消和“新 generation 替换旧任务”均由 watcher
 显式管理。
 
@@ -507,8 +507,8 @@ worker 访问同一 service 时会共享这些 cache line，选择本身还需�
 代码位置：
 
 - [`AccessServiceDiscovery.cpp`](../src/runtime/AccessServiceDiscovery.cpp#L250)；
-- [`SmoothWeightedRoundRobinImpl.h`](../src/runtime/SmoothWeightedRoundRobinImpl.h#L353)；
-- [`SmoothWeightedRoundRobinImpl.h`](../src/runtime/SmoothWeightedRoundRobinImpl.h#L395)。
+- [`SmoothWeightedRoundRobinImpl.h`](../src/routing/SmoothWeightedRoundRobinImpl.h#L353)；
+- [`SmoothWeightedRoundRobinImpl.h`](../src/routing/SmoothWeightedRoundRobinImpl.h#L395)。
 
 第一阶段由本项目完成：
 
@@ -1178,31 +1178,58 @@ Fiber 的 pool lease、LoggerManager queue stats 等已有接口应直接消费�
 
 **归属：本项目。**
 
-当前一个 static library 同时包含 config、routing、execution、observability、runtime 和
-validation，并 PUBLIC 依赖 Nacos、CAT、Prometheus。离线 validator 因此也只有在完整
-runtime 组件启用时才能构建。
-
-建议拆分为：
+**实施状态：已解决（2026-08-17）。** 原 `access_server_core` 已拆为五个显式 static
+component，源码仍逐项注册且每个源文件只属于一个 target：
 
 ```text
-access_server_config
-  -> codec, compiled model, route compiler, script compiler adapter
-
-access_server_execution
-  -> handler, response, proxy, request telemetry facade
-
-access_server_observability
-  -> metrics, trace and logging integration
-
-access_server_runtime
-  -> Nacos, CAT, discovery, watcher, DNS, listeners
-
-access_server_validation
-  -> native validator protocol and orchestration
+access-gateway-validator -> validation -> config -> fiber_lib + zlib
+access-server -> runtime -> execution -> observability -> config
+                       \-> Fiber Nacos/CAT/Prometheus
 ```
 
-validator 只依赖 config/compiler/validation；runtime 才依赖 Nacos/CAT/Prometheus。源文件
-继续显式列出，不使用 glob。PUBLIC/PRIVATE link interface 应按头文件实际暴露收紧。
+具体边界为：
+
+- `access_server_config` 拥有 codec/limits、不可变 routing model、Host/CIDR、route/script、
+  gray 和静态 gzip 编译；
+- `access_server_observability` 拥有固定 schema metrics、activation evidence、日志策略和
+  trace state，不依赖 execution/runtime；
+- `access_server_execution` 拥有 handler、response/proxy pipeline，以及与请求执行类型互相
+  约束的 telemetry/trace façade；
+- `access_server_runtime` 才拥有 Nacos/discovery、watcher、DNS、listener、worker 和发布生命
+  周期，并且只有该 target 注入 build revision；
+- `access_server_validation` 只编排版本化 validator protocol，私有依赖 config。
+
+为消除原有的反向依赖，本次同时完成三个窄接口调整：
+
+1. 从 `AccessScriptRuntime` 提取有状态的 `AccessScriptCompiler`。compiler loop 和 validator
+   直接持有 compiler；请求 runtime 只剩无状态执行 adapter，不再初始化第二套编译 library；
+2. 从 `GrayMatchStore` 提取纯 `GrayMatchCompiler`。validator 的严格字段校验与 runtime 的
+   Java 兼容发布继续不同，但两者共享同一个 bounded CIDR/ratio compiled model；
+3. handler 不再包含 `RouteConfigStore`/Nacos 头，而是消费两个指针大小、trivially-copyable
+   的 `AccessRouteSnapshotProvider`。每请求仍只执行一次 acquire pin，旧快照生命周期不变。
+
+新增默认开启的 `ACCESS_SERVER_BUILD_RUNTIME`。在全新 build tree 中将其关闭时，Fiber 不生成
+Nacos、CAT、Prometheus target，CMake 仍成功构建 validator。最终 validator link 从改造前的
+`core + Nacos + protobuf + CAT + Prometheus` 收敛为
+`validation + config + fiber_lib + TLS/crypto + zlib`，证明不是仅依赖 LTO dead stripping：
+
+```bash
+cmake -S native -B native/build-validator-only -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release -DFIBER_BUILD_TESTS=OFF \
+  -DACCESS_SERVER_BUILD_RUNTIME=OFF
+cmake --build native/build-validator-only \
+  --target fiber_app_access_gateway_validator --parallel
+```
+
+同一 Release+ThinLTO、Clang 22 构建中，validator 的 text/data 从
+`3,246,157/69,448` bytes 降到 `3,239,009/69,192`（text `-7,148`，约 `-0.22%`），bss
+保持 `9,849`。主服务 text 从 `6,934,609` 到 `6,935,553`（`+944`，约 `+0.014%`），
+data/bss 不变，文件大小从 `17,681,744` 到 `17,682,848`（`+1,104`，约 `+0.006%`）；该微小
+边界成本没有改变请求算法、分配或锁形状。
+
+完整 target 图、PUBLIC/PRIVATE 规则和独立构建门禁见
+[`build-boundaries.md`](build-boundaries.md)。本项没有修改 Fiber、没有新增 Fiber Issue，也没有
+更新 gitlink。
 
 ## 11. 测试与性能基线
 

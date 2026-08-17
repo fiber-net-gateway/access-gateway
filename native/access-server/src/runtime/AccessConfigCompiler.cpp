@@ -30,10 +30,10 @@ CompiledProjectConfigResult AccessConfigCompiler::compile_project(std::string_vi
                 .compilation_skipped = true,
         };
     }
-    if (!script_runtime_) {
-        script_runtime_.emplace();
+    if (!script_compiler_) {
+        script_compiler_.emplace();
     }
-    const ProjectConfigCompiler compiler(script_runtime_->compiler_adapter());
+    const ProjectConfigCompiler compiler(script_compiler_->adapter());
     auto compiled = compiler.compile(project, **parsed);
     if (!compiled) {
         return std::unexpected(AccessProjectCompileFailure{

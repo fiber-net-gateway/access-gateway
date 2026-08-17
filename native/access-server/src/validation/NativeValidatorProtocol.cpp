@@ -1,10 +1,10 @@
 #include "NativeValidatorProtocol.h"
 
 #include "config/AccessConfigCodec.h"
+#include "routing/AccessScriptCompiler.h"
 #include "routing/Cidr.h"
+#include "routing/GrayMatchCompiler.h"
 #include "routing/ProjectConfigCompiler.h"
-#include "runtime/AccessScriptRuntime.h"
-#include "runtime/GrayMatchStore.h"
 
 #include <cstdint>
 #include <optional>
@@ -241,8 +241,8 @@ ValidationResult validate_project(std::string_view project, std::string_view pay
         };
     }
 
-    AccessScriptRuntime scripts;
-    auto compiled = compile_project_config(project, **parsed, scripts.compiler_adapter());
+    AccessScriptCompiler scripts;
+    auto compiled = compile_project_config(project, **parsed, scripts.adapter());
     if (!compiled) {
         return ValidationResult{.errors = {to_validation_error(std::move(compiled.error()))}};
     }
@@ -265,7 +265,7 @@ ValidationResult validate_project(std::string_view project, std::string_view pay
 std::optional<ValidationError> validate_gray_entry(const GrayMatchConfigEntry &entry, std::size_t index,
                                                    std::unordered_set<std::string> &entries) {
     const std::string prefix = "rules[" + std::to_string(index) + ']';
-    if (entry.entry != "vdi" && entry.entry != "desktop" && entry.entry != "internet" && entry.entry != "custom") {
+    if (!recognized_gray_match_entry(entry.entry)) {
         return ValidationError{
                 .code = "invalid_field",
                 .field = prefix + ".entry",
@@ -323,14 +323,13 @@ ValidationResult validate_gray(std::string_view payload) {
             return ValidationResult{.errors = {std::move(*error)}};
         }
     }
-    GrayMatchStore store;
-    auto applied = store.apply(*parsed);
-    if (!applied) {
-        return ValidationResult{.errors = {to_validation_error(std::move(applied.error()))}};
+    auto compiled = compile_gray_match_config(**parsed);
+    if (!compiled) {
+        return ValidationResult{.errors = {to_validation_error(std::move(compiled.error()))}};
     }
     return ValidationResult{
             .valid = true,
-            .summary = {.gray_rule_count = store.rule_count()},
+            .summary = {.gray_rule_count = compiled->rule_count()},
     };
 }
 

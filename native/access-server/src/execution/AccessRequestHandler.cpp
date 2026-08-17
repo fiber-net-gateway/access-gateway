@@ -1,6 +1,7 @@
 #include "AccessRequestHandler.h"
 #include "../observability/AccessRequestTelemetry.h"
 
+#include <fiber/common/Assert.h>
 #include <fiber/http/HttpBodySpec.h>
 #include <fiber/http/HttpExchange.h>
 #include <fiber/http/HttpHeaderHash.h>
@@ -182,13 +183,17 @@ async::Task<Result<void>> send_redirect(http::HttpExchange &exchange, int status
 
 } // namespace
 
-AccessRequestHandler::AccessRequestHandler(const RouteConfigStore &config_store,
+AccessRequestHandler::AccessRequestHandler(AccessRouteSnapshotProvider snapshot_provider,
                                            AccessRequestScriptAdapter script_adapter,
                                            AccessRequestHandlerOptions options,
                                            AccessProxyAdapter proxy_adapter) noexcept :
-    config_store_(config_store), script_adapter_(script_adapter), options_(options), proxy_adapter_(proxy_adapter),
-    policy_evaluator_(options.default_max_request_body_size), response_executor_(options.response),
-    error_responder_(ErrorResponderOptions{.write_timeout = options.response.write_timeout}) {}
+    snapshot_provider_(snapshot_provider), script_adapter_(script_adapter), options_(options),
+    proxy_adapter_(proxy_adapter), policy_evaluator_(options.default_max_request_body_size),
+    response_executor_(options.response),
+    error_responder_(ErrorResponderOptions{.write_timeout = options.response.write_timeout}) {
+    FIBER_ASSERT(snapshot_provider_.context != nullptr);
+    FIBER_ASSERT(snapshot_provider_.pin != nullptr);
+}
 
 async::Task<void> AccessRequestHandler::handle(http::HttpExchange &exchange,
                                                AccessRequestTelemetry &telemetry) const noexcept {
@@ -250,7 +255,7 @@ AccessRequestHandler::handle_and_finalize(http::HttpExchange &exchange,
 
 async::Task<Result<void>> AccessRequestHandler::handle_impl(http::HttpExchange &exchange,
                                                             AccessRequestTelemetry &telemetry) const noexcept {
-    const std::shared_ptr<const AccessRouteSnapshot> snapshot = config_store_.pin();
+    const std::shared_ptr<const AccessRouteSnapshot> snapshot = snapshot_provider_.pin(snapshot_provider_.context);
     RequestHostContext request_host = resolve_request_host(exchange, options_.test_mode);
     const ProjectHostMatch host_match = snapshot->match_host(request_host.effective_host);
     if (!host_match) {

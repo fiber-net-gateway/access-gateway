@@ -446,6 +446,13 @@ std::optional<std::int32_t> RouteConfigStore::current_version(std::string_view p
     return registry_.current_version(project);
 }
 
+AccessRouteSnapshotProvider RouteConfigStore::snapshot_provider() const noexcept {
+    return AccessRouteSnapshotProvider{
+            .context = this,
+            .pin = [](const void *context) noexcept { return static_cast<const RouteConfigStore *>(context)->pin(); },
+    };
+}
+
 void RouteConfigStore::apply_to_candidate(std::vector<std::shared_ptr<const ProjectRouteSnapshot>> &candidate,
                                           const ReadyProjectUpdate &ready) {
     const auto existing = std::lower_bound(candidate.begin(), candidate.end(), ready.project_,

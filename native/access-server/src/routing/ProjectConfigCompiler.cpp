@@ -1,5 +1,5 @@
 #include "ProjectConfigCompiler.h"
-#include "../execution/GzipEncoder.h"
+#include "GzipEncoder.h"
 
 #include <fiber/common/util/Base64.h>
 

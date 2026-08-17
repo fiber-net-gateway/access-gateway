@@ -141,6 +141,7 @@ public:
     void clear() noexcept;
 
     [[nodiscard]] std::optional<std::int32_t> current_version(std::string_view project) const noexcept;
+    [[nodiscard]] AccessRouteSnapshotProvider snapshot_provider() const noexcept;
 
     [[nodiscard]] std::shared_ptr<const AccessRouteSnapshot> pin() const noexcept { return publisher_.pin(); }
 

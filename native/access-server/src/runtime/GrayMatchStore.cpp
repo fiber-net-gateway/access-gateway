@@ -1,7 +1,5 @@
 #include "GrayMatchStore.h"
 
-#include "../config/AccessConfigLimits.h"
-
 #include <limits>
 #include <utility>
 
@@ -59,36 +57,15 @@ GrayMatchStore::apply(const std::optional<GrayMatchConfig> &config) {
     if (!config) {
         return GrayMatchUpdateStatus::IgnoredEmpty;
     }
-    auto within_limits = validate_gray_match_config_limits(*config);
-    if (!within_limits) {
-        return std::unexpected(std::move(within_limits.error()));
+    auto compiled = compile_gray_match_config(*config);
+    if (!compiled) {
+        return std::unexpected(std::move(compiled.error()));
     }
 
     FIBER_ASSERT(next_generation_ != std::numeric_limits<std::uint64_t>::max());
     auto candidate = std::make_shared<Snapshot>();
     candidate->generation = next_generation_ + 1;
-    candidate->rules.reserve(config->size());
-    for (const GrayMatchConfigEntry &entry: *config) {
-        if (!recognized_entry(entry.entry) || entry.ratio < 0 || (entry.ratio == 0 && entry.cidrs.empty())) {
-            continue;
-        }
-
-        Rule rule{
-                .entry = entry.entry,
-                .ratio = entry.ratio,
-        };
-        rule.cidrs.reserve(entry.cidrs.size());
-        for (const std::optional<std::string> &text: entry.cidrs) {
-            if (!text) {
-                continue;
-            }
-            auto cidr = Cidr::parse(*text, entry.entry);
-            if (cidr) {
-                rule.cidrs.push_back(std::move(*cidr));
-            }
-        }
-        candidate->rules.push_back(std::move(rule));
-    }
+    candidate->config = std::move(*compiled);
 
     std::shared_ptr<const Snapshot> published = std::move(candidate);
     std::vector<std::shared_ptr<const WorkerSnapshot>> worker_snapshots;
@@ -134,8 +111,8 @@ bool GrayMatchStore::matches(std::string_view entry, const ClientMetadata &metad
 
 bool GrayMatchStore::matches_snapshot(const Snapshot &snapshot, std::string_view entry, const ClientMetadata &metadata,
                                       std::uint32_t random_sample) noexcept {
-    const Rule *matched = nullptr;
-    for (const Rule &rule: snapshot.rules) {
+    const CompiledGrayMatchRule *matched = nullptr;
+    for (const CompiledGrayMatchRule &rule: snapshot.config.rules()) {
         if (rule.entry == entry) {
             matched = &rule;
             break;
@@ -154,16 +131,12 @@ bool GrayMatchStore::matches_snapshot(const Snapshot &snapshot, std::string_view
     return random_sample % 10000U < static_cast<std::uint32_t>(matched->ratio);
 }
 
-std::size_t GrayMatchStore::rule_count() const noexcept { return pin()->rules.size(); }
+std::size_t GrayMatchStore::rule_count() const noexcept { return pin()->config.rule_count(); }
 
 std::uint64_t GrayMatchStore::generation() const noexcept { return pin()->generation; }
 
 std::shared_ptr<const GrayMatchStore::Snapshot> GrayMatchStore::pin() const noexcept {
     return published_.load(std::memory_order_acquire);
-}
-
-bool GrayMatchStore::recognized_entry(std::string_view entry) noexcept {
-    return entry == "vdi" || entry == "desktop" || entry == "internet" || entry == "custom";
 }
 
 std::uint32_t GrayMatchStore::next_sample(WorkerSlot &slot) noexcept {

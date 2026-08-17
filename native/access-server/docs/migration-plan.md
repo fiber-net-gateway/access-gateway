@@ -135,8 +135,9 @@ Java 源码到工作包的直接映射：
 | `tests/fixtures/java/` | Java 输入、归一化配置和 HTTP golden 数据 |
 | `tests/` | codec、路由、执行、热更新和端到端差分测试 |
 
-应用内可测试代码形成 `access_server_core` 静态库；最终可执行目标仍为
-`fiber_app_access_server`，产物名 `access-server`。
+应用内代码按 config、observability、execution、runtime、validation 五个静态组件构建；
+依赖方向和 validator-only 门禁见 [`build-boundaries.md`](build-boundaries.md)。最终可执行目标
+仍为 `fiber_app_access_server`，产物名 `access-server`。
 
 优先复用：
 
@@ -200,7 +201,7 @@ Java 源码到工作包的直接映射：
 - fixture 集的接受/拒绝结论与 Java 基线一致；
 - 接受的配置生成相同归一化业务模型；
 - 解析失败不产生可发布快照；
-- 建立 `access_server_core` 和 access-server 聚焦测试目标。
+- 建立分层 native component 和 access-server 聚焦测试目标。
 
 ### 阶段 2：项目、Host 与 Path 路由快照
 

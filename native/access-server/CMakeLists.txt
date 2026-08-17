@@ -1,9 +1,13 @@
-if (NOT TARGET fiber::nacos OR NOT TARGET fiber::cat OR NOT TARGET fiber::prometheus)
-    message(STATUS "Skipping access-server because its Nacos, CAT, or Prometheus component is disabled")
-    return()
-endif()
+function(access_server_add_component target)
+    add_library(${target} STATIC ${ARGN})
+    target_include_directories(${target} PUBLIC "${CMAKE_CURRENT_LIST_DIR}/src")
+    set_target_properties(${target} PROPERTIES FOLDER "native/access-server")
+    if (FIBER_ENABLE_LTO AND FIBER_IPO_SUPPORTED)
+        set_property(TARGET ${target} PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
+    endif()
+endfunction()
 
-add_library(access_server_core STATIC
+access_server_add_component(access_server_config
     "${CMAKE_CURRENT_LIST_DIR}/src/config/AccessConfigCodec.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/config/AccessConfigCoercion.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/config/AccessConfigErrorBuilder.cpp"
@@ -12,11 +16,60 @@ add_library(access_server_core STATIC
     "${CMAKE_CURRENT_LIST_DIR}/src/config/GrayMatchConfigCodec.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/config/ProjectConfigCodec.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/config/TlsCertificateConfig.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/routing/AccessScriptCompiler.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/routing/AccessRouteSnapshot.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/routing/Cidr.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/routing/CompiledHeaderTemplates.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/routing/CompiledTemplate.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/routing/GrayMatchCompiler.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/routing/GzipEncoder.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/routing/HostMatcher.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/routing/ProjectConfigCompiler.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/routing/ProjectRouteSnapshot.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/routing/ProxyAddressSelector.cpp")
+target_link_libraries(access_server_config
+    PUBLIC fiber_lib
+    PRIVATE zlibstatic)
+add_library(access_server::config ALIAS access_server_config)
+
+access_server_add_component(access_server_validation
+    "${CMAKE_CURRENT_LIST_DIR}/src/validation/NativeValidatorProtocol.cpp")
+target_link_libraries(access_server_validation PRIVATE access_server_config)
+add_library(access_server::validation ALIAS access_server_validation)
+
+fiber_add_app(access_gateway_validator
+    OUTPUT_NAME access-gateway-validator
+    SOURCES
+        "${CMAKE_CURRENT_LIST_DIR}/src/validator_main.cpp"
+    LIBRARIES
+        access_server_validation)
+
+if (NOT TARGET fiber::nacos OR NOT TARGET fiber::cat OR NOT TARGET fiber::prometheus)
+    message(STATUS
+        "Skipping access-server runtime because its Nacos, CAT, or Prometheus component is disabled; "
+        "the offline access-gateway-validator remains available")
+    return()
+endif()
+
+access_server_add_component(access_server_observability
+    "${CMAKE_CURRENT_LIST_DIR}/src/observability/AccessLogPolicy.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/observability/AccessActivationEvidence.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/observability/AccessConfigMetrics.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/observability/AccessDiscoveryMetrics.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/observability/AccessProcessMetrics.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/observability/AccessRuntimeMetrics.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/observability/AccessServerMetrics.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/observability/AccessTlsMetrics.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/observability/AccessTraceState.cpp")
+target_link_libraries(access_server_observability
+    PUBLIC access_server_config fiber_lib fiber::cat fiber::prometheus)
+add_library(access_server::observability ALIAS access_server_observability)
+
+access_server_add_component(access_server_execution
     "${CMAKE_CURRENT_LIST_DIR}/src/execution/AccessResult.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/execution/ClientMetadata.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/execution/AccessRequestHandler.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/execution/ErrorResponder.cpp"
-    "${CMAKE_CURRENT_LIST_DIR}/src/execution/GzipEncoder.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/execution/ProxyExecutor.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/execution/ProxyRequestPlan.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/execution/ProxyResponsePlan.cpp"
@@ -26,28 +79,16 @@ add_library(access_server_core STATIC
     "${CMAKE_CURRENT_LIST_DIR}/src/execution/RoutePolicyEvaluator.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/execution/TemplateEvaluator.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/execution/UpstreamTlsClientPolicy.cpp"
-    "${CMAKE_CURRENT_LIST_DIR}/src/observability/AccessLogPolicy.cpp"
-    "${CMAKE_CURRENT_LIST_DIR}/src/observability/AccessActivationEvidence.cpp"
-    "${CMAKE_CURRENT_LIST_DIR}/src/observability/AccessConfigMetrics.cpp"
-    "${CMAKE_CURRENT_LIST_DIR}/src/observability/AccessDiscoveryMetrics.cpp"
-    "${CMAKE_CURRENT_LIST_DIR}/src/observability/AccessProcessMetrics.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/observability/AccessProviderTransaction.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/observability/AccessRequestTelemetry.cpp"
-    "${CMAKE_CURRENT_LIST_DIR}/src/observability/AccessRuntimeMetrics.cpp"
-    "${CMAKE_CURRENT_LIST_DIR}/src/observability/AccessServerMetrics.cpp"
-    "${CMAKE_CURRENT_LIST_DIR}/src/observability/AccessTlsMetrics.cpp"
-    "${CMAKE_CURRENT_LIST_DIR}/src/observability/AccessTraceState.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/observability/RequestObservability.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/observability/ScriptExecutionContext.cpp"
-    "${CMAKE_CURRENT_LIST_DIR}/src/observability/TracePropagation.cpp"
-    "${CMAKE_CURRENT_LIST_DIR}/src/routing/AccessRouteSnapshot.cpp"
-    "${CMAKE_CURRENT_LIST_DIR}/src/routing/Cidr.cpp"
-    "${CMAKE_CURRENT_LIST_DIR}/src/routing/CompiledHeaderTemplates.cpp"
-    "${CMAKE_CURRENT_LIST_DIR}/src/routing/CompiledTemplate.cpp"
-    "${CMAKE_CURRENT_LIST_DIR}/src/routing/HostMatcher.cpp"
-    "${CMAKE_CURRENT_LIST_DIR}/src/routing/ProjectConfigCompiler.cpp"
-    "${CMAKE_CURRENT_LIST_DIR}/src/routing/ProjectRouteSnapshot.cpp"
-    "${CMAKE_CURRENT_LIST_DIR}/src/routing/ProxyAddressSelector.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/observability/TracePropagation.cpp")
+target_link_libraries(access_server_execution
+    PUBLIC access_server_config access_server_observability fiber_lib fiber::cat)
+add_library(access_server::execution ALIAS access_server_execution)
+
+access_server_add_component(access_server_runtime
     "${CMAKE_CURRENT_LIST_DIR}/src/runtime/AccessActivationEndpoint.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/runtime/AccessControlPlaneSupervisor.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/runtime/AccessConfigCompiler.cpp"
@@ -71,12 +112,17 @@ add_library(access_server_core STATIC
     "${CMAKE_CURRENT_LIST_DIR}/src/runtime/RouteSnapshotPublisher.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/runtime/SubscriptionLifecycle.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/runtime/TlsCertificateStore.cpp"
-    "${CMAKE_CURRENT_LIST_DIR}/src/runtime/TlsCertificateWatcher.cpp"
-    "${CMAKE_CURRENT_LIST_DIR}/src/validation/NativeValidatorProtocol.cpp")
-target_include_directories(access_server_core PUBLIC "${CMAKE_CURRENT_LIST_DIR}/src")
-target_link_libraries(access_server_core
-    PUBLIC fiber_lib fiber::nacos fiber::cat fiber::prometheus
-    PRIVATE zlibstatic)
+    "${CMAKE_CURRENT_LIST_DIR}/src/runtime/TlsCertificateWatcher.cpp")
+target_link_libraries(access_server_runtime
+    PUBLIC
+        access_server_config
+        access_server_execution
+        access_server_observability
+        fiber_lib
+        fiber::nacos
+        fiber::cat
+        fiber::prometheus)
+add_library(access_server::runtime ALIAS access_server_runtime)
 
 set(ACCESS_GATEWAY_BUILD_REVISION "" CACHE STRING
     "Source revision embedded in access-server activation evidence")
@@ -115,33 +161,21 @@ if (NOT ACCESS_GATEWAY_EFFECTIVE_BUILD_REVISION STREQUAL "unknown" AND
         "ACCESS_GATEWAY_BUILD_REVISION must be unknown or a 40/64-character hexadecimal revision, optionally suffixed by -dirty")
 endif()
 
-target_compile_definitions(access_server_core PRIVATE
+target_compile_definitions(access_server_runtime PRIVATE
     FIBER_ACCESS_SERVER_BUILD_VERSION="0.1.0"
     FIBER_ACCESS_SERVER_BUILD_REVISION="${ACCESS_GATEWAY_EFFECTIVE_BUILD_REVISION}")
-set_target_properties(access_server_core PROPERTIES FOLDER "native/access-server")
-
-if (FIBER_ENABLE_LTO AND FIBER_IPO_SUPPORTED)
-    set_property(TARGET access_server_core PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
-endif()
 
 fiber_add_app(access_server
     OUTPUT_NAME access-server
     SOURCES
         "${CMAKE_CURRENT_LIST_DIR}/src/main.cpp"
     LIBRARIES
-        access_server_core)
-
-fiber_add_app(access_gateway_validator
-    OUTPUT_NAME access-gateway-validator
-    SOURCES
-        "${CMAKE_CURRENT_LIST_DIR}/src/validator_main.cpp"
-    LIBRARIES
-        access_server_core)
+        access_server_runtime)
 
 if (ACCESS_SERVER_BUILD_BENCHMARKS)
     add_executable(fiber_access_service_selection_benchmark
         "${CMAKE_CURRENT_LIST_DIR}/benchmarks/AccessServiceSelectionBenchmark.cpp")
-    target_link_libraries(fiber_access_service_selection_benchmark PRIVATE access_server_core)
+    target_link_libraries(fiber_access_service_selection_benchmark PRIVATE access_server_runtime)
     set_target_properties(fiber_access_service_selection_benchmark PROPERTIES FOLDER "native/access-server")
     fiber_link_runtime_allocator(fiber_access_service_selection_benchmark)
 
@@ -151,7 +185,7 @@ if (ACCESS_SERVER_BUILD_BENCHMARKS)
 
     add_executable(fiber_access_template_header_benchmark
         "${CMAKE_CURRENT_LIST_DIR}/benchmarks/TemplateHeaderBenchmark.cpp")
-    target_link_libraries(fiber_access_template_header_benchmark PRIVATE access_server_core)
+    target_link_libraries(fiber_access_template_header_benchmark PRIVATE access_server_execution)
     set_target_properties(fiber_access_template_header_benchmark PROPERTIES FOLDER "native/access-server")
     fiber_link_runtime_allocator(fiber_access_template_header_benchmark)
 
@@ -161,7 +195,7 @@ if (ACCESS_SERVER_BUILD_BENCHMARKS)
 
     add_executable(fiber_access_route_publication_benchmark
         "${CMAKE_CURRENT_LIST_DIR}/benchmarks/RoutePublicationBenchmark.cpp")
-    target_link_libraries(fiber_access_route_publication_benchmark PRIVATE access_server_core)
+    target_link_libraries(fiber_access_route_publication_benchmark PRIVATE access_server_runtime)
     set_target_properties(fiber_access_route_publication_benchmark PROPERTIES FOLDER "native/access-server")
     fiber_link_runtime_allocator(fiber_access_route_publication_benchmark)
 
@@ -171,7 +205,7 @@ if (ACCESS_SERVER_BUILD_BENCHMARKS)
 
     add_executable(fiber_access_host_matcher_benchmark
         "${CMAKE_CURRENT_LIST_DIR}/benchmarks/HostMatcherBenchmark.cpp")
-    target_link_libraries(fiber_access_host_matcher_benchmark PRIVATE access_server_core)
+    target_link_libraries(fiber_access_host_matcher_benchmark PRIVATE access_server_config)
     set_target_properties(fiber_access_host_matcher_benchmark PROPERTIES FOLDER "native/access-server")
     fiber_link_runtime_allocator(fiber_access_host_matcher_benchmark)
 
@@ -200,6 +234,7 @@ if (FIBER_BUILD_TESTS AND (GTest_FOUND OR TARGET GTest::gtest_main))
         "${CMAKE_CURRENT_LIST_DIR}/tests/AccessServerConfigTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/AccessTlsMetricsTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/AccessTraceStateTest.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/tests/BuildBoundaryComponentsTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/CompiledHeaderTemplatesTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/CompiledTemplateTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/ClientMetadataTest.cpp"
@@ -219,7 +254,11 @@ if (FIBER_BUILD_TESTS AND (GTest_FOUND OR TARGET GTest::gtest_main))
     target_sources(fiber_access_server_tests PRIVATE
         "${CMAKE_CURRENT_LIST_DIR}/tests/SubscriptionLifecycleTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/TlsCertificateConfigTest.cpp")
-    target_link_libraries(fiber_access_server_tests PRIVATE access_server_core GTest::gtest_main zlibstatic)
+    target_link_libraries(fiber_access_server_tests PRIVATE
+        access_server_runtime
+        access_server_validation
+        GTest::gtest_main
+        zlibstatic)
     target_include_directories(fiber_access_server_tests PRIVATE
         "${ACCESS_GATEWAY_FIBER_SOURCE_DIR}/tests")
     target_compile_definitions(fiber_access_server_tests PRIVATE

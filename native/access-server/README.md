@@ -17,7 +17,9 @@ connection pool，以及 Nacos、CAT、Prometheus 组件。迁移不要求这些
 - 已注册离线 `fiber_app_access_gateway_validator`，产物名为
   `access-gateway-validator`；它复用相同 codec、脚本编译和 compiled model，按版本化
   stdin/stdout JSON 协议为 Console 提供 fail-closed 权威校验，且不连接 Nacos/CAT/公网；
-- 已建立 `access_server_core` 和 `fiber_access_server_tests`；
+- 已将 native 代码拆为 `access_server_config`、`access_server_observability`、
+  `access_server_execution`、`access_server_runtime`、`access_server_validation` 五个显式组件，
+  并建立 `fiber_access_server_tests`；
 - 已实现项目列表、`ProjectConf`、`HostStrategy`、`RouteItem`、Duration/DataSize 的
   Java 兼容解码；
 - 已实现版本化 `AccessConfigLimits`：在解析前限制 payload，在 codec/编译期限制 route、Host、
@@ -121,6 +123,20 @@ ctest --test-dir native/build --output-on-failure -L access-server
 native/build/apps/access-server
 native/build/apps/access-gateway-validator
 ```
+
+离线 validator 可在不生成 Nacos、CAT、Prometheus 和 access-server runtime target 的独立
+构建树中构建：
+
+```bash
+cmake -S native -B native/build-validator-only -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release -DFIBER_BUILD_TESTS=OFF \
+  -DACCESS_SERVER_BUILD_RUNTIME=OFF
+cmake --build native/build-validator-only \
+  --target fiber_app_access_gateway_validator --parallel
+```
+
+组件链接方向、源码归属和 validator 独立性门禁见
+[`docs/build-boundaries.md`](docs/build-boundaries.md)。
 
 ### 离线 Validator
 
