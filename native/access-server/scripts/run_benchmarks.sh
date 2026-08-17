@@ -123,12 +123,24 @@ benchmark_source_sha256=$(
         } | sort -z | xargs -0 sha256sum
     ) | sha256sum | awk '{print $1}'
 )
+native_source_sha256=$(
+    (
+        cd "${repository_root}/native/access-server"
+        {
+            printf '%s\0' ../CMakeLists.txt CMakeLists.txt scripts/run_benchmarks.sh
+            find src benchmarks -type f \( -name '*.cpp' -o -name '*.h' \) -print0
+        } | sort -z | xargs -0 sha256sum
+    ) | sha256sum | awk '{print $1}'
+)
+fiber_revision=$(git -C "${repository_root}/third_party/fiber-gateway-cpp" rev-parse HEAD)
 
 {
     echo "timestamp_utc=${timestamp}"
     echo "revision=${revision}"
     echo "dirty=${dirty}"
     echo "benchmark_source_sha256=${benchmark_source_sha256}"
+    echo "native_source_sha256=${native_source_sha256}"
+    echo "fiber_revision=${fiber_revision}"
     echo "build_type=Release"
     echo "lto=ON"
     echo "quick=${quick}"

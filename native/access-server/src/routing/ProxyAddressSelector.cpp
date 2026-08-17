@@ -4,8 +4,50 @@
 #include <utility>
 
 #include <fiber/common/Assert.h>
+#include <fiber/event/EventLoop.h>
 
 namespace fiber::access_server {
+
+AccessUpstreamInstance::AccessUpstreamInstance(http::Http1ConnectionGroupKey connection_key, std::string authority,
+                                               std::shared_ptr<AccessUpstreamCircuit> circuit) :
+    data_(std::make_shared<const Data>(Data{
+            .connection_key = std::move(connection_key),
+            .authority = std::move(authority),
+    })),
+    circuit_(std::move(circuit)) {}
+
+const http::Http1ConnectionGroupKey &AccessUpstreamInstance::connection_key() const noexcept {
+    FIBER_ASSERT(data_ != nullptr);
+    return data_->connection_key;
+}
+
+std::string_view AccessUpstreamInstance::authority() const noexcept {
+    FIBER_ASSERT(data_ != nullptr);
+    return data_->authority;
+}
+
+bool operator==(const AccessUpstreamInstance &left, const AccessUpstreamInstance &right) noexcept {
+    if (left.data_ == right.data_) {
+        return true;
+    }
+    if (left.data_ == nullptr || right.data_ == nullptr) {
+        return false;
+    }
+    return left.data_->connection_key == right.data_->connection_key && left.data_->authority == right.data_->authority;
+}
+
+void ProxyUpstreamEndpoint::report(bool success) noexcept {
+    if (!selection.pending()) {
+        return;
+    }
+    const auto now = event::EventLoop::current().now();
+    const auto &circuit = selection.instance().circuit();
+    if (circuit) {
+        circuit->report(circuit_permit, success, now);
+    }
+    selection.report(success, now);
+}
+
 namespace {
 
 ProxyAddressSelectError unavailable_error(ProxyAddressSelectErrorCode code, const char *message) noexcept {
@@ -46,7 +88,7 @@ public:
                                           : "static upstream circuit breaker is open";
             return std::unexpected(unavailable_error(code, message));
         }
-        const std::string_view provider_name = selected->instance().authority;
+        const std::string_view provider_name = selected->instance().authority();
         return make_proxy_upstream_endpoint(std::move(*selected), provider_name);
     }
 

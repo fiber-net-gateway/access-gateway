@@ -354,6 +354,34 @@ template<std::equality_comparable Instance>
 std::expected<typename SmoothWeightedRoundRobin<Instance>::Selection, SwrrSelectError>
 SmoothWeightedRoundRobin<Instance>::select(std::span<const std::uint64_t> excluded_selection_tokens,
                                            TimePoint now) noexcept {
+    return select_if(excluded_selection_tokens, now, [](const Instance &, std::uint64_t) noexcept { return true; });
+}
+
+template<std::equality_comparable Instance>
+template<typename Availability>
+    requires std::predicate<Availability, const Instance &, std::uint64_t>
+std::expected<typename SmoothWeightedRoundRobin<Instance>::Selection, SwrrSelectError>
+SmoothWeightedRoundRobin<Instance>::select_if(std::span<const std::uint64_t> excluded_selection_tokens, TimePoint now,
+                                              Availability &&availability) noexcept {
+    return select_if_impl(excluded_selection_tokens, now, true, std::forward<Availability>(availability));
+}
+
+template<std::equality_comparable Instance>
+template<typename Availability>
+    requires std::predicate<Availability, const Instance &, std::uint64_t>
+std::expected<typename SmoothWeightedRoundRobin<Instance>::Selection, SwrrSelectError>
+SmoothWeightedRoundRobin<Instance>::select_with_external_availability(
+        std::span<const std::uint64_t> excluded_selection_tokens, TimePoint now, Availability &&availability) noexcept {
+    return select_if_impl(excluded_selection_tokens, now, false, std::forward<Availability>(availability));
+}
+
+template<std::equality_comparable Instance>
+template<typename Availability>
+    requires std::predicate<Availability, const Instance &, std::uint64_t>
+std::expected<typename SmoothWeightedRoundRobin<Instance>::Selection, SwrrSelectError>
+SmoothWeightedRoundRobin<Instance>::select_if_impl(std::span<const std::uint64_t> excluded_selection_tokens,
+                                                   TimePoint now, bool enforce_internal_circuit,
+                                                   Availability &&availability) noexcept {
     std::lock_guard guard(state_->mutex);
     Weighted *weighted_instances = state_->weighted_instances.get();
     if (state_->weighted_instance_count == 0) {
@@ -366,7 +394,8 @@ SmoothWeightedRoundRobin<Instance>::select(std::span<const std::uint64_t> exclud
     for (std::size_t i = 0; i < state_->weighted_instance_count; ++i) {
         Weighted &weighted = weighted_instances[i];
         if (detail::swrr_excluded(excluded_selection_tokens, weighted.selection_token) ||
-            !detail::swrr_circuit_available(weighted, state_->options, now)) {
+            (enforce_internal_circuit && !detail::swrr_circuit_available(weighted, state_->options, now)) ||
+            !availability(weighted.instance, weighted.selection_token)) {
             continue;
         }
         weighted.current_weight += weighted.effective_weight;

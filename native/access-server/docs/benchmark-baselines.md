@@ -42,14 +42,15 @@ npm run benchmark:native
 
 每个 target 产生 CSV、stderr 和 `.resources`。资源文件由 GNU time 记录 user/system CPU、
 平均 CPU 百分比、最大 RSS 和 wall time。metadata 记录 revision、dirty 状态、benchmark source
-digest、编译器、内核、CPU、绑核范围和运行档位；`manifest.sha256` 对所有结果再逐文件校验。
+digest、实际 native source digest、Fiber revision、编译器、内核、CPU、绑核范围和运行档位；
+`manifest.sha256` 对所有结果再逐文件校验。
 这些原始结果位于被忽略的 build tree，不提交仓库。
 
 ## 3. 覆盖矩阵
 
 | Target | 覆盖路径 | 主要输出 |
 | --- | --- | --- |
-| `fiber_access_service_selection_benchmark` | directory pin、cluster lookup、SWRR select | endpoint/worker p50/p95/p99、吞吐、扩展效率 |
+| `fiber_access_service_selection_benchmark` | canonical/worker-sharded directory pin、cluster lookup、SWRR select 与 report | mode/completion/endpoint/worker p50/p95/p99、吞吐、扩展效率 |
 | `fiber_access_template_header_benchmark` | 静态/动态 template、response/proxy headers | 延迟、吞吐、分配次数和字节 |
 | `fiber_access_route_publication_benchmark` | sequential/batch commit、完整 compile/build/publish | 10/100/352/500 项目更新时间和发布次数 |
 | `fiber_access_host_matcher_benchmark` | exact Host 高 fan-out hit/miss | 1..1024 fan-out 延迟和吞吐 |
@@ -64,7 +65,7 @@ digest、编译器、内核、CPU、绑核范围和运行档位；`manifest.sha2
 rotation 和 CAT lifecycle 任一结果异常都会使 target 非零退出。WebSocket 当前只记录会话延迟和
 响应字节，CSV 用 `NA` 明确表示没有单独测量分配和 pool hit，避免把未测量误报为零。
 
-## 4. 2026-08-18 基线
+## 4. 2026-08-18 T-02 初始基线（P-01 改造前）
 
 ### 4.1 环境和证据标识
 
@@ -105,7 +106,9 @@ loopback server 线程。
 
 ### 4.3 Selection、route 和 gray
 
-service selection 的 operation 是固定总 selection 数，不随 worker 数倍增。扩展效率为
+本节 service selection 数据是 P-01 第二阶段前的 canonical-only 历史基线；当前 target 已扩展为
+canonical/worker-sharded 与 select-only/select-report 矩阵，改造后对照见第 5 节。operation 是固定
+总 selection 数，不随 worker 数倍增。扩展效率为
 `N-worker throughput / (1-worker throughput * N)`；它是共享路径竞争的代理指标，不是
 mutex wait time 的直接采样。
 
@@ -186,16 +189,74 @@ async logger 峰值排队 831、drop 0；CAT sampled-in 的 queue-full drop 为 
 最后一项包含当前 Fiber Happy Eyeballs 最小 attempt delay；IPv6 loopback 不可用时 target 会明确
 输出 `SKIP`，不能伪造为通过数据。
 
-## 5. 解释和后续比较规则
+## 5. P-01 worker-sharded 对照基线
+
+### 5.1 环境和证据标识
+
+本轮使用与第 4 节相同机器、绑核、Release+LTO 和 full operation 口径；同一 binary 内依次运行
+canonical 与 worker-sharded，减少跨构建比较误差。
+
+| 字段 | 值 |
+| --- | --- |
+| 本地时间 | 2026-08-18 |
+| UTC timestamp | `20260817T173556Z` |
+| parent revision | `2afa6d4b57d924e0195cc6ae24c7c5202dd900d0` |
+| source 状态 | `dirty=true`；P-01 代码和文档在提交前测量 |
+| benchmark source SHA-256 | `9ff60d2df8e1d3c378d829f535ba8b608359e403999a3f0af54e6fcb2251eb67` |
+| native source SHA-256 | `add48727c2e90b33defbe430bd14774484189002e08949ce504e36b162662189` |
+| Fiber revision | `abc8c34ba13bd50554a55e10389c6b3da2dcc048` |
+| result manifest SHA-256 | `bbe37b198df0d6ac9f6b7431256092592381e3cccac8578c57c0b7c69e1d49bb` |
+| 构建/affinity | Release + LTO；CPUs `0-3`；最多 4 workers |
+| 编译器/内核/CPU | Ubuntu Clang 22.1.6；Linux 6.6.114.1 WSL2；i7-13700H |
+
+`native_source_sha256` 覆盖 native/access-server 的生产 `src/`、全部 benchmark、runner、组件及
+native 顶层 CMake；因此即使结果来自提交前 dirty tree，也能精确区分实际被测实现。service
+selection target 的资源总量为 user `41.40 s`、system `17.33 s`、平均 `198%` CPU、wall
+`29.56 s`、最大 RSS `4,000 KiB`；运行时间增加是因为现在覆盖两种 mode 和两种 completion，不能
+直接与第 4 节 canonical-only target wall time比较。
+
+### 5.2 Select-only 对照
+
+以下均为 4 worker、每 aggregate sample 固定总计 100,000 次操作、21 个样本。扩展效率仍定义为
+`4-worker throughput / (1-worker throughput * 4)`；加速比是同一轮 `worker-sharded / canonical`
+四 worker 吞吐。
+
+| endpoints | canonical p50/p95/p99 ns | canonical ops/s | sharded p50/p95/p99 ns | sharded ops/s | sharded 扩展效率 | 加速 |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 175.23 / 185.91 / 198.74 | 5,706,753 | 18.97 / 20.63 / 21.20 | 52,702,005 | 86.57% | 9.23x |
+| 8 | 195.82 / 212.51 / 238.97 | 5,106,679 | 22.24 / 23.23 / 24.22 | 44,958,409 | 82.06% | 8.80x |
+| 32 | 366.02 / 392.11 / 400.83 | 2,732,091 | 42.25 / 50.46 / 54.86 | 23,669,110 | 82.55% | 8.66x |
+| 128 | 923.38 / 949.39 / 951.20 | 1,082,982 | 112.69 / 124.20 / 128.94 | 8,874,173 | 80.44% | 8.19x |
+
+### 5.3 Select + report 对照
+
+该模式每次成功选择后立即走生产 completion 路径。健康 success 不获取共享 circuit mutex；它仍
+更新 worker-local SWRR 权重状态。failure/half-open 路径由正确性与 sanitizer 测试覆盖，不用正常
+成功流量伪造故障比例。
+
+| endpoints | canonical p50/p95/p99 ns | canonical ops/s | sharded p50/p95/p99 ns | sharded ops/s | sharded 扩展效率 | 加速 |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 276.32 / 300.31 / 300.61 | 3,619,022 | 27.31 / 31.28 / 32.28 | 36,622,980 | 84.65% | 10.12x |
+| 8 | 299.82 / 331.69 / 336.48 | 3,335,350 | 30.66 / 36.77 / 40.79 | 32,616,648 | 84.63% | 9.78x |
+| 32 | 440.70 / 453.14 / 459.20 | 2,269,143 | 54.95 / 76.43 / 96.21 | 18,196,912 | 75.77% | 8.02x |
+| 128 | 932.57 / 991.93 / 999.47 | 1,072,304 | 115.79 / 122.32 / 122.55 | 8,636,208 | 84.52% | 8.05x |
+
+worker-sharded 的单 worker 吞吐相对同轮 canonical 为 `-7.6%..+1.3%`。四 worker 的明显改善来自
+把 directory ownership control block、SWRR mutex、current/effective weight 和 completion state
+限制到所属 EventLoop；endpoint scan 仍为每 worker O(N)，共享 circuit 在健康路径只做 bounded
+atomic read。该微基准证明实现消除了原共享热点并排除了明显单线程回退，但不证明生产 QPS、故障
+比例或 endpoint 分布下的收益。
+
+## 6. 解释和后续比较规则
 
 - 在同一机器比较前后版本时，保持 build type、LTO、CPU affinity、worker 数和 runner 档位一致，
   并同时保存 metadata 与 manifest；不能把 quick 与 full 数值混用。
-- service selection 已稳定复现负扩展，但该端到端 case 仍把 atomic directory pin、cluster lookup、
-  全局 SWRR mutex 和 O(N) scan 合在一起。它足以触发 P-01 方案评估，不足以声称某一子组件占用的
-  精确比例；最终生产决策仍需真实 service/endpoint/worker 分布的 profile。
+- 第 4 节 service selection 已稳定复现负扩展并触发 P-01；第 5 节同 binary 对照证明项目内
+  worker sharding 消除了该共享路径的主要扩展瓶颈，但仍不能把每个子组件的 CPU 占比或真实生产
+  收益精确归因。最终容量决策仍需真实 service/endpoint/worker/故障分布的 profile。
 - loopback proxy 数值包含 client socket、gateway、upstream、Fiber buffers 和线程调度，适合做同机
   回归，不等同于网络环境中的单请求 SLA。
 - GNU time 的 CPU/RSS 是 target 级总量，单个 CSV case 的 CPU attribution 需要 `perf` 或生产
   profiler；本 runner 不以无权限时的空 `perf` 数据冒充锁等待证据。
-- 新增 Fiber SWRR/RCU 抽象或改变 DNS/connector 实现时，先在 Fiber 上游增加组件 benchmark，
-  再更新 gitlink 并复跑这里的集成基线。
+- 只有跨应用复用需要新增 Fiber SWRR/RCU 抽象，或改变 DNS/connector 实现时，才先在 Fiber 上游
+  增加组件 benchmark，再更新 gitlink 并复跑这里的集成基线；P-01 当前实现不等待上游化。

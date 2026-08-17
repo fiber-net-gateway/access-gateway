@@ -64,8 +64,7 @@ Issue/PR，合入后再审查 revision range、运行完整回归并更新 gitli
 1. 生命周期中存在 EventLoop 同步阻塞；
 2. “收到配置”“编译发布”“实例可服务”之间的状态建模不完整；
 3. Nacos owner loop 承担过多 CPU 和分配工作；
-4. service selection 仍有全局 SWRR 状态；gray sampling 和 route snapshot pin 已完成
-   worker-local 隔离；
+4. service selection、gray sampling 和 route snapshot pin 均已完成 worker-local 隔离；
 5. 安全边界依赖部署约定，未在代码中显式表达；
 6. 大类内部边界和 CMake target 边界不足，限制测试和后续演进。
 
@@ -83,7 +82,7 @@ Issue/PR，合入后再审查 revision range、运行完整回归并更新 gitli
 | S-02 | P0/P1 | trusted proxy 和真实客户端地址模型 | 本项目 | 否 |
 | S-03 | P1 | 上游 TLS peer/CA/SNI 验证配置 | 双方（已解决） | Fiber 前置与本项目接入均已完成 |
 | S-04 | P1 | 上游 mTLS 客户端身份 | 双方（已解决） | Fiber 前置与本项目接入均已完成 |
-| P-01 | P1 | 消除 service selection 双层共享锁 | 双方 | 通用 SWRR 上游化时需要 |
+| P-01 | P1 | 消除 service selection 双层共享锁 | 本项目（已解决） | 否；通用化时才需要 Fiber |
 | P-02 | P1/P2 | per-worker route snapshot pin | 本项目（已解决） | 否；进一步通用化才需要 |
 | P-03 | P1 | per-worker gray snapshot 和 PRNG | 本项目 | 否 |
 | P-04 | P1 | TLS hazard reaper 只在有退休对象时调度 | 本项目 | 否 |
@@ -123,8 +122,8 @@ Access Gateway 的配置、secret、生命周期、指标、兼容和端到端�
 
 以下事项只有在 benchmark 或多应用复用需求成立后，才建议引入 Fiber 改动：
 
-- **P-01**：将通用 SWRR、selection token 和 circuit state 上游化或提供 sharded
-  balancer；
+- **P-01（可选后续）**：本项目的 worker-sharded SWRR 和共享 circuit 已完成；只有其他
+  Fiber 应用出现明确复用需求时，才将通用 SWRR、selection token 和 circuit state 上游化；
 - **P-02（可选后续）**：只有其他 Fiber 应用也需要，或新的 profile 证明 project-local slot
   仍是瓶颈时，再提供通用 loop-local immutable snapshot/epoch/RCU 原语；
 - **T-02（条件后续）**：新增通用 SWRR/RCU 或改变 Fiber DNS/connector 时，在 Fiber 上游补组件
@@ -135,11 +134,10 @@ Access Gateway 的配置、secret、生命周期、指标、兼容和端到端�
 
 ### 4.2 当前未完成工作
 
-以 `abc8c34` 和本仓库当前实现为准，仍未完成的工作如下；其余表中项目已经解决：
+以 Fiber `abc8c34` 和本仓库当前实现为准，仍未完成的工作如下；其余表中项目已经解决：
 
 | ID | 已完成边界 | 剩余工作 |
 | --- | --- | --- |
-| P-01 | service directory 外层锁已移除 | 仅在 production profile 证明全局 SWRR mutex/O(N) scan 是瓶颈后，决定 sharding 或上游化；当前是条件项 |
 | D-01 | gate 状态和证据格式已统一 | 获取完整生产 corpus，完成同请求 Java/C++ 差分、阶段 8、稳定性/灰度/回滚演练；在此之前切流 gate 仍为 `NOT_MET` |
 
 T-01 已于 2026-08-18 完成；聚焦 sanitizer 和外部 rnacos 故障注入的范围、复现命令与证据见
@@ -147,6 +145,9 @@ T-01 已于 2026-08-18 完成；聚焦 sanitizer 和外部 rnacos 故障注入�
 
 T-02 也已于 2026-08-18 完成；统一 runner、十组覆盖、指标口径和绑核 Release+LTO 基线见
 [`benchmark-baselines.md`](benchmark-baselines.md)。
+
+P-01 第二阶段已于 2026-08-18 完成；触发依据、worker-sharded 实现、全局 circuit 语义和
+canonical/sharded 对照基线见 7.1 节及同一基准文档。
 
 ## 5. 生命周期、配置和并发正确性
 
@@ -561,7 +562,7 @@ native codec/validator、server compiler、web 预检和证书版本 ID 展示�
 atomic route snapshot pin
   -> Host/Path matcher
   -> per-worker gray snapshot + loop-local sample sequence
-  -> atomic service directory pin + SWRR mutex + endpoint scan
+  -> worker-local service directory pin + worker-local SWRR scan + shared endpoint circuit
   -> connection pool / DNS / connect
   -> template and header materialization
   -> CAT / metrics / access log
@@ -569,73 +570,73 @@ atomic route snapshot pin
 
 ### 7.1 P-01：service selection 双层共享锁
 
-**归属：双方。**
+**归属：本项目。Fiber 无前置改动。** 只有其他 Fiber 应用出现明确复用需求时，才考虑把通用
+SWRR 和共享 circuit 上游化。
 
-**实施状态：第一阶段已解决（2026-08-17）。** service/cluster 映射现在由 Nacos owner
-EventLoop 构建为按 cluster 名排序的不可变目录，并通过 atomic `shared_ptr` release/acquire
-发布。请求选择只 pin 一次目录、二分查找 cluster，再进入该 cluster 的 SWRR；不再持有
-service mutex，也不会把目录锁带入 endpoint 扫描。更新继续复用同名 cluster 的 SWRR，因而
-保留 selection token、权重进度和 circuit state；删除或 retire 先发布新目录/空目录，旧目录
-由已经开始的 `select()` 固定并自然回收。更新 bookkeeping 和 discovery metrics 保持 owner-loop
-私有。
+**实施状态：已解决（第一阶段 2026-08-17，第二阶段 2026-08-18）。** 第一阶段已把
+service/cluster 映射改为 owner-loop 构建、按 cluster 排序的不可变目录，消除了 service directory
+外层 mutex；保留的全局 atomic directory pin、SWRR mutex 和 O(N) scan 在正式四核基线中呈稳定
+负扩展，因此触发第二阶段，而不是等待未知的 production profile 才处理已经量化的共享热点。
 
-本阶段没有修改 Fiber，也没有把 SWRR 算法迁移到上游。atomic `shared_ptr` 的引用计数并不
-保证 lock-free，而全局 SWRR 的 mutex 和 O(N) endpoint 扫描仍然存在；是否开展第二阶段必须
-由下面的 benchmark 和生产 profile 决定。
+第二阶段采用以下边界：
 
-改造前，`AccessServiceState::Impl::select()` 在 service mutex 内查找 cluster，再调用带独立 mutex 的
-`SmoothWeightedRoundRobin::select()`；完成或失败报告会再次获取 SWRR mutex。所有 HTTP
-worker 访问同一 service 时会共享这些 cache line，选择本身还需要 O(N) 扫描 endpoint。
+1. `AccessControlPlaneSupervisor` 把固定的 HTTP `EventLoopGroup` 显式绑定到
+   `AccessServiceState`。每个 worker 拥有 cache-line 对齐的 atomic directory slot；slot 发布各自
+   独占控制块的 wrapper，wrapper 再强引用同一份 canonical cluster directory。请求只增减所属
+   worker wrapper 的引用计数；非服务 EventLoop 和独立 validator 使用 canonical fallback。
+2. 每个逻辑 cluster 的 preferred/fallback balancer 各保留一份 canonical SWRR，并为每个 HTTP
+   worker 建立独立 SWRR shard。请求根据当前 loop 的 group/index O(1) 进入本地 shard，因此
+   selection、completion 和 O(N) endpoint scan 不再跨 worker 共享 mutex/cache line；固定 worker
+   数由 runtime 生命周期保证，不支持运行中 resize。
+3. endpoint 地址、authority 和 connection key 组成共享不可变 `AccessUpstreamInstance::Data`，
+   各 shard 不重复物化字符串；selection 仍 pin 住其本地 SWRR generation，跨 await 使用的
+   `connection_key`/Host view 不会悬空。`ProxyUpstreamEndpoint` 直接通过 pinned selection 访问
+   circuit，没有为每个请求额外增减全局 circuit 的 `shared_ptr` 控制块。
+4. selection token 和每 endpoint `AccessUpstreamCircuit` 在健康/权重更新时跨 generation 复用。
+   健康扫描只读 bounded atomics；失败和 recovery report 仅在该 endpoint 的 mutex 上串行，不再
+   锁整个 cluster。达到 `max_fails` 后用 CAS 只允许一个 half-open probe，failure epoch 防止旧
+   probe 的迟到成功清除更新的失败，timeout 继续保持原有严格“大于”边界。
+5. 对 service selector，共享 circuit 是唯一开路/恢复判据；worker-local SWRR 只保留平滑权重进度
+   和失败降权，不能在全局恢复后继续隐藏 endpoint。静态 address selector 不参与分片，继续使用
+   原有 SWRR 内建 circuit。多个 worker 只可能在 half-open CAS 竞争的罕见路径临时记录 raced
+   token 并重选；正常健康路径不分配该容器。
+6. update 在任何 worker slot 发布前预构造全部 wrapper，随后逐 slot release-store，最后发布
+   canonical pointer；retire 清空全部 slot。代价是每 cluster/endpoint 保存 O(worker) 份小型
+   可变权重状态和更新期复制，地址数据及全局故障状态仍只存一份。请求热路径没有新增
+   `std::function`、跨 worker 锁或 circuit 引用计数争用。
 
 代码位置：
 
-- [`AccessServiceDiscovery.cpp`](../src/runtime/AccessServiceDiscovery.cpp#L250)；
-- [`SmoothWeightedRoundRobinImpl.h`](../src/routing/SmoothWeightedRoundRobinImpl.h#L353)；
-- [`SmoothWeightedRoundRobinImpl.h`](../src/routing/SmoothWeightedRoundRobinImpl.h#L395)。
+- [`AccessServiceDiscovery.cpp`](../src/runtime/AccessServiceDiscovery.cpp)；
+- [`AccessUpstreamCircuit.cpp`](../src/routing/AccessUpstreamCircuit.cpp)；
+- [`SmoothWeightedRoundRobinImpl.h`](../src/routing/SmoothWeightedRoundRobinImpl.h)；
+- [`ProxyAddressSelector.cpp`](../src/routing/ProxyAddressSelector.cpp)。
 
-第一阶段由本项目完成：
+基准同时保留 canonical 路径作为同二进制对照，并新增 `select_only` 与 `select_report` 两种完成
+模式。每个 endpoint/worker/mode 仍运行 21 个固定总操作量 aggregate sample，CSV 输出
+p50/p95/p99、吞吐、扩展效率和 checksum。2026-08-18 在 i7-13700H/WSL、Release+LTO、绑核
+CPU 0-3、每 sample 100,000 次操作下，四 worker 结果如下：
 
-- service/cluster 目录改成不可变 snapshot；
-- selection 不再持有目录 mutex；
-- 保留当前全局 SWRR 状态和锁，先消除双层锁；
-- 建立 endpoint 数 1/8/32/128、worker 数 1 到 CPU 数的 contention benchmark。
+| completion | endpoints | canonical ops/s | worker-sharded ops/s | worker-sharded 扩展效率 | 四 worker 加速 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| select only | 1 | 5,706,753 | 52,702,005 | 86.57% | 9.23x |
+| select only | 8 | 5,106,679 | 44,958,409 | 82.06% | 8.80x |
+| select only | 32 | 2,732,091 | 23,669,110 | 82.55% | 8.66x |
+| select only | 128 | 1,082,982 | 8,874,173 | 80.44% | 8.19x |
+| select + report | 1 | 3,619,022 | 36,622,980 | 84.65% | 10.12x |
+| select + report | 8 | 3,335,350 | 32,616,648 | 84.63% | 9.78x |
+| select + report | 32 | 2,269,143 | 18,196,912 | 75.77% | 8.02x |
+| select + report | 128 | 1,072,304 | 8,636,208 | 84.52% | 8.05x |
 
-默认关闭的 `fiber_access_service_selection_benchmark` 对每个 endpoint 数执行 worker
-`1..max-workers` 的固定总 selection 次数；每个 case 运行 21 个 aggregate sample，输出
-p50/p95/p99、吞吐和相对单 worker 的扩展效率。测量包含 atomic directory pin、cluster 查找和
-SWRR selection，不包含请求执行与 completion/report。统一构建和运行方式：
+worker-sharded 单 worker 吞吐相对 canonical 的变化范围为 `-7.6%..+1.3%`，没有用数量级单线程
+退化换取扩展性；endpoint 增长仍保留预期的每 worker O(N) scan 成本。测试覆盖独立 worker 的
+1:3 权重分布、跨 worker/更新共享开路、单 half-open probe、迟到成功、external circuit 恢复、
+canonical fallback、selection generation pin，以及 512 次并发目录更新。
 
-```bash
-ACCESS_SERVER_BENCHMARK_CPUSET=0-3 \
-ACCESS_SERVER_BENCHMARK_MAX_WORKERS=4 \
-npm run benchmark:native
-```
-
-2026-08-18 在同一 i7-13700H/WSL 环境将 target 绑定到 CPU 0-3，以每个 sample 100,000 次
-selection 得到以下方向性结果：
-
-| endpoint 数 | 1 worker ops/s | 4 worker ops/s | 4 worker 扩展效率 |
-| ---: | ---: | ---: | ---: |
-| 1 | 17,767,294 | 6,934,807 | 9.76% |
-| 8 | 16,864,214 | 5,996,604 | 8.89% |
-| 32 | 10,761,640 | 3,006,603 | 6.98% |
-| 128 | 4,531,126 | 1,676,750 | 9.25% |
-
-结果确认剩余的共享 selection 路径在同一 service 高并发下呈负扩展，且 endpoint 增长带来
-预期的 O(N) 扫描成本。当前 benchmark 尚不能把 atomic directory pin 与全局 SWRR mutex 的
-成本完全分离，而且没有计入 completion/report 的再次加锁。第二阶段仍需组件分解和生产分布
-profile，再比较 sharded/per-loop 方案的流量分布与故障状态一致性，不能仅凭微基准直接改变
-负载均衡语义。完整 percentile、资源数据、source/manifest digest 和解释限制见
-[`benchmark-baselines.md`](benchmark-baselines.md)。
-
-第二阶段由双方协同：
-
-- Fiber 上游承载通用 SWRR、selection token、update、complete 和 circuit 状态；
-- 评估 sharded/per-loop balancer API，避免框架组件依赖 access-server 类型；
-- 本项目保留 zone、cluster、gray、Java retry 次数和兼容错误映射；
-- 本项目验证全局 SWRR 改成 per-worker 后的流量分布和故障恢复语义。
-
-如果 benchmark 证明第一阶段已经足够，不应仅为代码复用强行迁移上游。
+这些数字是 aggregate 微基准，不是单请求延迟或生产容量。真实 service/endpoint/worker 分布、
+连接池、网络和业务策略仍须生产 profile；完整 percentile、资源数据、native/Fiber source digest、
+manifest 和解释边界见 [`benchmark-baselines.md`](benchmark-baselines.md)。本项已不再被 Fiber
+上游化阻塞；上游化只能由复用需求单独触发。
 
 ### 7.2 P-02：per-worker route snapshot 和请求 pin
 
@@ -1575,7 +1576,7 @@ compatibility contract 统一引用该矩阵，并继续声明：完整生产 co
 | DNS resolver | 系统配置、最多三个 server、failover/rotation、TCP fallback 已提供 | 已在启动前严格加载并完整注入 HTTP worker；Nacos 仍为 IP-only |
 | Happy Eyeballs | `TcpConnector` 和 HTTP/1 多地址 connect 已提供 | 已接入单 lease、共享 deadline 的多地址竞速 |
 | Nacos 服务状态 | Config/Naming typed latest-value watch 已提供 | 已映射 bounded transport/reconnect metrics，并在服务后、client 前关闭 subscriber |
-| 通用 SWRR | 当前实现位于 access-server | 稳定后考虑上游化 |
+| 通用 SWRR | 当前实现位于 access-server | worker-sharded SWRR 与共享 circuit 已完成；仅按复用需求上游化 |
 | 通用 loop-local RCU | 当前未作为公共能力使用 | P-02 已用项目内 worker slot 解决；复用需求或剩余瓶颈成立时再设计 |
 
 ## 14. 推荐落地顺序
@@ -1611,14 +1612,13 @@ compatibility contract 统一引用该矩阵，并继续声明：完整生产 co
 3. S-03 route 级 TLS transport profile 隔离与配置（已完成）；
 4. S-04 upstream mTLS client identity（已完成）；
 5. O-02 Nacos config/naming status watch（已完成）；
-6. P-01 通用 SWRR 上游化或 sharding；
+6. P-01 worker-sharded SWRR 与共享 circuit（已完成）；通用 SWRR 上游化仅在复用需求成立时开展；
 7. P-02 已由本项目完成；只有新 profile 证明 worker-local slot 仍是瓶颈或 Fiber 出现复用需求时，
    才开展通用 RCU 设计。
 
-前五项的 Fiber 前置及本项目接入均已完成。
-P-01/P-02
-仍由 profile 或复用需求触发，不因为本次 gitlink 更新自动启动。任何后续 Fiber revision 更新仍须
-审阅 range、更新 provenance 并运行完整 Fiber/native 回归。
+前六项的必需实现均已完成。P-01 的项目内分片和 P-02 的 worker-local pin 不再等待 profile；只有
+抽取 Fiber 通用 SWRR/RCU 的后续工作仍由跨应用复用需求触发，不因为本次 gitlink 更新自动启动。
+任何后续 Fiber revision 更新仍须审阅 range、更新 provenance 并运行完整 Fiber/native 回归。
 
 ### 阶段 D：结构收敛和最终门禁
 

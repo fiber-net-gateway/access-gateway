@@ -3,6 +3,7 @@
 #include <array>
 #include <atomic>
 #include <expected>
+#include <future>
 #include <map>
 #include <memory>
 #include <optional>
@@ -176,7 +177,7 @@ TEST(AccessServiceStateTest, PublishesAndRetiresImmutableClusterDirectory) {
             co_return;
         }
         const std::uint64_t stable_token = pinned->selection_token();
-        EXPECT_EQ(pinned->instance().authority, "10.0.0.1:8080");
+        EXPECT_EQ(pinned->instance().authority(), "10.0.0.1:8080");
 
         const auto reweighted = service_snapshot(
                 "two", {service_instance("10.0.0.1", "sh-default", 5.0), service_instance("10.0.0.3", "sh-gray")});
@@ -185,22 +186,22 @@ TEST(AccessServiceStateTest, PublishesAndRetiresImmutableClusterDirectory) {
         EXPECT_TRUE(stable);
         if (stable) {
             EXPECT_EQ(stable->selection_token(), stable_token);
-            EXPECT_EQ(stable->instance().authority, "10.0.0.1:8080");
+            EXPECT_EQ(stable->instance().authority(), "10.0.0.1:8080");
         }
         auto gray = state.select("gray", {});
         EXPECT_TRUE(gray);
         if (gray) {
-            EXPECT_EQ(gray->instance().authority, "10.0.0.3:8080");
+            EXPECT_EQ(gray->instance().authority(), "10.0.0.3:8080");
         }
 
         const auto replaced = service_snapshot("three", {service_instance("10.0.0.2")});
         state.update(*replaced);
-        EXPECT_EQ(pinned->instance().authority, "10.0.0.1:8080");
+        EXPECT_EQ(pinned->instance().authority(), "10.0.0.1:8080");
         pinned->report(false);
         auto current = state.select("default", {});
         EXPECT_TRUE(current);
         if (current) {
-            EXPECT_EQ(current->instance().authority, "10.0.0.2:8080");
+            EXPECT_EQ(current->instance().authority(), "10.0.0.2:8080");
             EXPECT_NE(current->selection_token(), stable_token);
         }
         auto removed = state.select("gray", {});
@@ -230,12 +231,12 @@ TEST(AccessServiceStateTest, SelectsWhileOwnerPublishesChangingDirectories) {
     constexpr std::size_t update_count = 512;
     constexpr std::size_t minimum_selections_per_worker = 2'000;
 
+    fiber::event::EventLoopGroup workers(worker_count);
     fiber::access_server::AccessServiceState state;
-    state.initialize({}, "sh");
+    state.initialize({}, "sh", {}, &workers);
     const auto initial = service_snapshot("initial", {service_instance("10.0.0.1")});
     state.update(*initial);
 
-    fiber::event::EventLoopGroup workers(worker_count);
     workers.start();
     std::atomic<std::size_t> ready{0};
     std::atomic<std::size_t> done{0};
@@ -258,8 +259,8 @@ TEST(AccessServiceStateTest, SelectsWhileOwnerPublishesChangingDirectories) {
                    selected_count < minimum_selections_per_worker) {
                 auto selected = state.select("default", {});
                 if (!selected || selected->selection_token() == 0 ||
-                    (selected->instance().authority != "10.0.0.1:8080" &&
-                     selected->instance().authority != "10.0.0.2:8080")) {
+                    (selected->instance().authority() != "10.0.0.1:8080" &&
+                     selected->instance().authority() != "10.0.0.2:8080")) {
                     ++local_invalid;
                 } else {
                     selected->report(true);
@@ -309,6 +310,111 @@ TEST(AccessServiceStateTest, SelectsWhileOwnerPublishesChangingDirectories) {
 
     EXPECT_EQ(invalid_results.load(std::memory_order_relaxed), 0u);
     EXPECT_GE(total_selections.load(std::memory_order_relaxed), worker_count * minimum_selections_per_worker);
+    state.retire(fiber::nacos::ServiceRetireReason::Released);
+}
+
+TEST(AccessServiceStateTest, SharesCircuitStateAcrossWorkerShardsAndUpdates) {
+    fiber::event::EventLoopGroup workers(2);
+    fiber::access_server::AccessServiceState state;
+    state.initialize(
+            {
+                    .max_fails = 1,
+                    .fail_timeout = std::chrono::hours(1),
+            },
+            "sh", {}, &workers);
+    state.update(*service_snapshot("initial", {service_instance("10.0.0.1")}));
+    workers.start();
+
+    std::promise<bool> failed_promise;
+    auto failed = failed_promise.get_future();
+    fiber::async::spawn(workers.at(0), [&]() -> fiber::async::DetachedTask {
+        auto selected = state.select("default", {});
+        const bool valid = selected.has_value();
+        if (selected) {
+            selected->report(false);
+        }
+        failed_promise.set_value(valid);
+        co_return;
+    });
+    ASSERT_TRUE(failed.get());
+
+    state.update(*service_snapshot("reweighted", {service_instance("10.0.0.1", "sh-default", 2.0)}));
+    std::promise<bool> open_promise;
+    auto open = open_promise.get_future();
+    fiber::async::spawn(workers.at(1), [&]() -> fiber::async::DetachedTask {
+        auto selected = state.select("default", {});
+        open_promise.set_value(!selected &&
+                               selected.error() == fiber::access_server::SwrrSelectError::NoAvailableInstance);
+        co_return;
+    });
+    EXPECT_TRUE(open.get());
+
+    workers.stop();
+    workers.join();
+    state.retire(fiber::nacos::ServiceRetireReason::Released);
+}
+
+TEST(AccessServiceStateTest, PreservesWeightedDistributionIndependentlyOnEveryWorker) {
+    fiber::event::EventLoopGroup workers(2);
+    fiber::access_server::AccessServiceState state;
+    state.initialize({.max_fails = 0}, "sh", {}, &workers);
+    state.update(*service_snapshot("weighted", {service_instance("10.0.0.1", "sh-default", 1.0),
+                                                service_instance("10.0.0.2", "sh-default", 3.0)}));
+    workers.start();
+
+    std::array<std::promise<std::array<std::size_t, 2>>, 2> promises;
+    std::array<std::future<std::array<std::size_t, 2>>, 2> futures{
+            promises[0].get_future(),
+            promises[1].get_future(),
+    };
+    for (std::size_t worker = 0; worker < workers.size(); ++worker) {
+        fiber::async::spawn(workers.at(worker), [&, worker]() -> fiber::async::DetachedTask {
+            std::array<std::size_t, 2> counts{};
+            for (std::size_t selection = 0; selection < 40; ++selection) {
+                auto selected = state.select("default", {});
+                if (!selected) {
+                    break;
+                }
+                if (selected->instance().authority() == "10.0.0.1:8080") {
+                    ++counts[0];
+                } else if (selected->instance().authority() == "10.0.0.2:8080") {
+                    ++counts[1];
+                }
+                selected->report(true);
+            }
+            promises[worker].set_value(counts);
+            co_return;
+        });
+    }
+
+    for (auto &future: futures) {
+        EXPECT_EQ(future.get(), (std::array<std::size_t, 2>{10, 30}));
+    }
+    workers.stop();
+    workers.join();
+    state.retire(fiber::nacos::ServiceRetireReason::Released);
+}
+
+TEST(AccessServiceStateTest, UsesCanonicalFallbackOutsideTheServingWorkerGroup) {
+    fiber::event::EventLoopGroup workers(1);
+    fiber::access_server::AccessServiceState state;
+    state.initialize({}, "sh", {}, &workers);
+    state.update(*service_snapshot("canonical", {service_instance("10.0.0.1")}));
+
+    fiber::event::EventLoop control_loop;
+    bool selected_canonical = false;
+    fiber::async::spawn(control_loop, [&]() -> fiber::async::DetachedTask {
+        auto selected = state.select("default", {});
+        selected_canonical = selected.has_value() && selected->instance().authority() == "10.0.0.1:8080";
+        if (selected) {
+            selected->report(true);
+        }
+        control_loop.stop();
+        co_return;
+    });
+    control_loop.run();
+
+    EXPECT_TRUE(selected_canonical);
     state.retire(fiber::nacos::ServiceRetireReason::Released);
 }
 

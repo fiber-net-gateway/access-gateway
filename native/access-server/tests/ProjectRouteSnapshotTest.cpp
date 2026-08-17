@@ -175,10 +175,7 @@ select_addresses(fiber::access_server::ProxyAddressSelector &selector, std::size
             if (!selected || selected->connection_key == nullptr) {
                 break;
             }
-            addresses.push_back(fiber::access_server::AccessUpstreamInstance{
-                    .connection_key = *selected->connection_key,
-                    .authority = std::string(selected->host_header),
-            });
+            addresses.emplace_back(*selected->connection_key, std::string(selected->host_header));
             excluded.push_back(selected->selection_token);
             selected->report(true);
         }
@@ -439,21 +436,21 @@ TEST(ProjectRouteSnapshotTest, CompilesStaticAddressesWithJavaHttpHostRules) {
     const auto addresses = select_addresses(*snapshot.routes()[0].proxy->address_selector, 4);
     ASSERT_EQ(addresses.size(), 4U);
     using ConnectionKey = fiber::http::Http1ConnectionGroupKey;
-    EXPECT_EQ(addresses[0].connection_key.scheme(), ConnectionKey::Scheme::Http);
-    EXPECT_TRUE(addresses[0].connection_key.is_ip());
-    EXPECT_EQ(addresses[0].connection_key.ip_address().to_string(), "127.0.0.1");
-    EXPECT_EQ(addresses[0].connection_key.port(), 8080);
-    EXPECT_EQ(addresses[0].authority, "127.0.0.1:8080");
-    EXPECT_EQ(addresses[1].connection_key.scheme(), ConnectionKey::Scheme::Http);
-    EXPECT_TRUE(addresses[1].connection_key.is_name());
-    EXPECT_EQ(addresses[1].connection_key.host_name(), "backend");
-    EXPECT_EQ(addresses[1].connection_key.port(), 80);
-    EXPECT_EQ(addresses[1].authority, "backend");
-    EXPECT_EQ(addresses[2].connection_key.host_name(), ":80");
-    EXPECT_EQ(addresses[2].authority, ":80");
-    EXPECT_EQ(addresses[3].connection_key.scheme(), ConnectionKey::Scheme::Https);
-    EXPECT_EQ(addresses[3].connection_key.port(), 443);
-    EXPECT_EQ(addresses[3].authority, "backend");
+    EXPECT_EQ(addresses[0].connection_key().scheme(), ConnectionKey::Scheme::Http);
+    EXPECT_TRUE(addresses[0].connection_key().is_ip());
+    EXPECT_EQ(addresses[0].connection_key().ip_address().to_string(), "127.0.0.1");
+    EXPECT_EQ(addresses[0].connection_key().port(), 8080);
+    EXPECT_EQ(addresses[0].authority(), "127.0.0.1:8080");
+    EXPECT_EQ(addresses[1].connection_key().scheme(), ConnectionKey::Scheme::Http);
+    EXPECT_TRUE(addresses[1].connection_key().is_name());
+    EXPECT_EQ(addresses[1].connection_key().host_name(), "backend");
+    EXPECT_EQ(addresses[1].connection_key().port(), 80);
+    EXPECT_EQ(addresses[1].authority(), "backend");
+    EXPECT_EQ(addresses[2].connection_key().host_name(), ":80");
+    EXPECT_EQ(addresses[2].authority(), ":80");
+    EXPECT_EQ(addresses[3].connection_key().scheme(), ConnectionKey::Scheme::Https);
+    EXPECT_EQ(addresses[3].connection_key().port(), 443);
+    EXPECT_EQ(addresses[3].authority(), "backend");
 
     RouteConfig invalid = proxy_route("/address", "");
     invalid.addresses = {std::optional<std::string>("backend:2147483648")};

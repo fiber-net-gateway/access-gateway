@@ -1,11 +1,12 @@
 #ifndef FIBER_ACCESS_SERVER_PROXY_ADDRESS_SELECTOR_H
 #define FIBER_ACCESS_SERVER_PROXY_ADDRESS_SELECTOR_H
 
-#include <fiber/http/Http1ConnectionGroupKey.h>
+#include "AccessUpstreamCircuit.h"
 #include "SmoothWeightedRoundRobin.h"
 
 #include <fiber/async/Task.h>
 #include <fiber/common/IoError.h>
+#include <fiber/http/Http1ConnectionGroupKey.h>
 
 #include <cstdint>
 #include <expected>
@@ -37,11 +38,27 @@ struct ProxyAddressReadyError {
     const char *message = nullptr;
 };
 
-struct AccessUpstreamInstance {
-    http::Http1ConnectionGroupKey connection_key;
-    std::string authority;
+class AccessUpstreamInstance {
+public:
+    AccessUpstreamInstance() noexcept = default;
+    AccessUpstreamInstance(http::Http1ConnectionGroupKey connection_key, std::string authority,
+                           std::shared_ptr<AccessUpstreamCircuit> circuit = {});
 
-    friend bool operator==(const AccessUpstreamInstance &, const AccessUpstreamInstance &) noexcept = default;
+    [[nodiscard]] const http::Http1ConnectionGroupKey &connection_key() const noexcept;
+    [[nodiscard]] std::string_view authority() const noexcept;
+    [[nodiscard]] const std::shared_ptr<AccessUpstreamCircuit> &circuit() const noexcept { return circuit_; }
+    void set_circuit(std::shared_ptr<AccessUpstreamCircuit> circuit) noexcept { circuit_ = std::move(circuit); }
+
+    friend bool operator==(const AccessUpstreamInstance &left, const AccessUpstreamInstance &right) noexcept;
+
+private:
+    struct Data {
+        http::Http1ConnectionGroupKey connection_key;
+        std::string authority;
+    };
+
+    std::shared_ptr<const Data> data_;
+    std::shared_ptr<AccessUpstreamCircuit> circuit_;
 };
 
 using AccessUpstreamSwrr = SmoothWeightedRoundRobin<AccessUpstreamInstance>;
@@ -53,24 +70,23 @@ struct ProxyUpstreamEndpoint {
     std::string_view host_header;
     std::string_view provider_name;
     AccessUpstreamSwrr::Selection selection;
+    AccessUpstreamCircuit::Permit circuit_permit;
     std::uint64_t selection_token = 0;
 
-    void report(bool success) noexcept {
-        if (selection.pending()) {
-            selection.report(success);
-        }
-    }
+    void report(bool success) noexcept;
 };
 
-[[nodiscard]] inline ProxyUpstreamEndpoint make_proxy_upstream_endpoint(AccessUpstreamSwrr::Selection selection,
-                                                                        std::string_view provider_name) noexcept {
+[[nodiscard]] inline ProxyUpstreamEndpoint
+make_proxy_upstream_endpoint(AccessUpstreamSwrr::Selection selection, std::string_view provider_name,
+                             AccessUpstreamCircuit::Permit permit = {}) noexcept {
     const std::uint64_t selection_token = selection.selection_token();
     const AccessUpstreamInstance &instance = selection.instance();
     return ProxyUpstreamEndpoint{
-            .connection_key = &instance.connection_key,
-            .host_header = instance.authority,
+            .connection_key = &instance.connection_key(),
+            .host_header = instance.authority(),
             .provider_name = provider_name,
             .selection = std::move(selection),
+            .circuit_permit = permit,
             .selection_token = selection_token,
     };
 }

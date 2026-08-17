@@ -4,6 +4,7 @@
 #include <array>
 #include <atomic>
 #include <charconv>
+#include <chrono>
 #include <cmath>
 #include <limits>
 #include <new>
@@ -11,6 +12,8 @@
 #include <vector>
 
 #include <fiber/common/Assert.h>
+#include <fiber/event/EventLoop.h>
+#include <fiber/event/EventLoopGroup.h>
 
 namespace fiber::access_server {
 namespace {
@@ -98,7 +101,7 @@ int compare_connection_key(const http::Http1ConnectionGroupKey &left,
 
 int compare_identity(const AccessEndpointDefinition &left, const AccessEndpointDefinition &right) noexcept {
     const int compared =
-            compare_connection_key(left.endpoint.instance.connection_key, right.endpoint.instance.connection_key);
+            compare_connection_key(left.endpoint.instance.connection_key(), right.endpoint.instance.connection_key());
     if (compared != 0) {
         return compared;
     }
@@ -165,10 +168,20 @@ AccessDiscoveryMetricEvent acquire_failure_event(nacos::NamingServiceErrorCode c
 
 class AccessServiceState::Impl final : public common::NonCopyable, public common::NonMovable {
 public:
-    using Selection = AccessUpstreamSwrr::Selection;
+    using Selection = AccessServiceState::Selection;
 
-    Impl(AccessUpstreamSwrr::Options options, std::string zone, AccessDiscoveryMetricsObserver metrics_observer) :
-        options_(std::move(options)), zone_(std::move(zone)), metrics_observer_(metrics_observer) {}
+    Impl(AccessUpstreamSwrr::Options options, std::string zone, AccessDiscoveryMetricsObserver metrics_observer,
+         event::EventLoopGroup *workers) :
+        options_(std::move(options)), zone_(std::move(zone)), metrics_observer_(metrics_observer), workers_(workers) {
+        if (workers_ == nullptr) {
+            return;
+        }
+        FIBER_ASSERT(workers_->size() > 0);
+        worker_slots_.reserve(workers_->size());
+        for (std::size_t index = 0; index < workers_->size(); ++index) {
+            worker_slots_.push_back(std::make_unique<WorkerSlot>());
+        }
+    }
 
     [[nodiscard]] bool update(const nacos::ServiceInfo &snapshot) noexcept {
         std::vector<AccessEndpointDefinition> next_definitions;
@@ -201,12 +214,9 @@ public:
                     .logical_cluster = std::string(logical_cluster),
                     .endpoint =
                             WeightedInstance{
-                                    .instance =
-                                            AccessUpstreamInstance{
-                                                    .connection_key = std::move(*connection_key),
-                                                    .authority = make_authority(instance.ip, instance.port,
-                                                                                parsed_ip && ip.is_v6()),
-                                            },
+                                    .instance = AccessUpstreamInstance(
+                                            std::move(*connection_key),
+                                            make_authority(instance.ip, instance.port, parsed_ip && ip.is_v6())),
                                     .weight = instance.weight,
                             },
                     .preferred = preferred,
@@ -259,8 +269,8 @@ public:
                     active_directory_ == nullptr ? nullptr : find_cluster(*active_directory_, pending.name);
             Cluster cluster{
                     .name = std::move(pending.name),
-                    .preferred = current ? current->preferred : std::make_shared<AccessUpstreamSwrr>(options_),
-                    .fallback = current ? current->fallback : std::make_shared<AccessUpstreamSwrr>(options_),
+                    .preferred = current ? current->preferred : std::make_shared<ClusterBalancer>(options_, workers_),
+                    .fallback = current ? current->fallback : std::make_shared<ClusterBalancer>(options_, workers_),
             };
             (void) cluster.preferred->update(std::move(pending.preferred));
             (void) cluster.fallback->update(std::move(pending.fallback));
@@ -268,8 +278,8 @@ public:
         }
 
         auto next_directory = std::make_shared<const ClusterDirectory>(std::move(next_clusters));
+        publish_directory(next_directory);
         active_directory_ = next_directory;
-        published_directory_.store(std::move(next_directory), std::memory_order_release);
 
         checksum_ = snapshot.checksum;
         definitions_ = std::move(next_definitions);
@@ -289,6 +299,9 @@ public:
         FIBER_ASSERT(initialized_);
         FIBER_ASSERT(aggregate_.ready);
         FIBER_ASSERT(active_directory_ != nullptr);
+        for (const auto &slot: worker_slots_) {
+            slot->published.store({}, std::memory_order_release);
+        }
         published_directory_.store({}, std::memory_order_release);
         active_directory_.reset();
         metrics_observer_.transition_service(retire_event(reason), aggregate_, {});
@@ -300,7 +313,20 @@ public:
 
     [[nodiscard]] std::expected<Selection, SwrrSelectError>
     select(std::string_view cluster, std::span<const std::uint64_t> excluded_selection_tokens) noexcept {
-        const std::shared_ptr<const ClusterDirectory> directory = published_directory_.load(std::memory_order_acquire);
+        std::shared_ptr<const ClusterDirectory> canonical_directory;
+        std::shared_ptr<const WorkerDirectory> worker_directory;
+        const ClusterDirectory *directory = nullptr;
+        event::EventLoop *loop = event::EventLoop::current_or_null();
+        if (workers_ != nullptr && loop != nullptr && loop->has_group_index() && loop->group() == workers_) {
+            FIBER_ASSERT(loop->group_index() < worker_slots_.size());
+            worker_directory = worker_slots_[loop->group_index()]->published.load(std::memory_order_acquire);
+            if (worker_directory != nullptr) {
+                directory = worker_directory->directory.get();
+            }
+        } else {
+            canonical_directory = published_directory_.load(std::memory_order_acquire);
+            directory = canonical_directory.get();
+        }
         if (directory == nullptr) {
             return std::unexpected(SwrrSelectError::NoConfiguredInstance);
         }
@@ -330,10 +356,77 @@ private:
         std::vector<WeightedInstance> fallback;
     };
 
+    class ClusterBalancer final : public common::NonCopyable, public common::NonMovable {
+    public:
+        ClusterBalancer(const AccessUpstreamSwrr::Options &options, event::EventLoopGroup *workers) :
+            canonical_(options), workers_(workers) {
+            if (workers_ == nullptr) {
+                return;
+            }
+            shards_.reserve(workers_->size());
+            for (std::size_t index = 0; index < workers_->size(); ++index) {
+                shards_.push_back(std::make_unique<AccessUpstreamSwrr>(options));
+            }
+        }
+
+        [[nodiscard]] bool update(std::vector<WeightedInstance> instances) {
+            bool changed = false;
+            for (const auto &shard: shards_) {
+                changed = shard->update(instances) || changed;
+            }
+            changed = canonical_.update(std::move(instances)) || changed;
+            return changed;
+        }
+
+        [[nodiscard]] std::expected<Selection, SwrrSelectError>
+        select(std::span<const std::uint64_t> excluded_selection_tokens) noexcept {
+            event::EventLoop *loop = event::EventLoop::current_or_null();
+            const auto now = loop == nullptr ? std::chrono::steady_clock::now() : loop->now();
+            AccessUpstreamSwrr *balancer = &canonical_;
+            if (workers_ != nullptr && loop != nullptr && loop->has_group_index() && loop->group() == workers_) {
+                FIBER_ASSERT(loop->group_index() < shards_.size());
+                balancer = shards_[loop->group_index()].get();
+            }
+
+            std::vector<std::uint64_t> raced_recovery_tokens;
+            for (;;) {
+                auto selected = balancer->select_with_external_availability(
+                        excluded_selection_tokens, now,
+                        [&](const AccessUpstreamInstance &instance, std::uint64_t selection_token) noexcept {
+                            if (std::find(raced_recovery_tokens.begin(), raced_recovery_tokens.end(),
+                                          selection_token) != raced_recovery_tokens.end()) {
+                                return false;
+                            }
+                            const auto &circuit = instance.circuit();
+                            return circuit == nullptr || circuit->available(now);
+                        });
+                if (!selected) {
+                    return std::unexpected(selected.error());
+                }
+                const auto &circuit = selected->instance().circuit();
+                if (circuit == nullptr) {
+                    return Selection(std::move(*selected), {});
+                }
+                auto permit = circuit->acquire(now);
+                if (permit) {
+                    return Selection(std::move(*selected), *permit);
+                }
+                const std::uint64_t raced_token = selected->selection_token();
+                selected->cancel();
+                raced_recovery_tokens.push_back(raced_token);
+            }
+        }
+
+    private:
+        AccessUpstreamSwrr canonical_;
+        event::EventLoopGroup *workers_ = nullptr;
+        std::vector<std::unique_ptr<AccessUpstreamSwrr>> shards_;
+    };
+
     struct Cluster {
         std::string name;
-        std::shared_ptr<AccessUpstreamSwrr> preferred;
-        std::shared_ptr<AccessUpstreamSwrr> fallback;
+        std::shared_ptr<ClusterBalancer> preferred;
+        std::shared_ptr<ClusterBalancer> fallback;
     };
 
     struct ClusterDirectory {
@@ -343,6 +436,29 @@ private:
         // retains its own synchronized SWRR and circuit state across directories.
         const std::vector<Cluster> clusters;
     };
+
+    struct alignas(64) WorkerDirectory {
+        explicit WorkerDirectory(std::shared_ptr<const ClusterDirectory> value) noexcept :
+            directory(std::move(value)) {}
+
+        const std::shared_ptr<const ClusterDirectory> directory;
+    };
+
+    struct alignas(64) WorkerSlot {
+        std::atomic<std::shared_ptr<const WorkerDirectory>> published;
+    };
+
+    void publish_directory(const std::shared_ptr<const ClusterDirectory> &directory) {
+        std::vector<std::shared_ptr<const WorkerDirectory>> candidates;
+        candidates.reserve(worker_slots_.size());
+        for (std::size_t index = 0; index < worker_slots_.size(); ++index) {
+            candidates.push_back(std::make_shared<const WorkerDirectory>(directory));
+        }
+        for (std::size_t index = 0; index < worker_slots_.size(); ++index) {
+            worker_slots_[index]->published.store(std::move(candidates[index]), std::memory_order_release);
+        }
+        published_directory_.store(directory, std::memory_order_release);
+    }
 
     void assign_selection_tokens(std::vector<AccessEndpointDefinition> &next) noexcept {
         std::size_t old_index = 0;
@@ -357,7 +473,10 @@ private:
                 assign_new_token(next[new_index++]);
                 continue;
             }
-            next[new_index++].endpoint.selection_token = definitions_[old_index++].endpoint.selection_token;
+            AccessEndpointDefinition &next_definition = next[new_index++];
+            const AccessEndpointDefinition &old_definition = definitions_[old_index++];
+            next_definition.endpoint.selection_token = old_definition.endpoint.selection_token;
+            next_definition.endpoint.instance.set_circuit(old_definition.endpoint.instance.circuit());
         }
         while (new_index < next.size()) {
             assign_new_token(next[new_index++]);
@@ -367,6 +486,8 @@ private:
     void assign_new_token(AccessEndpointDefinition &definition) noexcept {
         FIBER_ASSERT(next_selection_token_ != std::numeric_limits<std::uint64_t>::max());
         definition.endpoint.selection_token = ++next_selection_token_;
+        definition.endpoint.instance.set_circuit(
+                std::make_shared<AccessUpstreamCircuit>(options_.max_fails, options_.fail_timeout));
     }
 
     [[nodiscard]] static const Cluster *find_cluster(const ClusterDirectory &directory,
@@ -380,8 +501,10 @@ private:
     AccessUpstreamSwrr::Options options_;
     std::string zone_;
     AccessDiscoveryMetricsObserver metrics_observer_;
-    // Only this pointer crosses the owner-loop boundary. The remaining fields
-    // are single-writer bookkeeping used while compiling the next directory.
+    event::EventLoopGroup *workers_ = nullptr;
+    std::vector<std::unique_ptr<WorkerSlot>> worker_slots_;
+    // Serving workers load distinct wrapper control blocks. The canonical
+    // pointer is reserved for non-serving loops and deterministic tests.
     std::atomic<std::shared_ptr<const ClusterDirectory>> published_directory_;
     std::shared_ptr<const ClusterDirectory> active_directory_;
     std::string checksum_;
@@ -391,14 +514,35 @@ private:
     bool initialized_ = false;
 };
 
+AccessServiceState::Selection::Selection(AccessUpstreamSwrr::Selection selection,
+                                         AccessUpstreamCircuit::Permit circuit_permit) noexcept :
+    selection_(std::move(selection)), circuit_permit_(circuit_permit) {}
+
+void AccessServiceState::Selection::report(bool success) noexcept {
+    if (!selection_.pending()) {
+        return;
+    }
+    const auto now = event::EventLoop::current().now();
+    const auto &circuit = selection_.instance().circuit();
+    if (circuit) {
+        circuit->report(circuit_permit_, success, now);
+    }
+    selection_.report(success, now);
+}
+
+ProxyUpstreamEndpoint AccessServiceState::Selection::into_proxy_endpoint(std::string_view provider_name) && noexcept {
+    return make_proxy_upstream_endpoint(std::move(selection_), provider_name, circuit_permit_);
+}
+
 AccessServiceState::AccessServiceState() noexcept = default;
 
 AccessServiceState::~AccessServiceState() noexcept = default;
 
 void AccessServiceState::initialize(AccessUpstreamSwrr::Options options, std::string_view zone,
-                                    AccessDiscoveryMetricsObserver metrics_observer) noexcept {
+                                    AccessDiscoveryMetricsObserver metrics_observer,
+                                    event::EventLoopGroup *workers) noexcept {
     FIBER_ASSERT(impl_ == nullptr);
-    impl_.reset(new (std::nothrow) Impl(std::move(options), std::string(zone), metrics_observer));
+    impl_.reset(new (std::nothrow) Impl(std::move(options), std::string(zone), metrics_observer, workers));
     FIBER_ASSERT(impl_ != nullptr);
 }
 
@@ -469,7 +613,7 @@ public:
                                           : "service upstream circuit breaker is open";
             return std::unexpected(select_error(code, message, common::IoErr::NotFound));
         }
-        return make_proxy_upstream_endpoint(std::move(*selected), lease_.service_name());
+        return std::move(*selected).into_proxy_endpoint(lease_.service_name());
     }
 
     [[nodiscard]] std::string_view service_name() const noexcept override { return lease_.service_name(); }
@@ -485,7 +629,7 @@ private:
 } // namespace
 
 void AccessServiceOps::on_init(const nacos::ServiceKeyView &, State &state) noexcept {
-    state.initialize(swrr_options, zone, metrics_observer);
+    state.initialize(swrr_options, zone, metrics_observer, workers);
 }
 
 void AccessServiceOps::on_update(const nacos::ServiceKeyView &, State &state,

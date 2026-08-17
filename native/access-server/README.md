@@ -64,7 +64,8 @@ connection pool，以及 Nacos、CAT、Prometheus 组件。迁移不要求这些
 - 已实现 production gray 配置 codec、失败保旧的原子规则快照，以及 CIDR/ratio 对
   NamingService cluster 的覆盖；`context.cluster` 同样会覆盖 route 默认 cluster；
 - 已实现 NamingService route 依赖协调、健康/权重/zone/cluster 过滤、不可变服务目录、
-  discovery generation pin，以及基于本地 `DnsResolver` 的执行器 DNS adapter；
+  per-worker SWRR、跨 worker 共享的 endpoint circuit、discovery generation pin，以及基于本地
+  `DnsResolver` 的执行器 DNS adapter；
 - 已建立兼容边界、详细配置/请求契约和分阶段验收清单；
 - 已实现 `AccessServerRuntime`：启动 Nacos client/config/naming，建立 project/gray
   watcher 和 NamingService selector，在每个 HTTP worker 初始化 DNS resolver 与本地

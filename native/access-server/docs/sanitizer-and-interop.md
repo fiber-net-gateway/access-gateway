@@ -36,17 +36,18 @@ npm run test:native:sanitizers
 `NATIVE_BUILD_JOBS` 控制构建并发数。`ACCESS_SERVER_SANITIZER_REPEAT` 仅用于本地诊断时覆盖
 重复次数；正式默认值为 ASAN/UBSAN 5 轮、TSAN 10 轮。
 
-ASAN/UBSAN 集合包含 84 个测试，覆盖：
+ASAN/UBSAN 集合包含 93 个测试，覆盖：
 
 - runtime/control-plane 启动、失败回滚、取消和重复关闭；
 - DNS 异步释放、配置 watcher generation/Closed 竞态和 Nacos status subscriber join；
 - route snapshot pin、TLS identity hazard/rotation 和 mTLS 握手；
 - 多地址连接、pool lease、HTTP proxy、WebSocket、下游取消和 client metadata 解析。
+- worker-sharded service selection、共享 endpoint circuit、权重分布和 canonical fallback。
 
-TSAN 集合包含 26 个测试，集中检查：
+TSAN 集合包含 34 个测试，集中检查：
 
 - 配置和发现指标的 coherent snapshot 读取；
-- service directory owner 发布与 worker 并发选择；
+- service directory owner 发布与 worker 并发选择、单 half-open probe 和跨 worker circuit 状态；
 - route/TLS snapshot 发布、pin 和回收；
 - compiler/owner EventLoop 交接、Nacos status watch、启动回滚和 shutdown。
 
@@ -86,8 +87,8 @@ runner 还独立检查启动期与就绪后两类 RST 确实发生，避免客�
 
 2026-08-18，Clang 22.1.6：
 
-- ASAN+UBSAN：84 个聚焦测试连续 5 轮，共 420 次执行，0 失败、0 sanitizer 报告；
-- TSAN：26 个并发测试连续 10 轮，共 260 次执行，0 失败、0 data-race 报告；
+- ASAN+UBSAN：P-01 扩展后的 93 个聚焦测试连续 5 轮，共 465 次执行，0 失败、0 sanitizer 报告；
+- TSAN：P-01 扩展后的 34 个并发测试连续 10 轮，共 340 次执行，0 失败、0 data-race 报告；
 - 外部 rnacos：启动期 RST 2 次、Ready 后 RST 2 次，Config/Naming 均恢复，重连尝试计数
   大于 0（本次为 6），关闭终态正确；
 - 常规 Release/ThinLTO 测试仍须单独运行，sanitizer 的无 LTO 构建不能替代生产形状回归。

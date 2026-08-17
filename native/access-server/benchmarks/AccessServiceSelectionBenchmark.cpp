@@ -71,15 +71,16 @@ struct ServiceSnapshot {
 
 struct CaseState {
     CaseState(fiber::access_server::AccessServiceState &value_state, std::size_t value_workers,
-              std::uint64_t value_operations) :
+              std::uint64_t value_operations, bool value_report_success) :
         state(&value_state), workers(value_workers), operations(value_operations), elapsed_ns(value_workers),
-        checksums(value_workers) {}
+        checksums(value_workers), report_success(value_report_success) {}
 
     fiber::access_server::AccessServiceState *state = nullptr;
     std::size_t workers = 0;
     std::uint64_t operations = 0;
     std::vector<std::uint64_t> elapsed_ns;
     std::vector<std::uint64_t> checksums;
+    bool report_success = false;
     std::atomic<std::size_t> ready{0};
     std::atomic<std::size_t> done{0};
     std::atomic<bool> start{false};
@@ -93,8 +94,8 @@ struct CaseResult {
 };
 
 CaseResult run_case(fiber::event::EventLoopGroup &group, fiber::access_server::AccessServiceState &state,
-                    std::size_t worker_count, std::uint64_t operations) {
-    auto run = std::make_shared<CaseState>(state, worker_count, operations);
+                    std::size_t worker_count, std::uint64_t operations, bool report_success) {
+    auto run = std::make_shared<CaseState>(state, worker_count, operations, report_success);
     for (std::size_t worker = 0; worker < worker_count; ++worker) {
         fiber::async::spawn(group.at(worker), [run, worker]() -> fiber::async::DetachedTask {
             run->ready.fetch_add(1, std::memory_order_release);
@@ -114,6 +115,9 @@ CaseResult run_case(fiber::event::EventLoopGroup &group, fiber::access_server::A
                     continue;
                 }
                 checksum += selected->selection_token();
+                if (run->report_success) {
+                    selected->report(true);
+                }
             }
             const auto elapsed = std::chrono::steady_clock::now() - started;
             run->elapsed_ns[worker] =
@@ -154,13 +158,13 @@ struct Measurement {
 };
 
 Measurement measure(fiber::event::EventLoopGroup &group, fiber::access_server::AccessServiceState &state,
-                    std::size_t worker_count, std::uint64_t operations) {
+                    std::size_t worker_count, std::uint64_t operations, bool report_success) {
     std::vector<std::uint64_t> elapsed;
     elapsed.reserve(fiber::access_server::benchmark::kDefaultSamples);
     std::uint64_t checksum = 0;
     bool failed = false;
     for (std::size_t sample = 0; sample < fiber::access_server::benchmark::kDefaultSamples; ++sample) {
-        const CaseResult result = run_case(group, state, worker_count, operations);
+        const CaseResult result = run_case(group, state, worker_count, operations, report_success);
         elapsed.push_back(result.elapsed_ns);
         checksum ^= result.checksum + sample;
         failed = failed || result.failed;
@@ -194,38 +198,55 @@ int main(int argc, char **argv) {
     const std::string_view cpu_source = fiber::util::cpu_concurrency_source_name(cpu.source);
     std::fprintf(stderr, "effective_cpus=%zu source=%.*s\n", detected_cpus, static_cast<int>(cpu_source.size()),
                  cpu_source.data());
-    fiber::access_server::AccessServiceState state;
-    state.initialize({}, "sh");
     fiber::event::EventLoopGroup group(max_workers);
+    fiber::access_server::AccessServiceState canonical_state;
+    canonical_state.initialize({}, "sh");
+    fiber::access_server::AccessServiceState sharded_state;
+    sharded_state.initialize({}, "sh", {}, &group);
     group.start();
 
-    std::printf("endpoints,workers,operations,p50_ns_per_operation,p95_ns_per_operation,p99_ns_per_operation,"
-                "operations_per_second,throughput_scaling_efficiency,checksum\n");
+    std::printf("mode,completion,endpoints,workers,operations,p50_ns_per_operation,p95_ns_per_operation,"
+                "p99_ns_per_operation,operations_per_second,throughput_scaling_efficiency,checksum\n");
     bool failed = false;
     for (const std::size_t endpoint_count: kEndpointCounts) {
         ServiceSnapshot snapshot(endpoint_count);
-        state.update(snapshot.info);
-        double single_worker_throughput = 0.0;
-        for (std::size_t workers = 1; workers <= max_workers; ++workers) {
-            const Measurement result = measure(group, state, workers, operations_per_case);
-            if (workers == 1) {
-                single_worker_throughput = result.distribution.operations_per_second;
+        canonical_state.update(snapshot.info);
+        sharded_state.update(snapshot.info);
+        for (const bool report_success: {false, true}) {
+            const std::array modes{
+                    std::pair<std::string_view, fiber::access_server::AccessServiceState *>{"canonical",
+                                                                                            &canonical_state},
+                    std::pair<std::string_view, fiber::access_server::AccessServiceState *>{"worker_sharded",
+                                                                                            &sharded_state},
+            };
+            for (const auto &[mode, state]: modes) {
+                double single_worker_throughput = 0.0;
+                for (std::size_t workers = 1; workers <= max_workers; ++workers) {
+                    const Measurement result = measure(group, *state, workers, operations_per_case, report_success);
+                    if (workers == 1) {
+                        single_worker_throughput = result.distribution.operations_per_second;
+                    }
+                    const double scaling_efficiency =
+                            single_worker_throughput == 0.0
+                                    ? 0.0
+                                    : result.distribution.operations_per_second /
+                                              (single_worker_throughput * static_cast<double>(workers));
+                    const std::string_view completion = report_success ? "select_report" : "select_only";
+                    std::printf("%.*s,%.*s,%zu,%zu,%llu,%.2f,%.2f,%.2f,%.0f,%.4f,%llu\n", static_cast<int>(mode.size()),
+                                mode.data(), static_cast<int>(completion.size()), completion.data(), endpoint_count,
+                                workers, static_cast<unsigned long long>(operations_per_case),
+                                result.distribution.p50_ns_per_operation, result.distribution.p95_ns_per_operation,
+                                result.distribution.p99_ns_per_operation, result.distribution.operations_per_second,
+                                scaling_efficiency, static_cast<unsigned long long>(result.checksum));
+                    failed = failed || result.failed;
+                }
             }
-            const double scaling_efficiency =
-                    single_worker_throughput == 0.0 ? 0.0
-                                                    : result.distribution.operations_per_second /
-                                                              (single_worker_throughput * static_cast<double>(workers));
-            std::printf("%zu,%zu,%llu,%.2f,%.2f,%.2f,%.0f,%.4f,%llu\n", endpoint_count, workers,
-                        static_cast<unsigned long long>(operations_per_case), result.distribution.p50_ns_per_operation,
-                        result.distribution.p95_ns_per_operation, result.distribution.p99_ns_per_operation,
-                        result.distribution.operations_per_second, scaling_efficiency,
-                        static_cast<unsigned long long>(result.checksum));
-            failed = failed || result.failed;
         }
     }
 
     group.stop();
     group.join();
-    state.retire(fiber::nacos::ServiceRetireReason::Shutdown);
+    canonical_state.retire(fiber::nacos::ServiceRetireReason::Shutdown);
+    sharded_state.retire(fiber::nacos::ServiceRetireReason::Shutdown);
     return failed ? 1 : 0;
 }
