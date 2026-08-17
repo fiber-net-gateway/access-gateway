@@ -6,12 +6,12 @@
 #include <utility>
 #include <vector>
 
-#include "runtime/AccessScriptRuntime.h"
+#include "routing/AccessScriptCompiler.h"
 #include "runtime/RouteConfigStore.h"
 
 namespace {
 
-using fiber::access_server::AccessScriptRuntime;
+using fiber::access_server::AccessScriptCompiler;
 using fiber::access_server::BodyType;
 using fiber::access_server::compile_project_config;
 using fiber::access_server::ConfigUpdateStatus;
@@ -301,8 +301,8 @@ TEST(RouteConfigStoreTest, RejectsCandidateWithoutReplacingPublishedSnapshot) {
 }
 
 TEST(RouteConfigStoreTest, RejectsInvalidLocalScriptWithoutReplacingPublishedSnapshot) {
-    AccessScriptRuntime scripts;
-    RouteConfigStore store(scripts.compiler_adapter());
+    AccessScriptCompiler scripts;
+    RouteConfigStore store(scripts.adapter());
     ASSERT_TRUE(store.apply("demo", project_config(1, "api.example.com", "/one")));
     auto before = store.pin();
 
@@ -340,8 +340,8 @@ TEST(RouteConfigStoreTest, RejectsInvalidGzipCandidateWithoutReplacingPublishedS
 }
 
 TEST(RouteConfigStoreTest, RejectsInvalidJavaScriptRouteWithoutReplacingPublishedSnapshot) {
-    AccessScriptRuntime scripts;
-    RouteConfigStore store(scripts.compiler_adapter());
+    AccessScriptCompiler scripts;
+    RouteConfigStore store(scripts.adapter());
     ASSERT_TRUE(store.apply("demo", project_config(1, "api.example.com", "/one")));
     auto before = store.pin();
 
@@ -360,8 +360,8 @@ TEST(RouteConfigStoreTest, RejectsInvalidJavaScriptRouteWithoutReplacingPublishe
 }
 
 TEST(RouteConfigStoreTest, RejectsResponseSideEffectsInRouteExpressions) {
-    AccessScriptRuntime scripts;
-    RouteConfigStore store(scripts.compiler_adapter());
+    AccessScriptCompiler scripts;
+    RouteConfigStore store(scripts.adapter());
     ProjectConfig invalid = project_config(1, "api.example.com", "/side-effect");
     (*invalid.routes)[0]->condition = "resp.setHeader('X-Leak', 'true') == null";
 

@@ -2,7 +2,7 @@
 #define FIBER_ACCESS_SERVER_PROXY_ADDRESS_SELECTOR_H
 
 #include <fiber/http/Http1ConnectionGroupKey.h>
-#include "../runtime/SmoothWeightedRoundRobin.h"
+#include "SmoothWeightedRoundRobin.h"
 
 #include <fiber/async/Task.h>
 #include <fiber/common/IoError.h>

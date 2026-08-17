@@ -54,9 +54,11 @@ owner-loop contract. Service readiness is then awaited before commit as before.
 The move-only publication states and their compatibility semantics are specified in
 [`config-publication-typestate.md`](config-publication-typestate.md).
 
-The compiler owns a separate `AccessScriptRuntime`, constructed lazily on the compiler loop. Its
-extension data remains alive for the lifetime of runtime snapshots; request workers only execute
-the resulting immutable programs.
+The compiler owns a separate `AccessScriptCompiler`, constructed lazily on the compiler loop. Its
+extension data remains alive for the lifetime of runtime snapshots. `AccessScriptRuntime` is a
+stateless execution adapter on request workers and does not own compiler libraries or expose a
+compile callback. The offline validator also constructs `AccessScriptCompiler` directly, so route
+compilation has no dependency on request execution or Nacos runtime targets.
 
 ## Bounded queue and replacement
 

@@ -10,12 +10,12 @@
 #include <vector>
 
 #include "config/AccessConfigCodec.h"
+#include "routing/AccessScriptCompiler.h"
 #include "routing/ProjectConfigCompiler.h"
-#include "runtime/AccessScriptRuntime.h"
 
 namespace {
 
-using fiber::access_server::AccessScriptRuntime;
+using fiber::access_server::AccessScriptCompiler;
 using fiber::access_server::compile_project_config;
 using fiber::access_server::parse_project_config;
 
@@ -49,7 +49,7 @@ TEST(ProductionScriptCorpusTest, CompilesExternalSnapshotWhenProvided) {
     std::sort(files.begin(), files.end());
     ASSERT_FALSE(files.empty());
 
-    AccessScriptRuntime scripts;
+    AccessScriptCompiler scripts;
     std::size_t parsed = 0;
     std::size_t compiled = 0;
     std::size_t unloaded = 0;
@@ -66,7 +66,7 @@ TEST(ProductionScriptCorpusTest, CompilesExternalSnapshotWhenProvided) {
             continue;
         }
 
-        auto snapshot = compile_project_config("corpus", **config, scripts.compiler_adapter());
+        auto snapshot = compile_project_config("corpus", **config, scripts.adapter());
         ASSERT_TRUE(snapshot) << "compile failed for corpus entry index=" << index
                               << " field=" << snapshot.error().field << " message=" << snapshot.error().message;
         if (*snapshot) {

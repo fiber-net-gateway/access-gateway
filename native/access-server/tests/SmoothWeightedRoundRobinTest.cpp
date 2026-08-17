@@ -7,7 +7,7 @@
 #include <utility>
 #include <vector>
 
-#include "runtime/SmoothWeightedRoundRobin.h"
+#include "routing/SmoothWeightedRoundRobin.h"
 
 namespace {
 

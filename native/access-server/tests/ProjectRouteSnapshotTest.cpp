@@ -14,11 +14,11 @@
 #include <fiber/event/EventLoop.h>
 
 #include "routing/AccessRouteSnapshot.h"
+#include "routing/AccessScriptCompiler.h"
 #include "routing/Cidr.h"
 #include "routing/HostMatcher.h"
 #include "routing/ProjectConfigCompiler.h"
 #include "routing/ProjectRouteSnapshot.h"
-#include "runtime/AccessScriptRuntime.h"
 
 namespace {
 
@@ -45,7 +45,7 @@ using fiber::access_server::ScriptCompilerAdapter;
 using fiber::access_server::StringConfigEntry;
 
 struct ScriptCompilerCapture {
-    fiber::access_server::AccessScriptRuntime runtime;
+    fiber::access_server::AccessScriptCompiler runtime;
     std::vector<std::string> expressions;
     std::vector<std::vector<std::string>> path_variable_names;
 };
@@ -56,7 +56,7 @@ ScriptCompilerAdapter::Result capture_expression(void *context, fiber::http_scri
     auto &capture = *static_cast<ScriptCompilerCapture *>(context);
     capture.expressions.emplace_back(expression);
     capture.path_variable_names.emplace_back(path_variable_names.begin(), path_variable_names.end());
-    ScriptCompilerAdapter delegate = capture.runtime.compiler_adapter();
+    ScriptCompilerAdapter delegate = capture.runtime.adapter();
     return delegate.compile_expression(delegate.context, constants, expression, path_variable_names);
 }
 
@@ -333,7 +333,7 @@ TEST(ProjectRouteSnapshotTest, RequiresRoutesOnlyForConfiguredHosts) {
 }
 
 TEST(ProjectRouteSnapshotTest, CompilesProxyFieldsAndJavaNarrowing) {
-    fiber::access_server::AccessScriptRuntime scripts;
+    fiber::access_server::AccessScriptCompiler scripts;
     RouteConfig route = proxy_route("/v1/:id", "orders/gray");
     route.cluster = "stable";
     route.timeout_millis = 4'294'967'297LL;
@@ -351,7 +351,7 @@ TEST(ProjectRouteSnapshotTest, CompilesProxyFieldsAndJavaNarrowing) {
             std::optional<std::string>("!10.0.0.0/8"),
     };
 
-    auto result = compile_project_config("orders", project_with_routes({std::move(route)}), scripts.compiler_adapter());
+    auto result = compile_project_config("orders", project_with_routes({std::move(route)}), scripts.adapter());
     const ProjectRouteSnapshot &snapshot = require_snapshot(result);
     EXPECT_EQ(snapshot.project(), "orders");
     EXPECT_EQ(snapshot.call_source(), "orders.unifiedAccess");
@@ -613,7 +613,7 @@ TEST(ProjectRouteSnapshotTest, RejectsCaseInsensitiveProxyHeaderDuplicates) {
 }
 
 TEST(ProjectRouteSnapshotTest, UsesJavaCrc32cRouteKeyAndConditionalOrder) {
-    fiber::access_server::AccessScriptRuntime scripts;
+    fiber::access_server::AccessScriptCompiler scripts;
     RouteConfig first = proxy_route("/same/:id");
     first.condition = "false";
     RouteConfig second = proxy_route("/same/:id");
@@ -621,8 +621,7 @@ TEST(ProjectRouteSnapshotTest, UsesJavaCrc32cRouteKeyAndConditionalOrder) {
     RouteConfig fallback = proxy_route("/same/:id");
 
     auto result = compile_project_config(
-            "demo", project_with_routes({std::move(first), std::move(second), std::move(fallback)}),
-            scripts.compiler_adapter());
+            "demo", project_with_routes({std::move(first), std::move(second), std::move(fallback)}), scripts.adapter());
     const ProjectRouteSnapshot &snapshot = require_snapshot(result);
     ASSERT_EQ(snapshot.routes().size(), 3U);
     ASSERT_TRUE(snapshot.routes()[0].condition_program);
@@ -730,14 +729,14 @@ TEST(ProjectRouteSnapshotTest, RejectsInvalidMethodAndScriptRouteCombinations) {
 }
 
 TEST(ProjectRouteSnapshotTest, CompilesJavaScriptRouteAgainstPathConstants) {
-    fiber::access_server::AccessScriptRuntime scripts;
+    fiber::access_server::AccessScriptCompiler scripts;
     RouteConfig route;
     route.path = "/script/:id";
     route.method = "POST";
     route.type = RouteType::Script;
     route.script = "return {id: $path.id, method: $req.method};";
 
-    auto result = compile_project_config("demo", project_with_routes({std::move(route)}), scripts.compiler_adapter());
+    auto result = compile_project_config("demo", project_with_routes({std::move(route)}), scripts.adapter());
     const ProjectRouteSnapshot &snapshot = require_snapshot(result);
 
     ASSERT_EQ(snapshot.routes().size(), 1U);

@@ -9,7 +9,8 @@
   `RouteExecutionBuilder.compileExpression/parseTemplate`、
   `ScriptStringTemplate` 和 `ConditionalExecution`；
 - C++ 实现：
-  `AccessScriptRuntime`、`TemplateEvaluator`、compiled route snapshot 和请求执行计划；
+  `AccessScriptCompiler`、`AccessScriptRuntime`、`TemplateEvaluator`、compiled route snapshot
+  和请求执行计划；
 - 不把 Nacos 地址、账号、密码、项目名、Host、业务 header value、表达式字符串常量
   或完整 route JSON 写入 Git；
 - 原始 dump 和 Java 探针产物只保留在被忽略的 `temp/` 中。

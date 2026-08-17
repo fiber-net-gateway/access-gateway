@@ -12,10 +12,10 @@
 #include <zlib.h>
 #include "execution/AccessResult.h"
 #include "execution/ErrorResponder.h"
-#include "execution/GzipEncoder.h"
 #include "execution/ProxyResponsePlan.h"
 #include "execution/ResponsePlan.h"
 #include "execution/TemplateEvaluator.h"
+#include "routing/GzipEncoder.h"
 
 namespace {
 

@@ -2,8 +2,8 @@
 #define FIBER_ACCESS_SERVER_ACCESS_CONFIG_COMPILER_H
 
 #include "../config/AccessConfigError.h"
+#include "../routing/AccessScriptCompiler.h"
 #include "../routing/ProjectConfigCompiler.h"
-#include "AccessScriptRuntime.h"
 #include "TlsCertificateStore.h"
 
 #include <cstdint>
@@ -63,7 +63,7 @@ public:
 
 private:
     event::EventLoop *loop_ = nullptr;
-    std::optional<AccessScriptRuntime> script_runtime_;
+    std::optional<AccessScriptCompiler> script_compiler_;
 };
 
 } // namespace fiber::access_server

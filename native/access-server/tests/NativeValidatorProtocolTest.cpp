@@ -16,7 +16,7 @@ std::string request(std::string_view kind, std::string_view project, std::string
            std::string(project) + R"(","payloadBase64":")" + encoded + R"("})";
 }
 
-TEST(NativeValidatorProtocolTest, CompilesProjectPayloadWithAccessServerCore) {
+TEST(NativeValidatorProtocolTest, CompilesProjectPayloadWithConfigAndValidationComponents) {
     constexpr std::string_view payload = R"({
         "version": 3,
         "host": {"example.com": {"https": "S_NOT_MUST"}},

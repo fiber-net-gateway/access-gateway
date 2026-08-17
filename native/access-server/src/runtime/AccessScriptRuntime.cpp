@@ -1,14 +1,12 @@
 #include "AccessScriptRuntime.h"
 
-#include <utility>
+#include <expected>
+#include <string>
 
-#include <fiber/http_script/HttpScriptLib.h>
-#include <fiber/http_script/RequestFuncs.h>
 #include <fiber/http_script/ScriptExchangeCtx.h>
 #include <fiber/script/JsGc.h>
 #include <fiber/script/JsValue.h>
 #include <fiber/script/Script.h>
-#include <fiber/script/ScriptCompiler.h>
 #include <fiber/script/run/Compares.h>
 #include <fiber/script/std/NodeText.h>
 
@@ -29,23 +27,6 @@ std::string script_failure_message(const script::ScriptResult &result) {
 
 } // namespace
 
-AccessScriptRuntime::AccessScriptRuntime() {
-    http_script::register_request_funcs(expression_library_);
-    http_script::register_http_functions_to_lib(route_library_);
-    expression_library_.add_ext_ops(&exchange_const_extension_, http_script::ExchangeConstExtension::ops());
-    expression_library_.add_ext_ops(&route_extension_, http_script::RouteScriptExtension::ops());
-    route_library_.add_ext_ops(&exchange_const_extension_, http_script::ExchangeConstExtension::ops());
-    route_library_.add_ext_ops(&route_extension_, http_script::RouteScriptExtension::ops());
-}
-
-ScriptCompilerAdapter AccessScriptRuntime::compiler_adapter() noexcept {
-    return ScriptCompilerAdapter{
-            .context = this,
-            .compile_expression = compile_expression,
-            .compile_route_script = compile_route_script,
-    };
-}
-
 AccessRequestScriptAdapter AccessScriptRuntime::request_adapter() noexcept {
     return AccessRequestScriptAdapter{
             .context = this,
@@ -53,46 +34,6 @@ AccessRequestScriptAdapter AccessScriptRuntime::request_adapter() noexcept {
             .evaluate_template = evaluate_template,
             .execute_route_script = execute_route_script,
     };
-}
-
-ScriptCompilerAdapter::Result
-AccessScriptRuntime::compile_route_script(void *context, http_script::ConstPackage::Builder &constants,
-                                          std::string_view source, std::span<const std::string> path_variable_names) {
-    auto &runtime = *static_cast<AccessScriptRuntime *>(context);
-    http_script::RouteScriptExtension::CompileScope compile_scope(runtime.route_extension_, constants,
-                                                                  path_variable_names, false);
-    auto compiled = script::compile_script(runtime.route_library_, source, true);
-    if (!compiled) {
-        std::string message = "route script compile failed at script offset ";
-        message.append(std::to_string(compiled.error().position));
-        return std::unexpected(std::move(message));
-    }
-    return std::move(*compiled);
-}
-
-ScriptCompilerAdapter::Result
-AccessScriptRuntime::compile_expression(void *context, http_script::ConstPackage::Builder &constants,
-                                        std::string_view expression, std::span<const std::string> path_variable_names) {
-    auto &runtime = *static_cast<AccessScriptRuntime *>(context);
-    http_script::RouteScriptExtension::CompileScope compile_scope(runtime.route_extension_, constants,
-                                                                  path_variable_names, false);
-
-    std::string source;
-    source.reserve(expression.size() + 8);
-    source.append("return ");
-    source.append(expression);
-    source.push_back(';');
-    auto compiled = script::compile_script(runtime.expression_library_, source, false);
-    if (!compiled) {
-        std::string message = compiled.error().message;
-        message.append(" at expression offset ");
-        message.append(std::to_string(compiled.error().position));
-        return std::unexpected(std::move(message));
-    }
-    if (compiled->contains_async()) {
-        return std::unexpected("asynchronous route expressions are not supported");
-    }
-    return std::move(*compiled);
 }
 
 bool AccessScriptRuntime::evaluate_condition(void *, http_script::ScriptExchangeCtx &script_context,

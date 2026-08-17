@@ -2,8 +2,7 @@
 #define FIBER_ACCESS_SERVER_ACCESS_REQUEST_HANDLER_H
 
 #include <fiber/async/Task.h>
-#include "../routing/ProjectRouteSnapshot.h"
-#include "../runtime/RouteConfigStore.h"
+#include "../routing/AccessRouteSnapshot.h"
 #include "AccessResult.h"
 #include "ErrorResponder.h"
 #include "ResponseExecutor.h"
@@ -26,7 +25,6 @@ class ScriptExchangeCtx;
 namespace fiber::access_server {
 
 class AccessRequestTelemetry;
-
 struct AccessRequestScriptAdapter {
     using ConditionFunction = bool (*)(void *context, http_script::ScriptExchangeCtx &script_context,
                                        const script::Script &program) noexcept;
@@ -70,7 +68,7 @@ struct AccessProxyAdapter {
 
 class AccessRequestHandler {
 public:
-    AccessRequestHandler(const RouteConfigStore &config_store, AccessRequestScriptAdapter script_adapter = {},
+    AccessRequestHandler(AccessRouteSnapshotProvider snapshot_provider, AccessRequestScriptAdapter script_adapter = {},
                          AccessRequestHandlerOptions options = {}, AccessProxyAdapter proxy_adapter = {}) noexcept;
 
     [[nodiscard]] async::Task<void> handle(http::HttpExchange &exchange,
@@ -82,7 +80,7 @@ private:
     [[nodiscard]] async::Task<Result<void>> handle_impl(http::HttpExchange &exchange,
                                                         AccessRequestTelemetry &telemetry) const noexcept;
 
-    const RouteConfigStore &config_store_;
+    AccessRouteSnapshotProvider snapshot_provider_;
     AccessRequestScriptAdapter script_adapter_;
     AccessRequestHandlerOptions options_;
     AccessProxyAdapter proxy_adapter_;

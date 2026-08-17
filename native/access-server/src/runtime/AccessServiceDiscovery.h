@@ -4,7 +4,6 @@
 #include "../config/AccessConfig.h"
 #include "../observability/AccessDiscoveryMetrics.h"
 #include "../routing/ProxyAddressSelector.h"
-#include "SmoothWeightedRoundRobin.h"
 
 #include <cstdint>
 #include <expected>

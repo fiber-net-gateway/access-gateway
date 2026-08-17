@@ -4,7 +4,7 @@
 #include "../config/AccessConfig.h"
 #include "../config/AccessConfigError.h"
 #include "../execution/ClientMetadata.h"
-#include "../routing/Cidr.h"
+#include "../routing/GrayMatchCompiler.h"
 #include "../routing/ProxyAddressSelector.h"
 
 #include <atomic>
@@ -53,15 +53,9 @@ public:
 
 private:
     static bool matches_request(void *context, std::string_view entry, const ClientMetadata &metadata) noexcept;
-    struct Rule {
-        std::string entry;
-        std::int32_t ratio = 0;
-        std::vector<Cidr> cidrs;
-    };
-
     struct Snapshot {
         std::uint64_t generation = 0;
-        std::vector<Rule> rules;
+        CompiledGrayMatchConfig config;
     };
 
     struct alignas(64) WorkerSnapshot {
@@ -80,7 +74,6 @@ private:
     };
 
     void initialize(GrayMatchStoreOptions options);
-    [[nodiscard]] static bool recognized_entry(std::string_view entry) noexcept;
     [[nodiscard]] static bool matches_snapshot(const Snapshot &snapshot, std::string_view entry,
                                                const ClientMetadata &metadata, std::uint32_t random_sample) noexcept;
     [[nodiscard]] static std::uint32_t next_sample(WorkerSlot &slot) noexcept;

@@ -19,6 +19,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(FIBER_BUILD_TESTS "Build Fiber and access-server tests" ON)
 option(FIBER_FETCH_DEPS "Allow CMake to download third-party dependencies" ON)
+option(ACCESS_SERVER_BUILD_RUNTIME "Build the online access-server runtime" ON)
 option(ACCESS_SERVER_BUILD_BENCHMARKS "Build access-server microbenchmarks" OFF)
 
 # Keep all generated dependency state in the build tree, never in the submodule.
@@ -28,9 +29,9 @@ set(FETCHCONTENT_BASE_DIR "${FIBER_DEPS_DIR}" CACHE PATH "FetchContent base dire
 # The application is repository-owned below; only reusable upstream components are enabled.
 set(FIBER_BUILD_APPS OFF CACHE BOOL "" FORCE)
 set(FIBER_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-set(FIBER_BUILD_NACOS ON CACHE BOOL "" FORCE)
-set(FIBER_BUILD_CAT ON CACHE BOOL "" FORCE)
-set(FIBER_BUILD_PROMETHEUS ON CACHE BOOL "" FORCE)
+set(FIBER_BUILD_NACOS ${ACCESS_SERVER_BUILD_RUNTIME} CACHE BOOL "" FORCE)
+set(FIBER_BUILD_CAT ${ACCESS_SERVER_BUILD_RUNTIME} CACHE BOOL "" FORCE)
+set(FIBER_BUILD_PROMETHEUS ${ACCESS_SERVER_BUILD_RUNTIME} CACHE BOOL "" FORCE)
 set(FIBER_BUILD_CAT_DEMO OFF CACHE BOOL "" FORCE)
 set(FIBER_BUILD_PROMETHEUS_BENCHMARK OFF CACHE BOOL "" FORCE)
 

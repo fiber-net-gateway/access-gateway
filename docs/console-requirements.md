@@ -684,7 +684,7 @@ Route 不能破坏历史 Release 和审计引用。
 ### 13.1 必需配套依赖
 
 - 安全、严格、可保留源码位置的 YAML 1.2 parser 与版本化 YAML-to-wire compiler；
-- 基于 `access_server_core` 的离线 Native Validator contract；
+- 仅依赖 `access_server_config` 与 `access_server_validation` 的离线 Native Validator contract；
 - rnacos publication worker、只读回读 adapter 和最小权限服务身份；
 - 证书 envelope encryption 与 KEK/Secret Provider；
 - access-server 实例级 TLS 快照版本、加载结果和有界鉴权状态接口；

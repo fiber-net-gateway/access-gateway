@@ -21,7 +21,9 @@
 #include "HttpTransportStub.h"
 #include "execution/AccessRequestHandler.h"
 #include "observability/AccessRequestTelemetry.h"
+#include "routing/AccessScriptCompiler.h"
 #include "runtime/AccessScriptRuntime.h"
+#include "runtime/RouteConfigStore.h"
 
 namespace {
 
@@ -31,7 +33,6 @@ using fiber::access_server::AccessProxyAdapter;
 using fiber::access_server::AccessRequestHandler;
 using fiber::access_server::AccessRequestHandlerOptions;
 using fiber::access_server::AccessRequestScriptAdapter;
-using fiber::access_server::AccessScriptRuntime;
 using fiber::access_server::BodyType;
 using fiber::access_server::ClientMetadataMode;
 using fiber::access_server::ClientMetadataResolver;
@@ -50,6 +51,18 @@ using fiber::access_server::RouteConfig;
 using fiber::access_server::RouteConfigStore;
 using fiber::access_server::RouteType;
 using fiber::access_server::StringConfigEntry;
+
+class AccessScriptRuntime final {
+public:
+    [[nodiscard]] fiber::access_server::ScriptCompilerAdapter compiler_adapter() noexcept {
+        return compiler_.adapter();
+    }
+    [[nodiscard]] AccessRequestScriptAdapter request_adapter() noexcept { return runtime_.request_adapter(); }
+
+private:
+    fiber::access_server::AccessScriptCompiler compiler_;
+    fiber::access_server::AccessScriptRuntime runtime_;
+};
 
 class RecordingTransport final : public fiber::test::HttpTransportStub {
 public:
@@ -142,7 +155,7 @@ fiber::async::DetachedTask run_request_on_loop(fiber::event::EventLoop *loop, co
                                                ClientMetadataResolverOptions client_metadata_options,
                                                std::string request, std::string *output, std::promise<void> *done) {
     auto transport = std::make_unique<RecordingTransport>(*loop, std::move(request), *output);
-    AccessRequestHandler access_handler(*store, script_adapter, options, proxy_adapter);
+    AccessRequestHandler access_handler(store->snapshot_provider(), script_adapter, options, proxy_adapter);
     ClientMetadataResolver client_metadata_resolver(std::move(client_metadata_options));
     fiber::http::HttpHandler handler = [&access_handler, &client_metadata_resolver](
                                                fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
