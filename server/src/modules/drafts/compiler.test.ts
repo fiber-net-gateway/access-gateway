@@ -233,7 +233,8 @@ upstream_tls:
   verification: CUSTOM_CA
   ca_pem: test-ca
   server_name: sni.example.com
-  verify_name: identity.example.com`),
+  verify_name: identity.example.com
+  client_identity_ref: 123e4567-e89b-42d3-a456-426614174000`),
   )
 
   assert.deepEqual(result.issues, [])
@@ -242,6 +243,7 @@ upstream_tls:
   }
   assert.deepEqual(payload.routes[0]?.upstream_tls, {
     ca_pem: 'test-ca',
+    client_identity_ref: '123e4567-e89b-42d3-a456-426614174000',
     generation: 7,
     server_name: 'sni.example.com',
     verification: 'CUSTOM_CA',
@@ -266,6 +268,10 @@ test('rejects malformed, misleading, and oversized upstream TLS profiles', () =>
       code: 'UPSTREAM_TLS_VERIFY_NAME_CONFLICT',
     },
     { source: 'generation: 1\n  server_name: 127.0.0.1', code: 'INVALID_UPSTREAM_TLS_SERVER_NAME' },
+    {
+      source: 'generation: 1\n  client_identity_ref: not-a-uuid',
+      code: 'INVALID_UPSTREAM_TLS_CLIENT_IDENTITY_REF',
+    },
   ]
   for (const testCase of cases) {
     const result = compileProjectRoutes(

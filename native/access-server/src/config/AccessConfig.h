@@ -37,6 +37,7 @@ struct RouteUpstreamTlsConfig {
     std::optional<std::string> ca_pem;
     std::optional<std::string> server_name;
     std::optional<std::string> verify_name;
+    std::optional<std::string> client_identity_ref;
 
     bool operator==(const RouteUpstreamTlsConfig &) const = default;
 };

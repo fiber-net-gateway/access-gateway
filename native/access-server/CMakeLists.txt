@@ -27,6 +27,7 @@ access_server_add_component(access_server_config
     "${CMAKE_CURRENT_LIST_DIR}/src/routing/ProjectConfigCompiler.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/routing/ProjectRouteSnapshot.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/routing/ProxyAddressSelector.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/routing/UpstreamTlsClientIdentity.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/routing/UpstreamTlsTransportProfile.cpp")
 target_link_libraries(access_server_config
     PUBLIC fiber_lib

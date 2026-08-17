@@ -20,6 +20,8 @@ struct UpstreamTlsClientPolicyView {
     std::string_view ca_file;
     std::string_view server_name;
     std::string_view verify_name;
+    std::string_view client_certificate_file;
+    std::string_view client_private_key_file;
 };
 
 [[nodiscard]] inline UpstreamTlsClientPolicyView

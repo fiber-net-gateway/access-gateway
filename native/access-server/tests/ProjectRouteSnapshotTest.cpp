@@ -47,6 +47,21 @@ using fiber::access_server::ScriptCompilerAdapter;
 using fiber::access_server::StringConfigEntry;
 using fiber::access_server::UpstreamTlsVerificationMode;
 
+struct ClientIdentityResolverState {
+    std::string id;
+    std::shared_ptr<const fiber::access_server::UpstreamTlsClientIdentity> identity;
+
+    static std::shared_ptr<const fiber::access_server::UpstreamTlsClientIdentity> find(void *context,
+                                                                                       std::string_view id) noexcept {
+        auto &state = *static_cast<ClientIdentityResolverState *>(context);
+        return state.id == id ? state.identity : nullptr;
+    }
+
+    [[nodiscard]] fiber::access_server::UpstreamTlsClientIdentityResolver resolver() noexcept {
+        return {.context = this, .find = &find};
+    }
+};
+
 struct ScriptCompilerCapture {
     fiber::access_server::AccessScriptCompiler runtime;
     std::vector<std::string> expressions;
@@ -513,6 +528,7 @@ TEST(ProjectRouteSnapshotTest, RejectsInvalidUpstreamTlsProfilesBeforeSnapshotPu
               .verify_name = "identity.example.com"}},
             {{.generation = 1, .server_name = "127.0.0.1"}},
             {{.generation = 1, .verify_name = "bad name"}},
+            {{.generation = 1, .client_identity_ref = "not-a-uuid"}},
             {{.generation = 1, .verification = UpstreamTlsVerificationMode::CustomCa, .ca_pem = "not a certificate"}},
             {{.generation = 1}, RouteType::Response},
     };
@@ -521,6 +537,52 @@ TEST(ProjectRouteSnapshotTest, RejectsInvalidUpstreamTlsProfilesBeforeSnapshotPu
         ASSERT_FALSE(result);
         EXPECT_TRUE(result.error().field.starts_with("routes[0].upstream_tls"));
     }
+}
+
+TEST(ProjectRouteSnapshotTest, BindsClientIdentityWithoutRetainingPemInRouteConfig) {
+    constexpr std::string_view identity_id = "123e4567-e89b-42d3-a456-426614174000";
+    RouteConfig route = proxy_route("/mutual-tls");
+    route.upstream_tls = fiber::access_server::RouteUpstreamTlsConfig{
+            .generation = 17,
+            .verification = UpstreamTlsVerificationMode::SystemCa,
+            .client_identity_ref = std::string(identity_id),
+    };
+    auto compiled = compile_project_config("demo", project_with_routes({std::move(route)}));
+    ASSERT_TRUE(compiled) << compiled.error().message;
+    ASSERT_TRUE(*compiled);
+    ProjectRouteSnapshot &snapshot = **compiled;
+    const auto &unbound = *snapshot.routes()[0].proxy->upstream_tls;
+    const std::uint64_t transport_affinity = unbound.pool_affinity();
+    EXPECT_TRUE(unbound.client_certificate_file().empty());
+    EXPECT_TRUE(unbound.client_private_key_file().empty());
+
+    auto missing = fiber::access_server::bind_project_tls_client_identities(snapshot, {});
+    ASSERT_FALSE(missing);
+    EXPECT_EQ(missing.error().code, AccessConfigErrorCode::MissingDependency);
+    EXPECT_EQ(missing.error().field, "routes[0].upstream_tls.client_identity_ref");
+    EXPECT_EQ(missing.error().message.find(identity_id), std::string::npos);
+
+    const std::string certificate_chain = std::string(fiber::test::kClientCertPem) + fiber::test::kIntermediateCertPem;
+    auto identity =
+            fiber::access_server::UpstreamTlsClientIdentity::create(certificate_chain, fiber::test::kClientKeyPem);
+    ASSERT_TRUE(identity);
+    std::weak_ptr<const fiber::access_server::UpstreamTlsClientIdentity> weak = *identity;
+    ClientIdentityResolverState resolver{
+            .id = std::string(identity_id),
+            .identity = *identity,
+    };
+    auto bound = fiber::access_server::bind_project_tls_client_identities(snapshot, resolver.resolver());
+    ASSERT_TRUE(bound) << bound.error().message;
+    const auto &profile = *snapshot.routes()[0].proxy->upstream_tls;
+    EXPECT_TRUE(profile.client_certificate_file().starts_with("/proc/self/fd/"));
+    EXPECT_TRUE(profile.client_private_key_file().starts_with("/proc/self/fd/"));
+    EXPECT_NE(profile.pool_affinity(), transport_affinity);
+
+    identity->reset();
+    resolver.identity.reset();
+    EXPECT_FALSE(weak.expired());
+    compiled->reset();
+    EXPECT_TRUE(weak.expired());
 }
 
 TEST(ProjectRouteSnapshotTest, CompilesResponseBodyAndHeaders) {

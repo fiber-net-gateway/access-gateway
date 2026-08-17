@@ -207,6 +207,7 @@ const upstreamTlsFields = new Set([
   'ca_pem',
   'server_name',
   'verify_name',
+  'client_identity_ref',
 ])
 const upstreamTlsVerificationModes = new Set([
   'INHERIT',
@@ -234,6 +235,10 @@ function validTlsDnsName(value: string): boolean {
         /^[A-Za-z0-9-]+$/u.test(label) &&
         !label.includes('*'),
     )
+}
+
+function validPublicId(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(value)
 }
 
 function validTlsIp(value: string): boolean {
@@ -339,6 +344,17 @@ function validateUpstreamTls(
       'UPSTREAM_TLS_VERIFY_NAME_CONFLICT',
       'LEGACY_INSECURE 不能配置 verify_name',
       'upstream_tls.verify_name',
+    )
+  }
+  if (
+    profile.client_identity_ref !== undefined &&
+    profile.client_identity_ref !== null &&
+    (typeof profile.client_identity_ref !== 'string' || !validPublicId(profile.client_identity_ref))
+  ) {
+    add(
+      'INVALID_UPSTREAM_TLS_CLIENT_IDENTITY_REF',
+      'client_identity_ref 必须是有效 UUID 或 null',
+      'upstream_tls.client_identity_ref',
     )
   }
   if (value.type !== 'PROXY') {

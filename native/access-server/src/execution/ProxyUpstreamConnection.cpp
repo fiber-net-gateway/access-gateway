@@ -27,6 +27,8 @@ UpstreamTlsClientPolicyView effective_upstream_tls_client_policy(const UpstreamT
     }
     result.server_name = profile->server_name();
     result.verify_name = profile->verify_name();
+    result.client_certificate_file = profile->client_certificate_file();
+    result.client_private_key_file = profile->client_private_key_file();
     return result;
 }
 
@@ -75,6 +77,11 @@ http::Http1ClientConnectionOptions connection_options(const http::Http1Connectio
             // IP literals are authenticated as IP identities without emitting an
             // IP-valued SNI extension.
             result.tls.verify_name = key.ip_address().to_string();
+        }
+        if (!tls_policy.client_certificate_file.empty()) {
+            FIBER_ASSERT(!tls_policy.client_private_key_file.empty());
+            result.tls.cert_file.assign(tls_policy.client_certificate_file);
+            result.tls.key_file.assign(tls_policy.client_private_key_file);
         }
     }
     return result;

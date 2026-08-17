@@ -3,6 +3,7 @@
 
 #include "../config/AccessConfig.h"
 #include "../config/AccessConfigError.h"
+#include "UpstreamTlsClientIdentity.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -36,18 +37,26 @@ public:
     [[nodiscard]] std::string_view ca_file() const noexcept;
     [[nodiscard]] std::string_view server_name() const noexcept { return server_name_; }
     [[nodiscard]] std::string_view verify_name() const noexcept { return verify_name_; }
+    [[nodiscard]] std::string_view client_identity_ref() const noexcept { return client_identity_ref_; }
+    [[nodiscard]] std::string_view client_certificate_file() const noexcept;
+    [[nodiscard]] std::string_view client_private_key_file() const noexcept;
     [[nodiscard]] std::optional<http::Http1ConnectionGroupKey>
     connection_key(const http::Http1ConnectionGroupKey &base) const noexcept;
 
 private:
     friend std::expected<UpstreamTlsTransportProfile, AccessConfigError>
     compile_upstream_tls_transport_profile(const RouteUpstreamTlsConfig &config, std::size_t route_index);
+    friend std::expected<void, AccessConfigError>
+    bind_upstream_tls_client_identity(UpstreamTlsTransportProfile &profile, UpstreamTlsClientIdentityResolver resolver,
+                                      std::size_t route_index);
 
     UpstreamTlsTransportProfile() = default;
 
     std::shared_ptr<const UpstreamTlsCaBundle> ca_bundle_;
+    std::shared_ptr<const UpstreamTlsClientIdentity> client_identity_;
     std::string server_name_;
     std::string verify_name_;
+    std::string client_identity_ref_;
     std::uint64_t generation_ = 0;
     std::uint64_t pool_affinity_ = 0;
     UpstreamTlsVerificationMode verification_ = UpstreamTlsVerificationMode::Inherit;
@@ -55,6 +64,10 @@ private:
 
 [[nodiscard]] std::expected<UpstreamTlsTransportProfile, AccessConfigError>
 compile_upstream_tls_transport_profile(const RouteUpstreamTlsConfig &config, std::size_t route_index);
+
+[[nodiscard]] std::expected<void, AccessConfigError>
+bind_upstream_tls_client_identity(UpstreamTlsTransportProfile &profile, UpstreamTlsClientIdentityResolver resolver,
+                                  std::size_t route_index);
 
 } // namespace fiber::access_server
 

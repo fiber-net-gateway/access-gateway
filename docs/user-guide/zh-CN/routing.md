@@ -355,14 +355,25 @@ upstream_tls:
         -----END CERTIFICATE-----
     server_name: sni.internal.example
     verify_name: identity.internal.example
+    client_identity_ref: 123e4567-e89b-42d3-a456-426614174000
 ```
 
-`generation` 必填且为正整数；任何 CA、SNI、验证名变更都必须递增。`CUSTOM_CA` 必须提供 PEM，
+`generation` 必填且为正整数；任何 CA、SNI、验证名或客户端身份变更都必须递增。`CUSTOM_CA` 必须提供 PEM，
 其他模式不得提供；每个 Project 最多 256 个 profile，每份 PEM 上限 512 KiB，在候选发布前验证并存入
 只读内存 fd。`server_name` 只控制 SNI，
 `verify_name` 可独立选择证书 DNS/IP identity；两者缺失时继续按 endpoint hostname/IP 自动推导。
 每个 profile 都产生非零连接池 affinity，因此新旧 generation 不会复用同一连接；已 pin 旧 snapshot
 的请求仍可安全完成。字段缺失/`null` 时继续使用进程默认和旧 affinity `0`。
+
+`client_identity_ref` 可选，值是 Console TLS 证书历史中某个不可变“证书版本”的 UUID，而不是逻辑
+证书 UUID。证书链和私钥仍只由加密 TLS Release 写入专用
+`ploto.unified-access.tls-certificates` 资源；Route JSON、API、日志和错误不会回显 PEM、私钥或 fd
+路径。引用在实例当前 TLS snapshot 中不存在时，native 拒绝新 Route 并保留旧 snapshot。
+
+轮换时先创建并发布包含新证书版本的 TLS Release，再发布引用新 UUID、递增 `generation` 的 Route。
+删除旧版本时顺序相反：先移除所有 Route 引用，再发布不含旧版本的 TLS Release。rnacos write/readback
+只代表 published，不代表任一实例 active；必须等待逐实例 typed activation evidence。旧请求和旧连接
+lease 会继续持有 sealed 身份直到安全退役。
 
 这是 native-only wire 扩展。旧 Java 实例会忽略它并退回不校验证书；混合 Java/native 环境或旧版
 Native Validator 必须禁止发布。Console 的 rnacos readback 也不等于实例激活证据，激活状态在取得

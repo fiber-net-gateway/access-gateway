@@ -238,6 +238,7 @@ public:
         std::string id;
         std::unique_ptr<net::TlsContext> tcp;
         std::unique_ptr<net::TlsContext> quic;
+        std::shared_ptr<const UpstreamTlsClientIdentity> client;
     };
 
     struct NameEntry {
@@ -279,10 +280,18 @@ public:
         return nullptr;
     }
 
+    [[nodiscard]] const Identity *find_client(std::string_view id) const noexcept {
+        const auto found =
+                std::lower_bound(client_index.begin(), client_index.end(), id,
+                                 [](const Identity *entry, std::string_view value) { return entry->id < value; });
+        return found != client_index.end() && (*found)->id == id ? *found : nullptr;
+    }
+
     std::uint64_t version = 0;
     std::vector<Identity> identities;
     std::vector<NameEntry> exact_names;
     std::vector<NameEntry> wildcard_suffixes;
+    std::vector<Identity *> client_index;
     Identity *default_identity = nullptr;
 };
 
@@ -327,13 +336,25 @@ compile_snapshot(const TlsCertificateSnapshotConfig &config, bool quic_enabled) 
             }
             quic = std::move(*context);
         }
+        auto client = UpstreamTlsClientIdentity::create(source.certificate_pem, source.private_key_pem);
+        if (!client) {
+            return std::unexpected(config_error(TlsCertificateConfigErrorCode::InvalidField, field,
+                                                "failed to protect TLS identity material"));
+        }
         snapshot->identities.push_back(TlsCertificateStore::Snapshot::Identity{
                 .id = source.id,
                 .tcp = std::move(*tcp),
                 .quic = std::move(quic),
+                .client = std::move(*client),
         });
         dns_names.push_back(std::move(*names));
     }
+    snapshot->client_index.reserve(snapshot->identities.size());
+    for (auto &identity: snapshot->identities) {
+        snapshot->client_index.push_back(&identity);
+    }
+    std::sort(snapshot->client_index.begin(), snapshot->client_index.end(),
+              [](const auto *left, const auto *right) { return left->id < right->id; });
     for (std::size_t i = 0; i < snapshot->identities.size(); ++i) {
         auto &identity = snapshot->identities[i];
         if (identity.id == config.default_certificate) {
@@ -439,8 +460,10 @@ void TlsBootstrapIdentity::close() noexcept {
 }
 
 TlsCertificateStore::TlsCertificateStore(event::EventLoop &owner_loop, event::EventLoopGroup &workers,
-                                         bool quic_enabled, AccessTlsMetricsObserver metrics_observer) :
-    owner_loop_(&owner_loop), workers_(&workers), metrics_observer_(metrics_observer), quic_enabled_(quic_enabled) {
+                                         bool quic_enabled, AccessTlsMetricsObserver metrics_observer,
+                                         TlsCertificateIdentityObserver observer) :
+    owner_loop_(&owner_loop), workers_(&workers), metrics_observer_(metrics_observer), identity_observer_(observer),
+    quic_enabled_(quic_enabled) {
     worker_slots_.reserve(workers.size());
     for (std::size_t i = 0; i < workers.size(); ++i) {
         auto slot = std::make_unique<WorkerSlot>();
@@ -512,6 +535,15 @@ TlsCertificateStore::commit(PreparedUpdate prepared) {
         return std::unexpected(config_error(TlsCertificateConfigErrorCode::InvalidField, "snapshot",
                                             "prepared TLS snapshot is empty"));
     }
+    if (active_) {
+        for (const Snapshot::Identity *candidate: prepared.snapshot_->client_index) {
+            const Snapshot::Identity *current = active_->find_client(candidate->id);
+            if (current && current->client->digest() != candidate->client->digest()) {
+                return std::unexpected(config_error(TlsCertificateConfigErrorCode::VersionConflict, "certificates.id",
+                                                    "immutable TLS certificate id has different content"));
+            }
+        }
+    }
     if (!bootstrap_) {
         if (!prepared.bootstrap_) {
             return std::unexpected(config_error(TlsCertificateConfigErrorCode::InvalidField, "defaultCertificate",
@@ -539,6 +571,9 @@ TlsCertificateStore::commit(PreparedUpdate prepared) {
     if (!retired_.empty()) {
         reclaim_retired(AccessTlsReclaimTrigger::Publication);
     }
+    if (identity_observer_.on_update) {
+        identity_observer_.on_update(identity_observer_.context);
+    }
     return TlsCertificateUpdateStatus::Published;
 }
 
@@ -547,6 +582,24 @@ net::TlsIdentitySelectorOps TlsCertificateStore::selector_ops() noexcept {
             .select = &select_identity,
             .ctx = this,
     };
+}
+
+UpstreamTlsClientIdentityResolver TlsCertificateStore::client_identity_resolver() noexcept {
+    return UpstreamTlsClientIdentityResolver{
+            .context = this,
+            .find = &find_client_identity,
+    };
+}
+
+std::shared_ptr<const UpstreamTlsClientIdentity>
+TlsCertificateStore::find_client_identity(void *context, std::string_view id) noexcept {
+    auto &store = *static_cast<TlsCertificateStore *>(context);
+    FIBER_ASSERT(store.owner_loop_->in_loop());
+    if (!store.active_) {
+        return {};
+    }
+    const Snapshot::Identity *identity = store.active_->find_client(id);
+    return identity ? identity->client : std::shared_ptr<const UpstreamTlsClientIdentity>{};
 }
 
 std::size_t TlsCertificateStore::certificate_count() const noexcept { return active_ ? active_->identities.size() : 0; }

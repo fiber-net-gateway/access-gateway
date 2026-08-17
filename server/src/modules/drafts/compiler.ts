@@ -9,6 +9,7 @@ import {
 } from '../../integrations/native-validator/limits.js'
 import type { AccessConfigLimits } from '../../integrations/native-validator/model.js'
 import { canonicalJson } from '../../shared/json.js'
+import { isPublicId } from '../../shared/ids.js'
 import type { HttpsRedirect, ProjectRoutesModel, RouteItemModel } from './model.js'
 
 const routeFields = new Set([
@@ -35,7 +36,7 @@ const routeFields = new Set([
   'upstream_tls',
 ])
 
-export const ROUTE_COMPILER_REVISION = 'project-routes-upstream-tls-profile-v1'
+export const ROUTE_COMPILER_REVISION = 'project-routes-upstream-mtls-v2'
 
 const networkPolicyRouteId = '00000000-0000-4000-8000-000000000099'
 
@@ -401,6 +402,7 @@ const upstreamTlsFields = new Set([
   'ca_pem',
   'server_name',
   'verify_name',
+  'client_identity_ref',
 ])
 const upstreamTlsVerificationModes = new Set([
   'INHERIT',
@@ -529,6 +531,17 @@ function validateUpstreamTls(
       'UPSTREAM_TLS_VERIFY_NAME_CONFLICT',
       'verify_name cannot be used with LEGACY_INSECURE',
       'upstream_tls.verify_name',
+    )
+  }
+  if (
+    profile.client_identity_ref !== undefined &&
+    profile.client_identity_ref !== null &&
+    (typeof profile.client_identity_ref !== 'string' || !isPublicId(profile.client_identity_ref))
+  ) {
+    add(
+      'INVALID_UPSTREAM_TLS_CLIENT_IDENTITY_REF',
+      'client_identity_ref must be a valid UUID or null',
+      'upstream_tls.client_identity_ref',
     )
   }
   if (value.type !== 'PROXY') {

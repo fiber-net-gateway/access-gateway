@@ -6,6 +6,7 @@
 #include <utility>
 #include <vector>
 
+#include "TlsClientIdentityTestData.h"
 #include "routing/AccessScriptCompiler.h"
 #include "runtime/RouteConfigStore.h"
 
@@ -26,6 +27,21 @@ using fiber::access_server::RouteConfig;
 using fiber::access_server::RouteConfigStore;
 using fiber::access_server::RouteType;
 using fiber::access_server::UpstreamTlsVerificationMode;
+
+struct TlsIdentityResolverState {
+    std::string id;
+    std::shared_ptr<const fiber::access_server::UpstreamTlsClientIdentity> identity;
+
+    static std::shared_ptr<const fiber::access_server::UpstreamTlsClientIdentity> find(void *context,
+                                                                                       std::string_view id) noexcept {
+        auto &state = *static_cast<TlsIdentityResolverState *>(context);
+        return state.id == id ? state.identity : nullptr;
+    }
+
+    [[nodiscard]] fiber::access_server::UpstreamTlsClientIdentityResolver adapter() noexcept {
+        return {.context = this, .find = &find};
+    }
+};
 
 static_assert(!std::is_default_constructible_v<PreparedProjectUpdate>);
 static_assert(!std::is_copy_constructible_v<PreparedProjectUpdate>);
@@ -66,6 +82,66 @@ TEST(RouteConfigStoreTest, CommitsAfterCheckedReadyTransition) {
     ASSERT_TRUE(published);
     EXPECT_EQ(published->status, ConfigUpdateStatus::Published);
     EXPECT_TRUE(store.pin()->match_host("one.example.com"));
+}
+
+TEST(RouteConfigStoreTest, RetainsOldIdentityAndSnapshotWhenRotationDependencyIsMissing) {
+    constexpr std::string_view first_id = "123e4567-e89b-42d3-a456-426614174000";
+    constexpr std::string_view second_id = "123e4567-e89b-42d3-a456-426614174001";
+    const std::string client_chain = std::string(fiber::test::kClientCertPem) + fiber::test::kIntermediateCertPem;
+    const std::string server_chain = std::string(fiber::test::kServerCertPem) + fiber::test::kIntermediateCertPem;
+    auto first_identity =
+            fiber::access_server::UpstreamTlsClientIdentity::create(client_chain, fiber::test::kClientKeyPem);
+    auto second_identity =
+            fiber::access_server::UpstreamTlsClientIdentity::create(server_chain, fiber::test::kServerKeyPem);
+    ASSERT_TRUE(first_identity);
+    ASSERT_TRUE(second_identity);
+    std::weak_ptr<const fiber::access_server::UpstreamTlsClientIdentity> first_weak = *first_identity;
+    TlsIdentityResolverState resolver{
+            .id = std::string(first_id),
+            .identity = *first_identity,
+    };
+    RouteConfigStore store;
+    store.set_tls_client_identity_resolver(resolver.adapter());
+
+    auto v1 = project_config(1, "secure.example.com", "/");
+    (*v1.routes)[0]->upstream_tls = fiber::access_server::RouteUpstreamTlsConfig{
+            .generation = 1,
+            .client_identity_ref = std::string(first_id),
+    };
+    auto prepared_v1 = store.prepare("secure", v1);
+    ASSERT_TRUE(prepared_v1) << prepared_v1.error().message;
+    auto ready_v1 = std::move(*prepared_v1).try_ready();
+    ASSERT_TRUE(ready_v1);
+    ASSERT_TRUE(store.commit(std::move(*ready_v1)));
+    auto old_pin = store.pin();
+    const auto &old_profile = *old_pin->projects()[0]->routes()[0].proxy->upstream_tls;
+    const std::uint64_t old_affinity = old_profile.pool_affinity();
+    EXPECT_FALSE(old_profile.client_certificate_file().empty());
+
+    auto v2 = project_config(2, "secure.example.com", "/");
+    (*v2.routes)[0]->upstream_tls = fiber::access_server::RouteUpstreamTlsConfig{
+            .generation = 2,
+            .client_identity_ref = std::string(second_id),
+    };
+    auto missing = store.prepare("secure", v2);
+    ASSERT_FALSE(missing);
+    EXPECT_EQ(missing.error().code, fiber::access_server::AccessConfigErrorCode::MissingDependency);
+    EXPECT_EQ(store.current_version("secure"), 1);
+    EXPECT_EQ(store.pin(), old_pin);
+
+    resolver.id = second_id;
+    resolver.identity = *second_identity;
+    first_identity->reset();
+    auto prepared_v2 = store.prepare("secure", v2);
+    ASSERT_TRUE(prepared_v2) << prepared_v2.error().message;
+    auto ready_v2 = std::move(*prepared_v2).try_ready();
+    ASSERT_TRUE(ready_v2);
+    ASSERT_TRUE(store.commit(std::move(*ready_v2)));
+    const auto &new_profile = *store.pin()->projects()[0]->routes()[0].proxy->upstream_tls;
+    EXPECT_NE(new_profile.pool_affinity(), old_affinity);
+    EXPECT_FALSE(first_weak.expired());
+    old_pin.reset();
+    EXPECT_TRUE(first_weak.expired());
 }
 
 TEST(RouteConfigStoreTest, BatchCommitsReadyProjectsWithOneAtomicSnapshot) {

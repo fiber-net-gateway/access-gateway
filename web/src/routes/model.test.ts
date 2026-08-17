@@ -156,7 +156,8 @@ upstream_tls:
   verification: CUSTOM_CA
   ca_pem: test-ca
   server_name: sni.example.com
-  verify_name: 192.0.2.1`,
+  verify_name: 192.0.2.1
+  client_identity_ref: 123e4567-e89b-42d3-a456-426614174000`,
   })
   assert.deepEqual(valid.issues, [])
   assert.equal(valid.hasUpstreamTls, true)
@@ -179,6 +180,10 @@ upstream_tls:
     {
       profile: "generation: 1\n  verify_name: '::::'",
       code: 'INVALID_UPSTREAM_TLS_VERIFY_NAME',
+    },
+    {
+      profile: 'generation: 1\n  client_identity_ref: not-a-uuid',
+      code: 'INVALID_UPSTREAM_TLS_CLIENT_IDENTITY_REF',
     },
   ]) {
     const result = analyzeRouteSource({

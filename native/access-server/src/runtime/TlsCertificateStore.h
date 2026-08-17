@@ -3,6 +3,7 @@
 
 #include "../config/TlsCertificateConfig.h"
 #include "../observability/AccessTlsMetrics.h"
+#include "../routing/UpstreamTlsClientIdentity.h"
 
 #include <array>
 #include <atomic>
@@ -41,6 +42,11 @@ struct TlsCertificateVersionState {
 
 using TlsCertificateClassification =
         std::optional<std::expected<TlsCertificateUpdateStatus, TlsCertificateConfigError>>;
+
+struct TlsCertificateIdentityObserver {
+    void *context = nullptr;
+    void (*on_update)(void *context) noexcept = nullptr;
+};
 
 class TlsBootstrapIdentity final : public common::NonCopyable, public common::NonMovable {
 public:
@@ -84,7 +90,7 @@ public:
     };
 
     TlsCertificateStore(event::EventLoop &owner_loop, event::EventLoopGroup &workers, bool quic_enabled,
-                        AccessTlsMetricsObserver metrics_observer = {});
+                        AccessTlsMetricsObserver metrics_observer = {}, TlsCertificateIdentityObserver observer = {});
     ~TlsCertificateStore();
 
     [[nodiscard]] static TlsCertificateContentDigest content_digest(std::string_view wire_content) noexcept;
@@ -97,6 +103,7 @@ public:
     [[nodiscard]] async::Task<void> shutdown() noexcept;
 
     [[nodiscard]] net::TlsIdentitySelectorOps selector_ops() noexcept;
+    [[nodiscard]] UpstreamTlsClientIdentityResolver client_identity_resolver() noexcept;
     [[nodiscard]] std::shared_ptr<TlsBootstrapIdentity> bootstrap_identity() const noexcept { return bootstrap_; }
     [[nodiscard]] std::uint64_t version() const noexcept { return version_; }
     [[nodiscard]] std::size_t certificate_count() const noexcept;
@@ -119,6 +126,8 @@ private:
 
     [[nodiscard]] static net::TlsContext *select_identity(void *context,
                                                           const net::TlsIdentitySelectInput &input) noexcept;
+    [[nodiscard]] static std::shared_ptr<const UpstreamTlsClientIdentity>
+    find_client_identity(void *context, std::string_view id) noexcept;
     static void clear_hazard(WorkerSlot *slot) noexcept;
     static void run_reaper(TlsCertificateStore *store) noexcept;
     void request_reclaim() noexcept;
@@ -133,6 +142,7 @@ private:
     std::shared_ptr<TlsBootstrapIdentity> bootstrap_;
     TlsCertificateContentDigest content_digest_{};
     AccessTlsMetricsObserver metrics_observer_;
+    TlsCertificateIdentityObserver identity_observer_;
     event::EventLoop::NotifyEntry reaper_entry_;
     std::atomic<bool> retirement_pending_{false};
     std::atomic<bool> reaper_posted_{false};

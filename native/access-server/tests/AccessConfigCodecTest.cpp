@@ -252,7 +252,7 @@ TEST(AccessConfigCodecTest, ParsesResponseGzipBooleanAndCompressionLevels) {
 
 TEST(AccessConfigCodecTest, ParsesStrictRouteUpstreamTlsProfile) {
     auto result = parse_project_config(
-            R"({"routes":[{"path":"/","type":"PROXY","service":"orders","upstream_tls":{"generation":7,"verification":"CUSTOM_CA","ca_pem":"test-ca","server_name":"sni.example.com","verify_name":"identity.example.com"}}]})");
+            R"({"routes":[{"path":"/","type":"PROXY","service":"orders","upstream_tls":{"generation":7,"verification":"CUSTOM_CA","ca_pem":"test-ca","server_name":"sni.example.com","verify_name":"identity.example.com","client_identity_ref":"123e4567-e89b-42d3-a456-426614174000"}}]})");
 
     ASSERT_TRUE(result) << result.error().message;
     ASSERT_TRUE(*result);
@@ -266,6 +266,8 @@ TEST(AccessConfigCodecTest, ParsesStrictRouteUpstreamTlsProfile) {
     EXPECT_EQ(*route.upstream_tls->server_name, "sni.example.com");
     ASSERT_TRUE(route.upstream_tls->verify_name);
     EXPECT_EQ(*route.upstream_tls->verify_name, "identity.example.com");
+    ASSERT_TRUE(route.upstream_tls->client_identity_ref);
+    EXPECT_EQ(*route.upstream_tls->client_identity_ref, "123e4567-e89b-42d3-a456-426614174000");
 
     auto inherited =
             parse_project_config(R"({"routes":[{"path":"/","service":"orders","upstream_tls":{"generation":1}}]})");
@@ -296,6 +298,8 @@ TEST(AccessConfigCodecTest, PreservesNativeUpstreamTlsCompatibilityFixture) {
     EXPECT_EQ(*route.upstream_tls->server_name, "orders.internal.example");
     ASSERT_TRUE(route.upstream_tls->verify_name);
     EXPECT_EQ(*route.upstream_tls->verify_name, "orders.identity.example");
+    ASSERT_TRUE(route.upstream_tls->client_identity_ref);
+    EXPECT_EQ(*route.upstream_tls->client_identity_ref, "123e4567-e89b-42d3-a456-426614174000");
 }
 
 TEST(AccessConfigCodecTest, RejectsMalformedRouteUpstreamTlsProfileBeforeJavaCoercion) {
@@ -305,6 +309,7 @@ TEST(AccessConfigCodecTest, RejectsMalformedRouteUpstreamTlsProfileBeforeJavaCoe
                  R"({"generation":"1"})",
                  R"({"generation":1,"verification":"FUTURE"})",
                  R"({"generation":1,"ca_pem":7})",
+                 R"({"generation":1,"client_identity_ref":7})",
                  R"({"generation":1,"unknown":true})",
                  R"({"generation":1,"generation":2})",
          }) {

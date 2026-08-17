@@ -80,6 +80,7 @@ DecodeResult<std::optional<RouteUpstreamTlsConfig>> route_upstream_tls(const Acc
     bool ca_pem_seen = false;
     bool server_name_seen = false;
     bool verify_name_seen = false;
+    bool client_identity_ref_seen = false;
     for (const auto &entry: value.as_object()) {
         const std::string path = child_path(field, entry.key);
         bool *seen = nullptr;
@@ -93,6 +94,8 @@ DecodeResult<std::optional<RouteUpstreamTlsConfig>> route_upstream_tls(const Acc
             seen = &server_name_seen;
         } else if (entry.key == "verify_name") {
             seen = &verify_name_seen;
+        } else if (entry.key == "client_identity_ref") {
+            seen = &client_identity_ref_seen;
         } else {
             return invalid_field(path, "unknown upstream_tls field");
         }
@@ -125,7 +128,8 @@ DecodeResult<std::optional<RouteUpstreamTlsConfig>> route_upstream_tls(const Acc
         } else {
             std::optional<std::string> *output = entry.key == "ca_pem"        ? &result.ca_pem
                                                  : entry.key == "server_name" ? &result.server_name
-                                                                              : &result.verify_name;
+                                                 : entry.key == "verify_name" ? &result.verify_name
+                                                                              : &result.client_identity_ref;
             if (entry.value.is_null()) {
                 output->reset();
             } else if (entry.value.is_text()) {

@@ -28,6 +28,7 @@
 #include <fiber/net/TcpListener.h>
 #include <fiber/net/TlsContext.h>
 #include "QuicTestTlsCertificate.h"
+#include "TlsClientIdentityTestData.h"
 #include "execution/ProxyUpstreamConnection.h"
 #include "routing/UpstreamTlsTransportProfile.h"
 
@@ -277,7 +278,7 @@ fiber::async::DetachedTask run_tls_client_scenario(fiber::http::StealableHttp1Co
 ConnectionScenarioResult run_tls_scenario(const std::string &certificate_path, const std::string &private_key_path,
                                           std::string_view host,
                                           fiber::access_server::UpstreamTlsClientPolicyView policy,
-                                          bool use_ip_key = false) {
+                                          bool use_ip_key = false, std::string_view client_ca_file = {}) {
     fiber::event::EventLoopGroup group(1);
     fiber::http::StealableHttp1ConnectionPoolSet pool(group);
     if (!pool.init()) {
@@ -297,6 +298,10 @@ ConnectionScenarioResult run_tls_scenario(const std::string &certificate_path, c
     fiber::net::TlsOptions server_options;
     server_options.cert_file = certificate_path;
     server_options.key_file = private_key_path;
+    if (!client_ca_file.empty()) {
+        server_options.verify_client = true;
+        server_options.ca_file = client_ca_file;
+    }
     fiber::net::TlsContext server_context(std::move(server_options), true);
     auto initialized = server_context.init();
     if (!initialized) {
@@ -918,6 +923,67 @@ TEST(ProxyUpstreamConnectionTest, CustomCaVerifiesPeerAndDerivesSniFromUpstreamN
     EXPECT_TRUE(result.verify_name.empty());
     EXPECT_EQ(result.observation.dns_success, 1U);
     EXPECT_EQ(result.observation.connect_success, 1U);
+}
+
+TEST(ProxyUpstreamConnectionTest, RouteClientIdentityCompletesMutualTlsAndAnonymousClientFails) {
+    constexpr std::string_view identity_id = "123e4567-e89b-42d3-a456-426614174000";
+    fiber::test::QuicTestTlsFile root("access-upstream-mtls-root", fiber::test::kRootCertPem);
+    const std::string server_chain = std::string(fiber::test::kServerCertPem) + fiber::test::kIntermediateCertPem;
+    fiber::test::QuicTestTlsFile server_certificate("access-upstream-mtls-server", server_chain);
+    fiber::test::QuicTestTlsFile server_key("access-upstream-mtls-server-key", fiber::test::kServerKeyPem);
+    ASSERT_TRUE(root.valid());
+    ASSERT_TRUE(server_certificate.valid());
+    ASSERT_TRUE(server_key.valid());
+
+    const std::string client_chain = std::string(fiber::test::kClientCertPem) + fiber::test::kIntermediateCertPem;
+    auto identity = fiber::access_server::UpstreamTlsClientIdentity::create(client_chain, fiber::test::kClientKeyPem);
+    ASSERT_TRUE(identity);
+    struct ResolverState {
+        std::shared_ptr<const fiber::access_server::UpstreamTlsClientIdentity> identity;
+        static std::shared_ptr<const fiber::access_server::UpstreamTlsClientIdentity>
+        find(void *context, std::string_view id) noexcept {
+            auto &state = *static_cast<ResolverState *>(context);
+            return id == "123e4567-e89b-42d3-a456-426614174000" ? state.identity : nullptr;
+        }
+    } resolver{.identity = *identity};
+
+    auto profile = fiber::access_server::compile_upstream_tls_transport_profile(
+            {
+                    .generation = 31,
+                    .verification = fiber::access_server::UpstreamTlsVerificationMode::CustomCa,
+                    .ca_pem = std::string(fiber::test::kRootCertPem),
+                    .server_name = "server.identity.test",
+                    .client_identity_ref = std::string(identity_id),
+            },
+            0);
+    ASSERT_TRUE(profile) << profile.error().message;
+    const std::uint64_t transport_affinity = profile->pool_affinity();
+    auto bound = fiber::access_server::bind_upstream_tls_client_identity(
+            *profile, {.context = &resolver, .find = &ResolverState::find}, 0);
+    ASSERT_TRUE(bound) << bound.error().message;
+    EXPECT_NE(profile->pool_affinity(), transport_affinity);
+    EXPECT_TRUE(profile->client_certificate_file().starts_with("/proc/self/fd/"));
+    EXPECT_TRUE(profile->client_private_key_file().starts_with("/proc/self/fd/"));
+
+    const fiber::access_server::UpstreamTlsClientPolicy environment;
+    const auto mutual_policy = fiber::access_server::effective_upstream_tls_client_policy(environment, &*profile);
+    const ConnectionScenarioResult mutual = run_tls_scenario(server_certificate.path(), server_key.path(),
+                                                             "server.identity.test", mutual_policy, false, root.path());
+    EXPECT_EQ(mutual.error, fiber::common::IoErr::None);
+    EXPECT_EQ(mutual.server_error, fiber::common::IoErr::None);
+    EXPECT_EQ(mutual.observation.connect_success, 1U);
+
+    const ConnectionScenarioResult anonymous =
+            run_tls_scenario(server_certificate.path(), server_key.path(), "server.identity.test",
+                             {
+                                     .verification = fiber::access_server::UpstreamTlsVerificationMode::CustomCa,
+                                     .ca_file = root.path(),
+                             },
+                             false, root.path());
+    // TLS 1.3 can let the client finish its side of the handshake before it
+    // consumes the server's certificate-required alert. The authoritative
+    // upstream side still rejects the anonymous peer.
+    EXPECT_NE(anonymous.server_error, fiber::common::IoErr::None);
 }
 
 TEST(ProxyUpstreamConnectionTest, RouteProfileSeparatesSniFromCertificateVerificationName) {

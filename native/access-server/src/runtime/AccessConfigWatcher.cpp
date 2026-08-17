@@ -116,6 +116,8 @@ std::string_view config_error_code_name(AccessConfigErrorCode code) noexcept {
             return "conflict";
         case AccessConfigErrorCode::LimitExceeded:
             return "limit_exceeded";
+        case AccessConfigErrorCode::MissingDependency:
+            return "missing_dependency";
     }
     return "invalid_configuration";
 }
@@ -194,6 +196,7 @@ struct AccessConfigWatcher::ProjectEntry final : public common::NonCopyable, pub
     std::int64_t active_at_unix_millis = 0;
     std::uint64_t published_generation = 0;
     std::shared_ptr<const nacos::ConfigData> pending_compile_data;
+    std::shared_ptr<const nacos::ConfigData> retry_identity_data;
     std::unique_ptr<InitialProjectUpdate> initial_update;
     ProjectCompileJob *active_compile_job = nullptr;
     bool synchronized = false;
@@ -387,6 +390,7 @@ void AccessConfigWatcher::apply_project(const std::shared_ptr<ProjectEntry> &ent
                                         std::shared_ptr<const nacos::ConfigData> data) {
     FIBER_ASSERT(loop_->in_loop());
     FIBER_ASSERT(data);
+    entry->retry_identity_data.reset();
     entry->initial_update.reset();
     (void) entry->subscription.observe_value();
     cancel_project_compile(entry);
@@ -574,12 +578,18 @@ void AccessConfigWatcher::apply_compiled_project(ProjectCompileJob &job) {
     }
     auto prepared = store_->prepare_compiled(entry->project, result->version, std::move(result->snapshot));
     if (!prepared) {
+        if (prepared.error().code == AccessConfigErrorCode::MissingDependency) {
+            entry->retry_identity_data = job.data;
+        } else {
+            entry->retry_identity_data.reset();
+        }
         report_failure(entry, AccessConfigWatcherFailureStage::Compile,
                        options_.project_route_data_id_prefix + entry->project, std::string(job.data->md5),
                        common::IoErr::Invalid, std::move(prepared.error()));
         settle_project(entry, AccessProjectConfigState::Rejected);
         return;
     }
+    entry->retry_identity_data.reset();
     apply_prepared_project(entry, std::move(*prepared), job.generation, entry->subscription.revision_version(),
                            options_.project_route_data_id_prefix + entry->project, std::string(job.data->md5));
 }
@@ -957,9 +967,32 @@ void AccessConfigWatcher::settle_project(const std::shared_ptr<ProjectEntry> &en
     FIBER_ASSERT(entry);
     FIBER_ASSERT(state == AccessProjectConfigState::Accepted || state == AccessProjectConfigState::Rejected);
     entry->config_state = state;
+    if (state == AccessProjectConfigState::Accepted) {
+        entry->retry_identity_data.reset();
+    }
     entry->synchronized = true;
     publish_readiness();
     commit_initial_batch_if_ready();
+}
+
+void AccessConfigWatcher::retry_missing_tls_identities() {
+    FIBER_ASSERT(loop_->in_loop());
+    if (state_ != AccessConfigWatcherState::Running) {
+        return;
+    }
+    for (const auto &[project, entry]: projects_) {
+        (void) project;
+        if (!entry->retry_identity_data || entry->config_state != AccessProjectConfigState::Rejected ||
+            !entry->last_failure || entry->last_failure->error.code != AccessConfigErrorCode::MissingDependency ||
+            !entry->subscription.subscribed()) {
+            continue;
+        }
+        entry->config_state = AccessProjectConfigState::Processing;
+        entry->synchronized = false;
+        entry->last_failure.reset();
+        enqueue_project_compile(entry, entry->retry_identity_data, true);
+    }
+    publish_readiness();
 }
 
 std::size_t AccessConfigWatcher::active_project_subscription_count() const noexcept {

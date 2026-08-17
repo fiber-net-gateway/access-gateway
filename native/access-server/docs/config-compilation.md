@@ -23,6 +23,7 @@ compiler loop
 
 Nacos owner loop
   -> reject stale generation results
+  -> bind immutable upstream mTLS identity references
   -> bind NamingService leases where required
   -> transition PreparedProjectUpdate to ReadyProjectUpdate
   -> commit only the Ready type, or retain the previous snapshot on failure
@@ -43,14 +44,22 @@ CPU-only `ProjectConfigCompiler` on the compiler loop:
 - condition, template, rewrite, and JavaScript route compilation;
 - static response decoding and gzip precompression;
 - strict native-only outbound `upstream_tls` validation, sealed custom-CA preparation, and stable
-  non-zero pool-affinity derivation;
+  non-zero transport pool-affinity derivation;
 - construction of a complete `ProjectRouteSnapshot` candidate.
 
-The immutable Project snapshot owns each route profile's sealed CA descriptor. A request pinned to
-an old snapshot therefore keeps the old trust material alive across publication of a new generation;
-new and old connection keys use different affinities. Invalid CA/name/profile candidates retain the
-previously published Project snapshot. This outbound route profile is independent of the downstream
-certificate watcher described below.
+The immutable Project snapshot owns each route profile's sealed CA descriptor. On the Nacos owner
+loop, `RouteConfigStore` also resolves an optional Certificate Version UUID against the active TLS
+identity directory before freezing the candidate. The bound snapshot owns sealed certificate/key
+descriptors, and the identity digest participates in pool affinity. A request pinned to an old
+snapshot therefore keeps old trust and client identity material alive across rotation; new and old
+connection keys cannot cross profiles. Missing identity, invalid CA/name/profile, or ID reuse with
+different content retains the previously published Project snapshot. The offline validator checks
+the reference shape but cannot claim that an instance has loaded the referenced TLS resource.
+
+The watcher retains only the latest `ConfigData` pointer for a candidate rejected with
+`MissingDependency`. A successful TLS snapshot publication retries that bounded set with forced
+compilation. This does not bypass same-version semantics for an already published Route. Other
+compile failures are never retried by a TLS update.
 
 Pure compilation represents a service route with an unavailable selector that retains only its
 normalized service and cluster metadata. After the candidate returns, `RouteConfigStore` binds

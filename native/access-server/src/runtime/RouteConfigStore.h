@@ -150,6 +150,9 @@ public:
     [[nodiscard]] ConfigBatchUpdateOutcome commit_batch(std::vector<ReadyProjectUpdate> ready);
     [[nodiscard]] ConfigUpdateOutcome remove_project(std::string_view project);
     void clear() noexcept;
+    void set_tls_client_identity_resolver(UpstreamTlsClientIdentityResolver resolver) noexcept {
+        tls_client_identity_resolver_ = resolver;
+    }
 
     [[nodiscard]] std::optional<std::int32_t> current_version(std::string_view project) const noexcept;
     [[nodiscard]] AccessRouteSnapshotProvider snapshot_provider() const noexcept;
@@ -163,6 +166,7 @@ private:
     ProjectConfigCompiler project_compiler_;
     AccessServiceSelectorFactory service_selector_factory_;
     ProxyAddressSelectorFactory selector_factory_;
+    UpstreamTlsClientIdentityResolver tls_client_identity_resolver_;
     ProjectSnapshotRegistry registry_;
     RouteSnapshotPublisher publisher_;
 };

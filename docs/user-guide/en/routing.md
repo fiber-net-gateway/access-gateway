@@ -374,16 +374,29 @@ upstream_tls:
         -----END CERTIFICATE-----
     server_name: sni.internal.example
     verify_name: identity.internal.example
+    client_identity_ref: 123e4567-e89b-42d3-a456-426614174000
 ```
 
-`generation` is a required positive integer and must increase whenever the CA, SNI, or verification name
-changes. `CUSTOM_CA` requires a PEM bundle; other modes reject one. A Project is capped at 256 profiles, and
+`generation` is a required positive integer and must increase whenever the CA, SNI, verification name, or
+client identity changes. `CUSTOM_CA` requires a PEM bundle; other modes reject one. A Project is capped at 256 profiles, and
 each PEM is capped at 512 KiB, validated before candidate publication, and held in a sealed in-memory fd.
 `server_name` controls SNI while `verify_name`
 independently selects the certificate DNS/IP identity; when omitted they retain endpoint-derived behavior.
 Each explicit profile receives a non-zero pool affinity, so old and new generations cannot reuse a connection,
 while requests pinned to the old snapshot can finish safely. Missing/`null` preserves the process default and
 legacy affinity `0`.
+
+`client_identity_ref` is optional and names an immutable certificate-version UUID from Console TLS history,
+not the logical certificate UUID. The certificate chain and private key remain in the encrypted TLS Release and
+the dedicated `ploto.unified-access.tls-certificates` resource; route JSON, APIs, logs, and errors never return
+PEM, private keys, or fd paths. If the active TLS snapshot on an instance lacks the reference, native rejects the
+new Route and retains the previous snapshot.
+
+For rotation, first publish a TLS Release containing the new certificate version, then publish the Route with
+the new UUID and an incremented `generation`. Reverse that order for removal: remove every Route reference before
+publishing a TLS Release without the old version. An rnacos write/readback means published, not active on any
+instance; wait for typed per-instance activation evidence. Old requests and pool leases retain sealed identity
+material until they retire safely.
 
 This is a native-only wire extension. Old Java instances ignore it and fall back to insecure verification;
 mixed Java/native deployments and old Native Validators must therefore reject publication. An rnacos readback

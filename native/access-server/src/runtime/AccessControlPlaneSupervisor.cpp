@@ -48,6 +48,10 @@ async::Task<void> shutdown_nacos_client(void *context) noexcept {
     return static_cast<nacos::NacosClient *>(context)->shutdown();
 }
 
+void retry_missing_tls_identities(void *context) noexcept {
+    static_cast<AccessConfigWatcher *>(context)->retry_missing_tls_identities();
+}
+
 } // namespace
 
 AccessControlPlaneSupervisor::AccessControlPlaneSupervisor(event::EventLoop &coordinator_loop,
@@ -76,7 +80,11 @@ AccessControlPlaneSupervisor::AccessControlPlaneSupervisor(event::EventLoop &coo
     gray_watcher_(nacos_loop, *config_service_, gray_store_, std::move(options.gray_watcher),
                   options.activation_endpoint.enabled ? activation_evidence_.gray_observer()
                                                       : AccessGrayActivationEvidenceObserver{}),
-    tls_certificate_store_(nacos_loop, http_workers, options.quic_enabled, runtime_metrics_.tls().observer()),
+    tls_certificate_store_(nacos_loop, http_workers, options.quic_enabled, runtime_metrics_.tls().observer(),
+                           TlsCertificateIdentityObserver{
+                                   .context = &config_watcher_,
+                                   .on_update = &retry_missing_tls_identities,
+                           }),
     tls_certificate_watcher_(nacos_loop, config_compiler_, *config_service_, tls_certificate_store_,
                              std::move(options.tls_certificate_watcher),
                              options.activation_endpoint.enabled ? activation_evidence_.tls_observer()
@@ -84,6 +92,7 @@ AccessControlPlaneSupervisor::AccessControlPlaneSupervisor(event::EventLoop &coo
     tls_enabled_(options.tls_enabled) {
     FIBER_ASSERT(config_service_);
     FIBER_ASSERT(naming_service_);
+    route_store_.set_tls_client_identity_resolver(tls_certificate_store_.client_identity_resolver());
     FIBER_ASSERT((cat_lifecycle_.start == nullptr) == (cat_lifecycle_.shutdown == nullptr));
     FIBER_ASSERT((nacos_lifecycle_.start == nullptr) == (nacos_lifecycle_.shutdown == nullptr));
     if (!cat_lifecycle_ && cat_client_) {
@@ -217,19 +226,17 @@ async::DetachedTask AccessControlPlaneSupervisor::start_nacos_on_owner() noexcep
         co_return;
     }
     gray_watcher_started_ = true;
-    if (tls_enabled_) {
-        auto tls_started = tls_certificate_watcher_.start();
-        if (!tls_started) {
-            nacos_start_publisher_->publish(NacosStartStatus{
-                    .error = make_access_server_runtime_io_error(
-                            AccessServerRuntimeErrorCode::StartTlsCertificateWatcher, tls_started.error().io_error,
-                            std::move(tls_started.error().message)),
-            });
-            nacos_start_tasks_.done();
-            co_return;
-        }
-        tls_certificate_watcher_started_ = true;
+    auto tls_started = tls_certificate_watcher_.start();
+    if (!tls_started) {
+        nacos_start_publisher_->publish(NacosStartStatus{
+                .error = make_access_server_runtime_io_error(AccessServerRuntimeErrorCode::StartTlsCertificateWatcher,
+                                                             tls_started.error().io_error,
+                                                             std::move(tls_started.error().message)),
+        });
+        nacos_start_tasks_.done();
+        co_return;
     }
+    tls_certificate_watcher_started_ = true;
     auto watcher_started = config_watcher_.start();
     if (!watcher_started) {
         nacos_start_publisher_->publish(NacosStartStatus{
@@ -261,8 +268,8 @@ async::DetachedTask AccessControlPlaneSupervisor::shutdown_nacos_on_owner() noex
         co_await gray_watcher_.shutdown();
         gray_watcher_started_ = false;
     }
-    co_await tls_certificate_store_.shutdown();
     route_store_.clear();
+    co_await tls_certificate_store_.shutdown();
     co_await service_discovery_.shutdown();
     if (naming_service_start_attempted_) {
         metrics.set_lifecycle(AccessNacosComponent::NamingService, AccessNacosLifecycleState::Stopping);

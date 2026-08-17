@@ -211,6 +211,8 @@ std::string_view access_error_code(AccessConfigErrorCode code) noexcept {
             return "conflict";
         case AccessConfigErrorCode::LimitExceeded:
             return "limit_exceeded";
+        case AccessConfigErrorCode::MissingDependency:
+            return "missing_dependency";
     }
     return "invalid_configuration";
 }

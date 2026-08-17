@@ -121,7 +121,8 @@ Access Server 使用 Fiber 的 `HttpServer` 替换仅支持明文的 `Http1Serve
 
 - Console 将证书链、私钥和 Release payload 分别 envelope-encrypted 保存，API、日志和审计均不回显；
 - TLS Release 的完整 JSON payload 通过 Nacos 交付；必须对 Nacos 使用受控网络、鉴权和加密传输；
-- Access Server 在更新线程内解析 PEM，运行快照只保留编译后的 TLS context 和 SAN 索引；
+- Access Server 在 compiler loop 解析 PEM；下游握手快照保留编译后的 TLS context 和 SAN 索引，
+  可被 Route 引用的客户端身份另保留只读 sealed memfd 与内容摘要，不保留 PEM 字符串；
 - 启动桥接使用只读 sealed memfd，监听器初始化后立即关闭，不把私钥写入磁盘或镜像层；
 - `deploy/demo/init-env.sh` 使用 `umask 077` 生成自签名 ECDSA P-256 证书，SAN 覆盖
   `demo.local`、`localhost`、`127.0.0.1` 和 `::1`；

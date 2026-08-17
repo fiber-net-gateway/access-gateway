@@ -14,7 +14,8 @@
         "generation": 42,
         "verification": "INHERIT",
         "server_name": "orders.internal.example",
-        "verify_name": "orders.identity.example"
+        "verify_name": "orders.identity.example",
+        "client_identity_ref": "123e4567-e89b-42d3-a456-426614174000"
       }
     }
   ]

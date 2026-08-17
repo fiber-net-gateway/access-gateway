@@ -291,7 +291,7 @@ bad routing 特殊入口返回 400、`BAD_REQUEST`、`error find router`。
 | `flush` | body flush；响应额外写 `X-Accel-Buffering: no` |
 | `allows` | CIDR allow/deny |
 | `script` | `SCRIPT` 的必填脚本正文；其他 type 不允许 |
-| `upstream_tls` | native-only PROXY TLS transport profile；缺失/null 继承进程策略且不改变旧 wire |
+| `upstream_tls` | native-only PROXY TLS/mTLS transport profile；缺失/null 继承进程策略且不改变旧 wire |
 
 Body：
 
@@ -549,7 +549,8 @@ PROXY Route 可用 native-only `upstream_tls` 覆盖 transport profile：
   "verification": "CUSTOM_CA",
   "ca_pem": "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----\n",
   "server_name": "sni.internal.example",
-  "verify_name": "identity.internal.example"
+  "verify_name": "identity.internal.example",
+  "client_identity_ref": "123e4567-e89b-42d3-a456-426614174000"
 }
 ```
 
@@ -560,11 +561,20 @@ PROXY Route 可用 native-only `upstream_tls` 覆盖 transport profile：
 - `server_name` 只能是非空 ASCII DNS 名，用作 SNI；缺失时 hostname endpoint 自动发送 SNI，
   IP endpoint 不发送 IP-valued SNI；
 - `verify_name` 可为 ASCII DNS 名或 IP，独立于 SNI；缺失时使用显式 SNI 或 endpoint identity；
+- `client_identity_ref` 可选且必须是不可变 Certificate Version UUID。它只引用 TLS certificate
+  snapshot 中同 ID 的证书链/私钥，Route wire 不含 PEM、私钥或文件路径；引用缺失时拒绝候选并保留
+  旧 Route，TLS snapshot 后续加入该 ID 时重试最新依赖失败候选；
 - profile 子字段、重复字段和未知字段严格拒绝，不套用 Java 的宽松 object 行为；非 PROXY Route
   上出现该对象也拒绝；
 - custom CA 在候选编译时验证并放入只读 sealed memfd。`generation` 和全部连接级内容生成稳定、
-  非零 pool affinity；相同 profile 同时用于 connection key 与 `TlsOptions`。旧请求 pin 旧 snapshot，
-  新旧 lease 不会跨 profile 复用。
+  非零 pool affinity；mTLS 身份内容摘要也进入 affinity，相同 profile 同时用于 connection key 与
+  `TlsOptions`。旧请求 pin 旧 snapshot 及 sealed 身份，新旧 lease 不会跨 profile/身份复用。
+
+mTLS 轮换是两资源发布流程：先发布包含新 Certificate Version ID 的 TLS snapshot，确认 rnacos 写入/
+readback 后，再发布引用新 ID 且递增 `generation` 的 Route。readback 不是实例 activation 证据；只有
+typed per-instance evidence 才能证明生效。删除旧身份时先发布不再引用它的 Route，再从后续 TLS snapshot
+移除。TLS store 拒绝用不同内容复用同一 ID；已发布旧 Route 即使随后从 TLS directory 移除该 ID，也会
+持有旧 sealed material 直到请求和 pool lease 安全退役。
 
 字段缺失时仍使用 affinity `0` 和现有进程策略，保持旧 route wire。进程级 custom CA 文件变更仍要求
 滚动重启。`upstream_tls` 不属于 Java 基线：旧 Java 实例会忽略整个对象并继续使用 insecure 行为，

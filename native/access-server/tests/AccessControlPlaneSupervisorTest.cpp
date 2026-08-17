@@ -371,8 +371,8 @@ INSTANTIATE_TEST_SUITE_P(
         testing::Values(
                 FailureCase{
                         .expected_events = {"cat.start", "nacos.start", "config.start", "naming.start", "gray.start",
-                                            "projects.start", "projects.stop", "gray.stop", "naming.stop",
-                                            "config.stop", "nacos.stop", "cat.stop"},
+                                            "tls.start", "projects.start", "projects.stop", "tls.stop", "gray.stop",
+                                            "naming.stop", "config.stop", "nacos.stop", "cat.stop"},
                 },
                 FailureCase{
                         .point = FailurePoint::CatClient,
@@ -420,8 +420,8 @@ INSTANTIATE_TEST_SUITE_P(
                         .point = FailurePoint::InitialReadiness,
                         .error = AccessServerRuntimeErrorCode::InitialConfigUnavailable,
                         .expected_events = {"cat.start", "nacos.start", "config.start", "naming.start", "gray.start",
-                                            "projects.start", "projects.stop", "gray.stop", "naming.stop",
-                                            "config.stop", "nacos.stop", "cat.stop"},
+                                            "tls.start", "projects.start", "projects.stop", "tls.stop", "gray.stop",
+                                            "naming.stop", "config.stop", "nacos.stop", "cat.stop"},
                 },
                 FailureCase{
                         .point = FailurePoint::SynchronousTlsClosedReplay,

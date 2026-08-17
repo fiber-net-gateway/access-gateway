@@ -195,6 +195,11 @@ PreparedProjectUpdateOutcome RouteConfigStore::prepare_compiled(std::string_view
         return PreparedProjectUpdate(ConfigUpdateStatus::Unloaded, std::string(project), *version, {});
     }
 
+    auto identities_bound = bind_project_tls_client_identities(*project_snapshot, tls_client_identity_resolver_);
+    if (!identities_bound) {
+        return std::unexpected(std::move(identities_bound.error()));
+    }
+
     auto bound = bind_project_service_selectors(*project_snapshot, selector_factory_);
     if (!bound) {
         return std::unexpected(std::move(bound.error()));
