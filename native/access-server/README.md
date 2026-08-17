@@ -118,6 +118,17 @@ cmake --build native/build --target fiber_access_server_tests --parallel
 ctest --test-dir native/build --output-on-failure -L access-server
 ```
 
+聚焦 sanitizer 和显式 Docker/rnacos 互操作故障注入使用独立构建树：
+
+```bash
+npm run test:native:sanitizers
+npm run test:native:interop
+```
+
+互操作 runner 只使用本机已有的 digest 固定镜像，不会隐式拉取；Docker 或镜像缺失时会 skip，
+不能计作门禁通过。测试范围、重复次数和当前证据见
+[`docs/sanitizer-and-interop.md`](docs/sanitizer-and-interop.md)。
+
 产物位于：
 
 ```text
@@ -318,6 +329,7 @@ listener 只在 Nacos client/config/naming、project/gray watcher、项目列表
   Release 聚合状态和部署检查；
 - `docs/script-corpus-differential.md`：测试环境有限 condition/template/rewrite 快照的证据
   元数据、完成层级、未完成的生产/阶段 8 门禁和私有 corpus 复跑方式；
+- `docs/sanitizer-and-interop.md`：ASAN/UBSAN、TSAN 和固定 rnacos 外部故障注入的设计、命令与证据；
 - `docs/optimization-analysis.md`：代码职责、生命周期、性能、安全和可观测性优化分析，
   以及 Access Gateway 与 Fiber 上游的改造归属。
 

@@ -27,7 +27,7 @@ Issue/PR，合入后再审查 revision range、运行完整回归并更新 gitli
 - Fiber 当前 pinned revision：`abc8c34ba13bd50554a55e10389c6b3da2dcc048`；
 - 本次审阅的 Fiber revision range：`0fda7764..abc8c34`；
 - 审阅日期：2026-08-16；
-- 实施状态和验证结果持续更新至：2026-08-17；
+- 实施状态和验证结果持续更新至：2026-08-18；
 - `native/access-server/src/` 约 1.37 万行代码；
 - 当前 Release/ThinLTO 构建、CMake target、兼容文档和测试注册；
 - `ctest --test-dir native/build --output-on-failure -L access-server`：共发现 324 个测试，
@@ -139,9 +139,11 @@ Access Gateway 的配置、secret、生命周期、指标、兼容和端到端�
 | ID | 已完成边界 | 剩余工作 |
 | --- | --- | --- |
 | P-01 | service directory 外层锁已移除 | 仅在 production profile 证明全局 SWRR mutex/O(N) scan 是瓶颈后，决定 sharding 或上游化；当前是条件项 |
-| T-01 | 生命周期、竞态、TLS/mTLS rotation、snapshot pin、DNS、Happy Eyeballs 和 Nacos status focused/integration 测试已补齐 | 完成聚焦 ASAN/UBSAN/TSAN 和外部互操作故障注入 |
 | T-02 | 五组 microbenchmark 已有基线 | 补 gray、TLS identity、loopback proxy/WebSocket、CAT/logging，以及新 Fiber DNS/connector 的集成基线 |
 | D-01 | gate 状态和证据格式已统一 | 获取完整生产 corpus，完成同请求 Java/C++ 差分、阶段 8、稳定性/灰度/回滚演练；在此之前切流 gate 仍为 `NOT_MET` |
+
+T-01 已于 2026-08-18 完成；聚焦 sanitizer 和外部 rnacos 故障注入的范围、复现命令与证据见
+[`sanitizer-and-interop.md`](sanitizer-and-interop.md)。
 
 ## 5. 生命周期、配置和并发正确性
 
@@ -1403,7 +1405,7 @@ data/bss 不变，文件大小从 `17,681,744` 到 `17,682,848`（`+1,104`，约
 
 **归属：本项目；涉及 Fiber 改动时同时运行上游测试。**
 
-**实施状态：部分解决（2026-08-17）。** `AccessRuntimeCoordinatorTest` 已覆盖 control/data
+**实施状态：已解决（2026-08-18）。** `AccessRuntimeCoordinatorTest` 已覆盖 control/data
 启动顺序、两层同步失败、data-before-control 逆序回滚、启动前 shutdown，以及运行态并发和
 重复 shutdown。本轮又按 `main.cpp` 的实际
 `when_any(runtime.start().select(), SIGINT, SIGTERM)` 取消形状，增加两个确定性回归：
@@ -1483,13 +1485,21 @@ ASAN/UBSAN；该子项不修改生产实现或 Fiber。
 
 access-server upstream mTLS 子项也已补齐：strict secret 引用、profile affinity、缺失身份重试、
 同 ID 篡改拒绝、rotation 下旧 snapshot 保活以及真实 loopback mutual-TLS 均有覆盖；Fiber 继续承载
-TLS 1.2/1.3/QUIC 的基础组合矩阵。上述测试仍不等价于所有请求并发及外部互操作故障注入，后续重点为
-ASAN/UBSAN、聚焦 TSAN 和外部实现互操作。
+TLS 1.2/1.3/QUIC 的基础组合矩阵。
 
 Nacos status 集成子项也已补齐。fake latest-value watch 覆盖 start 前同步首值、Connecting、Ready、
 ReconnectBackoff、failure reset、订阅/注册聚合和最终 Stopped；supervisor 的所有 partial-start 回滚路径
 均在 subscriber join 后才停止 Nacos client，重复 shutdown 不会遗留等待任务。应用生命周期 `running`
 与 Fiber `rpc_available` 使用独立字段和指标，测试明确验证前者不会推导后者。
+
+聚焦 sanitizer 和外部实现互操作也已完成。顶层 CMake 现在支持 `address`（ASAN+UBSAN）和
+`thread`（TSAN）两种独立、无 LTO、保留 frame pointer 的插桩模式，且标志覆盖 pinned Fiber 和
+access-server。ASAN/UBSAN 集合的 84 个测试连续 5 轮通过，TSAN 集合的 26 个并发测试连续 10 轮
+通过。显式 external-interop CTest 使用 digest 固定的 rnacos 0.8.4 和 TCP fault proxy，实测启动期
+RST、Config/Naming 同时 Ready、就绪后双连接 RST、两者 disconnect/reconnect/Ready 恢复、配置查询
+恢复及最终 Stopped。默认单元测试不依赖 Docker；Docker 或固定镜像缺失会 skip，不能计作通过证据。
+完整设计、命令和 2026-08-18 结果见
+[`sanitizer-and-interop.md`](sanitizer-and-interop.md)。
 
 Fiber DNS、connector、SWRR 或通用 RCU 有上游改动时，必须在 Fiber 仓库先补独立测试，再更新
 gitlink 并运行完整 Fiber/native 回归。
@@ -1613,7 +1623,7 @@ P-01/P-02
 
 1. C-01 按已稳定的运行边界拆类；
 2. C-02 拆 CMake targets；
-3. 完成 sanitizer、故障注入和压力测试；
+3. sanitizer 和外部 rnacos 故障注入已完成；继续以 T-02 基线和阶段 8 承载性能/稳定性压力门禁；
 4. 完成生产 corpus 和阶段 8 全量差分；
 5. 基于实例证据验收 published 与 activation 状态；
 6. 达到所有门禁前继续明确标记“不满足生产切流条件”。
