@@ -228,6 +228,31 @@ if (ACCESS_SERVER_BUILD_BENCHMARKS)
     endif()
 endif()
 
+if (ACCESS_SERVER_BUILD_EXTERNAL_INTEROP_TESTS)
+    if (NOT FIBER_BUILD_TESTS)
+        message(FATAL_ERROR
+            "ACCESS_SERVER_BUILD_EXTERNAL_INTEROP_TESTS requires FIBER_BUILD_TESTS=ON")
+    endif()
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    add_executable(fiber_access_server_external_interop
+        "${CMAKE_CURRENT_LIST_DIR}/tests/ExternalRnacosInterop.cpp")
+    target_link_libraries(fiber_access_server_external_interop PRIVATE access_server_runtime)
+    set_target_properties(fiber_access_server_external_interop PROPERTIES FOLDER "native/access-server")
+    fiber_link_runtime_allocator(fiber_access_server_external_interop)
+    if (FIBER_ENABLE_LTO AND FIBER_IPO_SUPPORTED)
+        set_property(TARGET fiber_access_server_external_interop PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
+    endif()
+    add_test(NAME AccessServerExternalInterop.RnacosReconnectThroughTcpFaultProxy
+        COMMAND
+            "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_LIST_DIR}/scripts/run_external_interop.py"
+            --binary "$<TARGET_FILE:fiber_access_server_external_interop>")
+    set_tests_properties(AccessServerExternalInterop.RnacosReconnectThroughTcpFaultProxy PROPERTIES
+        LABELS "access-server-interop"
+        SKIP_RETURN_CODE 77
+        TIMEOUT 120)
+endif()
+
 if (FIBER_BUILD_TESTS AND (GTest_FOUND OR TARGET GTest::gtest_main))
     include(GoogleTest)
 

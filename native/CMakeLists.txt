@@ -21,6 +21,40 @@ option(FIBER_BUILD_TESTS "Build Fiber and access-server tests" ON)
 option(FIBER_FETCH_DEPS "Allow CMake to download third-party dependencies" ON)
 option(ACCESS_SERVER_BUILD_RUNTIME "Build the online access-server runtime" ON)
 option(ACCESS_SERVER_BUILD_BENCHMARKS "Build access-server microbenchmarks" OFF)
+option(ACCESS_SERVER_BUILD_EXTERNAL_INTEROP_TESTS
+    "Build explicit Docker-backed access-server interoperability tests" OFF)
+set(ACCESS_SERVER_SANITIZER "none" CACHE STRING
+    "Native sanitizer instrumentation: none, address (ASAN+UBSAN), or thread (TSAN)")
+set_property(CACHE ACCESS_SERVER_SANITIZER PROPERTY STRINGS none address thread)
+
+if (NOT ACCESS_SERVER_SANITIZER MATCHES "^(none|address|thread)$")
+    message(FATAL_ERROR
+        "ACCESS_SERVER_SANITIZER must be one of: none, address, thread")
+endif()
+
+if (NOT ACCESS_SERVER_SANITIZER STREQUAL "none")
+    if (NOT CMAKE_CXX_COMPILER_ID MATCHES "^(Clang|GNU)$")
+        message(FATAL_ERROR
+            "ACCESS_SERVER_SANITIZER requires Clang or GCC")
+    endif()
+
+    # Sanitizer coverage must include the pinned Fiber static libraries as well
+    # as access-server. IPO obscures diagnostics and is not part of this gate.
+    set(FIBER_ENABLE_LTO OFF CACHE BOOL "Enable LTO/IPO for fiber targets" FORCE)
+    if (ACCESS_SERVER_SANITIZER STREQUAL "address")
+        set(ACCESS_SERVER_SANITIZER_FLAGS
+            -fsanitize=address,undefined
+            -fno-sanitize-recover=all
+            -fno-omit-frame-pointer)
+    else()
+        set(ACCESS_SERVER_SANITIZER_FLAGS
+            -fsanitize=thread
+            -fno-sanitize-recover=all
+            -fno-omit-frame-pointer)
+    endif()
+    add_compile_options(${ACCESS_SERVER_SANITIZER_FLAGS})
+    add_link_options(${ACCESS_SERVER_SANITIZER_FLAGS})
+endif()
 
 # Keep all generated dependency state in the build tree, never in the submodule.
 set(FIBER_DEPS_DIR "${CMAKE_BINARY_DIR}/_deps" CACHE PATH "Fiber dependency directory" FORCE)
