@@ -1237,10 +1237,23 @@ data/bss 不变，文件大小从 `17,681,744` 到 `17,682,848`（`+1,104`，约
 
 **归属：本项目；涉及 Fiber 改动时同时运行上游测试。**
 
-应优先增加：
+**实施状态：部分解决（2026-08-17）。** `AccessRuntimeCoordinatorTest` 已覆盖 control/data
+启动顺序、两层同步失败、data-before-control 逆序回滚、启动前 shutdown，以及运行态并发和
+重复 shutdown。本轮又按 `main.cpp` 的实际
+`when_any(runtime.start().select(), SIGINT, SIGTERM)` 取消形状，增加两个确定性回归：
 
-- `AccessServerRuntime` 每个启动阶段的失败和逆序回滚；
-- signal 到达 startup 中间阶段、重复 shutdown；
+- signal 分支在 control-plane start 挂起时获胜，loser task 被销毁，shutdown 只释放 control；
+- signal 分支在 data-plane start 挂起时获胜，loser 不再恢复，shutdown 严格执行
+  data -> control；
+- 两种路径都验证 `Starting -> Stopped`、后续重复 shutdown 无副作用，并且没有依赖真实
+  process-global signal 或墙钟时间。
+
+该层测试证明 coordinator 的取消/回滚协议，不等价于 concrete Nacos/CAT/watcher/listener 每个
+内部阶段都已完成故障注入。仍应优先增加：
+
+- `AccessControlPlaneSupervisor` 的 CAT、Nacos client、ConfigService、NamingService、各 watcher
+  和 initial readiness 失败，以及 `AccessDataPlaneService` worker/bind/metrics bind 失败的资源
+  级逆序回滚；
 - DNS 部分初始化、worker 停止和异步释放；
 - project subscribe 失败、closed、retry、stale generation；
 - 初始 project-list 与 route/service readiness 的各种到达顺序；
