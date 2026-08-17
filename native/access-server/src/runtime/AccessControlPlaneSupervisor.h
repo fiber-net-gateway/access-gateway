@@ -23,6 +23,7 @@
 #include <fiber/async/WaitGroup.h>
 #include <fiber/async/Watch.h>
 #include <fiber/cat/CatClient.h>
+#include <fiber/common/IoError.h>
 #include <fiber/common/NonCopyable.h>
 #include <fiber/common/NonMovable.h>
 #include <fiber/event/EventLoop.h>
@@ -33,11 +34,27 @@
 
 namespace fiber::access_server {
 
+// Borrowed, cold-path adapter for an owned resource whose concrete Fiber type
+// does not expose a virtual lifecycle. Production binds CatClient/NacosClient;
+// deterministic tests may bind an equivalent owner-loop lifecycle.
+struct AccessControlResourceLifecycle {
+    using StartFunction = common::IoResult<void> (*)(void *context) noexcept;
+    using ShutdownFunction = async::Task<void> (*)(void *context) noexcept;
+
+    void *context = nullptr;
+    StartFunction start = nullptr;
+    ShutdownFunction shutdown = nullptr;
+
+    [[nodiscard]] explicit operator bool() const noexcept { return start != nullptr; }
+};
+
 struct AccessControlPlaneDependencies {
     std::unique_ptr<cat::CatClient> cat_client;
     std::unique_ptr<nacos::NacosClient> nacos_client;
     std::unique_ptr<nacos::ConfigService> config_service;
     std::unique_ptr<nacos::NamingService> naming_service;
+    AccessControlResourceLifecycle cat_lifecycle;
+    AccessControlResourceLifecycle nacos_lifecycle;
 };
 
 struct AccessControlPlaneOptions {
@@ -111,6 +128,8 @@ private:
     std::unique_ptr<nacos::NacosClient> nacos_client_;
     std::unique_ptr<nacos::ConfigService> config_service_;
     std::unique_ptr<nacos::NamingService> naming_service_;
+    AccessControlResourceLifecycle cat_lifecycle_;
+    AccessControlResourceLifecycle nacos_lifecycle_;
     AccessConfigCompiler config_compiler_;
     AccessRuntimeMetrics runtime_metrics_;
     AccessActivationEvidenceStore activation_evidence_;
@@ -133,6 +152,13 @@ private:
     std::optional<async::Watch<bool>::Publisher> cat_stopped_publisher_;
     State state_ = State::Created;
     bool tls_enabled_ = false;
+    bool cat_start_attempted_ = false;
+    bool nacos_client_start_attempted_ = false;
+    bool config_service_start_attempted_ = false;
+    bool naming_service_start_attempted_ = false;
+    bool gray_watcher_started_ = false;
+    bool tls_certificate_watcher_started_ = false;
+    bool config_watcher_started_ = false;
     bool nacos_shutdown_spawned_ = false;
     bool cat_shutdown_spawned_ = false;
 };

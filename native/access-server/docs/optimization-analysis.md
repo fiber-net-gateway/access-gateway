@@ -1269,12 +1269,18 @@ service-ready。一个已准备好的 Project 不会提前发布部分 snapshot�
 挂起在 service readiness 后再被 v2 revision 取代。放行 readiness 后只发生一次 batch publish，
 其中包含早到 Project 与当前 v2 generation，旧 v1 从不进入可见快照。
 
-该层测试证明 coordinator 的取消/回滚协议，不等价于 concrete Nacos/CAT/watcher/listener 每个
-内部阶段都已完成故障注入。仍应优先增加：
+Control-plane 资源级回滚子项也已完成。CAT 与 Nacos concrete client 通过三个指针大小的非多态
+cold-path lifecycle adapter 获得确定性故障注入，生产默认仍直接调用原 Fiber client；ConfigService
+和 NamingService 保持既有虚接口。supervisor 区分外部服务 `start_attempted` 与 watcher
+`started`，失败时只清理可能获得资源的阶段，并严格按 access watcher、TLS watcher、gray watcher、
+TLS store/route/discovery、NamingService、ConfigService、Nacos client、CAT 的顺序回滚。参数化
+多 EventLoop 测试覆盖四个 client/service 启动、三个 watcher subscribe、initial readiness 和正常
+启动；subscription handle 的 close 事件用于验证真实资源次序，重复 shutdown 无副作用。
 
-- `AccessControlPlaneSupervisor` 的 CAT、Nacos client、ConfigService、NamingService、各 watcher
-  和 initial readiness 失败，以及 `AccessDataPlaneService` worker/bind/metrics bind 失败的资源
-  级逆序回滚；
+上述测试已经覆盖 concrete control-plane 启动阶段，但还不等价于 data-plane listener、请求并发及
+外部互操作均已完成故障注入。仍应优先增加：
+
+- `AccessDataPlaneService` worker initialize、业务 bind 和 metrics bind 失败的资源级逆序回滚；
 - project subscribe 失败、closed、retry、stale generation；
 - 初始 project-list 与 route/service readiness 的各种到达顺序；
 - TLS rotation 与握手并发、retired snapshot 回收；
