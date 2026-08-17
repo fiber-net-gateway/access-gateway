@@ -25,6 +25,7 @@ DEFAULT_ROUTE_GROUP = "ACCESS-SERVER"
 DEFAULT_GRAY_DATA_ID = "ploto.unified-access.gray-match"
 DEFAULT_GRAY_GROUP = "DEFAULT_GROUP"
 SAFE_FILE_NAME = re.compile(r"[^A-Za-z0-9._-]")
+CONTENT_MANIFEST_SCHEMA = "access-gateway-corpus/v1"
 
 
 class SyncError(RuntimeError):
@@ -234,13 +235,25 @@ def write_private_bytes(path: pathlib.Path, content: bytes) -> None:
     path.chmod(0o600)
 
 
+def canonical_json_bytes(value: object) -> bytes:
+    return (
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
 def write_dump(
     path: pathlib.Path,
     tenant: str,
     entries: list[ConfigEntry],
     missing_routes: list[str],
     missing_gray: bool,
-) -> None:
+) -> str:
     manifest_entries: list[dict[str, object]] = []
     route_index = 0
     for entry in entries:
@@ -264,10 +277,43 @@ def write_dump(
                 "sha256": hashlib.sha256(entry.content).hexdigest(),
             }
         )
+    content_manifest = {
+        "schema": CONTENT_MANIFEST_SCHEMA,
+        "sourceTenantSha256": hashlib.sha256(tenant.encode("utf-8")).hexdigest(),
+        "configs": sorted(
+            (
+                {
+                    "kind": entry["kind"],
+                    "dataId": entry["dataId"],
+                    "group": entry["group"],
+                    "type": entry["type"],
+                    "file": entry["file"],
+                    "bytes": entry["bytes"],
+                    "sha256": entry["sha256"],
+                }
+                for entry in manifest_entries
+            ),
+            key=lambda entry: str(entry["file"]),
+        ),
+        "missingRouteCount": len(missing_routes),
+        "missingGrayMatch": missing_gray,
+    }
+    content_manifest_bytes = canonical_json_bytes(content_manifest)
+    content_manifest_digest = hashlib.sha256(content_manifest_bytes).hexdigest()
+    write_private_bytes(path / "content-manifest.json", content_manifest_bytes)
+    write_private_bytes(
+        path / "content-manifest.sha256",
+        f"{content_manifest_digest}  content-manifest.json\n".encode("ascii"),
+    )
+
     manifest = {
         "format": 1,
         "sourceTenant": tenant,
         "createdAt": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "contentManifest": {
+            "file": "content-manifest.json",
+            "sha256": content_manifest_digest,
+        },
         "configs": manifest_entries,
         "missingRoutes": missing_routes,
         "missingGrayMatch": missing_gray,
@@ -278,6 +324,7 @@ def write_dump(
         encoding="utf-8",
     )
     manifest_path.chmod(0o600)
+    return content_manifest_digest
 
 
 def main() -> int:
@@ -354,7 +401,7 @@ def main() -> int:
         )
 
     output_dir = prepare_output_dir(args.output_dir)
-    write_dump(
+    corpus_digest = write_dump(
         output_dir,
         args.source_tenant,
         entries,
@@ -388,6 +435,7 @@ def main() -> int:
     print(f"missing_routes={len(missing_routes)}")
     print(f"gray_match={gray_state}")
     print(f"destination={destination_state}")
+    print(f"corpus_sha256={corpus_digest}")
     print(f"dump={output_dir}")
     return 0
 

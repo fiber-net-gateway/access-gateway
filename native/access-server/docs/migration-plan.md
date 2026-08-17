@@ -423,6 +423,8 @@ Java/C++ 同一 request corpus、生命周期、稳定性或回滚演练通过�
 
 - [x] 提供按项目列表精确导出 project/route/gray 配置、禁用代理、发布到 rnacos 并
   逐项回读 SHA-256 的同步工具；
+- [x] 为私有导出生成 canonical content manifest，并提供绑定 production 来源、精确 revision、
+  15 项必需 gate 和逐 artifact SHA-256 的 fail-closed `cutover-evidence/v1` 校验器；
 - [x] 使用测试环境完整配置图启动 C++ access-server，并验证实际 RESPONSE 路由和
   Prometheus 请求结果；
 - Java 和 C++ 加载相同配置，使用同一套 request corpus；
