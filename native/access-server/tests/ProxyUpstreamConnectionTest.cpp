@@ -1,12 +1,23 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <cstdint>
 #include <future>
+#include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <sys/socket.h>
 #include <utility>
 #include <vector>
+
+#include <openssl/bio.h>
+#include <openssl/ec.h>
+#include <openssl/evp.h>
+#include <openssl/obj.h>
+#include <openssl/pem.h>
+#include <openssl/x509.h>
+#include <openssl/x509v3.h>
 
 #include <fiber/async/Spawn.h>
 #include <fiber/event/EventLoopGroup.h>
@@ -24,6 +35,139 @@ namespace {
 using namespace std::chrono_literals;
 
 const fiber::access_server::UpstreamTlsClientPolicy kLegacyUpstreamTls;
+
+struct TestTlsChain {
+    std::string ca_certificate_pem;
+    std::string server_certificate_pem;
+    std::string server_private_key_pem;
+};
+
+std::optional<TestTlsChain> make_test_tls_chain(std::string_view ca_common_name) {
+    using BasicConstraintsPtr = std::unique_ptr<BASIC_CONSTRAINTS, decltype(&BASIC_CONSTRAINTS_free)>;
+    using BioPtr = std::unique_ptr<BIO, decltype(&BIO_free)>;
+    using EcKeyPtr = std::unique_ptr<EC_KEY, decltype(&EC_KEY_free)>;
+    using GeneralNamePtr = std::unique_ptr<GENERAL_NAME, decltype(&GENERAL_NAME_free)>;
+    using GeneralNamesPtr = std::unique_ptr<GENERAL_NAMES, decltype(&GENERAL_NAMES_free)>;
+    using KeyPtr = std::unique_ptr<EVP_PKEY, decltype(&EVP_PKEY_free)>;
+    using X509Ptr = std::unique_ptr<X509, decltype(&X509_free)>;
+
+    const auto make_key = []() -> KeyPtr {
+        EcKeyPtr ec_key(EC_KEY_new_by_curve_name(NID_X9_62_prime256v1), &EC_KEY_free);
+        if (!ec_key || EC_KEY_generate_key(ec_key.get()) != 1) {
+            return {nullptr, &EVP_PKEY_free};
+        }
+        KeyPtr key(EVP_PKEY_new(), &EVP_PKEY_free);
+        if (!key || EVP_PKEY_assign_EC_KEY(key.get(), ec_key.get()) != 1) {
+            return {nullptr, &EVP_PKEY_free};
+        }
+        ec_key.release();
+        return key;
+    };
+    const auto initialize_certificate = [](X509 &certificate, EVP_PKEY &key, std::int64_t serial,
+                                           std::string_view common_name) {
+        if (X509_set_version(&certificate, X509_VERSION_3) != 1 ||
+            ASN1_INTEGER_set(X509_get_serialNumber(&certificate), serial) != 1 ||
+            X509_gmtime_adj(X509_get_notBefore(&certificate), -60) == nullptr ||
+            X509_gmtime_adj(X509_get_notAfter(&certificate), 3600) == nullptr ||
+            X509_set_pubkey(&certificate, &key) != 1) {
+            return false;
+        }
+        X509_NAME *subject = X509_get_subject_name(&certificate);
+        return subject != nullptr &&
+               X509_NAME_add_entry_by_txt(subject, "CN", MBSTRING_ASC,
+                                          reinterpret_cast<const unsigned char *>(common_name.data()),
+                                          static_cast<int>(common_name.size()), -1, 0) == 1;
+    };
+    const auto write_certificate = [](X509 &certificate) -> std::optional<std::string> {
+        BioPtr bio(BIO_new(BIO_s_mem()), &BIO_free);
+        if (!bio || PEM_write_bio_X509(bio.get(), &certificate) != 1) {
+            return std::nullopt;
+        }
+        char *data = nullptr;
+        const long size = BIO_get_mem_data(bio.get(), &data);
+        if (size <= 0 || data == nullptr) {
+            return std::nullopt;
+        }
+        return std::string(data, static_cast<std::size_t>(size));
+    };
+    const auto write_private_key = [](EVP_PKEY &key) -> std::optional<std::string> {
+        BioPtr bio(BIO_new(BIO_s_mem()), &BIO_free);
+        if (!bio || PEM_write_bio_PrivateKey(bio.get(), &key, nullptr, nullptr, 0, nullptr, nullptr) != 1) {
+            return std::nullopt;
+        }
+        char *data = nullptr;
+        const long size = BIO_get_mem_data(bio.get(), &data);
+        if (size <= 0 || data == nullptr) {
+            return std::nullopt;
+        }
+        return std::string(data, static_cast<std::size_t>(size));
+    };
+
+    KeyPtr ca_key = make_key();
+    X509Ptr ca_certificate(X509_new(), &X509_free);
+    if (!ca_key || !ca_certificate || !initialize_certificate(*ca_certificate, *ca_key, 1, ca_common_name) ||
+        X509_set_issuer_name(ca_certificate.get(), X509_get_subject_name(ca_certificate.get())) != 1) {
+        return std::nullopt;
+    }
+    BasicConstraintsPtr ca_constraints(BASIC_CONSTRAINTS_new(), &BASIC_CONSTRAINTS_free);
+    if (!ca_constraints) {
+        return std::nullopt;
+    }
+    ca_constraints->ca = 0xff;
+    if (X509_add1_ext_i2d(ca_certificate.get(), NID_basic_constraints, ca_constraints.get(), 1, 0) != 1 ||
+        X509_sign(ca_certificate.get(), ca_key.get(), EVP_sha256()) <= 0) {
+        return std::nullopt;
+    }
+
+    KeyPtr server_key = make_key();
+    X509Ptr server_certificate(X509_new(), &X509_free);
+    if (!server_key || !server_certificate ||
+        !initialize_certificate(*server_certificate, *server_key, 2, "localhost") ||
+        X509_set_issuer_name(server_certificate.get(), X509_get_subject_name(ca_certificate.get())) != 1) {
+        return std::nullopt;
+    }
+    BasicConstraintsPtr server_constraints(BASIC_CONSTRAINTS_new(), &BASIC_CONSTRAINTS_free);
+    GeneralNamesPtr server_names(GENERAL_NAMES_new(), &GENERAL_NAMES_free);
+    GeneralNamePtr server_name(GENERAL_NAME_new(), &GENERAL_NAME_free);
+    if (!server_constraints || !server_names || !server_name) {
+        return std::nullopt;
+    }
+    server_constraints->ca = 0;
+    server_name->type = GEN_DNS;
+    server_name->d.dNSName = ASN1_IA5STRING_new();
+    if (!server_name->d.dNSName || ASN1_STRING_set(server_name->d.dNSName, "localhost", 9) != 1 ||
+        sk_GENERAL_NAME_push(server_names.get(), server_name.get()) <= 0) {
+        return std::nullopt;
+    }
+    server_name.release();
+    if (X509_add1_ext_i2d(server_certificate.get(), NID_basic_constraints, server_constraints.get(), 1, 0) != 1 ||
+        X509_add1_ext_i2d(server_certificate.get(), NID_subject_alt_name, server_names.get(), 0, 0) != 1 ||
+        X509_sign(server_certificate.get(), ca_key.get(), EVP_sha256()) <= 0) {
+        return std::nullopt;
+    }
+
+    auto ca_pem = write_certificate(*ca_certificate);
+    auto server_pem = write_certificate(*server_certificate);
+    auto key_pem = write_private_key(*server_key);
+    if (!ca_pem || !server_pem || !key_pem) {
+        return std::nullopt;
+    }
+    return TestTlsChain{
+            .ca_certificate_pem = std::move(*ca_pem),
+            .server_certificate_pem = std::move(*server_pem),
+            .server_private_key_pem = std::move(*key_pem),
+    };
+}
+
+const std::optional<TestTlsChain> &trusted_test_tls_chain() {
+    static const std::optional<TestTlsChain> chain = make_test_tls_chain("access-server test root");
+    return chain;
+}
+
+const std::optional<TestTlsChain> &untrusted_test_tls_chain() {
+    static const std::optional<TestTlsChain> chain = make_test_tls_chain("access-server untrusted root");
+    return chain;
+}
 
 std::optional<std::uint16_t> bound_port(int fd) {
     sockaddr_storage bound{};
@@ -63,6 +207,7 @@ fiber::access_server::ProxyDnsResolver resolver_adapter(ResolverState &state) no
 
 struct ConnectionScenarioResult {
     fiber::common::IoErr error = fiber::common::IoErr::None;
+    fiber::common::IoErr server_error = fiber::common::IoErr::None;
     fiber::access_server::ProxyConnectErrorCode error_code = fiber::access_server::ProxyConnectErrorCode::Connect;
     fiber::net::IpAddress connected_ip;
     std::size_t resolver_calls = 0;
@@ -178,7 +323,7 @@ ConnectionScenarioResult run_tls_scenario(const std::string &certificate_path, c
     });
 
     ConnectionScenarioResult result = client_future.get();
-    (void) server_future.get();
+    result.server_error = server_future.get();
     group.stop();
     group.join();
     return result;
@@ -509,12 +654,14 @@ TEST(ProxyUpstreamConnectionTest, ReportsPoolShutdownBeforeDns) {
 }
 
 TEST(ProxyUpstreamConnectionTest, ValidatesCustomTrustStoreBeforeRuntimeStart) {
-    fiber::test::QuicTestTlsFile certificate("access-upstream-ca", fiber::test::kQuicTestCertificatePem);
-    ASSERT_TRUE(certificate.valid());
+    const auto &chain = trusted_test_tls_chain();
+    ASSERT_TRUE(chain);
+    fiber::test::QuicTestTlsFile ca_certificate("access-upstream-ca", chain->ca_certificate_pem);
+    ASSERT_TRUE(ca_certificate.valid());
 
     EXPECT_TRUE(fiber::access_server::validate_upstream_tls_client_policy({
             .verification = fiber::access_server::UpstreamTlsVerificationMode::CustomCa,
-            .ca_file = certificate.path(),
+            .ca_file = ca_certificate.path(),
     }));
     auto missing = fiber::access_server::validate_upstream_tls_client_policy({
             .verification = fiber::access_server::UpstreamTlsVerificationMode::CustomCa,
@@ -525,14 +672,17 @@ TEST(ProxyUpstreamConnectionTest, ValidatesCustomTrustStoreBeforeRuntimeStart) {
 }
 
 TEST(ProxyUpstreamConnectionTest, LegacyModePreservesInsecureHttpsCompatibility) {
-    fiber::test::QuicTestTlsFile certificate("access-upstream-legacy-cert", fiber::test::kQuicTestCertificatePem);
-    fiber::test::QuicTestTlsFile private_key("access-upstream-legacy-key", fiber::test::kQuicTestPrivateKeyPem);
+    const auto &chain = trusted_test_tls_chain();
+    ASSERT_TRUE(chain);
+    fiber::test::QuicTestTlsFile certificate("access-upstream-legacy-cert", chain->server_certificate_pem);
+    fiber::test::QuicTestTlsFile private_key("access-upstream-legacy-key", chain->server_private_key_pem);
     ASSERT_TRUE(certificate.valid());
     ASSERT_TRUE(private_key.valid());
 
     const ConnectionScenarioResult result =
             run_tls_scenario(certificate.path(), private_key.path(), "untrusted.example", {});
     EXPECT_EQ(result.error, fiber::common::IoErr::None);
+    EXPECT_EQ(result.server_error, fiber::common::IoErr::None);
     EXPECT_EQ(result.resolver_calls, 1U);
     EXPECT_TRUE(result.tls_enabled);
     EXPECT_FALSE(result.verify_peer);
@@ -544,8 +694,12 @@ TEST(ProxyUpstreamConnectionTest, LegacyModePreservesInsecureHttpsCompatibility)
 }
 
 TEST(ProxyUpstreamConnectionTest, CustomCaVerifiesPeerAndDerivesSniFromUpstreamName) {
-    fiber::test::QuicTestTlsFile certificate("access-upstream-custom-cert", fiber::test::kQuicTestCertificatePem);
-    fiber::test::QuicTestTlsFile private_key("access-upstream-custom-key", fiber::test::kQuicTestPrivateKeyPem);
+    const auto &chain = trusted_test_tls_chain();
+    ASSERT_TRUE(chain);
+    fiber::test::QuicTestTlsFile ca_certificate("access-upstream-custom-ca", chain->ca_certificate_pem);
+    fiber::test::QuicTestTlsFile certificate("access-upstream-custom-cert", chain->server_certificate_pem);
+    fiber::test::QuicTestTlsFile private_key("access-upstream-custom-key", chain->server_private_key_pem);
+    ASSERT_TRUE(ca_certificate.valid());
     ASSERT_TRUE(certificate.valid());
     ASSERT_TRUE(private_key.valid());
 
@@ -553,13 +707,14 @@ TEST(ProxyUpstreamConnectionTest, CustomCaVerifiesPeerAndDerivesSniFromUpstreamN
             run_tls_scenario(certificate.path(), private_key.path(), "localhost",
                              {
                                      .verification = fiber::access_server::UpstreamTlsVerificationMode::CustomCa,
-                                     .ca_file = certificate.path(),
+                                     .ca_file = ca_certificate.path(),
                              });
     EXPECT_EQ(result.error, fiber::common::IoErr::None);
+    EXPECT_EQ(result.server_error, fiber::common::IoErr::None);
     EXPECT_EQ(result.resolver_calls, 1U);
     EXPECT_TRUE(result.tls_enabled);
     EXPECT_TRUE(result.verify_peer);
-    EXPECT_EQ(result.ca_file, certificate.path());
+    EXPECT_EQ(result.ca_file, ca_certificate.path());
     EXPECT_EQ(result.server_name, "localhost");
     EXPECT_TRUE(result.verify_name.empty());
     EXPECT_EQ(result.observation.dns_success, 1U);
@@ -567,8 +722,12 @@ TEST(ProxyUpstreamConnectionTest, CustomCaVerifiesPeerAndDerivesSniFromUpstreamN
 }
 
 TEST(ProxyUpstreamConnectionTest, CustomCaRejectsMismatchedCertificateNameAsTlsFailure) {
-    fiber::test::QuicTestTlsFile certificate("access-upstream-name-cert", fiber::test::kQuicTestCertificatePem);
-    fiber::test::QuicTestTlsFile private_key("access-upstream-name-key", fiber::test::kQuicTestPrivateKeyPem);
+    const auto &chain = trusted_test_tls_chain();
+    ASSERT_TRUE(chain);
+    fiber::test::QuicTestTlsFile ca_certificate("access-upstream-name-ca", chain->ca_certificate_pem);
+    fiber::test::QuicTestTlsFile certificate("access-upstream-name-cert", chain->server_certificate_pem);
+    fiber::test::QuicTestTlsFile private_key("access-upstream-name-key", chain->server_private_key_pem);
+    ASSERT_TRUE(ca_certificate.valid());
     ASSERT_TRUE(certificate.valid());
     ASSERT_TRUE(private_key.valid());
 
@@ -576,7 +735,7 @@ TEST(ProxyUpstreamConnectionTest, CustomCaRejectsMismatchedCertificateNameAsTlsF
             run_tls_scenario(certificate.path(), private_key.path(), "wrong.example",
                              {
                                      .verification = fiber::access_server::UpstreamTlsVerificationMode::CustomCa,
-                                     .ca_file = certificate.path(),
+                                     .ca_file = ca_certificate.path(),
                              });
     EXPECT_EQ(result.error_code, fiber::access_server::ProxyConnectErrorCode::Tls);
     EXPECT_EQ(result.error, fiber::common::IoErr::Invalid);
@@ -585,9 +744,36 @@ TEST(ProxyUpstreamConnectionTest, CustomCaRejectsMismatchedCertificateNameAsTlsF
     EXPECT_EQ(result.observation.connect_failure, 0U);
 }
 
-TEST(ProxyUpstreamConnectionTest, SystemCaRejectsPrivateSelfSignedCertificateAsTlsFailure) {
-    fiber::test::QuicTestTlsFile certificate("access-upstream-system-cert", fiber::test::kQuicTestCertificatePem);
-    fiber::test::QuicTestTlsFile private_key("access-upstream-system-key", fiber::test::kQuicTestPrivateKeyPem);
+TEST(ProxyUpstreamConnectionTest, CustomCaRejectsCertificateFromUnknownAuthorityAsTlsFailure) {
+    const auto &trusted_chain = trusted_test_tls_chain();
+    const auto &untrusted_chain = untrusted_test_tls_chain();
+    ASSERT_TRUE(trusted_chain);
+    ASSERT_TRUE(untrusted_chain);
+    fiber::test::QuicTestTlsFile trusted_ca("access-upstream-trusted-ca", trusted_chain->ca_certificate_pem);
+    fiber::test::QuicTestTlsFile certificate("access-upstream-unknown-cert", untrusted_chain->server_certificate_pem);
+    fiber::test::QuicTestTlsFile private_key("access-upstream-unknown-key", untrusted_chain->server_private_key_pem);
+    ASSERT_TRUE(trusted_ca.valid());
+    ASSERT_TRUE(certificate.valid());
+    ASSERT_TRUE(private_key.valid());
+
+    const ConnectionScenarioResult result =
+            run_tls_scenario(certificate.path(), private_key.path(), "localhost",
+                             {
+                                     .verification = fiber::access_server::UpstreamTlsVerificationMode::CustomCa,
+                                     .ca_file = trusted_ca.path(),
+                             });
+    EXPECT_EQ(result.error_code, fiber::access_server::ProxyConnectErrorCode::Tls);
+    EXPECT_EQ(result.error, fiber::common::IoErr::Invalid);
+    EXPECT_EQ(result.observation.dns_success, 1U);
+    EXPECT_EQ(result.observation.tls_failure, 1U);
+    EXPECT_EQ(result.observation.connect_failure, 0U);
+}
+
+TEST(ProxyUpstreamConnectionTest, SystemCaRejectsPrivateCertificateAuthorityAsTlsFailure) {
+    const auto &chain = trusted_test_tls_chain();
+    ASSERT_TRUE(chain);
+    fiber::test::QuicTestTlsFile certificate("access-upstream-system-cert", chain->server_certificate_pem);
+    fiber::test::QuicTestTlsFile private_key("access-upstream-system-key", chain->server_private_key_pem);
     ASSERT_TRUE(certificate.valid());
     ASSERT_TRUE(private_key.valid());
 
@@ -602,8 +788,12 @@ TEST(ProxyUpstreamConnectionTest, SystemCaRejectsPrivateSelfSignedCertificateAsT
 }
 
 TEST(ProxyUpstreamConnectionTest, VerifiedIpTargetRequiresCertificateIpIdentityWithoutIpSni) {
-    fiber::test::QuicTestTlsFile certificate("access-upstream-ip-cert", fiber::test::kQuicTestCertificatePem);
-    fiber::test::QuicTestTlsFile private_key("access-upstream-ip-key", fiber::test::kQuicTestPrivateKeyPem);
+    const auto &chain = trusted_test_tls_chain();
+    ASSERT_TRUE(chain);
+    fiber::test::QuicTestTlsFile ca_certificate("access-upstream-ip-ca", chain->ca_certificate_pem);
+    fiber::test::QuicTestTlsFile certificate("access-upstream-ip-cert", chain->server_certificate_pem);
+    fiber::test::QuicTestTlsFile private_key("access-upstream-ip-key", chain->server_private_key_pem);
+    ASSERT_TRUE(ca_certificate.valid());
     ASSERT_TRUE(certificate.valid());
     ASSERT_TRUE(private_key.valid());
 
@@ -611,7 +801,7 @@ TEST(ProxyUpstreamConnectionTest, VerifiedIpTargetRequiresCertificateIpIdentityW
             run_tls_scenario(certificate.path(), private_key.path(), {},
                              {
                                      .verification = fiber::access_server::UpstreamTlsVerificationMode::CustomCa,
-                                     .ca_file = certificate.path(),
+                                     .ca_file = ca_certificate.path(),
                              },
                              true);
     EXPECT_EQ(result.error_code, fiber::access_server::ProxyConnectErrorCode::Tls);
