@@ -391,6 +391,12 @@ listener 的真实 TLS 状态。
 兼容 target，继续覆盖旧 fixture，但必须显式配置。Fiber HTTP/1 exchange 当前不携带 scheme，
 本项目利用业务 listener 全局 TLS 配置确定真实协议，因此本项不需要修改 Fiber。
 
+**边界加固（2026-08-17）：本项目调整，Fiber 无需调整。** `Forwarded` 每个 element 现在最多
+接受 16 个参数，并对大小写不敏感的参数名统一去重；未被业务消费的 `by`、`host` 和扩展参数也
+必须满足 token 或完整 quoted-string 语法，不再接受 `ext=bad=value`、未加引号空格或重复扩展。
+解析仍使用固定栈数组和 view，不增加请求期容器分配。可信 IPv6 peer、跨多个 header field 的 IPv6
+链、括号/端口/quoted extension，以及地址和 proto 的非法矩阵均已有确定性覆盖。
+
 改造前 HTTPS 判断直接读取 `X-Forwarded-Proto`，CIDR 和 gray 策略直接读取 `X-Real-Ip`。
 无可信代理边界时，客户端可以伪造这些 header。原始 IPv6 或非预期格式解析失败后还会按
 Java 行为跳过 allow/deny。
@@ -1303,10 +1309,17 @@ service、call source 和 timeout，结果仍必须来自 v1；请求完成后 v
 请求则必须命中 v2。该场景已连续重复 100 次并通过 ASAN/UBSAN，证明当前 shared-pointer 发布模型
 满足跨线程更新和跨 await 生命周期约束，因此本轮不需要修改请求热路径或 Fiber。
 
+Trusted proxy 边界子项也已补齐并修复解析差异。新增测试覆盖可信 IPv6 socket peer、原生和括号
+IPv6 client、跨多个 `Forwarded` field 的 wire 顺序、XFF/XFP 对齐、X-Real-Ip 多值，以及空项、
+unknown/obfuscated、坏括号/端口、重复参数、畸形扩展值和 proto 错位。实现对每个 Forwarded
+element 使用固定 16 槽参数名数组，拒绝大小写变体重复和非 token/quoted-string 扩展值；没有堆
+分配或 Fiber 改动。地址链错误回退 socket peer，只有 proto 错误时保留已验证地址并回退 listener
+scheme，两个维度均继续 fail closed。完整 `ClientMetadataTest` 矩阵连续重复 100 次并通过
+ASAN/UBSAN。
+
 上述测试已经覆盖 concrete control-plane 与 data-plane 启动阶段，但还不等价于请求并发及外部互操作
 均已完成故障注入。仍应优先增加：
 
-- trusted proxy、IPv6、多值和非法 forwarding header；
 - 上游 TLS 验证成功、未知 CA、名称错误和客户端证书；
 - ASAN/UBSAN、聚焦 TSAN；
 - codec、Host/CIDR、trace state、validator fuzz。
