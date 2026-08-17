@@ -26,6 +26,7 @@ struct AccessServerOptions {
     std::size_t default_max_request_body_size = 400U << 20U;
     ClientMetadataResolverOptions client_metadata;
     AccessLogOptions access_log;
+    AccessDnsResolverFactory dns_resolver_factory = AccessDnsResolverFactory::system();
     AccessRequestScriptAdapter script_adapter;
     ProxyExecutorOptions executor;
     const AccessRuntimeMetrics *runtime_metrics = nullptr;

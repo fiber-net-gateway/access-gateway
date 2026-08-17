@@ -44,6 +44,7 @@ async::Task<std::expected<void, AccessServerRuntimeError>>
 AccessDataPlaneService::start(AccessControlPlaneReady ready) noexcept {
     FIBER_ASSERT(accept_loop_->in_loop());
     FIBER_ASSERT(!server_);
+    FIBER_ASSERT(!shutdown_complete_);
 
     if (options_.http_server.tls.enabled) {
         FIBER_ASSERT(ready.tls_bootstrap);
@@ -58,6 +59,7 @@ AccessDataPlaneService::start(AccessControlPlaneReady ready) noexcept {
                     .default_max_request_body_size = options_.default_max_request_body_size,
                     .client_metadata = std::move(options_.client_metadata),
                     .access_log = std::move(options_.access_log),
+                    .dns_resolver_factory = options_.dns_resolver_factory,
                     .script_adapter = script_runtime_.request_adapter(),
                     .executor =
                             ProxyExecutorOptions{
@@ -75,6 +77,7 @@ AccessDataPlaneService::start(AccessControlPlaneReady ready) noexcept {
                                     : std::string{},
             }));
     if (!server_) {
+        co_await rollback_start(ready);
         co_return std::unexpected(make_access_server_runtime_io_error(AccessServerRuntimeErrorCode::InitializeWorkers,
                                                                       common::IoErr::NoMem,
                                                                       "failed to allocate access server"));
@@ -82,6 +85,7 @@ AccessDataPlaneService::start(AccessControlPlaneReady ready) noexcept {
 
     auto initialized = co_await server_->initialize();
     if (!initialized) {
+        co_await rollback_start(ready);
         co_return std::unexpected(make_access_server_runtime_io_error(AccessServerRuntimeErrorCode::InitializeWorkers,
                                                                       initialized.error()));
     }
@@ -91,11 +95,13 @@ AccessDataPlaneService::start(AccessControlPlaneReady ready) noexcept {
         ready.tls_bootstrap->close();
     }
     if (!bound) {
+        co_await rollback_start(ready);
         co_return std::unexpected(
                 make_access_server_runtime_io_error(AccessServerRuntimeErrorCode::Bind, bound.error()));
     }
     auto metrics_bound = server_->bind_metrics(options_.metrics_listen_address, options_.listen_options);
     if (!metrics_bound) {
+        co_await rollback_start(ready);
         co_return std::unexpected(
                 make_access_server_runtime_io_error(AccessServerRuntimeErrorCode::BindMetrics, metrics_bound.error()));
     }
@@ -103,6 +109,17 @@ AccessDataPlaneService::start(AccessControlPlaneReady ready) noexcept {
     async::spawn([this]() { return server_->serve(); });
     async::spawn([this]() { return server_->serve_metrics(); });
     co_return std::expected<void, AccessServerRuntimeError>{};
+}
+
+async::Task<void> AccessDataPlaneService::rollback_start(AccessControlPlaneReady &ready) noexcept {
+    FIBER_ASSERT(accept_loop_->in_loop());
+    if (ready.tls_bootstrap) {
+        ready.tls_bootstrap->close();
+    }
+    if (server_) {
+        co_await server_->shutdown_and_wait();
+    }
+    shutdown_complete_ = true;
 }
 
 async::Task<void> AccessDataPlaneService::shutdown() noexcept {

@@ -18,7 +18,7 @@ AccessWorkerResources::AccessWorkerResources(event::EventLoopGroup &workers, con
         options.client_metadata.connection_secure = options.connection_secure;
         return std::move(options.client_metadata);
     }()),
-    access_log_policy_(std::move(options.access_log)), pool_(workers),
+    access_log_policy_(std::move(options.access_log)), dns_(options.dns_resolver_factory), pool_(workers),
     executor_(pool_, cluster_matcher, dns_.adapter(), std::move(options.executor)),
     handler_(config_store.snapshot_provider(), options.script_adapter,
              AccessRequestHandlerOptions{

@@ -33,6 +33,7 @@ struct AccessDataPlaneOptions {
     AccessActivationEndpointOptions activation_endpoint;
     ClientMetadataResolverOptions client_metadata;
     AccessLogOptions access_log;
+    AccessDnsResolverFactory dns_resolver_factory = AccessDnsResolverFactory::system();
     UpstreamTlsClientPolicy upstream_tls;
     std::size_t default_max_request_body_size = 0;
     bool test_mode = false;
@@ -59,6 +60,7 @@ private:
     [[nodiscard]] static async::Task<std::expected<void, AccessServerRuntimeError>>
     start_lifecycle(void *context, AccessControlPlaneReady ready) noexcept;
     [[nodiscard]] static async::Task<void> shutdown_lifecycle(void *context) noexcept;
+    [[nodiscard]] async::Task<void> rollback_start(AccessControlPlaneReady &ready) noexcept;
 
     event::EventLoop *accept_loop_ = nullptr;
     event::EventLoopGroup *http_workers_ = nullptr;
