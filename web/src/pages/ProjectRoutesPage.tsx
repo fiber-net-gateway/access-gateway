@@ -22,6 +22,7 @@ import {
   createRouteItem,
   duplicateRouteItem,
   initialRouteModel,
+  normalizeExactHost,
   type RouteTemplate,
 } from '../routes/model'
 import { useUnsavedChangesGuard } from '../routes/useUnsavedChangesGuard'
@@ -77,6 +78,7 @@ export function ProjectRoutesPage() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [saveDialogOpen, setSaveDialogOpen] = useState(false)
   const [changeSummary, setChangeSummary] = useState('')
+  const [hostAliasInput, setHostAliasInput] = useState('')
 
   const hasUnsavedChanges = !routeLoading && modelFingerprint(model) !== savedFingerprint
   const sourceHasUserChanges = sourceVersion
@@ -130,11 +132,41 @@ export function ProjectRoutesPage() {
     })
   }, [model.routes])
 
-  const localIssueCount = useMemo(
-    () => model.routes.reduce((total, route) => total + analyzeRouteSource(route).issues.length, 0),
-    [model.routes],
-  )
   const routeLimits = systemStatus?.dependencies.nativeValidator.limits?.projectRoute ?? null
+  const hostAliasChecks = useMemo(() => {
+    const validationIssues: string[] = []
+    const limitMessages: string[] = []
+    const primary = normalizeExactHost(project.domain)
+    const seen = new Set<string>(primary ? [primary] : [])
+    if (routeLimits && model.hostAliases.length + 1 > routeLimits.maxHosts) {
+      limitMessages.push(`域名总数超过 Native 上限 ${routeLimits.maxHosts}`)
+    }
+    model.hostAliases.forEach((alias, index) => {
+      const normalized = normalizeExactHost(alias)
+      if (!normalized) {
+        validationIssues.push(`关联域名 ${index + 1} 不是有效的精确 DNS 域名`)
+      } else if (normalized === primary) {
+        validationIssues.push(`关联域名 ${index + 1} 与主域名重复`)
+      } else if (seen.has(normalized)) {
+        validationIssues.push(`关联域名 ${index + 1} 重复`)
+      } else {
+        seen.add(normalized)
+      }
+      if (routeLimits && utf8Bytes(alias) > routeLimits.maxHostPatternBytes) {
+        limitMessages.push(
+          `关联域名 ${index + 1} 超过 ${routeLimits.maxHostPatternBytes} UTF-8 bytes`,
+        )
+      }
+    })
+    return { validationIssues, limitMessages }
+  }, [model.hostAliases, project.domain, routeLimits])
+  const hostAliasIssues = [...hostAliasChecks.validationIssues, ...hostAliasChecks.limitMessages]
+  const localIssueCount = useMemo(
+    () =>
+      model.routes.reduce((total, route) => total + analyzeRouteSource(route).issues.length, 0) +
+      hostAliasChecks.validationIssues.length,
+    [hostAliasChecks.validationIssues.length, model.routes],
+  )
   const sourceBytes = useMemo(
     () => model.routes.reduce((total, route) => total + utf8Bytes(route.source), 0),
     [model.routes],
@@ -150,6 +182,7 @@ export function ProjectRoutesPage() {
   const limitMessages = useMemo(() => {
     if (!routeLimits) return []
     const messages: string[] = []
+    messages.push(...hostAliasChecks.limitMessages)
     if (model.routes.length > routeLimits.maxRoutes) {
       messages.push(`Route 数量超过 Native 上限 ${routeLimits.maxRoutes}`)
     }
@@ -177,7 +210,13 @@ export function ProjectRoutesPage() {
       }
     }
     return messages
-  }, [model.routes, routeLimits, sourceBytes, upstreamTlsProfileCount])
+  }, [
+    hostAliasChecks.limitMessages,
+    model.routes,
+    routeLimits,
+    sourceBytes,
+    upstreamTlsProfileCount,
+  ])
   const hasLimitIssues = limitMessages.length > 0
   const hasLocalIssues = localIssueCount > 0 || hasLimitIssues
   const routeCountAtLimit = routeLimits ? model.routes.length >= routeLimits.maxRoutes : false
@@ -190,6 +229,39 @@ export function ProjectRoutesPage() {
     setModel((current) => ({ ...current, routes }))
     setValidation(null)
     setErrorMessage(null)
+  }
+
+  const updateHostAliases = (hostAliases: readonly string[]): void => {
+    setModel((current) => ({ ...current, hostAliases }))
+    setValidation(null)
+    setErrorMessage(null)
+  }
+
+  const addHostAlias = (event: FormEvent): void => {
+    event.preventDefault()
+    const normalized = normalizeExactHost(hostAliasInput)
+    if (!normalized) {
+      setErrorMessage('请输入有效的精确 DNS 域名，不支持通配符、IP、端口或路径。')
+      return
+    }
+    if (normalized === normalizeExactHost(project.domain)) {
+      setErrorMessage('关联域名不能与主域名重复。')
+      return
+    }
+    if (model.hostAliases.includes(normalized)) {
+      setErrorMessage('该关联域名已存在。')
+      return
+    }
+    if (routeLimits && model.hostAliases.length + 1 >= routeLimits.maxHosts) {
+      setErrorMessage(`域名总数已达到 Native 上限 ${routeLimits.maxHosts}。`)
+      return
+    }
+    updateHostAliases([...model.hostAliases, normalized])
+    setHostAliasInput('')
+  }
+
+  const removeHostAlias = (alias: string): void => {
+    updateHostAliases(model.hostAliases.filter((item) => item !== alias))
   }
 
   const runAction = async (action: () => Promise<void>): Promise<void> => {
@@ -213,7 +285,7 @@ export function ProjectRoutesPage() {
       return
     }
     if (hasLocalIssues) {
-      setErrorMessage(`当前有 ${localIssueCount} 个 Route 问题，请修复后再保存为版本。`)
+      setErrorMessage(`当前有 ${localIssueCount} 个配置问题，请修复后再保存为版本。`)
       return
     }
     if (sourceVersion && !changeSummary) {
@@ -230,7 +302,7 @@ export function ProjectRoutesPage() {
         throw new Error(
           hasLimitIssues
             ? (limitMessages[0] ?? '配置超过 Native 资源上限')
-            : `当前有 ${localIssueCount} 个 Route 问题，请修复后再保存为版本。`,
+            : `当前有 ${localIssueCount} 个配置问题，请修复后再保存为版本。`,
         )
       }
       const saveBaseVersionId = currentVersionId
@@ -409,6 +481,70 @@ export function ProjectRoutesPage() {
         </section>
       ) : null}
 
+      <section className="host-bindings-card" aria-labelledby="host-bindings-title">
+        <div className="host-bindings-heading">
+          <div>
+            <p className="eyebrow">HOST BINDINGS</p>
+            <h3 id="host-bindings-title">关联域名</h3>
+            <p>
+              主域名与所有关联域名共享本 Project 的 Routes、网络策略和 Release。只支持精确 DNS
+              域名；关联域名不会新增 Project 或 rnacos route Data ID。
+            </p>
+          </div>
+          <span className="status-chip status-chip-unknown">
+            {model.hostAliases.length + 1} / {routeLimits?.maxHosts ?? '—'} hosts
+          </span>
+        </div>
+        <div className="host-binding-primary">
+          <span>主域名</span>
+          <strong>{project.domain}</strong>
+          <small>Project identity · 不可修改</small>
+        </div>
+        <div className="host-alias-list" aria-label="关联域名列表">
+          {model.hostAliases.length > 0 ? (
+            model.hostAliases.map((alias) => (
+              <div className="host-alias-chip" key={alias}>
+                <span>{alias}</span>
+                <button
+                  aria-label={`移除关联域名 ${alias}`}
+                  disabled={routeLoading || saving}
+                  onClick={() => removeHostAlias(alias)}
+                  type="button"
+                >
+                  ×
+                </button>
+              </div>
+            ))
+          ) : (
+            <span className="host-alias-empty">尚未添加关联域名</span>
+          )}
+        </div>
+        <form className="host-alias-form" onSubmit={addHostAlias}>
+          <label>
+            添加精确域名
+            <input
+              aria-label="添加关联域名"
+              autoComplete="off"
+              disabled={routeLoading || saving}
+              maxLength={routeLimits?.maxHostPatternBytes ?? 255}
+              placeholder="www.example.com"
+              value={hostAliasInput}
+              onChange={(event) => setHostAliasInput(event.target.value)}
+            />
+          </label>
+          <button className="button-secondary" disabled={routeLoading || saving} type="submit">
+            添加关联域名
+          </button>
+        </form>
+        {hostAliasIssues.length > 0 ? (
+          <ul className="host-binding-issues" role="alert">
+            {hostAliasIssues.map((message) => (
+              <li key={message}>{message}</li>
+            ))}
+          </ul>
+        ) : null}
+      </section>
+
       <section className="route-toolbar" aria-label="路由操作">
         <div>
           <button
@@ -443,7 +579,7 @@ export function ProjectRoutesPage() {
             </span>
           ) : hasLocalIssues ? (
             <span className="status-chip status-chip-pending" id="route-save-state">
-              {localIssueCount} 个 Route 问题 · 修复后才能保存
+              {localIssueCount} 个配置问题 · 修复后才能保存
             </span>
           ) : validation?.valid ? (
             <span className="status-chip status-chip-ready">Native 校验通过</span>

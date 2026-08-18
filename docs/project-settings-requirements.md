@@ -2,23 +2,24 @@
 
 ## 1. 背景与目标
 
-Project Settings 是域名 Project 的低频生命周期操作入口，不是通用配置页。Route、HTTPS redirect
+Project Settings 是域名 Project 的低频生命周期操作入口，不是通用配置页。Project 主域名不可变，
+关联域名在 Routes 页面维护；Route、HTTPS redirect
 和 CIDR 策略已经分别由 Routes 与 Network Policy 管理；rnacos 连接、Data ID、成员和系统能力属于
-部署级 System。Settings 首个业务可用版本聚焦于安全、可审计地将一个域名从运行配置中下线并归档。
+部署级 System。Settings 首个业务可用版本聚焦于安全、可审计地将一个 Project（及其全部 Host）从运行配置中下线并归档。
 
 本增量目标：
 
 1. 展示不可编辑的 Project 身份和三类独立状态；
 2. 由管理员创建不可变的下线 Release；
 3. 由管理员或发布者把下线 Release 加入既有发布队列；
-4. 先从 rnacos Project List 移除域名并回读，再把 Project 标记为 archived；
+4. 先从 rnacos Project List 移除主域名并回读，再把 Project 标记为 archived；route resource 中的全部 Host 随之停止服务；
 5. 保留配置版本、Release、发布证据和审计历史；
 6. 只有逐实例精确证据可证明 activation；没有目标、没有证据或证据过期时报告 unknown。
 
 ## 2. 非目标
 
-- 不在 Settings 中编辑域名。域名是 exact Host 和 rnacos project key；改名应通过复制到新域名并
-  单独下线旧域名完成。
+- 不在 Settings 中编辑主域名或关联域名。主域名是 exact Host 和 rnacos project key；改名应通过复制到
+  新主域名并单独下线旧 Project 完成。关联域名在 Routes 页面与配置版本一起保存。
 - 不在 Settings 中编辑 Route、HTTPS、CIDR、证书、rnacos endpoint、namespace、tenant、Data ID
   或凭据。
 - 不通过空 Route、空 Host 或空 YAML 表达下线。
@@ -75,11 +76,12 @@ Release，且上一 Release 已终止失败，则显示“重新创建下线 Rel
 
 确认对话框必须：
 
-1. 说明域名将从 `ploto.unified-access.projects`（或部署配置的 Project List Data ID）移除；
+1. 说明主域名将从 `ploto.unified-access.projects`（或部署配置的 Project List Data ID）移除，
+   并说明 route resource 中的关联域名也会随 Project 下线；
 2. 说明 access-server 应据此取消订阅并卸载运行快照，但没有实例证据时仍无法证明每个实例已执行；
 3. 说明历史版本、Release 和审计不会删除；
 4. 说明浏览器中的未保存内容不会进入下线 Release；
-5. 要求输入完整、规范化域名；
+5. 要求输入完整、规范化主域名；
 6. 要求填写 1 至 1000 个字符的下线原因；
 7. 最终按钮明确标为“创建并发布下线 Release”。
 
@@ -107,17 +109,19 @@ active
 
 - Data ID、Group；
 - base 是否存在、rnacos MD5、Console SHA-256 和加密 base payload；
-- 移除目标域名后的精确 target payload 与 SHA-256；
-- Project ID、域名、下线原因和预期 Project lock version。
+- 移除主域名后的精确 target payload 与 SHA-256；route resource 中的全部 Host 会随 Project
+  订阅移除；
+- Project ID、主域名、下线原因和预期 Project lock version。
 
 下线 Release 只有一个 P0 必需资源：
 
-| 顺序 | kind           | operation | 说明                                   |
-| ---- | -------------- | --------- | -------------------------------------- |
-| 10   | `project_list` | `upsert`  | 写入移除目标域名后的分号分隔列表并回读 |
+| 顺序 | kind           | operation | 说明                                 |
+| ---- | -------------- | --------- | ------------------------------------ |
+| 10   | `project_list` | `upsert`  | 写入移除主域名后的分号分隔列表并回读 |
 
-如果目标域名在 base 中已经不存在，仍生成 Release。target 保留原始 base 内容，worker 通过
-`already_at_target` 完成幂等验证。rnacos base 在创建后发生变化时按既有外部冲突规则 fail closed。
+如果主域名在 base 中已经不存在，仍生成 Release。target 保留原始 base 内容，worker 通过
+`already_at_target` 完成幂等验证；Project route resource 中的主域名和全部 alias 由同一次
+Project 订阅移除。rnacos base 在创建后发生变化时按既有外部冲突规则 fail closed。
 
 ## 7. API 需求
 

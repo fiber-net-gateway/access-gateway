@@ -35,7 +35,7 @@ Published 和实例 Active 继续是三个不同事实。
 | CON-NET-002 | P0     | Project 策略分别录入允许 CIDR 和拒绝 CIDR，支持标准 IPv4/IPv6 与可选前缀   |
 | CON-NET-003 | P0     | Project 策略确定性注入所有 Route；拒绝项编译为 native `!CIDR`              |
 | CON-NET-004 | P0     | Project 策略生效时禁止 Route YAML 同时声明 `allows`，避免不明确的覆盖/合并 |
-| CON-NET-005 | P0     | 策略作为 Configuration Version schema v5 的一部分保存、恢复、校验和发布    |
+| CON-NET-005 | P0     | 策略作为 Configuration Version schema v6 的一部分保存、恢复、校验和发布    |
 | CON-NET-006 | P0     | 无效、重复、超过 256 项或单项超过 64 字节的 CIDR 在保存/发布前失败         |
 | CON-NET-007 | P0     | 空允许列表表示不启用 allowlist；空允许和拒绝列表表示公开访问               |
 | CON-NET-008 | P0     | UI 对未保存、已保存、已发布和激活未知使用独立文案并提供离开保护            |
@@ -81,12 +81,14 @@ API 返回影响明细并要求 `confirmSniCoverageChange=true` 后才能原子�
 
 ## 3. 配置模型与编译
 
-当前 Configuration Version schema v5 保留 schema v4 引入的网络策略，并为 Route 增加格式判别：
+当前 Configuration Version schema v6 保留 schema v4 引入的网络策略、并增加 Project Host alias；
+同时为 Route 增加格式判别：
 
 ```json
 {
-  "schemaVersion": 5,
+  "schemaVersion": 6,
   "kind": "project_routes_yaml",
+  "hostAliases": [],
   "networkPolicy": {
     "source": "project",
     "httpsRedirect": "308",
@@ -104,10 +106,11 @@ API 返回影响明细并要求 `confirmSniCoverageChange=true` 后才能原子�
   `S_308`。该字段和 CIDR 所有权彼此独立。
 - CIDR 先做控制面标准 IPv4/IPv6 语法和重复检查，再由 Native Validator 使用仓库自有 codec/
   compiled route model 权威校验。
-- schema v1 whole-project JSON、schema v2 YAML、schema v3 网络策略和 schema v4 HTTPS 配置读取时
-  确定性升级到 schema v5 YAML 条目；缺少 HTTPS 配置的旧版本设 `httpsRedirect=off`，v1/v2 同时设
+- schema v1 whole-project JSON、schema v2 YAML、schema v3 网络策略、schema v4 HTTPS 配置和 schema v5
+  mixed route 配置读取时
+  确定性升级到 schema v6 YAML 条目；缺少 HTTPS 配置的旧版本设 `httpsRedirect=off`，v1/v2 同时设
   `source=route`，保持既有流量行为。旧加密文档不被原地重写。
-- 当前编译器 revision 为 `project-routes-upstream-mtls-gzip-v1`；Release 继续冻结输入摘要、编译器
+- 当前编译器 revision 为 `project-routes-upstream-mtls-gzip-host-aliases-v1`；Release 继续冻结输入摘要、编译器
   revision、wire version、精确 payload 和 Native Validator revision。
 
 切换到 Project 策略不自动删除 YAML 中的 `allows`，而是 fail closed 并要求用户确认修改对应

@@ -133,6 +133,18 @@ TEST(AccessConfigCodecTest, ParsesFullJavaProjectConfiguration) {
     EXPECT_EQ(*response.body->content, "ok");
 }
 
+TEST(AccessConfigCodecTest, ParsesMultipleExactHostsInOneProjectRoutePayload) {
+    const auto result = parse_project_config(
+            R"({"version":7,"host":{"api.example.com":{"https":"S_NOT_MUST"},"www.example.com":{"https":"S_NOT_MUST"}},"routes":[]})");
+
+    ASSERT_TRUE(result) << result.error().message;
+    ASSERT_TRUE(*result);
+    ASSERT_TRUE((*result)->hosts);
+    ASSERT_EQ((*result)->hosts->size(), 2U);
+    ASSERT_NE(find_host(**result, "api.example.com"), nullptr);
+    ASSERT_NE(find_host(**result, "www.example.com"), nullptr);
+}
+
 TEST(AccessConfigCodecTest, ParsesEveryHttpsHostStrategyPublishedByConsole) {
     const std::vector<std::pair<std::string_view, HttpsStrategy>> cases = {
             {"S_NOT_MUST", HttpsStrategy::NotRequired}, {"S_301", HttpsStrategy::Redirect301},

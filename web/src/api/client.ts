@@ -177,8 +177,10 @@ function isProject(value: unknown): value is ProjectView {
 function isProjectRoutesModel(value: unknown): value is ProjectRoutesModel {
   return (
     isRecord(value) &&
-    value.schemaVersion === 5 &&
+    value.schemaVersion === 6 &&
     value.kind === 'project_routes_yaml' &&
+    Array.isArray(value.hostAliases) &&
+    value.hostAliases.every((alias) => typeof alias === 'string') &&
     isRecord(value.networkPolicy) &&
     (value.networkPolicy.source === 'route' || value.networkPolicy.source === 'project') &&
     (value.networkPolicy.httpsRedirect === 'off' ||

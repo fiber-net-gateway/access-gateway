@@ -82,8 +82,9 @@ function installApiMock(options: { releaseEvidence?: boolean } = {}) {
     routeCount: 1,
   }
   const model = {
-    schemaVersion: 5,
+    schemaVersion: 6,
     kind: 'project_routes_yaml',
+    hostAliases: [],
     networkPolicy: {
       source: 'route',
       httpsRedirect: 'off',
@@ -93,8 +94,9 @@ function installApiMock(options: { releaseEvidence?: boolean } = {}) {
     routes: [],
   }
   const historicalModel = {
-    schemaVersion: 5,
+    schemaVersion: 6,
     kind: 'project_routes_yaml',
+    hostAliases: [],
     networkPolicy: {
       source: 'route',
       httpsRedirect: 'off',
@@ -434,6 +436,26 @@ describe('application routes', () => {
     expect(router.state.location.pathname).toBe(`/projects/${projectId}/routes`)
   })
 
+  test('adds and removes a normalized exact Host alias in the Routes workspace', async () => {
+    installApiMock()
+    const router = createMemoryRouter(appRoutes, {
+      initialEntries: [`/projects/${projectId}/routes`],
+    })
+    const user = userEvent.setup()
+    render(<RouterProvider router={router} />)
+
+    await screen.findByRole('heading', { name: 'Routes' })
+    const aliasInput = screen.getByRole('textbox', { name: '添加关联域名' }) as HTMLInputElement
+    await waitFor(() => expect(aliasInput.disabled).toBe(false))
+    fireEvent.change(aliasInput, { target: { value: ' WWW.Example.com. ' } })
+    await user.click(screen.getByRole('button', { name: '添加关联域名' }))
+
+    expect(await screen.findByText('www.example.com')).toBeTruthy()
+    expect(screen.getByText('有未保存修改')).toBeTruthy()
+    await user.click(screen.getByRole('button', { name: '移除关联域名 www.example.com' }))
+    expect(screen.getByText('尚未添加关联域名')).toBeTruthy()
+  })
+
   test('creates a JavaScript route with external path and optional method fields', async () => {
     installApiMock()
     const router = createMemoryRouter(appRoutes, {
@@ -591,7 +613,7 @@ describe('application routes', () => {
     expect(await screen.findByRole('heading', { name: '确认下线 api.example.com' })).toBeTruthy()
 
     await user.type(screen.getByLabelText('下线原因'), '域名已迁移')
-    await user.type(screen.getByLabelText('输入完整域名以确认'), 'api.example.com')
+    await user.type(screen.getByLabelText('输入完整主域名以确认'), 'api.example.com')
     await user.click(screen.getByRole('button', { name: '创建并发布下线 Release' }))
 
     await waitFor(() => {

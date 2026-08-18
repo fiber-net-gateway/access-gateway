@@ -119,7 +119,9 @@ export function ProjectSettingsPage() {
         <div>
           <p className="eyebrow">PROJECT LIFECYCLE</p>
           <h2 id="settings-title">Settings</h2>
-          <p>查看不可变身份，并通过有发布证据的 Release 下线域名。</p>
+          <p>
+            查看不可变主域名，并通过 Routes 管理关联域名、通过有发布证据的 Release 下线 Project。
+          </p>
         </div>
         <span
           className={`status-chip status-chip-${project.status === 'active' ? 'ready' : 'pending'}`}
@@ -158,7 +160,8 @@ export function ProjectSettingsPage() {
             </div>
           </dl>
           <p className="settings-note">
-            域名同时是 exact Host 与 rnacos project key，不能原地改名。请创建新域名后再下线旧域名。
+            主域名同时是 exact Host 与 rnacos project key，不能原地改名；关联域名请在 Routes
+            页面维护，与主域名共享配置和 Release。下线时会移除整个 Project 的全部域名。
           </p>
         </article>
 
@@ -234,8 +237,8 @@ export function ProjectSettingsPage() {
           <p className="eyebrow">DANGER ZONE</p>
           <h3 id="danger-zone-title">下线并归档 Project</h3>
           <p>
-            系统会先创建不可变 Release，再从 rnacos Project List 移除域名并回读。历史版本、Release
-            和审计记录不会被删除。
+            系统会先创建不可变 Release，再从 rnacos Project List 移除主域名并回读，同时下线该
+            Project 的全部关联域名。历史版本、Release 和审计记录不会被删除。
           </p>
           <ul>
             <li>不会发布浏览器中未保存的 Route 修改。</li>
@@ -293,7 +296,7 @@ export function ProjectSettingsPage() {
               />
             </label>
             <label>
-              输入完整域名以确认
+              输入完整主域名以确认
               <input
                 autoComplete="off"
                 placeholder={project.domain}

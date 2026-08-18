@@ -91,8 +91,9 @@ Host pattern 支持：
 | Global wildcard | `*`               | 匹配任意合法 Host                                                 |
 | Suffix wildcard | `*.example.com`   | 匹配 `a.example.com` 和 `a.b.example.com`，不匹配裸 `example.com` |
 
-不同 Project 不能声明规范化后重复的 Host pattern。Console 当前通常从 Project domain 生成 exact Host；
-直接维护 wire 配置时仍必须遵守上述全局冲突规则。
+不同 Project 不能声明规范化后重复的 Host pattern。Console 为每个 Project 保留一个不可变主域名，
+并允许在 Routes 页面添加多个精确 Host alias；alias 与主域名共享策略和 Release，不新增 Project 或
+route Data ID。发布前 Console 会读取现有 route resource 检查 alias 冲突；直接维护 wire 配置时仍必须遵守上述全局冲突规则。
 
 Host 未命中返回 HTTP 404，错误名为 `ROUTER_NOT_FOUND`。只有 Host 命中后，才会继续选择 Path Route。
 
@@ -502,6 +503,9 @@ Project JSON 的简化结构：
     "version": 42,
     "host": {
         "api.example.com": {
+            "https": "S_NOT_MUST"
+        },
+        "www.example.com": {
             "https": "S_NOT_MUST"
         }
     },

@@ -1,7 +1,5 @@
-import { isIP } from 'node:net'
-import { domainToASCII } from 'node:url'
-
 import { badRequest, forbidden, notFound, unavailable } from '../../shared/errors.js'
+import { normalizeExactHost } from '../../shared/hosts.js'
 import type { Actor } from '../auth/model.js'
 import { EnvironmentRepository } from '../environments/repository.js'
 import type { CreateProjectInput, ProjectListResult, ProjectView } from './model.js'
@@ -14,18 +12,8 @@ export interface ProjectService {
 }
 
 export function normalizeProjectDomain(value: string): string {
-  const input = value.trim().replace(/\.$/u, '')
-  const domain = domainToASCII(input).toLowerCase()
-  const labels = domain.split('.')
-  const valid =
-    domain.length > 0 &&
-    domain.length <= 253 &&
-    isIP(domain) === 0 &&
-    labels.every(
-      (label) =>
-        label.length >= 1 && label.length <= 63 && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/u.test(label),
-    )
-  if (!valid) {
+  const domain = normalizeExactHost(value)
+  if (!domain) {
     throw badRequest(
       'INVALID_PROJECT_DOMAIN',
       'Project domain must be a valid DNS hostname without a scheme, port, path, wildcard, or IP literal',

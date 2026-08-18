@@ -9,6 +9,7 @@ import {
 } from '../../integrations/native-validator/limits.js'
 import { bufferToPublicId, isPublicId } from '../../shared/ids.js'
 import { canonicalJson } from '../../shared/json.js'
+import { isCanonicalExactHost, normalizeExactHost } from '../../shared/hosts.js'
 
 export type DraftState = 'editing' | 'validating' | 'ready'
 
@@ -31,6 +32,8 @@ export type RouteItemModel = YamlRouteItemModel | JavaScriptRouteItemModel
 
 export type HttpsRedirect = 'off' | '301' | '302' | '307' | '308'
 
+export const PROJECT_ROUTES_SCHEMA_VERSION = 6
+
 export interface ProjectNetworkPolicy {
   source: 'route' | 'project'
   httpsRedirect: HttpsRedirect
@@ -39,8 +42,10 @@ export interface ProjectNetworkPolicy {
 }
 
 export interface ProjectRoutesModel {
-  schemaVersion: 5
+  schemaVersion: 6
   kind: 'project_routes_yaml'
+  /** Exact host aliases in addition to the immutable project domain. */
+  hostAliases: readonly string[]
   networkPolicy: ProjectNetworkPolicy
   routes: readonly RouteItemModel[]
 }
@@ -80,13 +85,29 @@ export function isProjectRoutesModel(
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
   const model = value as Record<string, unknown>
   if (
-    model.schemaVersion !== 5 ||
+    model.schemaVersion !== PROJECT_ROUTES_SCHEMA_VERSION ||
     model.kind !== 'project_routes_yaml' ||
+    !Array.isArray(model.hostAliases) ||
+    model.hostAliases.length > Math.max(limits.projectRoute.maxHosts - 1, 0) ||
     typeof model.networkPolicy !== 'object' ||
     model.networkPolicy === null ||
     Array.isArray(model.networkPolicy) ||
     !Array.isArray(model.routes) ||
     model.routes.length > limits.projectRoute.maxRoutes
+  ) {
+    return false
+  }
+  const hostAliases = model.hostAliases
+  const hostAliasSet = new Set<string>()
+  if (
+    !hostAliases.every(
+      (alias) =>
+        typeof alias === 'string' &&
+        isCanonicalExactHost(alias) &&
+        utf8Bytes(alias) <= limits.projectRoute.maxHostPatternBytes &&
+        !hostAliasSet.has(alias) &&
+        hostAliasSet.add(alias),
+    )
   ) {
     return false
   }
@@ -157,6 +178,16 @@ export function isProjectRoutesModel(
   return true
 }
 
+function isProjectRoutesModelV5(value: unknown, limits: AccessConfigLimits): boolean {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const model = value as Record<string, unknown>
+  if (model.schemaVersion !== 5 || 'hostAliases' in model) return false
+  return isProjectRoutesModel(
+    { ...model, schemaVersion: PROJECT_ROUTES_SCHEMA_VERSION, hostAliases: [] },
+    limits,
+  )
+}
+
 interface LegacyYamlRouteItemModel {
   id: string
   source: string
@@ -182,7 +213,8 @@ function isYamlRoutesV4Model(value: unknown): value is YamlRoutesV4Model {
   }
   return isProjectRoutesModel({
     ...model,
-    schemaVersion: 5,
+    schemaVersion: PROJECT_ROUTES_SCHEMA_VERSION,
+    hostAliases: [],
     routes: model.routes.map((route) =>
       typeof route === 'object' && route !== null && !Array.isArray(route)
         ? { ...route, format: 'yaml' }
@@ -215,7 +247,8 @@ function isYamlRoutesV3Model(value: unknown): value is YamlRoutesV3Model {
   const networkPolicy = model.networkPolicy as Record<string, unknown>
   return isProjectRoutesModel({
     ...model,
-    schemaVersion: 5,
+    schemaVersion: PROJECT_ROUTES_SCHEMA_VERSION,
+    hostAliases: [],
     networkPolicy: { ...networkPolicy, httpsRedirect: 'off' },
     routes: model.routes.map((route) =>
       typeof route === 'object' && route !== null && !Array.isArray(route)
@@ -291,27 +324,43 @@ function legacyRouteId(route: unknown, index: number): string {
   return bufferToPublicId(bytes)
 }
 
-export function normalizeStoredProjectRoutesModel(value: unknown): ProjectRoutesModel | null {
-  if (isProjectRoutesModel(value)) return value
+export function normalizeStoredProjectRoutesModel(
+  value: unknown,
+  limits: AccessConfigLimits = fallbackAccessConfigLimits,
+  primaryDomain?: string,
+): ProjectRoutesModel | null {
+  const primary = primaryDomain ? normalizeExactHost(primaryDomain) : null
+  if (isProjectRoutesModel(value, limits)) return value
+  if (isProjectRoutesModelV5(value, limits)) {
+    const legacy = value as Record<string, unknown>
+    return {
+      ...(legacy as unknown as Omit<ProjectRoutesModel, 'schemaVersion' | 'hostAliases'>),
+      schemaVersion: PROJECT_ROUTES_SCHEMA_VERSION,
+      hostAliases: [],
+    }
+  }
   if (isYamlRoutesV4Model(value)) {
     return {
       ...value,
-      schemaVersion: 5,
+      schemaVersion: PROJECT_ROUTES_SCHEMA_VERSION,
+      hostAliases: [],
       routes: value.routes.map((route) => ({ ...route, format: 'yaml' })),
     }
   }
   if (isYamlRoutesV3Model(value)) {
     return {
       ...value,
-      schemaVersion: 5,
+      schemaVersion: PROJECT_ROUTES_SCHEMA_VERSION,
+      hostAliases: [],
       networkPolicy: { ...value.networkPolicy, httpsRedirect: 'off' },
       routes: value.routes.map((route) => ({ ...route, format: 'yaml' })),
     }
   }
   if (isYamlRoutesV2Model(value)) {
     return {
-      schemaVersion: 5,
+      schemaVersion: PROJECT_ROUTES_SCHEMA_VERSION,
       kind: 'project_routes_yaml',
+      hostAliases: [],
       networkPolicy: {
         source: 'route',
         httpsRedirect: 'off',
@@ -340,9 +389,24 @@ export function normalizeStoredProjectRoutesModel(value: unknown): ProjectRoutes
       source,
     })
   }
+  const hostAliases: string[] = []
+  for (const host of value.hosts) {
+    if (typeof host !== 'object' || host === null || Array.isArray(host)) return null
+    const pattern = (host as Record<string, unknown>).pattern
+    if (typeof pattern !== 'string') return null
+    const normalized = normalizeExactHost(pattern)
+    if (!normalized) return null
+    if (normalized === primary) continue
+    if (!hostAliases.includes(normalized)) hostAliases.push(normalized)
+  }
+  if (hostAliases.length > Math.max(limits.projectRoute.maxHosts - 1, 0)) return null
+  if (hostAliases.some((alias) => utf8Bytes(alias) > limits.projectRoute.maxHostPatternBytes)) {
+    return null
+  }
   return {
-    schemaVersion: 5,
+    schemaVersion: PROJECT_ROUTES_SCHEMA_VERSION,
     kind: 'project_routes_yaml',
+    hostAliases,
     networkPolicy: {
       source: 'route',
       httpsRedirect: 'off',
@@ -351,4 +415,27 @@ export function normalizeStoredProjectRoutesModel(value: unknown): ProjectRoutes
     },
     routes,
   }
+}
+
+/** Normalize a request model before it is compiled and persisted. */
+export function normalizeProjectRoutesModelInput(
+  value: unknown,
+  limits: AccessConfigLimits = fallbackAccessConfigLimits,
+): ProjectRoutesModel | null {
+  if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+    const candidate = value as Record<string, unknown>
+    if (candidate.schemaVersion === PROJECT_ROUTES_SCHEMA_VERSION) {
+      if (!Array.isArray(candidate.hostAliases)) return null
+      const aliases = candidate.hostAliases.map((alias) =>
+        typeof alias === 'string' ? normalizeExactHost(alias) : null,
+      )
+      if (aliases.some((alias): alias is null => alias === null)) return null
+      return normalizeStoredProjectRoutesModel({ ...candidate, hostAliases: aliases }, limits)
+    }
+    if (candidate.schemaVersion === 5) {
+      if ('hostAliases' in candidate || !isProjectRoutesModelV5(candidate, limits)) return null
+      return normalizeStoredProjectRoutesModel(candidate, limits)
+    }
+  }
+  return null
 }

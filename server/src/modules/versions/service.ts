@@ -4,7 +4,7 @@ import { badRequest, forbidden, notFound, unavailable } from '../../shared/error
 import { bufferToPublicId } from '../../shared/ids.js'
 import type { Actor } from '../auth/model.js'
 import { compileProjectRoutes } from '../drafts/compiler.js'
-import { isProjectRoutesModel, type ProjectRoutesModel } from '../drafts/model.js'
+import { normalizeProjectRoutesModelInput, type ProjectRoutesModel } from '../drafts/model.js'
 import { validateProjectRoutesCandidate } from '../drafts/validation.js'
 import { EnvironmentRepository } from '../environments/repository.js'
 import { ProjectRepository } from '../projects/repository.js'
@@ -50,14 +50,15 @@ export interface ConfigurationVersionService {
 }
 
 function parseModel(value: unknown, limits = fallbackAccessConfigLimits): ProjectRoutesModel {
-  if (!isProjectRoutesModel(value, limits)) {
+  const normalized = normalizeProjectRoutesModelInput(value, limits)
+  if (!normalized) {
     throw badRequest(
       'INVALID_CONFIGURATION_MODEL',
-      'The configuration does not match project_routes_yaml schema version 5',
+      'The configuration does not match project_routes_yaml schema version 5 or 6',
       [{ path: 'model', code: 'INVALID_SCHEMA', message: 'Invalid mixed route model' }],
     )
   }
-  return value
+  return normalized
 }
 
 function parseSavableModel(

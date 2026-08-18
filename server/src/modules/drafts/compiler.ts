@@ -10,6 +10,7 @@ import {
 import type { AccessConfigLimits } from '../../integrations/native-validator/model.js'
 import { canonicalJson } from '../../shared/json.js'
 import { isPublicId } from '../../shared/ids.js'
+import { normalizeExactHost } from '../../shared/hosts.js'
 import type { HttpsRedirect, ProjectRoutesModel, RouteItemModel } from './model.js'
 
 const routeFields = new Set([
@@ -36,7 +37,7 @@ const routeFields = new Set([
   'upstream_tls',
 ])
 
-export const ROUTE_COMPILER_REVISION = 'project-routes-upstream-mtls-gzip-v1'
+export const ROUTE_COMPILER_REVISION = 'project-routes-upstream-mtls-gzip-host-aliases-v1'
 
 const networkPolicyRouteId = '00000000-0000-4000-8000-000000000099'
 
@@ -123,6 +124,25 @@ function validateModelLimits(
   if (utf8Bytes(domain) > routeLimits.maxHostPatternBytes) {
     return [limitIssue(fallbackRouteId, 'host', 'Host pattern', routeLimits.maxHostPatternBytes)]
   }
+  const aliases = model.hostAliases ?? []
+  if (1 + aliases.length > routeLimits.maxHosts) {
+    return [
+      limitIssue(networkPolicyRouteId, 'hostAliases', 'Host pattern count', routeLimits.maxHosts),
+    ]
+  }
+  for (const [index, alias] of aliases.entries()) {
+    if (typeof alias !== 'string') continue
+    if (utf8Bytes(alias) > routeLimits.maxHostPatternBytes) {
+      return [
+        limitIssue(
+          networkPolicyRouteId,
+          `hostAliases.${index}`,
+          'Host pattern',
+          routeLimits.maxHostPatternBytes,
+        ),
+      ]
+    }
+  }
   if (model.routes.length > routeLimits.maxRoutes) {
     return [limitIssue(fallbackRouteId, 'routes', 'Route count', routeLimits.maxRoutes)]
   }
@@ -181,6 +201,80 @@ function validateModelLimits(
     }
   }
   return []
+}
+
+interface ValidatedHostBindings {
+  hosts: readonly string[]
+  issues: readonly RouteValidationIssue[]
+}
+
+function validateHostBindings(domain: string, model: ProjectRoutesModel): ValidatedHostBindings {
+  const issues: RouteValidationIssue[] = []
+  const primary = normalizeExactHost(domain)
+  if (!primary) {
+    issues.push({
+      routeId: networkPolicyRouteId,
+      path: 'host',
+      line: 1,
+      column: 1,
+      code: 'INVALID_PROJECT_DOMAIN',
+      message: 'Project domain must be an exact DNS hostname',
+    })
+    return { hosts: [], issues }
+  }
+  const hosts = [primary]
+  const seen = new Set([primary])
+  for (const [index, value] of (model.hostAliases ?? []).entries()) {
+    const path = `hostAliases.${index}`
+    if (typeof value !== 'string') {
+      issues.push({
+        routeId: networkPolicyRouteId,
+        path,
+        line: 1,
+        column: 1,
+        code: 'INVALID_HOST_ALIAS',
+        message: 'Host alias must be an exact DNS hostname',
+      })
+      continue
+    }
+    const normalized = normalizeExactHost(value)
+    if (!normalized) {
+      issues.push({
+        routeId: networkPolicyRouteId,
+        path,
+        line: 1,
+        column: 1,
+        code: 'INVALID_HOST_ALIAS',
+        message: `${value} is not an exact DNS hostname`,
+      })
+      continue
+    }
+    if (normalized === primary) {
+      issues.push({
+        routeId: networkPolicyRouteId,
+        path,
+        line: 1,
+        column: 1,
+        code: 'DUPLICATE_PRIMARY_HOST',
+        message: `${value} is already the project's primary domain`,
+      })
+      continue
+    }
+    if (seen.has(normalized)) {
+      issues.push({
+        routeId: networkPolicyRouteId,
+        path,
+        line: 1,
+        column: 1,
+        code: 'DUPLICATE_HOST_ALIAS',
+        message: `${value} is duplicated in the host aliases`,
+      })
+      continue
+    }
+    seen.add(normalized)
+    hosts.push(normalized)
+  }
+  return { hosts, issues }
 }
 
 function findFieldOffset(document: ReturnType<typeof parseDocument>, field: string): number {
@@ -889,7 +983,8 @@ export function compileProjectRoutes(
   const limitIssues = validateModelLimits(domain, model, limits)
   if (limitIssues.length > 0) return { compiled: null, issues: limitIssues }
   const routes: Readonly<Record<string, unknown>>[] = []
-  const issues: RouteValidationIssue[] = validateNetworkPolicy(model)
+  const hostBindings = validateHostBindings(domain, model)
+  const issues: RouteValidationIssue[] = [...hostBindings.issues, ...validateNetworkPolicy(model)]
   let upstreamTlsProfileCount = 0
   for (const route of model.routes) {
     const parsed =
@@ -993,11 +1088,12 @@ export function compileProjectRoutes(
 
   const payloadText = canonicalJson({
     version,
-    host: {
-      [domain]: {
-        https: httpsStrategies[model.networkPolicy.httpsRedirect],
-      },
-    },
+    host: Object.fromEntries(
+      hostBindings.hosts.map((host) => [
+        host,
+        { https: httpsStrategies[model.networkPolicy.httpsRedirect] },
+      ]),
+    ),
     routes,
   })
   const payload = Buffer.from(payloadText, 'utf8')

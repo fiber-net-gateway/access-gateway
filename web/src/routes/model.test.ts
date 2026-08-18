@@ -6,12 +6,14 @@ import {
   createRouteItem,
   duplicateRouteItem,
   initialRouteModel,
+  normalizeExactHost,
 } from './model.js'
 
 test('creates an empty ordered YAML route model', () => {
   assert.deepEqual(initialRouteModel(), {
-    schemaVersion: 5,
+    schemaVersion: 6,
     kind: 'project_routes_yaml',
+    hostAliases: [],
     networkPolicy: {
       source: 'route',
       httpsRedirect: 'off',
@@ -20,6 +22,13 @@ test('creates an empty ordered YAML route model', () => {
     },
     routes: [],
   })
+})
+
+test('normalizes exact Host aliases and rejects unsafe host syntax', () => {
+  assert.equal(normalizeExactHost(' WWW.Example.com. '), 'www.example.com')
+  assert.equal(normalizeExactHost('bücher.example'), 'xn--bcher-kva.example')
+  assert.equal(normalizeExactHost('*.example.com'), null)
+  assert.equal(normalizeExactHost('example.com:443'), null)
 })
 
 test('creates independent RESPONSE and PROXY YAML route items', () => {

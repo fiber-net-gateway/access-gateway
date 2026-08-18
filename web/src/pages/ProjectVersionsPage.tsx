@@ -362,8 +362,10 @@ export function ProjectVersionsPage() {
             <p className="eyebrow">READ-ONLY SNAPSHOT</p>
             <h2 id="preview-version-title">V{previewVersion.number} · 配置快照</h2>
             <p>{previewVersion.changeSummary}</p>
-            <section className="version-preview-network" aria-label="网络策略快照">
-              <strong>Network Policy</strong>
+            <section className="version-preview-network" aria-label="Host 与网络策略快照">
+              <strong>Host bindings · Network Policy</strong>
+              <small>主域名：{project.domain}</small>
+              <small>关联域名：{previewVersion.model.hostAliases.join(', ') || '无'}</small>
               <span>
                 {previewVersion.model.networkPolicy.source === 'project'
                   ? 'Project 统一策略'

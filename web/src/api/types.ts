@@ -154,8 +154,9 @@ export interface ProjectNetworkPolicy {
 }
 
 export interface ProjectRoutesModel {
-  schemaVersion: 5
+  schemaVersion: 6
   kind: 'project_routes_yaml'
+  hostAliases: readonly string[]
   networkPolicy: ProjectNetworkPolicy
   routes: readonly RouteItemModel[]
 }

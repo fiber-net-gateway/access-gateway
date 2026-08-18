@@ -42,7 +42,8 @@
 ### 2.2 不变量
 
 - Configuration Version 的 YAML、Route ID、Route 顺序、说明、作者和创建时间一经保存不可修改。
-- Configuration Version 只覆盖 route wire payload 的创作模型；Project domain 是项目身份，TLS
+- Configuration Version 覆盖 route wire payload 的创作模型（包括主域名之外的 Host alias）；Project
+  primary domain 是项目身份，TLS
   SAN 派生索引、证书私钥、rnacos 连接和运行时激活证据不进入版本文档。
 - Current Configuration Version 只能前进到新插入的版本号，不能指回历史行。
 - Release 必须引用具体且同属该 Project 的 Configuration Version 主键。
@@ -316,10 +317,12 @@ Service 当作版本校验证据。
    domain 和新 wire version 编译为 exact JSON；
 5. 使用 Native Validator 校验 exact payload；失败时保存 `validation_failed` Release 和错误证据；
 6. 读取 rnacos 目标 Data ID 形成 base observations；只读失败时 fail closed；
-7. 计算与 base 的语义 diff、资源依赖和 exact target SHA-256；
-8. 在第二个短事务中插入 `release_items`、`release_resources` 和加密 payload document，把 Release
+7. 如果 source 包含 Host alias，读取 Project List 中其他 Project 的 route resource，检查 exact/wildcard
+   冲突；无法读取或解析现有 Host map 时 fail closed；
+8. 计算与 base 的语义 diff、资源依赖和 exact target SHA-256；
+9. 在第二个短事务中插入 `release_items`、`release_resources` 和加密 payload document，把 Release
    置为 `ready`；
-9. 返回确认页所需的来源版本、当前版本、Published 来源、wire version、diff 和风险。
+10. 返回确认页所需的来源版本、当前版本、Published 来源、wire version、diff 和风险。
 
 编译、subprocess 校验和 rnacos read 都不能发生在 MySQL transaction 内。进程若在 `creating` 或
 `validating` 中崩溃，只能在 compiler/validator revision 与创建时记录完全一致时恢复准备；否则把
@@ -336,12 +339,12 @@ Release 标记为 `abandoned`，由用户创建新 Release。已分配 wire vers
 
 保持既有 wire contract：
 
-| 资源          | Data ID                               | Group           | 内容                 |
-| ------------- | ------------------------------------- | --------------- | -------------------- |
-| Project list  | `ploto.unified-access.projects`       | `ACCESS-SERVER` | 分号分隔 domain      |
-| Project route | `ploto.unified-access.route.<domain>` | `ACCESS-SERVER` | Java-compatible JSON |
+| 资源          | Data ID                                       | Group           | 内容                                                      |
+| ------------- | --------------------------------------------- | --------------- | --------------------------------------------------------- |
+| Project list  | `ploto.unified-access.projects`               | `ACCESS-SERVER` | 分号分隔 domain                                           |
+| Project route | `ploto.unified-access.route.<primary-domain>` | `ACCESS-SERVER` | Java-compatible JSON；包含主域名与 Host alias 的 host map |
 
-单 Project 修改通常只有 route resource。新增 Project 的资源依赖为 `route -> project list`：先验证
+单 Project 修改通常只有 route resource；主域名与 alias 在同一 route resource 中原子更新。新增 Project 的资源依赖为 `route -> project list`：先验证
 route 写入，再把 domain 暴露给订阅图。归档顺序相反：先从 list 移除并回读，再把 route 清理作为
 独立资源。Gray Data ID 永远不进入本工作流。
 
@@ -397,8 +400,9 @@ Restoration 请求中的路径 `versionId` 是历史编辑来源，`baseVersionI
   "changeSummary": "为用户接口增加 30s 超时",
   "forceSameContent": false,
   "model": {
-    "schemaVersion": 5,
+    "schemaVersion": 6,
     "kind": "project_routes_yaml",
+    "hostAliases": [],
     "routes": [
       { "id": "uuid", "format": "yaml", "source": "path: /api/*\nmethod: GET\ntype: PROXY\n..." },
       {
@@ -463,6 +467,8 @@ Restoration 请求中的路径 `versionId` 是历史编辑来源，`baseVersionI
 | `CONFIG_VERSION_CONFLICT`         | 409  | base version 或 ETag 已过期           |
 | `CONFIG_VERSION_UNCHANGED`        | 409  | 相同内容且未确认强制保存              |
 | `CONFIG_VERSION_NOT_PUBLISHABLE`  | 422  | 所选版本校验失败                      |
+| `HOST_ALIAS_CONFLICT`             | 422  | alias 与其他 Project 的现有 Host 冲突 |
+| `HOST_ALIAS_PREFLIGHT_FAILED`     | 503  | 无法读取现有 route Host map           |
 | `PROJECT_LIST_LIMIT_EXCEEDED`     | 422  | Project List 超出 native 资源上限     |
 | `CONFIG_VERSION_PROJECT_MISMATCH` | 404  | source version 不属于当前授权 Project |
 | `NATIVE_VALIDATOR_UNAVAILABLE`    | 503  | 权威校验不可用或 contract 不匹配      |

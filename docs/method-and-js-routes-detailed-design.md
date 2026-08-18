@@ -13,7 +13,8 @@
 
 ## 2. Console 持久化模型
 
-schema 升级为 v5，顶层 `kind` 保留 `project_routes_yaml`，避免改变现有 API/数据库领域判别；
+schema 升级为 v6，顶层 `kind` 保留 `project_routes_yaml`，并以 `hostAliases` 保存主域名之外的精确
+Host alias，避免改变现有 API/数据库领域判别；
 是否为混合 Route 由条目级 `format` 判别：
 
 ```ts
@@ -29,7 +30,8 @@ type RouteItemModel =
     }
 
 interface ProjectRoutesModel {
-  schemaVersion: 5
+  schemaVersion: 6
+  hostAliases: readonly string[]
   kind: 'project_routes_yaml'
   networkPolicy: ProjectNetworkPolicy
   routes: readonly RouteItemModel[]
@@ -209,9 +211,9 @@ Fiber 脚本读取接口无法让宿主对未知长度流累计计数，因此 c
 
 ### Console
 
-- Model：v1-v4 升级、mixed union、限制；
+- Model：v1-v5 升级、Host alias、mixed union、限制；
 - Compiler：YAML method、JS wire、混排顺序、method/source/path 错误、网络策略注入；
-- API：schema v5 保存/恢复/校验；
+- API：schema v6 保存/恢复/校验（兼容读取并升级 schema v5）；
 - UI：新增/编辑/复制 JS、外置字段、错误阻止保存、历史预览。
 
 ### 资格声明

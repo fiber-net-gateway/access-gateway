@@ -64,7 +64,8 @@ export function ProjectsIndexPage() {
           <p className="eyebrow">ROUTE-FIRST CONTROL PLANE</p>
           <h1>Projects</h1>
           <p className="page-description">
-            每个 Project 对应一个域名，并拥有独立的 Route、配置版本和发布历史。
+            每个 Project 有一个不可变主域名，也可以关联多个域名；它们共享
+            Route、配置版本和发布历史。
           </p>
         </div>
       </header>
