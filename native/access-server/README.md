@@ -355,6 +355,8 @@ listener 只在 Nacos client/config/naming、project/gray watcher、项目列表
 - `docs/benchmark-baselines.md`：十组默认关闭 benchmark 的统一 runner、覆盖矩阵、证据格式和基线；
 - `docs/optimization-analysis.md`：代码职责、生命周期、性能、安全和可观测性优化分析，
   以及 Access Gateway 与 Fiber 上游的改造归属。
+- `docs/code-architecture-api-review.md`：当前代码结构、class 职责、API 参数/返回值、构建契约和
+  后续重构优先级复核。
 
 业务代码开始迁移后，按职责放入 `src/config/`、`src/routing/`、`src/execution/`、
 `src/runtime/` 和 `src/observability/`；对应测试放入 `tests/`，并在本目录的
