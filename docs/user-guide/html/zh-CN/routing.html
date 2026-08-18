@@ -112,8 +112,8 @@
     和执行字段都写在正文中；只允许 <code>PROXY</code> 或 <code>RESPONSE</code>。
   </li>
   <li>
-    JavaScript Route：正文只写脚本，<code>path</code> 和可选
-    <code>method</code> 在编辑器外单独填写；发布时编译为 wire <code>type: SCRIPT</code>。
+    JavaScript Route：正文只写脚本，<code>path</code>、可选 <code>method</code> 和可选
+    <code>gzip</code> 在编辑器外单独填写；发布时编译为 wire <code>type: SCRIPT</code>。
   </li>
 </ul>
 <p>
@@ -467,7 +467,7 @@ service: report-service/stable
     </tr>
     <tr>
       <td><code>gzip</code></td>
-      <td>RESPONSE</td>
+      <td>RESPONSE/PROXY/SCRIPT</td>
       <td>
         可选；<code>true</code> 使用级别 6，<code>1</code>–<code>9</code> 指定级别，<code
           >false</code
@@ -620,23 +620,29 @@ Transfer-Encoding, Upgrade
 </h3>
 <p>
   <code>gzip</code> 缺失或为 <code>false</code> 时不压缩；<code>true</code> 使用默认压缩级别 6，整数
-  <code>1</code>–<code>9</code> 指定压缩级别。 首版只支持非空 <code>TEXT</code> 和
-  <code>BASE64</code> body：access-server 在候选快照发布前同时固化 identity 与 gzip
-  字节，请求热路径只选择已有表示，不执行压缩。<code>TEMPLATE</code> body 暂不支持 gzip。
+  <code>1</code>–<code>9</code> 指定压缩级别。 RESPONSE、PROXY、SCRIPT 都可以启用：静态
+  <code>TEXT</code>/<code>BASE64</code> body 在候选快照发布前预压缩， <code>TEMPLATE</code> body
+  以及代理/脚本响应在最终 header 可用后通过共享的请求级 writer 流式压缩。 固定 MIME 白名单为
+  <code>text/html</code
+  >、<code>text/plain</code>、<code>text/css</code>、<code>text/javascript</code>、
+  <code>application/javascript</code
+  >、<code>application/json</code>、<code>application/xml</code>、<code>application/rss+xml</code>、
+  <code>application/wasm</code> 和 <code>image/svg+xml</code>，其他类型保持 identity。
 </p>
 <p>
   启用后，access-server 根据 <code>Accept-Encoding</code> 中的
   <code>gzip</code>、<code>identity</code>、<code>*</code> 和 <code>q</code> 权重选择表示； 未发送该
-  header 时返回 identity，两个表示都被显式拒绝时返回 406 <code>NOT_ACCEPTABLE</code>。响应总是合并
-  <code>Vary: Accept-Encoding</code>；选择 gzip 时写 <code>Content-Encoding: gzip</code> 和对应
-  <code>Content-Length</code>。 配置的强 ETag 会降为弱 ETag，HEAD 执行相同的编码选择并发送对应
-  header，但不发送 body。
+  header 时返回 identity，两个表示都被显式拒绝时返回 406 <code>NOT_ACCEPTABLE</code>。满足转换条件的
+  响应会合并 <code>Vary: Accept-Encoding</code>；选择 gzip 时写
+  <code>Content-Encoding: gzip</code>。静态 <code>TEXT</code>/<code>BASE64</code> 响应保留 gzip 的
+  <code>Content-Length</code>，<code>TEMPLATE</code>、<code>PROXY</code>、<code>SCRIPT</code>
+  响应使用流式 writer 的 自动/chunked framing。实际转换时配置的强 ETag 会降为弱 ETag；HEAD
+  执行相同的编码选择并发送 对应 header，但不发送 body。
 </p>
 <p>
-  以下组合会在配置编译阶段被拒绝：PROXY Route 上出现 <code>gzip</code> 字段、空 body、<code
-    >TEMPLATE</code
-  >
-  body、 1xx/204/205/206/304 status，以及同时配置 <code>response_headers.Content-Encoding</code>。
+  以下 RESPONSE 组合会在配置编译阶段被拒绝：空 body、1xx/204/205/206/304 status，以及同时 配置
+  <code>response_headers.Content-Encoding</code>。动态响应遇到不在白名单的 MIME 或已有编码时保持
+  原样传输。
 </p>
 <h2 id="8-proxy-route">
   8. PROXY Route<a

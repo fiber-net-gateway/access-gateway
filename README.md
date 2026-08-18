@@ -14,7 +14,7 @@ The repository is under active development in two first-class areas:
 
 - **Access Server** — the native runtime supports HTTPS, HTTP/2, and HTTP/3 enabled by default,
   Nacos-driven atomic TLS certificate snapshots plus project and route configuration,
-  Host/Path/condition matching, RESPONSE execution with negotiated static gzip, PROXY execution,
+  Host/Path/condition matching, RESPONSE execution with negotiated static/dynamic gzip, PROXY execution,
   WebSocket tunneling, service
   discovery, gray routing, CAT tracing, Prometheus metrics, and structured access logs. A limited
   2026-07-31 test-environment syntax snapshot passed 352/352 decode-and-compile checks; full

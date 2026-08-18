@@ -51,7 +51,7 @@ Issue/PR，合入后再审查 revision range、运行完整回归并更新 gitli
 
 - 路由、项目和 TLS 使用完整编译后再发布的不可变快照；
 - 非法配置保留旧快照，同版本候选忽略，请求 pin 住其执行版本；
-- 路由条件、模板、CIDR 和静态 gzip 尽量前移到配置编译期；
+- 路由条件、模板、CIDR 和静态 gzip 尽量前移到配置编译期，动态 gzip 由共享 response writer 流式处理；
 - proxy body、response body 和 WebSocket 使用流式转发；
 - 连接池 lease、service generation 和请求快照生命周期有明确绑定；
 - 指标按 worker 预绑定固定 schema，没有把任意 project/route/cluster 作为 label；
@@ -274,8 +274,9 @@ Validator 的 `--describe-config-limits` 输出 strict schema version 1 JSON。s
 **归属：本项目。初始实现不需要 Fiber 改动。**
 
 **实施状态：已解决（2026-08-17）。** runtime 现在使用独立单线程 compiler EventLoop。
-Project route 的 JSON、关系、脚本/模板、CIDR/address、matcher 和静态 gzip，以及 TLS 的
-JSON、PEM/SAN、TCP/QUIC context 和 bootstrap identity 准备都在该 loop 完成。Nacos loop
+Project route 的 JSON、关系、脚本/模板、CIDR/address、matcher 和静态 gzip，以及 TLS 的 JSON、PEM/SAN、
+TCP/QUIC context 和 bootstrap identity 准备都在该 loop 完成；动态 response writer 则在请求 owner loop
+装配。Nacos loop
 只检查原始字节上限、推进 generation、绑定 owner-loop-only NamingService lease、等待
 service ready 并发布完整候选。
 
@@ -286,7 +287,8 @@ Project 队列对每个当前项目只保留 latest `ConfigData` shared pointer�
 [`config-compilation.md`](config-compilation.md)。
 
 改造前，项目回调在 Nacos loop 上完成 JSON decode、关系校验、脚本和模板编译、
-CIDR/address 编译以及静态 gzip；TLS watcher 也会在 owner loop 上解析 PEM 和创建 TLS
+CIDR/address 编译以及静态 gzip；动态 gzip 不在该 loop 执行，而是在请求 owner loop 通过共享 writer
+流式处理；TLS watcher 也会在 owner loop 上解析 PEM 和创建 TLS
 context。大配置或复杂脚本会延迟同一 loop 上的其他配置和 NamingService 工作。
 
 采用的执行模型是：
@@ -1121,7 +1123,7 @@ readiness、retry 取消、旧快照保留、initial batch 及 off-loop compile�
 **实施状态：已解决（2026-08-17）。** 现在按以下边界组合 concrete component：
 
 - `ProjectConfigCompiler` 只负责 `ProjectConfig -> ProjectRouteSnapshot`：资源预算、Host/Path、
-  method、CIDR/address、脚本/模板、静态 gzip、常量包和 matcher；它借用 compiler adapter 与固定
+  method、CIDR/address、脚本/模板、静态 gzip、动态 gzip level、常量包和 matcher；它借用 compiler adapter 与固定
   limits，不持有 Nacos、版本 registry 或发布状态。既有 `compile_project_config()` 作为 validator、
   benchmark 和测试的兼容入口保留，但实际 runtime 编译直接使用该类；
 - `ProjectSnapshotRegistry` 是 owner-loop-only 的有序 registry，一条 record 只含最后成功非空版本
@@ -1359,7 +1361,7 @@ access-server -> runtime -> execution -> observability -> config
 具体边界为：
 
 - `access_server_config` 拥有 codec/limits、不可变 routing model、Host/CIDR、route/script、
-  gray 和静态 gzip 编译；
+  gray 和静态 gzip 编译；`access_server_execution` 通过 Fiber shared response writer 负责动态 gzip；
 - `access_server_observability` 拥有固定 schema metrics、activation evidence、日志策略和
   trace state，不依赖 execution/runtime；
 - `access_server_execution` 拥有 handler、response/proxy pipeline，以及与请求执行类型互相

@@ -8,7 +8,8 @@
 
 1. Route 可按一个 HTTP method 精确匹配；
 2. Route 条目除 YAML 外还可以使用请求期 JavaScript；
-3. 一个 Project 的有序 Route 列表可混合 YAML 与 JavaScript 条目。
+3. 一个 Project 的有序 Route 列表可混合 YAML 与 JavaScript 条目；
+4. RESPONSE、PROXY 和 JavaScript Route 可选择固定 MIME 白名单上的 gzip 响应。
 
 ## 2. 范围
 
@@ -16,6 +17,7 @@
 
 - YAML Route 增加可选 `method` 字段；
 - JavaScript Route 使用外置 `path`、可选 `method` 和必填脚本正文；
+- YAML/JavaScript Route 可选 `gzip: true|false|1..9`；动态响应由请求级共享 writer 流式压缩；
 - Console 的保存模型、编辑界面、本地校验、服务端编译器和 Native Validator 支持混合条目；
 - access-server wire codec、快照编译、请求匹配和 JS 执行支持新类型；
 - 旧 schema、旧 wire payload 和不含 `method` 的 Route 行为不变。
@@ -33,7 +35,7 @@
 ## 3. 术语与模型
 
 - **YAML Route**：正文是一条 YAML mapping。`path`、可选 `method` 和现有执行字段均在正文中。
-- **JavaScript Route**：正文只包含请求处理脚本；`path` 和可选 `method` 是条目外置元数据。
+- **JavaScript Route**：正文只包含请求处理脚本；`path`、可选 `method` 和可选 `gzip` 是条目外置元数据。
 - **全部 method**：Route 未配置 method；任何请求 method 都可进入该候选。
 - **混合列表**：同一 Project 的 Route 列表中 YAML 与 JavaScript 条目共同按列表顺序参与匹配。
 
@@ -69,6 +71,7 @@
 | ROUTE-JS-008 | P0     | 未提交响应前发生异常/abort 时生成稳定的 500 脚本执行错误；响应已提交后不尝试二次响应                |
 | ROUTE-JS-009 | P0     | 脚本 Route 仍受 Host/entry/Project CIDR/HTTPS 策略约束，并继续产生有界 metrics、trace 和 access log |
 | ROUTE-JS-010 | P0     | 脚本源码、请求/响应 body、敏感 header 不写入日志、错误响应或 validator 输出                         |
+| ROUTE-JS-011 | P0     | `gzip` 可选为 boolean 或 1-9 级别；最终响应仅对固定常见 MIME、状态和长度条件执行转换                |
 
 当前请求脚本读取 API 不能对未知长度流实施宿主级累计上限，因此 JS Route 只接受无 body，或
 Content-Length 已知且不超过 server 全局 request body limit 的请求；chunked/stream body 以 413
@@ -80,7 +83,7 @@ fail closed。后续只有在 Fiber 公共 API 提供有界脚本读取后才能
 | ----------------- | ------ | ------------------------------------------------------------------------------------------------------ |
 | ROUTE-CONSOLE-001 | P0     | Route 条目必须有显式 `format: yaml \| js` 判别字段                                                     |
 | ROUTE-CONSOLE-002 | P0     | YAML 条目只保存 `id`、`format`、`source`；path/method 从 YAML 正文解析                                 |
-| ROUTE-CONSOLE-003 | P0     | JS 条目保存 `id`、`format`、`source`、`path` 和可选 `method`                                           |
+| ROUTE-CONSOLE-003 | P0     | JS 条目保存 `id`、`format`、`source`、`path`、可选 `method` 和可选 `gzip`                              |
 | ROUTE-CONSOLE-004 | P0     | 新建普通 Route 默认仍为 YAML；界面另提供新建 JS Route                                                  |
 | ROUTE-CONSOLE-005 | P0     | 复制、排序、删除、历史版本预览、恢复、乐观锁和不可变版本语义对两种格式一致                             |
 | ROUTE-CONSOLE-006 | P0     | 保存前进行格式相关本地校验；完整校验仍以 Native Validator 为准                                         |
@@ -106,12 +109,14 @@ JavaScript Route 使用同一个有序 `routes` 数组，格式为：
 {
   "path": "/diagnostics/:id",
   "method": "POST",
+  "gzip": true,
   "type": "SCRIPT",
   "script": "let body = req.readJson(); return {id: $path.id, body: body};"
 }
 ```
 
 - `method` 缺失或 `null` 表示全部 method；
+- `gzip` 缺失或 `false` 表示 identity；`true` 使用级别 6，整数 `1..9` 指定级别；
 - `type: SCRIPT` 时 `script` 必须非空；
 - `type: PROXY|RESPONSE` 时 `script` 必须缺失；
 - 未识别 type、非法组合或脚本编译失败均拒绝完整候选；
@@ -139,6 +144,7 @@ JavaScript Route 使用同一个有序 `routes` 数组，格式为：
 - matcher 覆盖同 path 不同 method、all-method fallback、method+condition、dead route；
 - handler 覆盖 JS 显式响应、返回值、无返回、编译失败、执行失败和 path 常量；
 - Console 编译器覆盖 YAML method、混合列表、JS 外置字段和确定性 wire；
+- Console/native 覆盖 gzip 类型、Accept-Encoding 协商、固定 MIME、静态预压缩和动态流式响应；
 - schema 升级、API 校验、编辑器交互和历史预览覆盖两种格式；
 - native configure/build/CTest 与 Console typecheck/test/format/build 全部通过；
 - 文档继续声明生产脚本 corpus differential 与最终 cutover gate 未完成。

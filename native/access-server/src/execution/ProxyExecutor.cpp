@@ -731,7 +731,7 @@ async::Task<Result<void>> UpstreamAttempt::run() noexcept {
     if (websocket_response) {
         report_selection(true);
 
-        auto sent_header = co_await exchange_.send_header(
+        auto sent_header = co_await telemetry_.response_writer().send_header(
                 {
                         .kind = http::OutgoingHeaderKind::Final,
                         .status_code = 101,
@@ -765,7 +765,7 @@ async::Task<Result<void>> UpstreamAttempt::run() noexcept {
                     : (has_content_length ? http::HttpBodySpec::ContentLength(content_length)
                                           : http::HttpBodySpec::Auto());
     const bool response_end_stream = no_body || (has_content_length && content_length == 0);
-    auto sent_response_header = co_await exchange_.send_header(
+    auto sent_response_header = co_await telemetry_.response_writer().send_header(
             {
                     .kind = http::OutgoingHeaderKind::Final,
                     .status_code = upstream_head->status_code,
@@ -815,9 +815,8 @@ async::Task<Result<void>> UpstreamAttempt::run() noexcept {
             .read_timeout = std::chrono::milliseconds::max(),
             .write_timeout = options_.downstream_write_timeout,
     };
-    auto response_writer = http::make_http_response_writer(exchange_);
     auto piped = co_await http::pipe_http_body(http::make_http_body_pipe_reader(body_reader),
-                                               http::make_http_body_pipe_writer(response_writer),
+                                               http::make_http_body_pipe_writer(telemetry_.response_writer()),
                                                event::EventLoop::current().io_buf_node_pool(), pipe_options);
     if (!piped) {
         const http::HttpBodyPipeError pipe_error = piped.error();

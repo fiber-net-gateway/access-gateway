@@ -106,19 +106,30 @@ test('accepts RESPONSE gzip booleans and levels supported by access-server', () 
   }
 })
 
-test('reports RESPONSE gzip values and combinations rejected by access-server', () => {
+test('accepts gzip on dynamic routes and reports unsupported response combinations', () => {
+  for (const source of [
+    'path: /proxy\ntype: PROXY\nservice: users\ngzip: true',
+    'path: /template\ntype: RESPONSE\nstatus: 200\nbody: { type: TEMPLATE, content: value }\ngzip: true',
+  ]) {
+    const result = analyzeRouteSource({
+      id: crypto.randomUUID(),
+      format: 'yaml',
+      source,
+    })
+    assert.deepEqual(result.issues, [], source)
+  }
+  const script = analyzeRouteSource({
+    id: crypto.randomUUID(),
+    format: 'js',
+    path: '/script',
+    source: 'resp.send(200, "script")',
+    gzip: 1,
+  })
+  assert.deepEqual(script.issues, [])
+
   const cases = [
     { source: 'path: /\ntype: RESPONSE\ngzip: 10', code: 'INVALID_ROUTE_GZIP' },
     { source: 'path: /\ntype: RESPONSE\ngzip: null', code: 'INVALID_ROUTE_GZIP' },
-    {
-      source: 'path: /\ntype: PROXY\nservice: users\ngzip: false',
-      code: 'ROUTE_GZIP_TYPE_CONFLICT',
-    },
-    {
-      source:
-        'path: /\ntype: RESPONSE\nstatus: 200\nbody: { type: TEMPLATE, content: value }\ngzip: true',
-      code: 'ROUTE_GZIP_BODY_CONFLICT',
-    },
     {
       source:
         'path: /\ntype: RESPONSE\nstatus: 206\nbody: { type: TEXT, content: value }\ngzip: true',

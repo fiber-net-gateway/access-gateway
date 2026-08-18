@@ -107,7 +107,7 @@ API 返回影响明细并要求 `confirmSniCoverageChange=true` 后才能原子�
 - schema v1 whole-project JSON、schema v2 YAML、schema v3 网络策略和 schema v4 HTTPS 配置读取时
   确定性升级到 schema v5 YAML 条目；缺少 HTTPS 配置的旧版本设 `httpsRedirect=off`，v1/v2 同时设
   `source=route`，保持既有流量行为。旧加密文档不被原地重写。
-- 当前编译器 revision 为 `project-routes-mixed-v5-response-gzip`；Release 继续冻结输入摘要、编译器
+- 当前编译器 revision 为 `project-routes-upstream-mtls-gzip-v1`；Release 继续冻结输入摘要、编译器
   revision、wire version、精确 payload 和 Native Validator revision。
 
 切换到 Project 策略不自动删除 YAML 中的 `allows`，而是 fail closed 并要求用户确认修改对应

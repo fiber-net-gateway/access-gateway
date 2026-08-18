@@ -292,10 +292,11 @@ allows:
 公共字段至少覆盖 `path`、`type`、`condition`、`max_client_body_size`、`allows` 和
 `response_headers`。
 
-RESPONSE Route 至少覆盖 `status` 与 `body`（TEXT、BASE64、TEMPLATE）。静态 TEXT/BASE64 body
-支持 `gzip: true|false|1..9`；启用时 Console 必须拒绝
-TEMPLATE、空 body、1xx/204/205/206/304 和显式 `Content-Encoding` 组合。PROXY Route 至少覆盖
-`service`/`addresses`、`cluster`、`proxy_headers`、`context`、`rewrite`、`timeout`、
+RESPONSE Route 至少覆盖 `status` 与 `body`（TEXT、BASE64、TEMPLATE）。`gzip: true|false|1..9`
+可用于 RESPONSE、PROXY、SCRIPT；PROXY/SCRIPT 在最终响应头可用后通过请求级 writer 流式压缩。
+RESPONSE 的静态 TEXT/BASE64 在候选快照发布前预压缩，TEMPLATE 在请求阶段压缩。启用时
+Console 必须拒绝空 body、1xx/204/205/206/304 和显式 `Content-Encoding` 组合。PROXY Route
+至少覆盖 `service`/`addresses`、`cluster`、`proxy_headers`、`context`、`rewrite`、`timeout`、
 `max_proxy_body_size`、`websocket_timeout` 和 `flush`。
 
 完整默认值、coercion、模板、condition、CIDR、受保护 header 和 WebSocket 行为以 native codec

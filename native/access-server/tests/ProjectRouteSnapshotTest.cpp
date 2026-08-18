@@ -628,21 +628,28 @@ TEST(ProjectRouteSnapshotTest, PrecompressesEnabledStaticResponseBodies) {
     EXPECT_TRUE(disabled_snapshot.routes()[0].response->gzip_body.empty());
 }
 
-TEST(ProjectRouteSnapshotTest, RejectsUnsupportedResponseGzipCombinations) {
+TEST(ProjectRouteSnapshotTest, SupportsDynamicGzipAndRejectsUnsupportedResponseCombinations) {
     {
         RouteConfig route = proxy_route("/proxy");
         route.gzip = ResponseGzipConfig{.enabled = false};
         auto result = compile_project_config("demo", project_with_routes({std::move(route)}));
-        ASSERT_FALSE(result);
-        EXPECT_EQ(result.error().field, "routes[0].gzip");
+        const ProjectRouteSnapshot &snapshot = require_snapshot(result);
+        ASSERT_TRUE(snapshot.routes()[0].proxy);
+        EXPECT_FALSE(snapshot.routes()[0].gzip_level);
     }
     {
+        ScriptCompilerCapture capture;
         RouteConfig route = response_route("/template");
         route.body = RouteBodyConfig{.type = BodyType::Template, .content = "${$req.method}"};
         route.gzip = ResponseGzipConfig{.enabled = true};
-        auto result = compile_project_config("demo", project_with_routes({std::move(route)}));
-        ASSERT_FALSE(result);
-        EXPECT_EQ(result.error().field, "routes[0].gzip");
+        auto result =
+                compile_project_config("demo", project_with_routes({std::move(route)}), compiler_adapter(capture));
+        const ProjectRouteSnapshot &snapshot = require_snapshot(result);
+        ASSERT_TRUE(snapshot.routes()[0].response);
+        ASSERT_TRUE(snapshot.routes()[0].gzip_level);
+        EXPECT_EQ(*snapshot.routes()[0].gzip_level, 6);
+        EXPECT_FALSE(snapshot.routes()[0].response->gzip_level);
+        EXPECT_TRUE(snapshot.routes()[0].response->body_template);
     }
     {
         RouteConfig route = response_route("/encoded");
@@ -653,7 +660,7 @@ TEST(ProjectRouteSnapshotTest, RejectsUnsupportedResponseGzipCombinations) {
         ASSERT_FALSE(result);
         EXPECT_EQ(result.error().field, "routes[0].gzip");
     }
-    for (const std::int32_t status: {204, 206, 304}) {
+    for (const std::int32_t status: {204, 205, 206, 304}) {
         SCOPED_TRACE(status);
         RouteConfig route = response_route("/status", status);
         route.body = RouteBodyConfig{.type = BodyType::Text, .content = "body"};

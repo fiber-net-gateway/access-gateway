@@ -34,6 +34,10 @@
   <li>Select <strong>+ JS</strong>.</li>
   <li>Fill in the external <code>Path pattern</code> above the editor.</li>
   <li>Optionally fill in <code>Method</code>; blank means every HTTP method.</li>
+  <li>
+    Choose the optional <code>Gzip response</code> setting; <code>true</code> uses level 6 and an
+    integer from <code>1</code> through <code>9</code> selects a level.
+  </li>
   <li>Put only the script source in the JavaScript editor.</li>
   <li>Fix local issues and save a new immutable configuration version.</li>
   <li>
@@ -51,6 +55,7 @@
     format: &quot;js&quot;;
     path: string;
     method?: string;
+    gzip?: boolean | number;
     source: string;
 }
 </code></pre>
@@ -123,6 +128,13 @@
     >#</a
   >
 </h2>
+<p>
+  When Gzip response is enabled, access-server negotiates <code>Accept-Encoding</code> and wraps the
+  script response with the shared streaming response writer. It only transforms the fixed common
+  MIME allowlist (for example <code>text/plain</code>, <code>application/json</code>, and
+  <code>application/xml</code>); short, already encoded, and other MIME responses remain identity
+  responses.
+</p>
 <h3 id="4-1-implicit-response">
   4.1 Implicit response<a
     class="documentation-heading-anchor"

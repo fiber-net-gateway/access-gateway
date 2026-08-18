@@ -7,12 +7,15 @@
 #include "ScriptExecutionContext.h"
 #include "TracePropagation.h"
 
+#include <cstdint>
 #include <optional>
 #include <string_view>
 
 #include <fiber/common/IoError.h>
 #include <fiber/common/NonCopyable.h>
 #include <fiber/common/NonMovable.h>
+#include <fiber/http/GzipResponseWriter.h>
+#include <fiber/http/HttpResponseWriter.h>
 
 namespace fiber::cat {
 class CatClient;
@@ -58,9 +61,11 @@ public:
     }
     void record_response_compression(bool compressed) noexcept {
         observability_.record_response_compression(compressed);
+        response_compression_recorded_ = true;
     }
     void record_response_compression_not_acceptable() noexcept {
         observability_.record_response_compression_not_acceptable();
+        response_compression_recorded_ = true;
     }
     void record_proxy_execution(AccessProxyExecutionResult result) noexcept {
         observability_.record_proxy_execution(result);
@@ -108,6 +113,10 @@ public:
     }
     [[nodiscard]] http::HttpHeaders &response_headers() noexcept { return execution_.response_headers(); }
     [[nodiscard]] const http::HttpHeaders &response_headers() const noexcept { return execution_.response_headers(); }
+    [[nodiscard]] http::HttpResponseWriter &response_writer() noexcept { return response_writer_; }
+    [[nodiscard]] const http::HttpResponseWriter &response_writer() const noexcept { return response_writer_; }
+    [[nodiscard]] common::IoResult<void> enable_response_compression(std::uint8_t level,
+                                                                     bool request_accepts_gzip) noexcept;
     [[nodiscard]] const ClientMetadata &client_metadata() const noexcept { return client_metadata_; }
     [[nodiscard]] bool finalize_response_headers() noexcept {
         return trace_.finalize_response_headers(execution_.response_headers());
@@ -121,6 +130,9 @@ private:
     // Construction order is a lifetime invariant: observability is destroyed
     // before the trace, metadata, and exchange-backed execution state it reads.
     ScriptExecutionContext execution_;
+    http::HttpResponseWriter response_writer_;
+    std::optional<http::GzipResponseWriter> gzip_writer_;
+    bool response_compression_recorded_ = false;
     ClientMetadata client_metadata_;
     TracePropagation trace_;
     RequestObservability observability_;

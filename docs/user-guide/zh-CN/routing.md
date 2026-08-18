@@ -48,7 +48,7 @@ Console 必须显示“未知”，不能把 Published 渲染成 Active。
 
 - YAML Route：正文是一条 YAML mapping，`path`、`method` 和执行字段都写在正文中；只允许
   `PROXY` 或 `RESPONSE`。
-- JavaScript Route：正文只写脚本，`path` 和可选 `method` 在编辑器外单独填写；发布时编译为
+- JavaScript Route：正文只写脚本，`path`、可选 `method` 和可选 `gzip` 在编辑器外单独填写；发布时编译为
   wire `type: SCRIPT`。
 
 每个编辑器只包含一条 Route，不要在一个 YAML 编辑器中写 `routes:` 数组。拖动或键盘排序会改变
@@ -190,29 +190,29 @@ matcher 的结构优先级。
 
 ## 6. YAML Route 字段参考
 
-| 字段                   | 适用类型       | 规则与默认值                                               |
-| ---------------------- | -------------- | ---------------------------------------------------------- |
-| `path`                 | 全部           | 必填、非空、ASCII Path pattern                             |
-| `method`               | 全部           | 可选；缺失/`null` 匹配全部，配置后精确匹配                 |
-| `type`                 | 全部           | YAML 中必须为 `RESPONSE` 或 `PROXY`                        |
-| `condition`            | YAML           | 可选同步表达式                                             |
-| `service`              | PROXY          | 命名服务；可写 `service/cluster`                           |
-| `cluster`              | PROXY          | 显式 cluster，覆盖 `service` suffix                        |
-| `addresses`            | PROXY          | 无 `service` 时使用的静态 HTTP(S) authority 列表           |
-| `proxy_headers`        | PROXY          | 发往 upstream 的 header 模板 mapping                       |
-| `response_headers`     | RESPONSE/PROXY | 发往 client 的 header 模板 mapping                         |
-| `context`              | PROXY          | trace/CAT context 模板 mapping                             |
-| `rewrite`              | PROXY          | upstream path 模板；原 query 会重新拼接                    |
-| `status`               | RESPONSE       | 必填；native 接受 100–999，实际应使用标准 HTTP status      |
-| `body`                 | RESPONSE       | 可选；缺失表示空 body                                      |
-| `gzip`                 | RESPONSE       | 可选；`true` 使用级别 6，`1`–`9` 指定级别，`false` 关闭    |
-| `timeout`              | PROXY          | response header timeout；默认 60000 ms，配置值至少 5 ms    |
-| `max_client_body_size` | RESPONSE/PROXY | Route 请求体限制；缺失或数值 0 使用 server 默认值          |
-| `max_proxy_body_size`  | PROXY          | 非零时覆盖 upstream response body 限制                     |
-| `websocket_timeout`    | PROXY          | 大于 0 时允许 WebSocket tunnel，并作为隧道读写 timeout     |
-| `flush`                | PROXY          | `true` 开启低延迟 body flush，并写 `X-Accel-Buffering: no` |
-| `allows`               | 全部           | CIDR allow/deny sequence；`!` 前缀表示 deny                |
-| `upstream_tls`         | PROXY          | native-only 不可变出站 TLS transport profile               |
+| 字段                   | 适用类型              | 规则与默认值                                               |
+| ---------------------- | --------------------- | ---------------------------------------------------------- |
+| `path`                 | 全部                  | 必填、非空、ASCII Path pattern                             |
+| `method`               | 全部                  | 可选；缺失/`null` 匹配全部，配置后精确匹配                 |
+| `type`                 | 全部                  | YAML 中必须为 `RESPONSE` 或 `PROXY`                        |
+| `condition`            | YAML                  | 可选同步表达式                                             |
+| `service`              | PROXY                 | 命名服务；可写 `service/cluster`                           |
+| `cluster`              | PROXY                 | 显式 cluster，覆盖 `service` suffix                        |
+| `addresses`            | PROXY                 | 无 `service` 时使用的静态 HTTP(S) authority 列表           |
+| `proxy_headers`        | PROXY                 | 发往 upstream 的 header 模板 mapping                       |
+| `response_headers`     | RESPONSE/PROXY        | 发往 client 的 header 模板 mapping                         |
+| `context`              | PROXY                 | trace/CAT context 模板 mapping                             |
+| `rewrite`              | PROXY                 | upstream path 模板；原 query 会重新拼接                    |
+| `status`               | RESPONSE              | 必填；native 接受 100–999，实际应使用标准 HTTP status      |
+| `body`                 | RESPONSE              | 可选；缺失表示空 body                                      |
+| `gzip`                 | RESPONSE/PROXY/SCRIPT | 可选；`true` 使用级别 6，`1`–`9` 指定级别，`false` 关闭    |
+| `timeout`              | PROXY                 | response header timeout；默认 60000 ms，配置值至少 5 ms    |
+| `max_client_body_size` | RESPONSE/PROXY        | Route 请求体限制；缺失或数值 0 使用 server 默认值          |
+| `max_proxy_body_size`  | PROXY                 | 非零时覆盖 upstream response body 限制                     |
+| `websocket_timeout`    | PROXY                 | 大于 0 时允许 WebSocket tunnel，并作为隧道读写 timeout     |
+| `flush`                | PROXY                 | `true` 开启低延迟 body flush，并写 `X-Accel-Buffering: no` |
+| `allows`               | 全部                  | CIDR allow/deny sequence；`!` 前缀表示 deny                |
+| `upstream_tls`         | PROXY                 | native-only 不可变出站 TLS transport profile               |
 
 时间值接受整数毫秒，或不区分单位大小写的字符串：`500`、`500ms`、`5s`。数据大小接受整数 byte，
 或二进制单位字符串，例如 `64k`、`4m`、`1g`。新配置应使用非负、含义明确的值；不要依赖 Java
@@ -292,16 +292,22 @@ Transfer-Encoding, Upgrade
 ### 7.4 Gzip 内容协商
 
 `gzip` 缺失或为 `false` 时不压缩；`true` 使用默认压缩级别 6，整数 `1`–`9` 指定压缩级别。
-首版只支持非空 `TEXT` 和 `BASE64` body：access-server 在候选快照发布前同时固化 identity 与 gzip
-字节，请求热路径只选择已有表示，不执行压缩。`TEMPLATE` body 暂不支持 gzip。
+RESPONSE、PROXY、SCRIPT 都可以启用：静态 `TEXT`/`BASE64` body 在候选快照发布前预压缩，
+`TEMPLATE` body 以及代理/脚本响应在最终 header 可用后通过共享的请求级 writer 流式压缩。
+固定 MIME 白名单为 `text/html`、`text/plain`、`text/css`、`text/javascript`、
+`application/javascript`、`application/json`、`application/xml`、`application/rss+xml`、
+`application/wasm` 和 `image/svg+xml`，其他类型保持 identity。
 
 启用后，access-server 根据 `Accept-Encoding` 中的 `gzip`、`identity`、`*` 和 `q` 权重选择表示；
-未发送该 header 时返回 identity，两个表示都被显式拒绝时返回 406 `NOT_ACCEPTABLE`。响应总是合并
-`Vary: Accept-Encoding`；选择 gzip 时写 `Content-Encoding: gzip` 和对应 `Content-Length`。
-配置的强 ETag 会降为弱 ETag，HEAD 执行相同的编码选择并发送对应 header，但不发送 body。
+未发送该 header 时返回 identity，两个表示都被显式拒绝时返回 406 `NOT_ACCEPTABLE`。满足转换条件的
+响应会合并 `Vary: Accept-Encoding`；选择 gzip 时写 `Content-Encoding: gzip`。静态 `TEXT`/`BASE64`
+响应保留 gzip 的 `Content-Length`，`TEMPLATE`、`PROXY`、`SCRIPT` 响应使用流式 writer 的
+自动/chunked framing。实际转换时配置的强 ETag 会降为弱 ETag；HEAD 执行相同的编码选择并发送
+对应 header，但不发送 body。
 
-以下组合会在配置编译阶段被拒绝：PROXY Route 上出现 `gzip` 字段、空 body、`TEMPLATE` body、
-1xx/204/205/206/304 status，以及同时配置 `response_headers.Content-Encoding`。
+以下 RESPONSE 组合会在配置编译阶段被拒绝：空 body、1xx/204/205/206/304 status，以及同时
+配置 `response_headers.Content-Encoding`。动态响应遇到不在白名单的 MIME 或已有编码时保持
+原样传输。
 
 ## 8. PROXY Route
 

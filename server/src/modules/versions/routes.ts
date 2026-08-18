@@ -102,6 +102,9 @@ const projectRoutesModelSchema = {
             minLength: 1,
             maxLength: fallbackAccessConfigLimits.projectRoute.maxMethodBytes,
           },
+          gzip: {
+            anyOf: [{ type: 'boolean' }, { type: 'integer', minimum: 1, maximum: 9 }],
+          },
         },
         if: { properties: { format: { const: 'js' } }, required: ['format'] },
         then: {

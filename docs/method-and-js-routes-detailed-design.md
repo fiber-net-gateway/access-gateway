@@ -19,7 +19,14 @@ schema 升级为 v5，顶层 `kind` 保留 `project_routes_yaml`，避免改变�
 ```ts
 type RouteItemModel =
   | { id: string; format: 'yaml'; source: string }
-  | { id: string; format: 'js'; source: string; path: string; method?: string }
+  | {
+      id: string
+      format: 'js'
+      source: string
+      path: string
+      method?: string
+      gzip?: boolean | number
+    }
 
 interface ProjectRoutesModel {
   schemaVersion: 5
@@ -50,8 +57,8 @@ interface ProjectRoutesModel {
 `compileProjectRoutes()` 按条目 format 分派：
 
 ```text
-yaml -> 安全 YAML parse -> 字段/shape 校验 -> wire route object
-js   -> 外置 path/method 校验 -> {path, method?, type:'SCRIPT', script:source}
+yaml -> 安全 YAML parse -> 字段/shape/gzip 校验 -> wire route object
+js   -> 外置 path/method/gzip 校验 -> {path, method?, gzip?, type:'SCRIPT', script:source}
                                      |
                                      +-- Project allows 注入（若启用）
 ordered wire routes -> canonical JSON -> SHA-256 -> Native Validator
@@ -70,6 +77,13 @@ method token 使用 RFC 9110 token 字符集合：
 
 JS source 空字符串报 `EMPTY_ROUTE_SCRIPT`；path 复用 native path pattern 的最终校验，本地先做非空和
 长度校验。脚本语法不在 Node 中解析，交给 Native Validator，防止出现两个脚本语义来源。
+
+`gzip` 的 boolean/级别在 Console 和 Native 两侧都校验。RESPONSE 的静态 TEXT/BASE64 在候选快照
+编译期生成不可变 gzip 表示；TEMPLATE、PROXY 和 SCRIPT 在最终 response header 可用后装配 Fiber
+共享 response writer。writer 使用固定的 MIME 白名单（`text/html`、`text/plain`、`text/css`、
+`text/javascript`、`application/javascript`、`application/json`、`application/xml`、
+`application/rss+xml`、`application/wasm`、`image/svg+xml`）、最小 body 长度和请求协商结果；动态输出
+沿用底层 HTTP backpressure 与 flush 语义。
 
 该增量当时把编译器 revision 更新为 `project-routes-mixed-v5-method-script`；后续功能继续递增。
 
@@ -166,7 +180,8 @@ Fiber 脚本读取接口无法让宿主对未知长度流累计计数，因此 c
 - 工具栏保留 `+ RESPONSE`、`+ PROXY`（均创建 YAML），新增 `+ JS`；
 - 卡片显示 `YAML/JS`、执行类型、path、method 或 `ALL METHODS`；
 - YAML 使用现有 CodeMirror YAML mode，并增加 method completion；
-- JS 使用独立 CodeMirror JavaScript mode；外置 path 为必填输入，method 为可选文本输入；
+- JS 使用独立 CodeMirror JavaScript mode；外置 path 为必填输入，method 为可选文本输入，gzip 为可选
+  selector；
 - format 在创建后不可就地切换，避免静默丢失 YAML 字段；用户可新建目标格式后复制正文；
 - 本地问题阻止保存，Native 问题按 routeId/field 定位到 source/path/method；
 - 历史预览显示 format 和 JS 外置匹配元数据。
@@ -178,6 +193,7 @@ Fiber 脚本读取接口无法让宿主对未知长度流累计计数，因此 c
 - 编译产物和 ConstPackage 属于不可变 Project snapshot，请求通过 shared snapshot pin 保活；
 - request heap 属于请求，异步脚本必须在 owner EventLoop 完成或随 exchange 取消；
 - method 热路径仅一次 optional 检查和等长字节比较；
+- 动态 gzip 不在配置快照缓存压缩后的响应，writer 只为命中请求分配压缩状态并复用底层流式缓冲；
 - 不新增 method/project/path metrics label；
 - 配置编译失败、同版本更新和 shutdown 顺序沿用现有 RouteConfigStore/Watcher 语义。
 
@@ -188,6 +204,7 @@ Fiber 脚本读取接口无法让宿主对未知长度流累计计数，因此 c
 - Codec：method、SCRIPT、null/coercion；
 - Snapshot：token、SCRIPT 组合、脚本编译、same-path method、fallback/dead route；
 - Handler：GET/POST 分流、method+condition、JS sync/async response、path constant、异常；
+- Handler：动态 gzip 的模板、脚本、代理响应、MIME bypass 和 chunked 解码；
 - Store/Watcher/Validator：失败保留旧快照、字段路径和 summary。
 
 ### Console
