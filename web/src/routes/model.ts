@@ -65,8 +65,9 @@ const analysisCache = new WeakMap<RouteItemModel, RouteSourceAnalysis>()
 
 export function initialRouteModel(): ProjectRoutesModel {
   return {
-    schemaVersion: 5,
+    schemaVersion: 6,
     kind: 'project_routes_yaml',
+    hostAliases: [],
     networkPolicy: {
       source: 'route',
       httpsRedirect: 'off',
@@ -75,6 +76,42 @@ export function initialRouteModel(): ProjectRoutesModel {
     },
     routes: [],
   }
+}
+
+/** Normalize the exact DNS host syntax used by the server-side host binding validator. */
+export function normalizeExactHost(value: string): string | null {
+  const trimmed = value.trim()
+  if (
+    trimmed.length === 0 ||
+    /[\u0000-\u001f\u007f]/u.test(trimmed) ||
+    /[\\/:?#@]/u.test(trimmed)
+  ) {
+    return null
+  }
+  const candidate = trimmed.endsWith('.') ? trimmed.slice(0, -1) : trimmed
+  if (candidate.length === 0 || candidate.includes('*')) return null
+  let hostname: string
+  try {
+    hostname = new URL(`http://${candidate}`).hostname.replace(/\.$/u, '').toLowerCase()
+  } catch {
+    return null
+  }
+  if (
+    hostname.length < 1 ||
+    hostname.length > 253 ||
+    hostname.startsWith('[') ||
+    hostname.endsWith(']') ||
+    validTlsIp(hostname)
+  ) {
+    return null
+  }
+  const labels = hostname.split('.')
+  return labels.every(
+    (label) =>
+      label.length >= 1 && label.length <= 63 && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/u.test(label),
+  )
+    ? hostname
+    : null
 }
 
 function createRouteId(): string {

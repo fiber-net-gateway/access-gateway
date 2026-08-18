@@ -48,9 +48,18 @@ const projectRoutesModelSchema = {
   type: 'object',
   additionalProperties: false,
   required: ['schemaVersion', 'kind', 'networkPolicy', 'routes'],
+  anyOf: [
+    { properties: { schemaVersion: { const: 5 } }, not: { required: ['hostAliases'] } },
+    { properties: { schemaVersion: { const: 6 } }, required: ['hostAliases'] },
+  ],
   properties: {
-    schemaVersion: { type: 'integer', const: 5 },
+    schemaVersion: { type: 'integer', enum: [5, 6] },
     kind: { type: 'string', const: 'project_routes_yaml' },
+    hostAliases: {
+      type: 'array',
+      maxItems: Math.max(fallbackAccessConfigLimits.projectRoute.maxHosts - 1, 0),
+      items: { type: 'string', minLength: 1, maxLength: 253 },
+    },
     networkPolicy: {
       type: 'object',
       additionalProperties: false,

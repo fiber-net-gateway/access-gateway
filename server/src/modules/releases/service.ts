@@ -9,9 +9,17 @@ import {
   fallbackAccessConfigLimits,
   utf8Bytes,
 } from '../../integrations/native-validator/limits.js'
-import { conflict, forbidden, notFound, unavailable, unprocessable } from '../../shared/errors.js'
+import {
+  AppError,
+  conflict,
+  forbidden,
+  notFound,
+  unavailable,
+  unprocessable,
+} from '../../shared/errors.js'
 import { canonicalJson, sha256 } from '../../shared/json.js'
 import { bufferToPublicId } from '../../shared/ids.js'
+import { normalizeExactHost } from '../../shared/hosts.js'
 import type { Actor } from '../auth/model.js'
 import { compileProjectRoutes, ROUTE_COMPILER_REVISION } from '../drafts/compiler.js'
 import { validateProjectRoutesCandidate } from '../drafts/validation.js'
@@ -79,6 +87,87 @@ function projectNames(content: string | null): string[] {
         .filter(Boolean),
     ),
   ]
+}
+
+function routeHostPatterns(content: string | null): readonly string[] {
+  if (!content) return []
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(content)
+  } catch {
+    throw new Error('route resource is not valid JSON')
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error('route resource must be a JSON object')
+  }
+  const host = (parsed as Record<string, unknown>).host
+  if (typeof host !== 'object' || host === null || Array.isArray(host)) {
+    throw new Error('route resource host map is missing')
+  }
+  return Object.keys(host)
+}
+
+const hostPreflightConcurrency = 16
+
+export function hostPatternConflicts(pattern: string, alias: string): boolean {
+  const normalizedAlias = normalizeExactHost(alias)
+  if (!normalizedAlias) return false
+  const normalizedPattern = normalizeExactHost(pattern)
+  if (normalizedPattern) return normalizedPattern === normalizedAlias
+  // Existing Java configurations may contain a leading-label wildcard. The
+  // new editor does not create them, but an alias covered by one would still
+  // be ambiguous across Projects, so reserve that namespace as well.
+  if (pattern === '*') return true
+  if (pattern.startsWith('*.')) {
+    const suffix = normalizeExactHost(pattern.slice(2))
+    return suffix !== null && normalizedAlias.endsWith(`.${suffix}`) && normalizedAlias !== suffix
+  }
+  return false
+}
+
+async function ensureHostAliasesAvailable(
+  nacos: NacosClient,
+  target: NacosTarget,
+  routePrefix: string,
+  routeGroup: string,
+  projectName: string,
+  projectList: string | null,
+  aliases: readonly string[],
+): Promise<void> {
+  if (aliases.length === 0) return
+  const otherProjects = projectNames(projectList).filter((name) => name !== projectName)
+  if (otherProjects.length === 0) return
+  const resources: NacosResourceValue[] = []
+  for (let offset = 0; offset < otherProjects.length; offset += hostPreflightConcurrency) {
+    const batch = otherProjects.slice(offset, offset + hostPreflightConcurrency)
+    resources.push(
+      ...(await Promise.all(
+        batch.map((name) => nacos.read(target, `${routePrefix}${name}`, routeGroup)),
+      )),
+    )
+  }
+  for (const [index, resource] of resources.entries()) {
+    if (!resource.exists || resource.content === null) {
+      throw new Error(`route resource for ${otherProjects[index] ?? 'unknown'} is unavailable`)
+    }
+    const patterns = routeHostPatterns(resource.content)
+    for (const alias of aliases) {
+      const conflictPattern = patterns.find((pattern) => hostPatternConflicts(pattern, alias))
+      if (conflictPattern) {
+        throw unprocessable(
+          'HOST_ALIAS_CONFLICT',
+          'One or more associated domains are already bound to another Project',
+          [
+            {
+              path: 'model.hostAliases',
+              code: 'HOST_ALREADY_BOUND',
+              message: `${alias} conflicts with an existing host binding`,
+            },
+          ],
+        )
+      }
+    }
+  }
 }
 
 function trimJava(value: string): string {
@@ -335,6 +424,24 @@ export class DefaultReleaseService implements ReleaseService {
     } catch (error) {
       await this.#releases.markAbandoned(begun.release.id, 'PROJECT_LIST_LIMIT_EXCEEDED')
       throw error
+    }
+    try {
+      await ensureHostAliasesAvailable(
+        this.#nacos,
+        target,
+        environment.dataIds.routePrefix,
+        environment.dataIds.routeGroup,
+        project.name,
+        projectsBase.content,
+        source.model.hostAliases,
+      )
+    } catch (error) {
+      await this.#releases.markAbandoned(begun.release.id, 'HOST_ALIAS_PREFLIGHT_FAILED')
+      if (error instanceof AppError && error.code === 'HOST_ALIAS_CONFLICT') throw error
+      throw unavailable(
+        'HOST_ALIAS_PREFLIGHT_FAILED',
+        'Existing Project host bindings could not be checked before publication',
+      )
     }
     try {
       await this.#releases.completePreparation(

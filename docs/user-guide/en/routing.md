@@ -99,8 +99,11 @@ Supported patterns are:
 | Global wildcard | `*`               | Any valid Host                                                    |
 | Suffix wildcard | `*.example.com`   | `a.example.com` and `a.b.example.com`, but not bare `example.com` |
 
-Two Projects cannot declare Host patterns that normalize to the same value. The Console normally derives
-one exact Host from the Project domain, but direct wire configuration must still respect global conflicts.
+Two Projects cannot declare Host patterns that normalize to the same value. The Console keeps one
+immutable primary domain per Project and lets the Routes page add multiple exact Host aliases. Aliases
+share the Project's routes, policy, and Release; they do not add Project List entries or
+`route.<alias>` Data IDs. Before a Release, the Console reads existing route resources to check alias
+conflicts, while direct wire configuration must still respect global conflicts.
 
 An unmatched Host returns HTTP 404 with error name `ROUTER_NOT_FOUND`. Path selection starts only after a
 Host matches.
@@ -526,6 +529,9 @@ A simplified Project payload is:
     "version": 42,
     "host": {
         "api.example.com": {
+            "https": "S_NOT_MUST"
+        },
+        "www.example.com": {
             "https": "S_NOT_MUST"
         }
     },

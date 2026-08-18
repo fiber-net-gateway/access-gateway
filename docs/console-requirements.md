@@ -110,7 +110,7 @@ Project 分开管理，由证书 DNS SAN 自动形成 ClientHello SNI 选择索�
 
 ### 5.1 核心对象
 
-- **Project**：一个规范化 exact domain，以及其路由配置版本、Release 历史和状态摘要。
+- **Project**：一个不可变的规范化 primary domain、可选 Host alias，以及其路由配置版本、Release 历史和状态摘要。
 - **Route Item**：Project 下有稳定控制面 ID 和顺序的一条路由；格式为 YAML mapping 或
   JavaScript 脚本。JS 的 path/可选 method 存在条目元数据中；ID、format 和顺序不直接写入 wire。
 - **Working Copy**：浏览器中基于某个配置版本继续编辑的临时内容，可以包含未完成或无效 Route；
@@ -206,16 +206,16 @@ Project 页面固定显示域名、当前配置版本、未保存状态、rnacos
 
 ### 7.1 Project（域名）
 
-| ID          | 优先级 | 需求                                                                             |
-| ----------- | ------ | -------------------------------------------------------------------------------- |
-| CON-PRJ-001 | P0     | Projects 首页按域名搜索和列出 Project，并显示 Route 数、配置版本、发布和激活状态 |
-| CON-PRJ-002 | P0     | 支持创建、复制和归档 Project；创建后自动建立空 Route Working Copy                |
-| CON-PRJ-003 | P0     | Project domain 必须规范化、唯一，并作为默认 exact Host 和 rnacos project key     |
-| CON-PRJ-004 | P0     | 支持 Project 级 HTTPS redirect 策略：关闭、301、302、307、308；默认关闭          |
-| CON-PRJ-005 | P0     | 归档/下线前展示域名将从项目列表和运行快照移除，要求输入域名二次确认              |
-| CON-PRJ-006 | P0     | wire `version` 由 Release 流程分配，普通编辑器不可见、不可手工修改               |
-| CON-PRJ-007 | P1     | 支持从 rnacos 导入当前项目和 route 原文，但导入不得覆盖未确认的 Working Copy     |
-| CON-PRJ-008 | P1     | 支持多人编辑乐观锁；发现 base Configuration Version 改变时提示比较和合并         |
+| ID          | 优先级 | 需求                                                                                                            |
+| ----------- | ------ | --------------------------------------------------------------------------------------------------------------- |
+| CON-PRJ-001 | P0     | Projects 首页按域名搜索和列出 Project，并显示 Route 数、配置版本、发布和激活状态                                |
+| CON-PRJ-002 | P0     | 支持创建、复制和归档 Project；创建后自动建立空 Route Working Copy                                               |
+| CON-PRJ-003 | P0     | Project 主域名必须规范化、唯一，并作为默认 exact Host 和 rnacos project key；Routes 可维护多个 exact Host alias |
+| CON-PRJ-004 | P0     | 支持 Project 级 HTTPS redirect 策略：关闭、301、302、307、308；默认关闭                                         |
+| CON-PRJ-005 | P0     | 归档/下线前展示 Project 的主域名及全部关联 Host 将从项目列表和运行快照移除，要求输入主域名二次确认              |
+| CON-PRJ-006 | P0     | wire `version` 由 Release 流程分配，普通编辑器不可见、不可手工修改                                              |
+| CON-PRJ-007 | P1     | 支持从 rnacos 导入当前项目和 route 原文，但导入不得覆盖未确认的 Working Copy                                    |
+| CON-PRJ-008 | P1     | 支持多人编辑乐观锁；发现 base Configuration Version 改变时提示比较和合并                                        |
 
 域名规则：
 
@@ -225,8 +225,10 @@ Project 页面固定显示域名、当前配置版本、未保存状态、rnacos
 - 不接受通配符、端口、URL、路径和 IP 字面量；
 - 显示时可同时提供 Unicode 友好形式，但存储、唯一性和发布均使用规范化 ASCII domain。
 
-新版 Project 固定为单域名。旧配置若一个 project 包含多个 Host 或 project key 不是合法域名，
-必须通过有预览和人工确认的迁移流程处理；P0 不自动拆分或静默改名。
+Project 保留一个不可变主域名，可在 Routes 页面维护多个精确 Host alias。alias 与主域名共享 Route、
+网络策略、版本和 Release，不新增 Project List 条目，也不新增 `route.<alias>` Data ID。旧配置中的
+精确 Host 可迁移为 alias；通配符、IP 或无法规范化的 Host 必须通过有预览和人工确认的迁移流程处理，
+不得静默丢弃。
 
 ### 7.2 逐条 YAML/JavaScript Route 编辑器
 
@@ -358,8 +360,9 @@ Console 必须拒绝空 body、1xx/204/205/206/304 和显式 `Content-Encoding` 
 确定性编译结果遵守当前 wire contract：
 
 - 项目列表：`ploto.unified-access.projects`，Group `ACCESS-SERVER`，内容为分号分隔 domain；
-- 项目 route：`ploto.unified-access.route.<domain>`，Group `ACCESS-SERVER`；
-- Project domain 编译为唯一 exact `host`；HTTPS redirect 设置编译为对应 HostStrategy；
+- 项目 route：`ploto.unified-access.route.<primary-domain>`，Group `ACCESS-SERVER`；
+- Project 主域名和 `hostAliases` 编译为同一 route JSON 中的多个 exact `host`；所有 Host 使用同一
+  HTTPS HostStrategy；
 - 所有 Route YAML 按页面顺序解析并放入 JSON `routes` 数组；
 - Release 分配 `version`，YAML 和普通 Project 设置中不能覆盖它；
 - 编译器版本、输入摘要、输出 bytes 和 native validator contract version 都进入 Release 证据。
@@ -402,7 +405,7 @@ rnacos readback 或 TLS 库存推断 HTTPS 已经可达。
 
 ### 7.4.1 网络策略配置
 
-网络策略作为 Configuration Version schema v5 的一部分保存，而不是可漂移的 Project 当前属性。
+网络策略和 Host alias 作为 Configuration Version schema v6 的一部分保存，而不是可漂移的 Project 当前属性。
 其中 HTTPS redirect 独立配置为关闭/301/302/307/308，并编译到 exact HostStrategy；CIDR 支持
 “Route 自主管理”和“Project 统一策略”两种互斥模式。统一模式把允许 CIDR 和优先拒绝 CIDR
 确定性编译进每条 route `allows`，并禁止 Route YAML 同时声明 `allows`。详细需求、迁移、API、
@@ -531,7 +534,7 @@ API 统一位于 `/api`，使用显式 request/response schema、稳定错误 co
 
 | 对象                        | 关键内容                                                              |
 | --------------------------- | --------------------------------------------------------------------- |
-| `projects`                  | domain、状态、HTTPS 策略、当前配置/发布摘要                           |
+| `projects`                  | 主 domain、状态、当前配置/发布摘要；Host alias 保存在不可变配置版本   |
 | `route_items`               | 稳定 ID、Project、顺序；当前编辑头不作为发布事实                      |
 | `draft_revisions`           | 内部承载不可变配置版本：版本号、Route 原文/顺序、作者、说明和来源版本 |
 | `validation_runs`           | 配置版本、校验层级、编译器/validator 版本、结果和结构化错误           |
@@ -695,7 +698,7 @@ Route 不能破坏历史 Release 和审计引用。
 
 - 浏览器崩溃恢复副本的保留方式；恢复副本不作为正式配置版本或可发布来源；
 - YAML parser/editor 选型、补全 schema 来源和 YAML 错误到 native 字段路径的 source map；
-- 旧的多 Host/non-domain project 向单域名 Project 的迁移策略；
+- 旧的多 Host/non-domain project 向主域名加 exact alias 模型的迁移策略；
 - 证书私钥保留期限、销毁证明、KEK provider 和运行时安全交付协议；
 - 外部 TLS 终止器声明的授权方式和证书覆盖证据；
 - Project `version` 的并发分配算法和 int32 上限处理；

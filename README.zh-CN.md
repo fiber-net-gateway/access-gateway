@@ -147,7 +147,7 @@ Migration 使用 checksum 防篡改，并通过 MySQL advisory lock 串行执行
 - Project YAML Route 校验和确定性的 native wire 预览；
 - 从当前或历史版本创建 Release、加入发布队列和查询执行状态。
 
-每个 Configuration Version 保存有序 Route ID 和精确 YAML 原文；旧的整份 Project JSON revision
+每个 Configuration Version 使用 schema v6，保存主域名之外的 Host alias、有序 Route ID 和精确 YAML 原文；旧的整份 Project JSON revision
 会在读取时升级为稳定的 YAML Route Item。模型文档在写入 MySQL 前使用 AES-256-GCM 信封加密。本地密钥配置只
 用于开发环境；生产环境应接入外部密钥服务。
 

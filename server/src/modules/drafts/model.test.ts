@@ -2,7 +2,11 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import { fallbackAccessConfigLimits } from '../../integrations/native-validator/limits.js'
-import { isProjectRoutesModel, normalizeStoredProjectRoutesModel } from './model.js'
+import {
+  isProjectRoutesModel,
+  normalizeProjectRoutesModelInput,
+  normalizeStoredProjectRoutesModel,
+} from './model.js'
 
 test('upgrades legacy whole-project JSON revisions to stable YAML route items', () => {
   const legacy = {
@@ -15,7 +19,8 @@ test('upgrades legacy whole-project JSON revisions to stable YAML route items', 
   const second = normalizeStoredProjectRoutesModel(legacy)
   assert.deepEqual(first, second)
   assert.equal(first?.kind, 'project_routes_yaml')
-  assert.equal(first?.schemaVersion, 5)
+  assert.equal(first?.schemaVersion, 6)
+  assert.deepEqual(first?.hostAliases, ['api.example.com'])
   assert.equal(first?.routes[0]?.format, 'yaml')
   assert.deepEqual(first?.networkPolicy, {
     source: 'route',
@@ -50,8 +55,9 @@ test('upgrades schema v2 YAML models with safe network policy defaults', () => {
   })
 
   assert.deepEqual(upgraded, {
-    schemaVersion: 5,
+    schemaVersion: 6,
     kind: 'project_routes_yaml',
+    hostAliases: [],
     networkPolicy: {
       source: 'route',
       httpsRedirect: 'off',
@@ -75,8 +81,9 @@ test('upgrades schema v3 network policies with HTTPS redirect disabled', () => {
   })
 
   assert.deepEqual(upgraded, {
-    schemaVersion: 5,
+    schemaVersion: 6,
     kind: 'project_routes_yaml',
+    hostAliases: [],
     networkPolicy: {
       source: 'project',
       httpsRedirect: 'off',
@@ -100,12 +107,72 @@ test('upgrades schema v4 YAML items with an explicit format discriminator', () =
     routes: [{ id: '00000000-0000-4000-8000-000000000001', source: 'path: /' }],
   })
 
-  assert.equal(upgraded?.schemaVersion, 5)
+  assert.equal(upgraded?.schemaVersion, 6)
   assert.deepEqual(upgraded?.routes[0], {
     id: '00000000-0000-4000-8000-000000000001',
     format: 'yaml',
     source: 'path: /',
   })
+})
+
+test('upgrades schema v5 models without aliases to schema v6', () => {
+  const upgraded = normalizeStoredProjectRoutesModel({
+    schemaVersion: 5,
+    kind: 'project_routes_yaml',
+    networkPolicy: {
+      source: 'route',
+      httpsRedirect: 'off',
+      allowedCidrs: [],
+      deniedCidrs: [],
+    },
+    routes: [],
+  })
+  assert.deepEqual(upgraded, {
+    schemaVersion: 6,
+    kind: 'project_routes_yaml',
+    hostAliases: [],
+    networkPolicy: {
+      source: 'route',
+      httpsRedirect: 'off',
+      allowedCidrs: [],
+      deniedCidrs: [],
+    },
+    routes: [],
+  })
+})
+
+test('canonicalizes request aliases before persistence', () => {
+  const normalized = normalizeProjectRoutesModelInput({
+    schemaVersion: 6,
+    kind: 'project_routes_yaml',
+    hostAliases: [' WWW.Example.com. '],
+    networkPolicy: {
+      source: 'route',
+      httpsRedirect: 'off',
+      allowedCidrs: [],
+      deniedCidrs: [],
+    },
+    routes: [],
+  })
+  assert.deepEqual(normalized?.hostAliases, ['www.example.com'])
+})
+
+test('does not accept aliases embedded in a legacy schema v5 request', () => {
+  assert.equal(
+    normalizeProjectRoutesModelInput({
+      schemaVersion: 5,
+      kind: 'project_routes_yaml',
+      hostAliases: ['www.example.com'],
+      networkPolicy: {
+        source: 'route',
+        httpsRedirect: 'off',
+        allowedCidrs: [],
+        deniedCidrs: [],
+      },
+      routes: [],
+    }),
+    null,
+  )
 })
 
 test('checks mixed route source limits in UTF-8 bytes', () => {
@@ -120,8 +187,9 @@ test('checks mixed route source limits in UTF-8 bytes', () => {
   assert.equal(
     isProjectRoutesModel(
       {
-        schemaVersion: 5,
+        schemaVersion: 6,
         kind: 'project_routes_yaml',
+        hostAliases: [],
         networkPolicy: {
           source: 'route',
           httpsRedirect: 'off',

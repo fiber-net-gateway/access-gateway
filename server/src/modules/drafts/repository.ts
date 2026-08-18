@@ -48,6 +48,7 @@ interface RevisionRow extends RowDataPacket {
   validation_state: DraftRevisionView['validationState']
   change_summary: string
   created_at: string
+  project_name: string
 }
 
 function toDraftView(row: DraftRow): DraftView {
@@ -279,9 +280,10 @@ export class DraftRepository {
     const [rows] = await this.#pool.execute<RevisionRow[]>(
       `SELECT r.id AS internal_id, r.public_id, d.public_id AS draft_public_id,
               r.model_document_id, cd.plaintext_sha256, r.revision_no,
-              r.validation_state, r.change_summary, r.created_at
+              r.validation_state, r.change_summary, r.created_at, p.name AS project_name
        FROM draft_revisions r
        INNER JOIN drafts d ON d.id = r.draft_id
+       INNER JOIN projects p ON p.id = d.project_id
        INNER JOIN config_documents cd ON cd.id = r.model_document_id
        WHERE d.public_id = ? AND r.public_id = ? AND d.archived_at IS NULL`,
       [publicIdToBuffer(draftPublicId), publicIdToBuffer(revisionPublicId)],
@@ -295,7 +297,7 @@ export class DraftRepository {
       throw new Error('Draft model document was not found')
     }
     const parsed: unknown = JSON.parse(plaintext.toString('utf8'))
-    const model = normalizeStoredProjectRoutesModel(parsed)
+    const model = normalizeStoredProjectRoutesModel(parsed, undefined, row.project_name)
     if (!model) {
       throw new Error('Stored draft model is invalid')
     }

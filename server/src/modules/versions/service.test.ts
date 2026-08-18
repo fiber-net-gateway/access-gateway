@@ -23,8 +23,9 @@ const sourceVersionId = '00000000-0000-4000-8000-000000000003'
 const currentVersionId = '00000000-0000-4000-8000-000000000004'
 const routeId = '00000000-0000-4000-8000-000000000005'
 const sourceModel: ProjectRoutesModel = {
-  schemaVersion: 5,
+  schemaVersion: 6,
   kind: 'project_routes_yaml',
+  hostAliases: [],
   networkPolicy: {
     source: 'route',
     httpsRedirect: 'off',

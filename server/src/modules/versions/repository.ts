@@ -42,6 +42,7 @@ interface VersionRow extends RowDataPacket {
   creator_public_id: Buffer
   creator_display_name: string
   created_at: string
+  project_name: string
 }
 
 interface LockedDraftRow extends RowDataPacket {
@@ -87,7 +88,8 @@ const selectVersions = `
   SELECT
     r.id AS internal_id, r.public_id,
     d.id AS draft_internal_id, d.public_id AS draft_public_id,
-    p.public_id AS project_public_id, d.environment_id AS environment_internal_id,
+    p.public_id AS project_public_id, p.name AS project_name,
+    d.environment_id AS environment_internal_id,
     r.model_document_id, cd.plaintext_sha256,
     r.revision_no, d.current_revision_no, d.lock_version AS draft_lock_version,
     parent.public_id AS parent_public_id,
@@ -166,7 +168,7 @@ export class ConfigurationVersionRepository {
         toSummary(
           row,
           row.idempotency_key === null
-            ? (await this.readModel(row.model_document_id)).routes.length
+            ? (await this.readModel(row.model_document_id, row.project_name)).routes.length
             : row.route_count,
         ),
       ),
@@ -184,7 +186,7 @@ export class ConfigurationVersionRepository {
     const row = rows[0]
     const routeCount =
       row.idempotency_key === null
-        ? (await this.readModel(row.model_document_id)).routes.length
+        ? (await this.readModel(row.model_document_id, row.project_name)).routes.length
         : row.route_count
     return toSummary(row, routeCount)
   }
@@ -195,7 +197,7 @@ export class ConfigurationVersionRepository {
   ): Promise<ConfigurationVersionDetail | null> {
     const row = await this.findRow(projectInternalId, versionPublicId)
     if (!row) return null
-    const model = await this.readModel(row.model_document_id)
+    const model = await this.readModel(row.model_document_id, row.project_name)
     return { ...toSummary(row, model.routes.length), model }
   }
 
@@ -215,7 +217,7 @@ export class ConfigurationVersionRepository {
       number: row.revision_no,
       modelDocumentInternalId: row.model_document_id,
       modelSha256: row.plaintext_sha256.toString('hex'),
-      model: await this.readModel(row.model_document_id),
+      model: await this.readModel(row.model_document_id, row.project_name),
     }
   }
 
@@ -463,11 +465,14 @@ export class ConfigurationVersionRepository {
     return rows[0] ?? null
   }
 
-  private async readModel(documentInternalId: string): Promise<ProjectRoutesModel> {
+  private async readModel(
+    documentInternalId: string,
+    primaryDomain?: string,
+  ): Promise<ProjectRoutesModel> {
     const plaintext = await this.#documents.decryptByInternalId(this.#pool, documentInternalId)
     if (!plaintext) throw new Error('Configuration version document was not found')
     const parsed: unknown = JSON.parse(plaintext.toString('utf8'))
-    const model = normalizeStoredProjectRoutesModel(parsed)
+    const model = normalizeStoredProjectRoutesModel(parsed, undefined, primaryDomain)
     if (!model) throw new Error('Stored configuration version is invalid')
     return model
   }

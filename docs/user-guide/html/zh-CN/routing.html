@@ -204,8 +204,10 @@
   </tbody>
 </table>
 <p>
-  不同 Project 不能声明规范化后重复的 Host pattern。Console 当前通常从 Project domain 生成 exact
-  Host； 直接维护 wire 配置时仍必须遵守上述全局冲突规则。
+  不同 Project 不能声明规范化后重复的 Host pattern。Console 为每个 Project 保留一个不可变主域名，
+  并允许在 Routes 页面添加多个精确 Host alias；alias 与主域名共享策略和 Release，不新增 Project 或
+  route Data ID。发布前 Console 会读取现有 route resource 检查 alias 冲突；直接维护 wire
+  配置时仍必须遵守上述全局冲突规则。
 </p>
 <p>
   Host 未命中返回 HTTP 404，错误名为 <code>ROUTER_NOT_FOUND</code>。只有 Host 命中后，才会继续选择
@@ -956,6 +958,9 @@ $conn.remote_addr  $conn.remote_port  $conn.http_version  $conn.scheme  $conn.tl
     &quot;version&quot;: 42,
     &quot;host&quot;: {
         &quot;api.example.com&quot;: {
+            &quot;https&quot;: &quot;S_NOT_MUST&quot;
+        },
+        &quot;www.example.com&quot;: {
             &quot;https&quot;: &quot;S_NOT_MUST&quot;
         }
     },

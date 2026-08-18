@@ -137,7 +137,7 @@ test('readiness and persistent APIs fail closed when MySQL is unconfigured', asy
   assert.equal(activation.json().error.code, 'DATABASE_UNCONFIGURED')
 })
 
-test('mixed route APIs accept schema v5 and reject the legacy whole-project request shape', async (context) => {
+test('mixed route APIs accept schema v5/v6 and reject the legacy whole-project request shape', async (context) => {
   const app = buildApp()
   context.after(() => app.close())
   const projectId = '00000000-0000-4000-8000-000000000001'
@@ -149,8 +149,9 @@ test('mixed route APIs accept schema v5 and reject the legacy whole-project requ
     url: `/api/projects/${projectId}/routes/validate`,
     payload: {
       model: {
-        schemaVersion: 5,
+        schemaVersion: 6,
         kind: 'project_routes_yaml',
+        hostAliases: ['www.example.com'],
         networkPolicy: {
           source: 'route',
           httpsRedirect: 'off',

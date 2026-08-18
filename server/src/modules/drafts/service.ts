@@ -12,7 +12,7 @@ import type {
   ProjectRoutesModel,
 } from './model.js'
 import { compileProjectRoutes } from './compiler.js'
-import { isProjectRoutesModel } from './model.js'
+import { normalizeProjectRoutesModelInput } from './model.js'
 import { DraftRepository } from './repository.js'
 import { validateProjectRoutesCandidate, type ProjectRoutesValidationView } from './validation.js'
 
@@ -45,14 +45,15 @@ function parseProjectRoutesModel(
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw badRequest('INVALID_DRAFT_MODEL', 'Draft model must be an object')
   }
-  if (!isProjectRoutesModel(value, limits)) {
+  const normalized = normalizeProjectRoutesModelInput(value, limits)
+  if (!normalized) {
     throw badRequest(
       'INVALID_DRAFT_MODEL',
-      'Draft model does not match project_routes_yaml schema version 5',
+      'Draft model does not match project_routes_yaml schema version 5 or 6',
       [{ path: 'model', code: 'INVALID_SCHEMA', message: 'Invalid mixed route model' }],
     )
   }
-  return value
+  return normalized
 }
 
 function parseSavableProjectRoutesModel(

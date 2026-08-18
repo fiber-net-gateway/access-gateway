@@ -7,8 +7,9 @@ import { compileProjectRoutes } from './compiler.js'
 
 function model(...sources: string[]): ProjectRoutesModel {
   return {
-    schemaVersion: 5,
+    schemaVersion: 6,
     kind: 'project_routes_yaml',
+    hostAliases: [],
     networkPolicy: {
       source: 'route',
       httpsRedirect: 'off',
@@ -46,11 +47,40 @@ test('compiles independent YAML routes into ordered Java-compatible project JSON
   assert.match(result.compiled.sha256, /^[0-9a-f]{64}$/u)
 })
 
+test('emits the primary domain and exact aliases in one host strategy map', () => {
+  const result = compileProjectRoutes(
+    'API.Example.com.',
+    { ...model('path: /health\ntype: RESPONSE\nstatus: 200'), hostAliases: ['www.example.com'] },
+    3,
+  )
+  assert.deepEqual(result.issues, [])
+  assert.deepEqual(JSON.parse(result.compiled!.payloadText), {
+    host: {
+      'api.example.com': { https: 'S_NOT_MUST' },
+      'www.example.com': { https: 'S_NOT_MUST' },
+    },
+    routes: [{ path: '/health', status: 200, type: 'RESPONSE' }],
+    version: 3,
+  })
+})
+
+test('rejects invalid and duplicate host aliases before route compilation', () => {
+  const result = compileProjectRoutes('api.example.com', {
+    ...model(),
+    hostAliases: ['www.example.com', 'WWW.EXAMPLE.COM', '*.example.com', 'api.example.com'],
+  })
+  assert.equal(result.compiled, null)
+  assert.ok(result.issues.some((issue) => issue.code === 'DUPLICATE_HOST_ALIAS'))
+  assert.ok(result.issues.some((issue) => issue.code === 'INVALID_HOST_ALIAS'))
+  assert.ok(result.issues.some((issue) => issue.code === 'DUPLICATE_PRIMARY_HOST'))
+})
+
 test('rejects unsafe YAML features and reports the owning route', () => {
   const routeId = '00000000-0000-4000-8000-000000000001'
   const result = compileProjectRoutes('api.example.com', {
-    schemaVersion: 5,
+    schemaVersion: 6,
     kind: 'project_routes_yaml',
+    hostAliases: [],
     networkPolicy: {
       source: 'route',
       httpsRedirect: 'off',
