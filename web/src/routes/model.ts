@@ -1,6 +1,7 @@
 import { isAlias, isMap, isScalar, LineCounter, parseDocument, visit } from 'yaml'
 
 import type { ProjectRoutesModel, RouteItemModel, RouteValidationIssue } from '../api/types'
+import { createUuid } from '../shared/uuid'
 
 export type RouteTemplate = 'RESPONSE' | 'PROXY' | 'JS'
 
@@ -114,40 +115,24 @@ export function normalizeExactHost(value: string): string | null {
     : null
 }
 
-function createRouteId(): string {
-  if (typeof globalThis.crypto?.randomUUID === 'function') return globalThis.crypto.randomUUID()
-  const bytes = new Uint8Array(16)
-  if (typeof globalThis.crypto?.getRandomValues === 'function') {
-    globalThis.crypto.getRandomValues(bytes)
-  } else {
-    for (let index = 0; index < bytes.length; index += 1) {
-      bytes[index] = Math.floor(Math.random() * 256)
-    }
-  }
-  bytes[6] = (bytes[6]! & 0x0f) | 0x40
-  bytes[8] = (bytes[8]! & 0x3f) | 0x80
-  const hex = [...bytes].map((value) => value.toString(16).padStart(2, '0')).join('')
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
-}
-
 export function createRouteItem(template: RouteTemplate): RouteItemModel {
   if (template === 'JS') {
     return {
-      id: createRouteId(),
+      id: createUuid(),
       format: 'js',
       path: '/script/:id',
       source: javaScriptTemplate,
     }
   }
   return {
-    id: createRouteId(),
+    id: createUuid(),
     format: 'yaml',
     source: template === 'RESPONSE' ? responseTemplate : proxyTemplate,
   }
 }
 
 export function duplicateRouteItem(route: RouteItemModel): RouteItemModel {
-  return { ...route, id: createRouteId() }
+  return { ...route, id: createUuid() }
 }
 
 function isValidGzipValue(value: unknown): value is boolean | number {

@@ -20,6 +20,7 @@ import type {
   TlsSniResolutionView,
   TlsCertificateReleaseView,
 } from './types'
+import { createUuid } from '../shared/uuid'
 
 export interface ApiClientErrorField {
   path: string
@@ -596,7 +597,7 @@ export async function createTlsCertificateRelease(
     '/api/tls/releases',
     {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Idempotency-Key': crypto.randomUUID() },
+      headers: { 'Content-Type': 'application/json', 'Idempotency-Key': createUuid() },
       body: JSON.stringify({ defaultCertificateId }),
     },
     isTlsCertificateRelease,
@@ -608,7 +609,7 @@ export async function publishTlsCertificateRelease(
 ): Promise<TlsCertificateReleaseView> {
   const result = await requestJson(
     `/api/tls/releases/${encodeURIComponent(releaseId)}/publications`,
-    { method: 'POST', headers: { 'Idempotency-Key': crypto.randomUUID() } },
+    { method: 'POST', headers: { 'Idempotency-Key': createUuid() } },
     (value): value is { release: TlsCertificateReleaseView } =>
       isRecord(value) && isTlsCertificateRelease(value.release),
   )
@@ -674,7 +675,7 @@ export async function saveConfigurationVersion(
       headers: {
         'Content-Type': 'application/json',
         'If-Match': `"${lockVersion}"`,
-        'Idempotency-Key': crypto.randomUUID(),
+        'Idempotency-Key': createUuid(),
       },
       body: JSON.stringify({ baseVersionId, changeSummary, forceSameContent, model }),
     },
@@ -697,7 +698,7 @@ export async function restoreConfigurationVersion(
       headers: {
         'Content-Type': 'application/json',
         'If-Match': `"${lockVersion}"`,
-        'Idempotency-Key': crypto.randomUUID(),
+        'Idempotency-Key': createUuid(),
       },
       body: JSON.stringify({
         baseVersionId: currentVersionId,
@@ -781,7 +782,7 @@ export async function createRelease(
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Idempotency-Key': crypto.randomUUID(),
+        'Idempotency-Key': createUuid(),
       },
       body: JSON.stringify({ sourceVersionId, expectedCurrentVersionId, title, description }),
     },
@@ -802,7 +803,7 @@ export async function createProjectDecommissionRelease(
       headers: {
         'Content-Type': 'application/json',
         'If-Match': `"${lockVersion}"`,
-        'Idempotency-Key': crypto.randomUUID(),
+        'Idempotency-Key': createUuid(),
       },
       body: JSON.stringify({ confirmationDomain, reason }),
     },
@@ -813,7 +814,7 @@ export async function createProjectDecommissionRelease(
 export async function queueReleasePublication(releaseId: string): Promise<ProjectReleaseView> {
   const result = await requestJson(
     `/api/releases/${encodeURIComponent(releaseId)}/publications`,
-    { method: 'POST', headers: { 'Idempotency-Key': crypto.randomUUID() } },
+    { method: 'POST', headers: { 'Idempotency-Key': createUuid() } },
     (value): value is { jobId: string; state: string; release: ProjectReleaseView } =>
       isRecord(value) &&
       typeof value.jobId === 'string' &&
