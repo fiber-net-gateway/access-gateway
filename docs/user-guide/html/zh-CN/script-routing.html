@@ -32,6 +32,12 @@
   <li>点击 <strong>+ JS</strong>；</li>
   <li>在脚本卡片上方填写外置 <code>Path pattern</code>；</li>
   <li>可选填写 <code>Method</code>，留空表示所有 HTTP method；</li>
+  <li>
+    可选设置 <code>Gzip 响应</code>：<code>true</code> 使用级别 6，整数 <code>1</code>–<code
+      >9</code
+    >
+    指定级别；
+  </li>
   <li>在 JavaScript 编辑器中填写脚本正文；</li>
   <li>修复浏览器本地问题后保存为新的不可变配置版本；</li>
   <li>
@@ -48,6 +54,7 @@
     format: &quot;js&quot;;
     path: string;
     method?: string;
+    gzip?: boolean | number;
     source: string;
 }
 </code></pre>
@@ -124,6 +131,12 @@ Content-Type: application/json
     >#</a
   >
 </h2>
+<p>
+  启用 Gzip 响应后，access-server 根据 <code>Accept-Encoding</code> 协商，并用共享的流式 response
+  writer 包装脚本 响应。只有固定的常见 MIME 白名单（例如
+  <code>text/plain</code>、<code>application/json</code>、<code>application/xml</code>）会被转换；
+  短响应、已有编码的响应和其他 MIME 保持 identity。
+</p>
 <h3 id="4-1-隐式响应">
   4.1 隐式响应<a
     class="documentation-heading-anchor"

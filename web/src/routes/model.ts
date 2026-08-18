@@ -113,6 +113,13 @@ export function duplicateRouteItem(route: RouteItemModel): RouteItemModel {
   return { ...route, id: createRouteId() }
 }
 
+function isValidGzipValue(value: unknown): value is boolean | number {
+  return (
+    typeof value === 'boolean' ||
+    (typeof value === 'number' && Number.isInteger(value) && value >= 1 && value <= 9)
+  )
+}
+
 function position(lineCounter: LineCounter, offset: number): { line: number; column: number } {
   const value = lineCounter.linePos(offset)
   return { line: Math.max(value.line, 1), column: Math.max(value.col, 1) }
@@ -389,22 +396,11 @@ function validateResponseGzip(
     )
     return
   }
-  if (value.type !== 'RESPONSE') {
-    if (value.type === 'PROXY') {
-      issues.push(
-        sourceIssue(
-          route.id,
-          lineCounter,
-          'ROUTE_GZIP_TYPE_CONFLICT',
-          'gzip 只能用于 RESPONSE Route',
-          'gzip',
-          offset,
-        ),
-      )
-    }
-    return
-  }
   if (gzip === false) return
+
+  // PROXY and SCRIPT responses are decorated after their final response
+  // headers are available. RESPONSE routes retain compile-time body checks.
+  if (value.type !== 'RESPONSE') return
 
   const body = value.body
   if (typeof body !== 'object' || body === null || Array.isArray(body)) {
@@ -413,7 +409,7 @@ function validateResponseGzip(
         route.id,
         lineCounter,
         'ROUTE_GZIP_BODY_CONFLICT',
-        '启用 gzip 时必须配置非空的 TEXT 或 BASE64 response body',
+        '启用 gzip 时必须配置非空的 TEXT、BASE64 或 TEMPLATE response body',
         'gzip',
         offset,
       ),
@@ -421,16 +417,16 @@ function validateResponseGzip(
   } else {
     const bodyValue = body as Readonly<Record<string, unknown>>
     if (
-      (bodyValue.type !== 'TEXT' && bodyValue.type !== 'BASE64') ||
+      (bodyValue.type !== 'TEXT' && bodyValue.type !== 'BASE64' && bodyValue.type !== 'TEMPLATE') ||
       typeof bodyValue.content !== 'string' ||
-      bodyValue.content.length === 0
+      ((bodyValue.type === 'TEXT' || bodyValue.type === 'BASE64') && bodyValue.content.length === 0)
     ) {
       issues.push(
         sourceIssue(
           route.id,
           lineCounter,
           'ROUTE_GZIP_BODY_CONFLICT',
-          '启用 gzip 时必须配置非空的 TEXT 或 BASE64 response body',
+          '启用 gzip 时必须配置非空的 TEXT、BASE64 或 TEMPLATE response body',
           'gzip',
           offset,
         ),
@@ -529,6 +525,16 @@ function analyzeRouteSourceUncached(route: RouteItemModel): RouteSourceAnalysis 
         column: 1,
         code: 'EMPTY_ROUTE_SCRIPT',
         message: 'JS Route 脚本不能为空',
+      })
+    }
+    if (route.gzip !== undefined && !isValidGzipValue(route.gzip)) {
+      issues.push({
+        routeId: route.id,
+        path: 'gzip',
+        line: 1,
+        column: 1,
+        code: 'INVALID_ROUTE_GZIP',
+        message: 'gzip 必须是 true、false 或 1-9 的整数压缩级别',
       })
     }
     return {

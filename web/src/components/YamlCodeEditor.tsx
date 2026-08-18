@@ -73,7 +73,7 @@ const routeCompletions: readonly Completion[] = [
     label: 'gzip',
     type: 'property',
     apply: 'gzip: true',
-    detail: 'RESPONSE gzip；true 使用级别 6，也可填写 1-9',
+    detail: 'RESPONSE/PROXY/SCRIPT gzip；true 使用级别 6，也可填写 1-9',
   },
   {
     label: 'proxy_headers',

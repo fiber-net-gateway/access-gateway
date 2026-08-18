@@ -183,19 +183,35 @@ test('compiles boolean and numeric RESPONSE gzip settings without coercion', () 
   ])
 })
 
-test('rejects gzip values and combinations unsupported by access-server', () => {
+test('accepts gzip on dynamic routes and rejects unsupported response combinations', () => {
+  for (const source of [
+    'path: /proxy\ntype: PROXY\nservice: users\ngzip: true',
+    'path: /template\ntype: RESPONSE\nstatus: 200\nbody: { type: TEMPLATE, content: value }\ngzip: true',
+  ]) {
+    const result = compileProjectRoutes('api.example.com', model(source))
+    assert.deepEqual(result.issues, [], source)
+  }
+
+  const script = compileProjectRoutes('api.example.com', {
+    ...model(),
+    routes: [
+      {
+        id: '00000000-0000-4000-8000-000000000001',
+        format: 'js',
+        path: '/script',
+        source: 'resp.send(200, "script")',
+        gzip: 1,
+      },
+    ],
+  })
+  assert.deepEqual(script.issues, [])
+  assert.deepEqual(script.compiled?.routes, [
+    { gzip: 1, path: '/script', script: 'resp.send(200, "script")', type: 'SCRIPT' },
+  ])
+
   const cases = [
     { source: 'path: /\ntype: RESPONSE\ngzip: 0', code: 'INVALID_ROUTE_GZIP' },
     { source: 'path: /\ntype: RESPONSE\ngzip: "1"', code: 'INVALID_ROUTE_GZIP' },
-    {
-      source: 'path: /\ntype: PROXY\nservice: users\ngzip: false',
-      code: 'ROUTE_GZIP_TYPE_CONFLICT',
-    },
-    {
-      source:
-        'path: /\ntype: RESPONSE\nstatus: 200\nbody: { type: TEMPLATE, content: "${$req.method}" }\ngzip: true',
-      code: 'ROUTE_GZIP_BODY_CONFLICT',
-    },
     {
       source:
         'path: /\ntype: RESPONSE\nstatus: 204\nbody: { type: TEXT, content: body }\ngzip: true',

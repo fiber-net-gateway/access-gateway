@@ -406,6 +406,7 @@ Restoration 请求中的路径 `versionId` 是历史编辑来源，`baseVersionI
         "format": "js",
         "path": "/jobs/:id",
         "method": "POST",
+        "gzip": true,
         "source": "return {id: $path.id};"
       }
     ]

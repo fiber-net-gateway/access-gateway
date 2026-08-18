@@ -80,6 +80,10 @@ struct CompiledRoute {
     // kInvalidConstIndex and are skipped when a candidate route binds captures.
     std::vector<http_script::ConstIndex> path_constant_indices;
     std::optional<std::int64_t> max_client_body_size;
+    // Present for every route type that enables response gzip. Static RESPONSE
+    // bodies additionally retain their precompressed representation below;
+    // PROXY, SCRIPT, and TEMPLATE responses use this level at request time.
+    std::optional<std::uint8_t> gzip_level;
     std::vector<Cidr> allow_cidrs;
     std::vector<Cidr> deny_cidrs;
     std::optional<CompiledProxyRoute> proxy;

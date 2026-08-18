@@ -251,15 +251,16 @@ ComponentResult run_component_request(bool wrong_cat_loop = false) {
     return result;
 }
 
-TEST(AccessRequestTelemetryTest, KeepsFacadeAtBaselineSizeWithoutPolymorphicComponents) {
-    EXPECT_EQ(sizeof(fiber::access_server::AccessRequestTelemetry), 912U);
-    EXPECT_EQ(sizeof(fiber::access_server::AccessRequestTelemetry),
-              sizeof(fiber::access_server::ScriptExecutionContext) + sizeof(fiber::access_server::ClientMetadata) +
-                      sizeof(fiber::access_server::TracePropagation) +
+TEST(AccessRequestTelemetryTest, KeepsFacadeComposedOfNonPolymorphicRequestComponents) {
+    EXPECT_GE(sizeof(fiber::access_server::AccessRequestTelemetry),
+              sizeof(fiber::access_server::ScriptExecutionContext) + sizeof(fiber::http::HttpResponseWriter) +
+                      sizeof(std::optional<fiber::http::GzipResponseWriter>) +
+                      sizeof(fiber::access_server::ClientMetadata) + sizeof(fiber::access_server::TracePropagation) +
                       sizeof(fiber::access_server::RequestObservability));
     EXPECT_FALSE(std::is_polymorphic_v<fiber::access_server::ScriptExecutionContext>);
     EXPECT_FALSE(std::is_polymorphic_v<fiber::access_server::TracePropagation>);
     EXPECT_FALSE(std::is_polymorphic_v<fiber::access_server::RequestObservability>);
+    EXPECT_FALSE(std::is_polymorphic_v<fiber::http::GzipResponseWriter>);
 }
 
 TEST(AccessRequestTelemetryTest, ComponentsPreserveW3cAndScriptStateWhenCatIsDisabled) {

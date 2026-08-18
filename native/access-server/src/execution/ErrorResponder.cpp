@@ -98,7 +98,7 @@ async::Task<common::IoResult<void>> send_rendered(http::HttpExchange &exchange, 
     }
 
     const bool empty = rendered.body.empty();
-    auto header_result = co_await exchange.send_header(
+    auto header_result = co_await telemetry.response_writer().send_header(
             {
                     .kind = http::OutgoingHeaderKind::Final,
                     .status_code = rendered.status,
@@ -115,8 +115,8 @@ async::Task<common::IoResult<void>> send_rendered(http::HttpExchange &exchange, 
         co_return common::IoResult<void>{};
     }
 
-    auto body_result = co_await exchange.write_all(reinterpret_cast<const std::uint8_t *>(rendered.body.data()),
-                                                   rendered.body.size(), true, timeout);
+    auto body_result = co_await telemetry.response_writer().write_all(
+            reinterpret_cast<const std::uint8_t *>(rendered.body.data()), rendered.body.size(), true, timeout);
     if (!body_result) {
         co_return std::unexpected(body_result.error());
     }

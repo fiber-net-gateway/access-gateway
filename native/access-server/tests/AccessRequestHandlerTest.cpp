@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <chrono>
 #include <cstring>
 #include <future>
@@ -12,6 +13,8 @@
 #include <string_view>
 #include <utility>
 #include <vector>
+
+#include <zlib.h>
 
 #include <fiber/async/Spawn.h>
 #include <fiber/async/Watch.h>
@@ -248,6 +251,64 @@ std::string_view response_body(std::string_view response) {
     return response.substr(separator + 4);
 }
 
+std::optional<std::string> decode_chunked_body(std::string_view response) {
+    const std::size_t separator = response.find("\r\n\r\n");
+    if (separator == std::string_view::npos) {
+        return std::nullopt;
+    }
+    std::string_view input = response.substr(separator + 4);
+    std::string output;
+    for (;;) {
+        const std::size_t line_end = input.find("\r\n");
+        if (line_end == std::string_view::npos) {
+            return std::nullopt;
+        }
+        const std::string_view size_text = input.substr(0, line_end);
+        const auto semicolon = size_text.find(';');
+        const std::string_view size_value = size_text.substr(0, semicolon);
+        std::size_t size = 0;
+        const auto parsed = std::from_chars(size_value.data(), size_value.data() + size_value.size(), size, 16);
+        if (parsed.ec != std::errc{} || parsed.ptr != size_value.data() + size_value.size()) {
+            return std::nullopt;
+        }
+        input.remove_prefix(line_end + 2);
+        if (size == 0) {
+            return output;
+        }
+        if (size > input.size() || size + 2 > input.size() || input[size] != '\r' || input[size + 1] != '\n') {
+            return std::nullopt;
+        }
+        output.append(input.substr(0, size));
+        input.remove_prefix(size + 2);
+    }
+}
+
+std::optional<std::string> gunzip_body(std::string_view compressed) {
+    z_stream stream{};
+    if (inflateInit2(&stream, MAX_WBITS + 16) != Z_OK) {
+        return std::nullopt;
+    }
+    stream.next_in = reinterpret_cast<Bytef *>(const_cast<char *>(compressed.data()));
+    stream.avail_in = static_cast<uInt>(compressed.size());
+    std::array<unsigned char, 4096> buffer{};
+    std::string output;
+    int result = Z_OK;
+    do {
+        stream.next_out = buffer.data();
+        stream.avail_out = static_cast<uInt>(buffer.size());
+        result = inflate(&stream, Z_NO_FLUSH);
+        if (result != Z_OK && result != Z_STREAM_END) {
+            (void) inflateEnd(&stream);
+            return std::nullopt;
+        }
+        output.append(reinterpret_cast<const char *>(buffer.data()), buffer.size() - stream.avail_out);
+    } while (result != Z_STREAM_END);
+    if (inflateEnd(&stream) != Z_OK) {
+        return std::nullopt;
+    }
+    return output;
+}
+
 HostConfigEntry host(std::string pattern, HostStrategyConfig strategy = {}) {
     return HostConfigEntry{
             .pattern = std::move(pattern),
@@ -382,6 +443,8 @@ struct CapturedProxyRequest {
     bool rewrite_configured = false;
     bool flush = false;
     bool template_evaluator_configured = false;
+    bool response_content_type = false;
+    std::string response_body = "proxied";
 };
 
 fiber::async::Task<Result<void>>
@@ -429,12 +492,14 @@ capture_proxy_request(void *context, fiber::http::HttpExchange &exchange,
         }
     }
 
-    constexpr std::string_view kBody = "proxied";
+    const std::string_view kBody = capture.response_body;
     fiber::http::HttpHeaders &response_headers = telemetry.response_headers();
-    if (!response_headers.set("X-Proxy-Fixture", "captured") || !telemetry.finalize_response_headers()) {
+    if (!response_headers.set("X-Proxy-Fixture", "captured") ||
+        (capture.response_content_type && !response_headers.set("Content-Type", "text/plain")) ||
+        !telemetry.finalize_response_headers()) {
         co_return std::unexpected(Err::from_error(fiber::common::IoErr::NoMem));
     }
-    auto sent_header = co_await exchange.send_header({
+    auto sent_header = co_await telemetry.response_writer().send_header({
             .kind = fiber::http::OutgoingHeaderKind::Final,
             .status_code = 200,
             .headers = &response_headers,
@@ -445,8 +510,8 @@ capture_proxy_request(void *context, fiber::http::HttpExchange &exchange,
     if (!sent_header) {
         co_return std::unexpected(Err::from_error(sent_header.error()));
     }
-    auto sent_body =
-            co_await exchange.write_all(reinterpret_cast<const std::uint8_t *>(kBody.data()), kBody.size(), true);
+    auto sent_body = co_await telemetry.response_writer().write_all(
+            reinterpret_cast<const std::uint8_t *>(kBody.data()), kBody.size(), true);
     if (!sent_body) {
         co_return std::unexpected(Err::from_error(sent_body.error()));
     }
@@ -530,7 +595,7 @@ fail_proxy_after_response_header(void *, fiber::http::HttpExchange &exchange,
     if (!telemetry.finalize_response_headers()) {
         co_return std::unexpected(Err::from_error(fiber::common::IoErr::NoMem));
     }
-    auto sent = co_await exchange.send_header({
+    auto sent = co_await telemetry.response_writer().send_header({
             .kind = fiber::http::OutgoingHeaderKind::Final,
             .status_code = 204,
             .headers = &telemetry.response_headers(),
@@ -674,6 +739,65 @@ TEST(AccessRequestHandlerTest, JavaScriptRouteCanSendAnAsyncResponse) {
                                              scripts.request_adapter());
     EXPECT_TRUE(response.starts_with("HTTP/1.1 202 Accepted\r\n"));
     EXPECT_EQ(response_body(response), "accepted");
+}
+
+TEST(AccessRequestHandlerTest, CompressesTemplateAndScriptResponsesThroughSharedWriter) {
+    AccessScriptRuntime scripts;
+    constexpr std::string_view kTemplateBody = "template response with enough bytes for gzip";
+    RouteConfig template_route = response_route("/gzip-template", std::string(kTemplateBody));
+    template_route.gzip = fiber::access_server::ResponseGzipConfig{.enabled = true, .level = 6};
+    template_route.response_headers.push_back(StringConfigEntry{.name = "Content-Type", .value = "text/plain"});
+
+    RouteConfig script = script_route("/gzip-script", "resp.setHeader('Content-Type', 'text/plain'); resp.send(200, "
+                                                      "'script response with enough bytes for gzip');");
+    script.gzip = fiber::access_server::ResponseGzipConfig{.enabled = true, .level = 6};
+
+    RouteConfigStore store(scripts.compiler_adapter());
+    publish(store, project({}, {std::move(template_route), std::move(script)}));
+
+    const std::string template_response = run_request(store,
+                                                      "GET /gzip-template HTTP/1.1\r\n"
+                                                      "Host: api.example.com\r\n"
+                                                      "Accept-Encoding: gzip\r\n"
+                                                      "Connection: close\r\n\r\n",
+                                                      scripts.request_adapter());
+    EXPECT_NE(template_response.find("Content-Encoding: gzip\r\n"), std::string::npos);
+    EXPECT_NE(template_response.find("Transfer-Encoding: chunked\r\n"), std::string::npos);
+    const auto template_wire_body = decode_chunked_body(template_response);
+    ASSERT_TRUE(template_wire_body);
+    EXPECT_EQ(gunzip_body(*template_wire_body), kTemplateBody);
+
+    const std::string script_response = run_request(store,
+                                                    "GET /gzip-script HTTP/1.1\r\n"
+                                                    "Host: api.example.com\r\n"
+                                                    "Accept-Encoding: gzip\r\n"
+                                                    "Connection: close\r\n\r\n",
+                                                    scripts.request_adapter());
+    EXPECT_NE(script_response.find("Content-Encoding: gzip\r\n"), std::string::npos);
+    const auto script_wire_body = decode_chunked_body(script_response);
+    ASSERT_TRUE(script_wire_body);
+    EXPECT_EQ(gunzip_body(*script_wire_body), "script response with enough bytes for gzip");
+}
+
+TEST(AccessRequestHandlerTest, CompressesProxyAdapterResponseThroughSharedWriter) {
+    RouteConfig route = proxy_route("/gzip-proxy");
+    route.gzip = fiber::access_server::ResponseGzipConfig{.enabled = true, .level = 6};
+    RouteConfigStore store;
+    publish(store, project({}, {std::move(route)}));
+
+    CapturedProxyRequest capture;
+    capture.response_content_type = true;
+    capture.response_body = "proxied response with enough bytes for gzip";
+    const std::string response = run_request(store,
+                                             "GET /gzip-proxy HTTP/1.1\r\n"
+                                             "Host: api.example.com\r\n"
+                                             "Accept-Encoding: gzip\r\n"
+                                             "Connection: close\r\n\r\n",
+                                             {}, {}, proxy_adapter(capture));
+    EXPECT_NE(response.find("Content-Encoding: gzip\r\n"), std::string::npos);
+    const auto wire_body = decode_chunked_body(response);
+    ASSERT_TRUE(wire_body);
+    EXPECT_EQ(gunzip_body(*wire_body), capture.response_body);
 }
 
 TEST(AccessRequestHandlerTest, JavaScriptRouteMapsVoidAndExceptionResults) {

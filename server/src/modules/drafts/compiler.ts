@@ -36,7 +36,7 @@ const routeFields = new Set([
   'upstream_tls',
 ])
 
-export const ROUTE_COMPILER_REVISION = 'project-routes-upstream-mtls-v2'
+export const ROUTE_COMPILER_REVISION = 'project-routes-upstream-mtls-gzip-v1'
 
 const networkPolicyRouteId = '00000000-0000-4000-8000-000000000099'
 
@@ -560,9 +560,7 @@ function validateResponseGzip(
 
   const offset = findFieldOffset(document, 'gzip')
   const gzip = value.gzip
-  const valid =
-    typeof gzip === 'boolean' ||
-    (typeof gzip === 'number' && Number.isInteger(gzip) && gzip >= 1 && gzip <= 9)
+  const valid = isValidGzipValue(gzip)
   if (!valid) {
     issues.push(
       issue(
@@ -576,22 +574,12 @@ function validateResponseGzip(
     )
     return
   }
-  if (value.type !== 'RESPONSE') {
-    if (value.type === 'PROXY') {
-      issues.push(
-        issue(
-          route,
-          lineCounter,
-          'ROUTE_GZIP_TYPE_CONFLICT',
-          'gzip is only valid for RESPONSE routes',
-          'gzip',
-          offset,
-        ),
-      )
-    }
-    return
-  }
   if (gzip === false) return
+
+  // PROXY and SCRIPT responses are compressed after their final upstream or
+  // script headers are known. Only RESPONSE routes need body/status checks at
+  // configuration time.
+  if (value.type !== 'RESPONSE') return
 
   const body = value.body
   if (typeof body !== 'object' || body === null || Array.isArray(body)) {
@@ -600,7 +588,7 @@ function validateResponseGzip(
         route,
         lineCounter,
         'ROUTE_GZIP_BODY_CONFLICT',
-        'Enabled gzip requires a non-empty TEXT or BASE64 response body',
+        'Enabled gzip requires a non-empty TEXT, BASE64, or TEMPLATE response body',
         'gzip',
         offset,
       ),
@@ -608,16 +596,16 @@ function validateResponseGzip(
   } else {
     const bodyValue = body as Readonly<Record<string, unknown>>
     if (
-      (bodyValue.type !== 'TEXT' && bodyValue.type !== 'BASE64') ||
+      (bodyValue.type !== 'TEXT' && bodyValue.type !== 'BASE64' && bodyValue.type !== 'TEMPLATE') ||
       typeof bodyValue.content !== 'string' ||
-      bodyValue.content.length === 0
+      ((bodyValue.type === 'TEXT' || bodyValue.type === 'BASE64') && bodyValue.content.length === 0)
     ) {
       issues.push(
         issue(
           route,
           lineCounter,
           'ROUTE_GZIP_BODY_CONFLICT',
-          'Enabled gzip requires a non-empty TEXT or BASE64 response body',
+          'Enabled gzip requires a non-empty TEXT, BASE64, or TEMPLATE response body',
           'gzip',
           offset,
         ),
@@ -669,6 +657,13 @@ function validateResponseGzip(
       ),
     )
   }
+}
+
+function isValidGzipValue(value: unknown): value is boolean | number {
+  return (
+    typeof value === 'boolean' ||
+    (typeof value === 'number' && Number.isInteger(value) && value >= 1 && value <= 9)
+  )
 }
 
 const httpMethodPattern = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/u
@@ -916,6 +911,17 @@ export function compileProjectRoutes(
             }
             const methodIssue = validateMethod(route, route.method, lineCounter)
             if (methodIssue) routeIssues.push(methodIssue)
+            if (route.gzip !== undefined && !isValidGzipValue(route.gzip)) {
+              routeIssues.push(
+                issue(
+                  route,
+                  lineCounter,
+                  'INVALID_ROUTE_GZIP',
+                  'gzip must be true, false, or an integer compression level from 1 to 9',
+                  'gzip',
+                ),
+              )
+            }
             if (route.source.trim().length === 0) {
               routeIssues.push(
                 issue(
@@ -933,6 +939,7 @@ export function compileProjectRoutes(
                   ? {
                       path: route.path,
                       ...(route.method ? { method: route.method } : {}),
+                      ...(route.gzip !== undefined ? { gzip: route.gzip } : {}),
                       type: 'SCRIPT',
                       script: route.source,
                     }

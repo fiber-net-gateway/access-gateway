@@ -27,7 +27,7 @@ no target uses a source glob.
 | --- | --- | --- |
 | `access_server_config` | wire codecs, limits, immutable routing model, Host/CIDR, route and script compilation, gray compilation, deterministic static gzip | `fiber_lib`, zlib |
 | `access_server_observability` | bounded metrics, activation evidence, access-log policy, process stats, trace state | config, Fiber CAT/Prometheus |
-| `access_server_execution` | request handler, response/proxy pipeline, request-coupled telemetry and trace facade | config, observability, Fiber CAT |
+| `access_server_execution` | request handler, response/proxy pipeline, request-coupled telemetry and trace facade | config, observability, Fiber CAT, Fiber HTTP compression |
 | `access_server_runtime` | Nacos/discovery, watchers, DNS, listeners, workers, publication and ordered lifecycle | config, execution, observability, Fiber Nacos/CAT/Prometheus |
 | `access_server_validation` | versioned offline validator protocol and result encoding | config only |
 

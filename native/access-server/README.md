@@ -30,7 +30,8 @@ connection pool，以及 Nacos、CAT、Prometheus 组件。迁移不要求这些
   `RoutePathMatcher` 完成 Path/条件路由选择；
 - 已实现跨项目全局 Host 树、候选构建失败保旧、同 version 忽略、Host 为空卸载，
   以及请求对旧不可变快照的 pin；
-- 已实现 RESPONSE 的 TEXT/BASE64/TEMPLATE/空 body、静态 TEXT/BASE64 的协商式 gzip、
+- 已实现 RESPONSE 的 TEXT/BASE64/TEMPLATE/空 body、静态 TEXT/BASE64 的协商式 gzip，以及
+  PROXY/SCRIPT/TEMPLATE 通过共享 Fiber response writer 的请求级流式 gzip、
   受保护响应头过滤、header/body
   原子准备和统一 JSON/HTML 错误结果；项目匹配后的 access-owned header、最终 route/proxy
   header 和 trace header 由请求级 `AccessRequestTelemetry` 统一持有；

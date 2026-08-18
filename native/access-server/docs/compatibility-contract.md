@@ -283,7 +283,7 @@ bad routing 特殊入口返回 400、`BAD_REQUEST`、`error find router`。
 | `rewrite` | upstream path 模板 |
 | `status` | primitive int，缺失为 0 |
 | `body` | RESPONSE body |
-| `gzip` | 仓库扩展；仅 RESPONSE，`true` 使用级别 6，整数 1–9 指定级别，`false` 关闭 |
+| `gzip` | 仓库扩展；RESPONSE/PROXY/SCRIPT 均可用，`true` 使用级别 6，整数 1–9 指定级别，`false` 关闭 |
 | `timeout` | PROXY 默认 60000 ms；配置值必须不少于 5 ms |
 | `max_client_body_size` | 当前 route 的 client body limit |
 | `max_proxy_body_size` | 非零时应用，并 clamp 到不小于 0 |
@@ -461,16 +461,21 @@ C++ compiled plan 保留该分段/提交语义，并在候选配置发布前将�
 `HI-TRACE-CLUSTER`。
 
 `gzip` 是本仓库的 wire 扩展，不属于 Java 基线。字段缺失或为 `false` 时关闭；`true`
-使用 zlib 级别 6，整数 1–9 指定级别。启用时只接受非空 TEXT/BASE64 body，并在候选快照
-发布前生成不可变 gzip 表示；TEMPLATE、1xx/204/205/206/304、显式 Content-Encoding 和
-PROXY 上的该字段均拒绝配置。旧 Java 节点会忽略未知字段并继续返回 identity，因此混合版本
-实例的激活状态必须按实例观察，不能从 rnacos 写入成功推断。
+使用 zlib 级别 6，整数 1–9 指定级别。RESPONSE、PROXY、SCRIPT 均可启用：静态
+TEXT/BASE64 在候选快照发布前生成不可变 gzip 表示，TEMPLATE/PROXY/SCRIPT 在请求阶段通过
+共享 response-writer 流式压缩。动态 response writer 使用固定 MIME 白名单：`text/html`、`text/plain`、
+`text/css`、`text/javascript`、`application/javascript`、`application/json`、`application/xml`、
+`application/rss+xml`、`application/wasm`、`image/svg+xml`；静态 RESPONSE 保留现有预压缩兼容行为。
+RESPONSE 的空 body、1xx/204/205/206/304、显式
+Content-Encoding 仍拒绝配置。其他动态响应保持 identity。旧 Java 节点会忽略未知字段并继续返回
+identity，因此混合版本实例的激活状态必须按实例观察，不能从 rnacos 写入成功推断。
 
 请求按 `Accept-Encoding` 的 gzip/identity/wildcard 与 qvalue 协商；header 缺失时保守选择
-identity，两者都不可接受时返回 406 `NOT_ACCEPTABLE`。启用 gzip 的 Route 总是合并
-`Vary: Accept-Encoding`；gzip 表示增加 `Content-Encoding: gzip`，Content-Length 随所选表示
-计算，强 ETag 降为弱 ETag。HEAD 执行相同编码选择并发送对应 header，但不发送 body。
-请求阶段不调用 deflate。
+identity，两者都不可接受时返回 406 `NOT_ACCEPTABLE`。启用 gzip 的 Route 在候选响应满足
+固定 MIME、状态和大小条件时合并 `Vary: Accept-Encoding`；gzip 表示增加
+`Content-Encoding: gzip`，动态响应改用 Auto/chunked（HTTP/2/3 使用对应流 framing），静态
+响应保留所选表示的 Content-Length，强 ETag 降为弱 ETag。请求阶段的动态响应通过共享 writer
+执行 deflate，并遵守 flush/backpressure；静态响应仍不在请求阶段压缩。
 
 Java 的 `discardReqBody()` 只触发忽略后续请求 body；本仓库现有
 `HttpExchange::discard_body()` 会异步读完 body 后再继续 RESPONSE 执行。两者最终

@@ -139,6 +139,7 @@ export interface JavaScriptRouteItemModel {
   source: string
   path: string
   method?: string
+  gzip?: boolean | number
 }
 
 export type RouteItemModel = YamlRouteItemModel | JavaScriptRouteItemModel

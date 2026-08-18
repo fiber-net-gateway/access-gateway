@@ -603,11 +603,65 @@ export function ProjectRoutesPage() {
                                     format: 'js',
                                     path: item.path,
                                     source: item.source,
+                                    ...(item.gzip !== undefined ? { gzip: item.gzip } : {}),
                                   }
                                 }),
                               )
                             }
                           />
+                        </label>
+                        <label>
+                          Gzip 响应
+                          <select
+                            aria-label={`路由 ${index + 1} Gzip 响应`}
+                            value={
+                              route.gzip === undefined
+                                ? ''
+                                : route.gzip === true
+                                  ? 'true'
+                                  : route.gzip === false
+                                    ? 'false'
+                                    : String(route.gzip)
+                            }
+                            onChange={(event) =>
+                              updateRoutes(
+                                model.routes.map((item) => {
+                                  if (item.id !== route.id || item.format !== 'js') return item
+                                  const value = event.target.value
+                                  if (value === '') {
+                                    return {
+                                      id: item.id,
+                                      format: 'js',
+                                      path: item.path,
+                                      source: item.source,
+                                      ...(item.method ? { method: item.method } : {}),
+                                    }
+                                  }
+                                  return {
+                                    ...item,
+                                    gzip:
+                                      value === 'true'
+                                        ? true
+                                        : value === 'false'
+                                          ? false
+                                          : Number(value),
+                                  }
+                                }),
+                              )
+                            }
+                          >
+                            <option value="">关闭（缺省）</option>
+                            <option value="true">开启（级别 6）</option>
+                            <option value="1">级别 1</option>
+                            <option value="2">级别 2</option>
+                            <option value="3">级别 3</option>
+                            <option value="4">级别 4</option>
+                            <option value="5">级别 5</option>
+                            <option value="6">级别 6</option>
+                            <option value="7">级别 7</option>
+                            <option value="8">级别 8</option>
+                            <option value="9">级别 9</option>
+                          </select>
                         </label>
                       </div>
                     ) : null}

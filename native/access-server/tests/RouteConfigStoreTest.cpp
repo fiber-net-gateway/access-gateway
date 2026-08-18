@@ -394,7 +394,7 @@ TEST(RouteConfigStoreTest, RejectsInvalidLocalScriptWithoutReplacingPublishedSna
     EXPECT_FALSE(store.pin()->match_host("new.example.com"));
 }
 
-TEST(RouteConfigStoreTest, RejectsInvalidGzipCandidateWithoutReplacingPublishedSnapshot) {
+TEST(RouteConfigStoreTest, RejectsInvalidResponseGzipCandidateWithoutReplacingPublishedSnapshot) {
     RouteConfigStore store;
     ASSERT_TRUE(store.apply("demo", project_config(1, "api.example.com", "/one")));
     auto before = store.pin();
@@ -403,7 +403,7 @@ TEST(RouteConfigStoreTest, RejectsInvalidGzipCandidateWithoutReplacingPublishedS
     RouteConfig &route = *(*invalid.routes)[0];
     route.type = RouteType::Response;
     route.service.reset();
-    route.status = 200;
+    route.status = 204;
     route.body = RouteBodyConfig{.type = BodyType::Template, .content = "dynamic"};
     route.gzip = ResponseGzipConfig{.enabled = true};
 

@@ -15,11 +15,13 @@ and lifecycle boundaries.
 2. Select **+ JS**.
 3. Fill in the external `Path pattern` above the editor.
 4. Optionally fill in `Method`; blank means every HTTP method.
-5. Put only the script source in the JavaScript editor.
-6. Fix local issues and save a new immutable configuration version.
-7. The server compiles a wire Route and passes it to Native Validator, which uses the same codec and
+5. Choose the optional `Gzip response` setting; `true` uses level 6 and an integer from `1` through `9`
+   selects a level.
+6. Put only the script source in the JavaScript editor.
+7. Fix local issues and save a new immutable configuration version.
+8. The server compiles a wire Route and passes it to Native Validator, which uses the same codec and
    compiler as access-server.
-8. After creating and executing a Release, observe Published and instance Active separately. Active remains
+9. After creating and executing a Release, observe Published and instance Active separately. Active remains
    unknown without per-instance evidence.
 
 The Console model is approximately:
@@ -30,6 +32,7 @@ interface JavaScriptRouteItem {
     format: "js";
     path: string;
     method?: string;
+    gzip?: boolean | number;
     source: string;
 }
 ```
@@ -84,6 +87,11 @@ Create separate same-Path Routes for method dispatch. Use a YAML condition for c
 the script produce the complete response itself.
 
 ## 4. Response behavior
+
+When Gzip response is enabled, access-server negotiates `Accept-Encoding` and wraps the script response
+with the shared streaming response writer. It only transforms the fixed common MIME allowlist (for example
+`text/plain`, `application/json`, and `application/xml`); short, already encoded, and other MIME responses
+remain identity responses.
 
 ### 4.1 Implicit response
 

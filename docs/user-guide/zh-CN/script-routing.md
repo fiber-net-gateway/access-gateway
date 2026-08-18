@@ -13,11 +13,12 @@ JavaScript，也不是通用边缘函数平台；脚本运行在 Fiber 的 JS-li
 2. 点击 **+ JS**；
 3. 在脚本卡片上方填写外置 `Path pattern`；
 4. 可选填写 `Method`，留空表示所有 HTTP method；
-5. 在 JavaScript 编辑器中填写脚本正文；
-6. 修复浏览器本地问题后保存为新的不可变配置版本；
-7. 由 server 编译为 wire Route，再交给 Native Validator 使用与 access-server 相同的 codec/compiler
+5. 可选设置 `Gzip 响应`：`true` 使用级别 6，整数 `1`–`9` 指定级别；
+6. 在 JavaScript 编辑器中填写脚本正文；
+7. 修复浏览器本地问题后保存为新的不可变配置版本；
+8. 由 server 编译为 wire Route，再交给 Native Validator 使用与 access-server 相同的 codec/compiler
    校验；
-8. 创建并执行 Release 后，分别观察 Published 和实例 Active 状态。没有实例证据时 Active 仍为未知。
+9. 创建并执行 Release 后，分别观察 Published 和实例 Active 状态。没有实例证据时 Active 仍为未知。
 
 JavaScript Route 的 Console 模型大致为：
 
@@ -27,6 +28,7 @@ interface JavaScriptRouteItem {
     format: "js";
     path: string;
     method?: string;
+    gzip?: boolean | number;
     source: string;
 }
 ```
@@ -89,6 +91,10 @@ Method 留空匹配所有 method；填写后按原始字节大小写敏感匹配
 Path Route；如果需要 condition fallback，使用 YAML Route 的 condition，或让脚本自身生成完整响应。
 
 ## 4. 响应规则
+
+启用 Gzip 响应后，access-server 根据 `Accept-Encoding` 协商，并用共享的流式 response writer 包装脚本
+响应。只有固定的常见 MIME 白名单（例如 `text/plain`、`application/json`、`application/xml`）会被转换；
+短响应、已有编码的响应和其他 MIME 保持 identity。
 
 ### 4.1 隐式响应
 

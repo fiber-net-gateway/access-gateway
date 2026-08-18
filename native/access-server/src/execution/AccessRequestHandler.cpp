@@ -1,5 +1,6 @@
 #include "AccessRequestHandler.h"
 #include "../observability/AccessRequestTelemetry.h"
+#include "ResponsePlan.h"
 
 #include <fiber/common/Assert.h>
 #include <fiber/http/HttpBodySpec.h>
@@ -31,6 +32,16 @@ struct RequestEvaluationContext {
     AccessRequestScriptAdapter adapter;
     AccessRequestTelemetry &telemetry;
 };
+
+bool uses_dynamic_response_compression(const CompiledRoute &route) noexcept {
+    if (!route.gzip_level) {
+        return false;
+    }
+    if (route.type == RouteType::Proxy || route.type == RouteType::Script) {
+        return true;
+    }
+    return route.response && route.response->body_kind == ResponseBodyKind::Template;
+}
 
 Result<void> evaluate_template(void *context, const script::Script &program, std::string_view expression,
                                std::string &output) noexcept {
@@ -165,7 +176,7 @@ async::Task<Result<void>> send_redirect(http::HttpExchange &exchange, int status
         co_return std::unexpected(Err::from_error(common::IoErr::NoMem));
     }
 
-    auto sent = co_await exchange.send_header(
+    auto sent = co_await telemetry.response_writer().send_header(
             {
                     .kind = http::OutgoingHeaderKind::Final,
                     .status_code = status,
@@ -328,6 +339,23 @@ async::Task<Result<void>> AccessRequestHandler::handle_impl(http::HttpExchange &
             co_return std::unexpected(Err::from_exception(Exception::source_ip_not_allowed()));
     }
     const std::size_t body_limit = route_policy.body_limit;
+
+    if (uses_dynamic_response_compression(route)) {
+        const ResponseContentCoding coding = select_response_content_coding(exchange.request_headers());
+        if (coding == ResponseContentCoding::NotAcceptable) {
+            if (!telemetry.response_headers().set("Vary", "Accept-Encoding")) {
+                co_return std::unexpected(Err::from_error(common::IoErr::NoMem));
+            }
+            telemetry.record_response_compression_not_acceptable();
+            co_return std::unexpected(Err::from_exception(Exception::not_acceptable()));
+        }
+        auto compression =
+                telemetry.enable_response_compression(*route.gzip_level, coding == ResponseContentCoding::Gzip);
+        if (!compression) {
+            co_return std::unexpected(Err::from_error(compression.error()));
+        }
+    }
+
     TemplateEvaluator template_evaluator;
     if (script_adapter_.evaluate_template) {
         template_evaluator = TemplateEvaluator{

@@ -24,6 +24,7 @@ export interface JavaScriptRouteItemModel {
   source: string
   path: string
   method?: string
+  gzip?: boolean | number
 }
 
 export type RouteItemModel = YamlRouteItemModel | JavaScriptRouteItemModel
@@ -127,6 +128,19 @@ export function isProjectRoutesModel(
           (typeof route.method !== 'string' ||
             route.method.length < 1 ||
             utf8Bytes(route.method) > limits.projectRoute.maxMethodBytes)))
+    ) {
+      return false
+    }
+    if (
+      route.format === 'js' &&
+      route.gzip !== undefined &&
+      !(
+        typeof route.gzip === 'boolean' ||
+        (typeof route.gzip === 'number' &&
+          Number.isInteger(route.gzip) &&
+          route.gzip >= 1 &&
+          route.gzip <= 9)
+      )
     ) {
       return false
     }

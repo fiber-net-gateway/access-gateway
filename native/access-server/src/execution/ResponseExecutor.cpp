@@ -38,7 +38,7 @@ async::Task<Result<void>> send_response(http::HttpExchange &exchange, const Prep
     const bool empty = body.empty();
     const http::HttpBodySpec body_spec =
             no_body ? http::HttpBodySpec::None() : http::HttpBodySpec::ContentLength(reset_content ? 0 : body.size());
-    auto header_result = co_await exchange.send_header(
+    auto header_result = co_await telemetry.response_writer().send_header(
             {
                     .kind = http::OutgoingHeaderKind::Final,
                     .status_code = response.status,
@@ -55,8 +55,8 @@ async::Task<Result<void>> send_response(http::HttpExchange &exchange, const Prep
         co_return Result<void>{};
     }
 
-    auto body_result = co_await exchange.write_all(reinterpret_cast<const std::uint8_t *>(body.data()), body.size(),
-                                                   true, timeout);
+    auto body_result = co_await telemetry.response_writer().write_all(
+            reinterpret_cast<const std::uint8_t *>(body.data()), body.size(), true, timeout);
     if (!body_result) {
         co_return std::unexpected(Err::from_error(body_result.error()));
     }

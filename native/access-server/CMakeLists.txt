@@ -89,7 +89,7 @@ access_server_add_component(access_server_execution
     "${CMAKE_CURRENT_LIST_DIR}/src/observability/ScriptExecutionContext.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/observability/TracePropagation.cpp")
 target_link_libraries(access_server_execution
-    PUBLIC access_server_config access_server_observability fiber_lib fiber::cat)
+    PUBLIC access_server_config access_server_observability fiber_lib fiber::cat fiber::http_compression)
 add_library(access_server::execution ALIAS access_server_execution)
 
 access_server_add_component(access_server_runtime

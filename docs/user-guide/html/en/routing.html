@@ -120,9 +120,9 @@
     execution fields. YAML Routes can only be <code>PROXY</code> or <code>RESPONSE</code>.
   </li>
   <li>
-    JavaScript Route: the source contains only the script. <code>path</code> and optional
-    <code>method</code> are separate fields above the editor. Publication compiles it to wire
-    <code>type: SCRIPT</code>.
+    JavaScript Route: the source contains only the script. <code>path</code>, optional
+    <code>method</code>, and optional <code>gzip</code> are separate fields above the editor.
+    Publication compiles it to wire <code>type: SCRIPT</code>.
   </li>
 </ul>
 <p>
@@ -489,7 +489,7 @@ service: report-service/stable
     </tr>
     <tr>
       <td><code>gzip</code></td>
-      <td>RESPONSE</td>
+      <td>RESPONSE/PROXY/SCRIPT</td>
       <td>
         Optional; <code>true</code> uses level 6, <code>1</code>–<code>9</code> selects a level,
         <code>false</code> disables
@@ -642,24 +642,31 @@ Transfer-Encoding, Upgrade
 <p>
   Omitting <code>gzip</code> or setting it to <code>false</code> disables compression.
   <code>true</code> uses the default compression level 6; an integer from <code>1</code> through
-  <code>9</code> selects that level. The first implementation supports only non-empty
-  <code>TEXT</code> and <code>BASE64</code> bodies. access-server freezes both identity and gzip
-  bytes before publishing the candidate snapshot, so the request hot path selects an existing
-  representation without compressing it. <code>TEMPLATE</code> bodies do not support gzip yet.
+  <code>9</code> selects that level. <code>RESPONSE</code>, <code>PROXY</code>, and
+  <code>SCRIPT</code> routes may enable it. Static <code>TEXT</code> and <code>BASE64</code> bodies
+  are precompressed before publication; <code>TEMPLATE</code> bodies and proxy/script responses use
+  the shared request-local streaming writer after their final headers are known. The fixed MIME list
+  is <code>text/html</code>, <code>text/plain</code>, <code>text/css</code>,
+  <code>text/javascript</code>, <code>application/javascript</code>, <code>application/json</code>,
+  <code>application/xml</code>, <code>application/rss+xml</code>, <code>application/wasm</code>, and
+  <code>image/svg+xml</code>.
 </p>
 <p>
   When enabled, access-server negotiates <code>gzip</code>, <code>identity</code>, <code>*</code>,
   and <code>q</code> weights from <code>Accept-Encoding</code>. A request without that header
   receives identity; explicitly rejecting both available representations returns 406
-  <code>NOT_ACCEPTABLE</code>. Every negotiated response merges <code>Vary: Accept-Encoding</code>;
-  a selected gzip variant carries <code>Content-Encoding: gzip</code> and its own
-  <code>Content-Length</code>. A configured strong ETag is weakened. HEAD performs the same coding
-  selection and sends its headers without a body.
+  <code>NOT_ACCEPTABLE</code>. A response that is eligible for transformation merges
+  <code>Vary: Accept-Encoding</code>; a selected gzip variant carries
+  <code>Content-Encoding: gzip</code>. Static <code>TEXT</code> and <code>BASE64</code> responses
+  retain a gzip <code>Content-Length</code>, while <code>TEMPLATE</code>, <code>PROXY</code>, and
+  <code>SCRIPT</code> responses use the streaming writer&#39;s automatic/chunked framing. A
+  configured strong ETag is weakened when the representation is transformed. HEAD performs the same
+  coding selection and sends its headers without a body.
 </p>
 <p>
-  Configuration compilation rejects <code>gzip</code> on a PROXY Route, an empty or
-  <code>TEMPLATE</code> body, a 1xx/204/205/206/304 status, or a simultaneous
-  <code>response_headers.Content-Encoding</code> value.
+  Configuration compilation rejects an empty RESPONSE body, a 1xx/204/205/206/304 RESPONSE status,
+  or a simultaneous RESPONSE <code>response_headers.Content-Encoding</code> value. A dynamic
+  response with an unsupported MIME or an existing content encoding is passed through unchanged.
 </p>
 <h2 id="8-proxy-routes">
   8. PROXY Routes<a

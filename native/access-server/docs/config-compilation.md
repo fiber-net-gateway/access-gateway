@@ -42,7 +42,7 @@ CPU-only `ProjectConfigCompiler` on the compiler loop:
 - route JSON decoding and structural validation;
 - Host/Path, method, CIDR, address, header, and relationship compilation;
 - condition, template, rewrite, and JavaScript route compilation;
-- static response decoding and gzip precompression;
+- static response decoding and gzip precompression; dynamic response gzip level publication;
 - strict native-only outbound `upstream_tls` validation, sealed custom-CA preparation, and stable
   non-zero transport pool-affinity derivation;
 - construction of a complete `ProjectRouteSnapshot` candidate.
