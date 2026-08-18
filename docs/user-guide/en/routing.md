@@ -100,7 +100,7 @@ Supported patterns are:
 | Suffix wildcard | `*.example.com`   | `a.example.com` and `a.b.example.com`, but not bare `example.com` |
 
 Two Projects cannot declare Host patterns that normalize to the same value. The Console keeps one
-immutable primary domain per Project and lets the Routes page add multiple exact Host aliases. Aliases
+immutable primary domain per Project and lets the Host Policy page add multiple exact Host aliases. Aliases
 share the Project's routes, policy, and Release; they do not add Project List entries or
 `route.<alias>` Data IDs. Before a Release, the Console reads existing route resources to check alias
 conflicts, while direct wire configuration must still respect global conflicts.

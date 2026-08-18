@@ -192,10 +192,11 @@ Project 页面固定显示域名、当前配置版本、未保存状态、rnacos
 页内导航按以下顺序排列：
 
 1. **Routes**：默认页签，也是主要工作区；
-2. **Versions**：当前和历史配置版本、只读预览、版本 diff、恢复和发布入口；
-3. **Releases**：该域名的发布执行、资源状态、重试和激活证据；
-4. **Network Policy**：HTTPS redirect 和 CIDR 访问策略；
-5. **Settings**：归档/下线等低频高风险操作。
+2. **Host Policy**：主域名、额外域名和 HTTPS redirect；
+3. **Network Policy**：CIDR 访问策略和可信客户端地址来源；
+4. **Versions**：当前和历史配置版本、只读预览、版本 diff、恢复和发布入口；
+5. **Releases**：该域名的发布执行、资源状态、重试和激活证据；
+6. **Settings**：归档/下线等低频高风险操作。
 
 离开存在未保存修改的 Route、切换 Project、删除 Route、归档 Project 和发布时都必须提供明确的
 防误操作保护。
@@ -206,16 +207,16 @@ Project 页面固定显示域名、当前配置版本、未保存状态、rnacos
 
 ### 7.1 Project（域名）
 
-| ID          | 优先级 | 需求                                                                                                            |
-| ----------- | ------ | --------------------------------------------------------------------------------------------------------------- |
-| CON-PRJ-001 | P0     | Projects 首页按域名搜索和列出 Project，并显示 Route 数、配置版本、发布和激活状态                                |
-| CON-PRJ-002 | P0     | 支持创建、复制和归档 Project；创建后自动建立空 Route Working Copy                                               |
-| CON-PRJ-003 | P0     | Project 主域名必须规范化、唯一，并作为默认 exact Host 和 rnacos project key；Routes 可维护多个 exact Host alias |
-| CON-PRJ-004 | P0     | 支持 Project 级 HTTPS redirect 策略：关闭、301、302、307、308；默认关闭                                         |
-| CON-PRJ-005 | P0     | 归档/下线前展示 Project 的主域名及全部关联 Host 将从项目列表和运行快照移除，要求输入主域名二次确认              |
-| CON-PRJ-006 | P0     | wire `version` 由 Release 流程分配，普通编辑器不可见、不可手工修改                                              |
-| CON-PRJ-007 | P1     | 支持从 rnacos 导入当前项目和 route 原文，但导入不得覆盖未确认的 Working Copy                                    |
-| CON-PRJ-008 | P1     | 支持多人编辑乐观锁；发现 base Configuration Version 改变时提示比较和合并                                        |
+| ID          | 优先级 | 需求                                                                                                                 |
+| ----------- | ------ | -------------------------------------------------------------------------------------------------------------------- |
+| CON-PRJ-001 | P0     | Projects 首页按域名搜索和列出 Project，并显示 Route 数、配置版本、发布和激活状态                                     |
+| CON-PRJ-002 | P0     | 支持创建、复制和归档 Project；创建后自动建立空 Route Working Copy                                                    |
+| CON-PRJ-003 | P0     | Project 主域名必须规范化、唯一，并作为默认 exact Host 和 rnacos project key；Host Policy 可维护多个 exact Host alias |
+| CON-PRJ-004 | P0     | Host Policy 支持 Project 级 HTTPS redirect：关闭、301、302、307、308；默认关闭                                       |
+| CON-PRJ-005 | P0     | 归档/下线前展示 Project 的主域名及全部关联 Host 将从项目列表和运行快照移除，要求输入主域名二次确认                   |
+| CON-PRJ-006 | P0     | wire `version` 由 Release 流程分配，普通编辑器不可见、不可手工修改                                                   |
+| CON-PRJ-007 | P1     | 支持从 rnacos 导入当前项目和 route 原文，但导入不得覆盖未确认的 Working Copy                                         |
+| CON-PRJ-008 | P1     | 支持多人编辑乐观锁；发现 base Configuration Version 改变时提示比较和合并                                             |
 
 域名规则：
 
@@ -225,7 +226,7 @@ Project 页面固定显示域名、当前配置版本、未保存状态、rnacos
 - 不接受通配符、端口、URL、路径和 IP 字面量；
 - 显示时可同时提供 Unicode 友好形式，但存储、唯一性和发布均使用规范化 ASCII domain。
 
-Project 保留一个不可变主域名，可在 Routes 页面维护多个精确 Host alias。alias 与主域名共享 Route、
+Project 保留一个不可变主域名，可在 Host Policy 页面维护多个精确 Host alias 和 HTTPS redirect。alias 与主域名共享 Route、
 网络策略、版本和 Release，不新增 Project List 条目，也不新增 `route.<alias>` Data ID。旧配置中的
 精确 Host 可迁移为 alias；通配符、IP 或无法规范化的 Host 必须通过有预览和人工确认的迁移流程处理，
 不得静默丢弃。
@@ -403,10 +404,10 @@ SAN，不需要业务流量验证。到期状态必须随时间持续计算；�
 以及把现有证据安全地纳入 HTTPS redirect 发布前置校验仍是明确缺口；Console 不能从配置保存、
 rnacos readback 或 TLS 库存推断 HTTPS 已经可达。
 
-### 7.4.1 网络策略配置
+### 7.4.1 Host 与网络策略配置
 
-网络策略和 Host alias 作为 Configuration Version schema v6 的一部分保存，而不是可漂移的 Project 当前属性。
-其中 HTTPS redirect 独立配置为关闭/301/302/307/308，并编译到 exact HostStrategy；CIDR 支持
+Host alias、HTTPS redirect 和网络策略作为 Configuration Version schema v6 的一部分保存，而不是可漂移的
+Project 当前属性。其中 HTTPS redirect 独立配置为关闭/301/302/307/308，并编译到 exact HostStrategy；CIDR 支持
 “Route 自主管理”和“Project 统一策略”两种互斥模式。统一模式把允许 CIDR 和优先拒绝 CIDR
 确定性编译进每条 route `allows`，并禁止 Route YAML 同时声明 `allows`。详细需求、迁移、API、
 安全前提和验收见

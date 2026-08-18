@@ -222,11 +222,11 @@
 </table>
 <p>
   Two Projects cannot declare Host patterns that normalize to the same value. The Console keeps one
-  immutable primary domain per Project and lets the Routes page add multiple exact Host aliases.
-  Aliases share the Project&#39;s routes, policy, and Release; they do not add Project List entries
-  or <code>route.&lt;alias&gt;</code> Data IDs. Before a Release, the Console reads existing route
-  resources to check alias conflicts, while direct wire configuration must still respect global
-  conflicts.
+  immutable primary domain per Project and lets the Host Policy page add multiple exact Host
+  aliases. Aliases share the Project&#39;s routes, policy, and Release; they do not add Project List
+  entries or <code>route.&lt;alias&gt;</code> Data IDs. Before a Release, the Console reads existing
+  route resources to check alias conflicts, while direct wire configuration must still respect
+  global conflicts.
 </p>
 <p>
   An unmatched Host returns HTTP 404 with error name <code>ROUTER_NOT_FOUND</code>. Path selection

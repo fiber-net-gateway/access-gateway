@@ -436,24 +436,24 @@ describe('application routes', () => {
     expect(router.state.location.pathname).toBe(`/projects/${projectId}/routes`)
   })
 
-  test('adds and removes a normalized exact Host alias in the Routes workspace', async () => {
+  test('adds and removes a normalized exact Host alias in the Host Policy workspace', async () => {
     installApiMock()
     const router = createMemoryRouter(appRoutes, {
-      initialEntries: [`/projects/${projectId}/routes`],
+      initialEntries: [`/projects/${projectId}/host-policy`],
     })
     const user = userEvent.setup()
     render(<RouterProvider router={router} />)
 
-    await screen.findByRole('heading', { name: 'Routes' })
-    const aliasInput = screen.getByRole('textbox', { name: '添加关联域名' }) as HTMLInputElement
+    await screen.findByRole('heading', { name: 'Host Policy' })
+    const aliasInput = screen.getByRole('textbox', { name: '添加额外域名' }) as HTMLInputElement
     await waitFor(() => expect(aliasInput.disabled).toBe(false))
     fireEvent.change(aliasInput, { target: { value: ' WWW.Example.com. ' } })
-    await user.click(screen.getByRole('button', { name: '添加关联域名' }))
+    await user.click(screen.getByRole('button', { name: '添加额外域名' }))
 
     expect(await screen.findByText('www.example.com')).toBeTruthy()
     expect(screen.getByText('有未保存修改')).toBeTruthy()
-    await user.click(screen.getByRole('button', { name: '移除关联域名 www.example.com' }))
-    expect(screen.getByText('尚未添加关联域名')).toBeTruthy()
+    await user.click(screen.getByRole('button', { name: '移除额外域名 www.example.com' }))
+    expect(screen.getByText('尚未添加额外域名')).toBeTruthy()
   })
 
   test('creates a JavaScript route with external path and optional method fields', async () => {
@@ -558,7 +558,42 @@ describe('application routes', () => {
     expect(screen.queryByRole('dialog', { name: '保存为配置版本' })).toBeNull()
   })
 
-  test('saves HTTPS redirect and Project-owned CIDRs as one immutable version', async () => {
+  test('saves HTTPS redirect from the Host Policy workspace', async () => {
+    const fetchMock = installApiMock()
+    const router = createMemoryRouter(appRoutes, {
+      initialEntries: [`/projects/${projectId}/host-policy`],
+    })
+    const user = userEvent.setup()
+    render(<RouterProvider router={router} />)
+
+    await screen.findByRole('heading', { name: 'Host Policy' })
+    await user.click(screen.getByRole('checkbox', { name: /强制 HTTPS/u }))
+    await user.selectOptions(screen.getByRole('combobox', { name: /重定向状态码/u }), '307')
+    await user.click(screen.getByRole('button', { name: '保存为 V9' }))
+
+    await waitFor(() => {
+      const saveCall = fetchMock.mock.calls.find(
+        ([url, init]) =>
+          url === `/api/projects/${projectId}/configuration-versions` && init?.method === 'POST',
+      )
+      expect(saveCall).toBeTruthy()
+      const body = JSON.parse(String(saveCall?.[1]?.body)) as {
+        model: {
+          networkPolicy: {
+            httpsRedirect: string
+          }
+        }
+      }
+      expect(body.model.networkPolicy).toEqual({
+        source: 'route',
+        httpsRedirect: '307',
+        allowedCidrs: [],
+        deniedCidrs: [],
+      })
+    })
+  })
+
+  test('saves Project-owned CIDRs from the Network Policy workspace', async () => {
     const fetchMock = installApiMock()
     const router = createMemoryRouter(appRoutes, {
       initialEntries: [`/projects/${projectId}/network-policy`],
@@ -567,8 +602,6 @@ describe('application routes', () => {
     render(<RouterProvider router={router} />)
 
     await screen.findByRole('heading', { name: 'Network Policy' })
-    await user.click(screen.getByRole('checkbox', { name: /强制 HTTPS/u }))
-    await user.selectOptions(screen.getByRole('combobox', { name: /重定向状态码/u }), '307')
     await user.click(screen.getByRole('radio', { name: /Project 统一强制/u }))
     await user.type(screen.getByLabelText(/允许 CIDR/u), '10.0.0.0/8')
     await user.type(screen.getByLabelText(/拒绝 CIDR/u), '10.1.0.0/16')
@@ -592,7 +625,7 @@ describe('application routes', () => {
       }
       expect(body.model.networkPolicy).toEqual({
         source: 'project',
-        httpsRedirect: '307',
+        httpsRedirect: 'off',
         allowedCidrs: ['10.0.0.0/8'],
         deniedCidrs: ['10.1.0.0/16'],
       })
