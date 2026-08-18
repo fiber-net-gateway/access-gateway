@@ -120,7 +120,8 @@ export function ProjectSettingsPage() {
           <p className="eyebrow">PROJECT LIFECYCLE</p>
           <h2 id="settings-title">Settings</h2>
           <p>
-            查看不可变主域名，并通过 Routes 管理关联域名、通过有发布证据的 Release 下线 Project。
+            查看不可变主域名，并通过 Host Policy 管理域名与 HTTPS、通过有发布证据的 Release 下线
+            Project。
           </p>
         </div>
         <span
@@ -160,8 +161,8 @@ export function ProjectSettingsPage() {
             </div>
           </dl>
           <p className="settings-note">
-            主域名同时是 exact Host 与 rnacos project key，不能原地改名；关联域名请在 Routes
-            页面维护，与主域名共享配置和 Release。下线时会移除整个 Project 的全部域名。
+            主域名同时是 exact Host 与 rnacos project key，不能原地改名；额外域名和 HTTPS 请在 Host
+            Policy 页面维护，与主域名共享配置和 Release。下线时会移除整个 Project 的全部域名。
           </p>
         </article>
 

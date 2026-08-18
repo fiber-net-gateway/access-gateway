@@ -3,8 +3,8 @@
 ## 1. 背景与目标
 
 Project Settings 是域名 Project 的低频生命周期操作入口，不是通用配置页。Project 主域名不可变，
-关联域名在 Routes 页面维护；Route、HTTPS redirect
-和 CIDR 策略已经分别由 Routes 与 Network Policy 管理；rnacos 连接、Data ID、成员和系统能力属于
+关联域名和 HTTPS redirect 在 Host Policy 页面维护；Route 和 CIDR 策略已经分别由 Routes 与 Network Policy
+管理；rnacos 连接、Data ID、成员和系统能力属于
 部署级 System。Settings 首个业务可用版本聚焦于安全、可审计地将一个 Project（及其全部 Host）从运行配置中下线并归档。
 
 本增量目标：
@@ -19,7 +19,7 @@ Project Settings 是域名 Project 的低频生命周期操作入口，不是通
 ## 2. 非目标
 
 - 不在 Settings 中编辑主域名或关联域名。主域名是 exact Host 和 rnacos project key；改名应通过复制到
-  新主域名并单独下线旧 Project 完成。关联域名在 Routes 页面与配置版本一起保存。
+  新主域名并单独下线旧 Project 完成。额外域名和 HTTPS redirect 在 Host Policy 页面与配置版本一起保存。
 - 不在 Settings 中编辑 Route、HTTPS、CIDR、证书、rnacos endpoint、namespace、tenant、Data ID
   或凭据。
 - 不通过空 Route、空 Host 或空 YAML 表达下线。

@@ -164,7 +164,8 @@ body。跨 workspace 或无权对象继续返回 404，防止枚举。
 - 同一页面提供只读 SNI 解析预览，不提供规则创建、切换或删除。SAN 范围变化时展示新增/停止覆盖
   的域名并要求确认。
 - Project 列表、详情 DTO、导航和页面不再包含证书字段或证书入口。
-- Project / Network Policy 页面编辑 HTTPS redirect、CIDR 策略所有权、允许/拒绝 CIDR 和版本说明；保存复用
+- Project / Host Policy 页面编辑 Host alias、HTTPS redirect 和版本说明；Project / Network Policy 页面编辑 CIDR
+  策略所有权、允许/拒绝 CIDR；两页保存均复用
   Configuration Version 乐观锁与幂等写入，并阻止有未保存修改时离开。
 - 私钥输入成功后立即从 React state 清空；页面、响应、列表和错误中都不显示私钥。
 - 状态均带文字，键盘可操作；窄屏下表单和元数据布局降为单列。

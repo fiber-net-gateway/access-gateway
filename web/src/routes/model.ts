@@ -115,6 +115,46 @@ export function normalizeExactHost(value: string): string | null {
     : null
 }
 
+export interface HostAliasValidation {
+  validationIssues: readonly string[]
+  limitMessages: readonly string[]
+}
+
+export function validateHostAliases(
+  hostAliases: readonly string[],
+  primaryDomain: string,
+  limits?: { maxHosts?: number; maxHostPatternBytes?: number } | null,
+): HostAliasValidation {
+  const validationIssues: string[] = []
+  const limitMessages: string[] = []
+  const primary = normalizeExactHost(primaryDomain)
+  const seen = new Set<string>(primary ? [primary] : [])
+  const encoder = new TextEncoder()
+
+  if (limits?.maxHosts !== undefined && hostAliases.length + 1 > limits.maxHosts) {
+    limitMessages.push(`域名总数超过 Native 上限 ${limits.maxHosts}`)
+  }
+  hostAliases.forEach((alias, index) => {
+    const normalized = normalizeExactHost(alias)
+    if (!normalized) {
+      validationIssues.push(`关联域名 ${index + 1} 不是有效的精确 DNS 域名`)
+    } else if (normalized === primary) {
+      validationIssues.push(`关联域名 ${index + 1} 与主域名重复`)
+    } else if (seen.has(normalized)) {
+      validationIssues.push(`关联域名 ${index + 1} 重复`)
+    } else {
+      seen.add(normalized)
+    }
+    if (
+      limits?.maxHostPatternBytes !== undefined &&
+      encoder.encode(alias).byteLength > limits.maxHostPatternBytes
+    ) {
+      limitMessages.push(`关联域名 ${index + 1} 超过 ${limits.maxHostPatternBytes} UTF-8 bytes`)
+    }
+  })
+  return { validationIssues, limitMessages }
+}
+
 export function createRouteItem(template: RouteTemplate): RouteItemModel {
   if (template === 'JS') {
     return {

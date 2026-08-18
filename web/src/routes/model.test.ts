@@ -7,6 +7,7 @@ import {
   duplicateRouteItem,
   initialRouteModel,
   normalizeExactHost,
+  validateHostAliases,
 } from './model.js'
 
 test('creates an empty ordered YAML route model', () => {
@@ -29,6 +30,21 @@ test('normalizes exact Host aliases and rejects unsafe host syntax', () => {
   assert.equal(normalizeExactHost('bücher.example'), 'xn--bcher-kva.example')
   assert.equal(normalizeExactHost('*.example.com'), null)
   assert.equal(normalizeExactHost('example.com:443'), null)
+})
+
+test('validates Host aliases against the primary domain and native limits', () => {
+  const result = validateHostAliases(
+    ['www.example.com', 'WWW.Example.com', 'api.example.com'],
+    'api.example.com',
+    { maxHosts: 3, maxHostPatternBytes: 8 },
+  )
+  assert.deepEqual(result.validationIssues, ['关联域名 2 重复', '关联域名 3 与主域名重复'])
+  assert.deepEqual(result.limitMessages, [
+    '域名总数超过 Native 上限 3',
+    '关联域名 1 超过 8 UTF-8 bytes',
+    '关联域名 2 超过 8 UTF-8 bytes',
+    '关联域名 3 超过 8 UTF-8 bytes',
+  ])
 })
 
 test('creates independent RESPONSE and PROXY YAML route items', () => {
