@@ -57,9 +57,9 @@
 
 ## 4. 需要调整的地方
 
-### 4.1 P0：Fiber revision、CMake target 和构建说明不一致
+### 4.1 P0：Fiber revision、CMake target 和构建说明不一致（已解决）
 
-评审环境中发现：
+2026-08-18 的评审环境中曾发现：
 
 - [`native/access-server/CMakeLists.txt`](../CMakeLists.txt#L50) 只检查 Nacos、CAT、Prometheus
   target 是否存在；
@@ -69,15 +69,17 @@
   [`UPSTREAM.md`](../UPSTREAM.md#L12) 记录的是 `8e8e1d7933d4a30aa3b21feb6acc3e633a612b9b`；
 - 因此完整 runtime configure/regenerate 失败，离线 validator 因 runtime 被跳过而仍可构建。
 
-这首先是可复现构建问题，不应通过修改 submodule 内部文件解决。建议：
+这是可复现构建问题，不应通过修改 submodule 内部文件解决。2026-08-19 已完成以下收口：
 
-1. 明确当前要支持的 Fiber revision；
-2. 若采用新 revision，审阅 revision range，更新 gitlink、`UPSTREAM.md`、CMake target 约定和
-   相关 provenance；
-3. 在 `add_subdirectory` 后对所有 runtime 必需 target 做 configure-time 检查，失败时打印
-   revision 和缺失 target；
-4. 按 [`build-boundaries.md`](build-boundaries.md#L81) 审计 `PUBLIC`/`PRIVATE`：实现依赖尽量
-   使用 `PRIVATE`，避免把 Fiber 内部类型扩散到 access-server 公共头文件。
+1. gitlink 和 [`UPSTREAM.md`](../UPSTREAM.md#L12) 统一固定为
+   `0df9dd0d533c96555653af9288faeb54964359bc`；
+2. 已审阅 `3d4b350..0df9dd0`，增量仅修改未由本项目构建的 lite-nginx launcher shutdown；
+3. Release native configure、默认目标构建、337 项 access-server focused CTest 和 1,977 项完整
+   CTest 均通过，5 项按环境条件 skip。
+
+因此当前 pin 的 runtime 可复现构建阻断已经解除。对全部 runtime 必需 target 增加统一的
+configure-time 缺失诊断，以及继续按 [`build-boundaries.md`](build-boundaries.md#L81) 收窄
+`PUBLIC`/`PRIVATE` 依赖，仍可作为后续 build hardening，但不再阻断当前依赖版本。
 
 ### 4.2 P1：收窄 control plane 与 data plane 的接口
 
