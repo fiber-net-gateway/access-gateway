@@ -59,6 +59,7 @@ http::Http1ClientConnectionOptions connection_options(const http::Http1Connectio
                                                       UpstreamTlsClientPolicyView tls_policy) {
     http::Http1ClientConnectionOptions result;
     result.peer_addr = net::SocketAddress(ip, key.port());
+    result.pool_affinity = key.pool_affinity();
     if (key.scheme() == http::Http1ConnectionGroupKey::Scheme::Https) {
         result.tls.enabled = true;
         result.tls.verify_peer = verified_tls(tls_policy);
