@@ -62,7 +62,12 @@ AccessActivationEvidenceStore::AccessActivationEvidenceStore(event::EventLoop &o
     initial->gray = gray_;
     initial->tls = tls_;
     initial->route_snapshot_fingerprint_sha256 = route_fingerprint();
-    published_.store(std::move(initial), std::memory_order_relaxed);
+    std::shared_ptr<const AccessActivationEvidenceSnapshot> snapshot = std::move(initial);
+#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
+    published_.store(std::move(snapshot), std::memory_order_relaxed);
+#else
+    std::atomic_store_explicit(&published_, std::move(snapshot), std::memory_order_relaxed);
+#endif
 }
 
 AccessRouteActivationEvidenceObserver AccessActivationEvidenceStore::route_observer() noexcept {
@@ -127,7 +132,12 @@ void AccessActivationEvidenceStore::publish() noexcept {
     snapshot->gray = gray_;
     snapshot->tls = tls_;
     snapshot->route_snapshot_fingerprint_sha256 = route_fingerprint();
-    published_.store(std::move(snapshot), std::memory_order_release);
+    std::shared_ptr<const AccessActivationEvidenceSnapshot> pinned = std::move(snapshot);
+#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
+    published_.store(std::move(pinned), std::memory_order_release);
+#else
+    std::atomic_store_explicit(&published_, std::move(pinned), std::memory_order_release);
+#endif
 }
 
 std::string AccessActivationEvidenceStore::route_fingerprint() const noexcept {

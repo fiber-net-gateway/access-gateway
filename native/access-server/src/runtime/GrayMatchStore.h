@@ -69,7 +69,11 @@ private:
     struct alignas(64) WorkerSlot {
         WorkerSlot(std::shared_ptr<const WorkerSnapshot> initial, std::uint64_t sequence) noexcept;
 
+#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
         std::atomic<std::shared_ptr<const WorkerSnapshot>> published;
+#else
+        std::shared_ptr<const WorkerSnapshot> published;
+#endif
         std::uint64_t random_sequence = 0;
     };
 
@@ -79,7 +83,11 @@ private:
     [[nodiscard]] static std::uint32_t next_sample(WorkerSlot &slot) noexcept;
     [[nodiscard]] std::shared_ptr<const Snapshot> pin() const noexcept;
 
+#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
     std::atomic<std::shared_ptr<const Snapshot>> published_;
+#else
+    std::shared_ptr<const Snapshot> published_;
+#endif
     event::EventLoopGroup *workers_ = nullptr;
     std::vector<std::unique_ptr<WorkerSlot>> worker_slots_;
     std::uint64_t next_generation_ = 0;

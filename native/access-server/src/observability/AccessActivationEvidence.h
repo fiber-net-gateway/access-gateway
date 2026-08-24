@@ -139,7 +139,11 @@ public:
     [[nodiscard]] AccessTlsActivationEvidenceObserver tls_observer() noexcept;
 
     [[nodiscard]] std::shared_ptr<const AccessActivationEvidenceSnapshot> pin() const noexcept {
+#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
         return published_.load(std::memory_order_acquire);
+#else
+        return std::atomic_load_explicit(&published_, std::memory_order_acquire);
+#endif
     }
 
 private:
@@ -159,7 +163,11 @@ private:
     AccessGrayActivationEvidence gray_;
     AccessTlsActivationEvidence tls_;
     std::uint64_t revision_ = 0;
+#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
     std::atomic<std::shared_ptr<const AccessActivationEvidenceSnapshot>> published_;
+#else
+    std::shared_ptr<const AccessActivationEvidenceSnapshot> published_;
+#endif
 };
 
 [[nodiscard]] std::string_view access_activation_candidate_status_name(AccessActivationCandidateStatus status) noexcept;
