@@ -300,9 +300,19 @@ public:
         FIBER_ASSERT(aggregate_.ready);
         FIBER_ASSERT(active_directory_ != nullptr);
         for (const auto &slot: worker_slots_) {
+#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
             slot->published.store({}, std::memory_order_release);
+#else
+            std::atomic_store_explicit(&slot->published, std::shared_ptr<const WorkerDirectory>{},
+                                       std::memory_order_release);
+#endif
         }
+#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
         published_directory_.store({}, std::memory_order_release);
+#else
+        std::atomic_store_explicit(&published_directory_, std::shared_ptr<const ClusterDirectory>{},
+                                   std::memory_order_release);
+#endif
         active_directory_.reset();
         metrics_observer_.transition_service(retire_event(reason), aggregate_, {});
         aggregate_ = {};
@@ -319,12 +329,21 @@ public:
         event::EventLoop *loop = event::EventLoop::current_or_null();
         if (workers_ != nullptr && loop != nullptr && loop->has_group_index() && loop->group() == workers_) {
             FIBER_ASSERT(loop->group_index() < worker_slots_.size());
+#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
             worker_directory = worker_slots_[loop->group_index()]->published.load(std::memory_order_acquire);
+#else
+            worker_directory = std::atomic_load_explicit(&worker_slots_[loop->group_index()]->published,
+                                                         std::memory_order_acquire);
+#endif
             if (worker_directory != nullptr) {
                 directory = worker_directory->directory.get();
             }
         } else {
+#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
             canonical_directory = published_directory_.load(std::memory_order_acquire);
+#else
+            canonical_directory = std::atomic_load_explicit(&published_directory_, std::memory_order_acquire);
+#endif
             directory = canonical_directory.get();
         }
         if (directory == nullptr) {
@@ -445,7 +464,11 @@ private:
     };
 
     struct alignas(64) WorkerSlot {
+#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
         std::atomic<std::shared_ptr<const WorkerDirectory>> published;
+#else
+        std::shared_ptr<const WorkerDirectory> published;
+#endif
     };
 
     void publish_directory(const std::shared_ptr<const ClusterDirectory> &directory) {
@@ -455,9 +478,18 @@ private:
             candidates.push_back(std::make_shared<const WorkerDirectory>(directory));
         }
         for (std::size_t index = 0; index < worker_slots_.size(); ++index) {
+#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
             worker_slots_[index]->published.store(std::move(candidates[index]), std::memory_order_release);
+#else
+            std::atomic_store_explicit(&worker_slots_[index]->published, std::move(candidates[index]),
+                                       std::memory_order_release);
+#endif
         }
+#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
         published_directory_.store(directory, std::memory_order_release);
+#else
+        std::atomic_store_explicit(&published_directory_, directory, std::memory_order_release);
+#endif
     }
 
     void assign_selection_tokens(std::vector<AccessEndpointDefinition> &next) noexcept {
@@ -505,7 +537,11 @@ private:
     std::vector<std::unique_ptr<WorkerSlot>> worker_slots_;
     // Serving workers load distinct wrapper control blocks. The canonical
     // pointer is reserved for non-serving loops and deterministic tests.
+#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
     std::atomic<std::shared_ptr<const ClusterDirectory>> published_directory_;
+#else
+    std::shared_ptr<const ClusterDirectory> published_directory_;
+#endif
     std::shared_ptr<const ClusterDirectory> active_directory_;
     std::string checksum_;
     std::vector<AccessEndpointDefinition> definitions_;

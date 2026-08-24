@@ -39,7 +39,11 @@ GrayMatchStore::GrayMatchStore(event::EventLoopGroup &workers, GrayMatchStoreOpt
 
 void GrayMatchStore::initialize(GrayMatchStoreOptions options) {
     auto initial = std::make_shared<const Snapshot>();
+#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
     published_.store(initial, std::memory_order_relaxed);
+#else
+    std::atomic_store_explicit(&published_, initial, std::memory_order_relaxed);
+#endif
     if (workers_ == nullptr) {
         return;
     }
@@ -74,9 +78,18 @@ GrayMatchStore::apply(const std::optional<GrayMatchConfig> &config) {
         worker_snapshots.push_back(std::make_shared<const WorkerSnapshot>(published));
     }
     for (std::size_t index = 0; index < worker_slots_.size(); ++index) {
+#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
         worker_slots_[index]->published.store(std::move(worker_snapshots[index]), std::memory_order_release);
+#else
+        std::atomic_store_explicit(&worker_slots_[index]->published, std::move(worker_snapshots[index]),
+                                   std::memory_order_release);
+#endif
     }
+#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
     published_.store(std::move(published), std::memory_order_release);
+#else
+    std::atomic_store_explicit(&published_, std::move(published), std::memory_order_release);
+#endif
     ++next_generation_;
     return GrayMatchUpdateStatus::Published;
 }
@@ -98,7 +111,12 @@ bool GrayMatchStore::matches_request(void *context, std::string_view entry, cons
     }
     FIBER_ASSERT(loop->group_index() < store.worker_slots_.size());
     WorkerSlot &slot = *store.worker_slots_[loop->group_index()];
+#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
     const std::shared_ptr<const WorkerSnapshot> worker_snapshot = slot.published.load(std::memory_order_acquire);
+#else
+    const std::shared_ptr<const WorkerSnapshot> worker_snapshot =
+            std::atomic_load_explicit(&slot.published, std::memory_order_acquire);
+#endif
     FIBER_ASSERT(worker_snapshot != nullptr);
     FIBER_ASSERT(worker_snapshot->snapshot != nullptr);
     return matches_snapshot(*worker_snapshot->snapshot, entry, metadata, next_sample(slot));
@@ -136,7 +154,11 @@ std::size_t GrayMatchStore::rule_count() const noexcept { return pin()->config.r
 std::uint64_t GrayMatchStore::generation() const noexcept { return pin()->generation; }
 
 std::shared_ptr<const GrayMatchStore::Snapshot> GrayMatchStore::pin() const noexcept {
+#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
     return published_.load(std::memory_order_acquire);
+#else
+    return std::atomic_load_explicit(&published_, std::memory_order_acquire);
+#endif
 }
 
 std::uint32_t GrayMatchStore::next_sample(WorkerSlot &slot) noexcept {

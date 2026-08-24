@@ -20,7 +20,11 @@ struct RouteSnapshotPublisher::WorkerState {
     struct alignas(64) WorkerSlot {
         explicit WorkerSlot(std::shared_ptr<const WorkerSnapshot> initial) noexcept : published(std::move(initial)) {}
 
+#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
         std::atomic<std::shared_ptr<const WorkerSnapshot>> published;
+#else
+        std::shared_ptr<const WorkerSnapshot> published;
+#endif
     };
 
     WorkerState(event::EventLoopGroup &worker_group, const std::shared_ptr<const AccessRouteSnapshot> &initial) :
@@ -33,7 +37,12 @@ struct RouteSnapshotPublisher::WorkerState {
 
     [[nodiscard]] std::shared_ptr<const AccessRouteSnapshot> pin(std::size_t index) const noexcept {
         FIBER_ASSERT(index < slots.size());
+#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
         std::shared_ptr<const WorkerSnapshot> worker_snapshot = slots[index]->published.load(std::memory_order_acquire);
+#else
+        std::shared_ptr<const WorkerSnapshot> worker_snapshot =
+                std::atomic_load_explicit(&slots[index]->published, std::memory_order_acquire);
+#endif
         FIBER_ASSERT(worker_snapshot);
         FIBER_ASSERT(worker_snapshot->snapshot);
         const AccessRouteSnapshot *snapshot = worker_snapshot->snapshot.get();
@@ -50,7 +59,12 @@ struct RouteSnapshotPublisher::WorkerState {
             candidates.push_back(std::make_shared<const WorkerSnapshot>(snapshot));
         }
         for (std::size_t index = 0; index < slots.size(); ++index) {
+#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
             slots[index]->published.store(std::move(candidates[index]), std::memory_order_release);
+#else
+            std::atomic_store_explicit(&slots[index]->published, std::move(candidates[index]),
+                                       std::memory_order_release);
+#endif
         }
     }
 
