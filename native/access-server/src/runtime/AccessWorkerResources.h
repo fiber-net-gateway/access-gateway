@@ -33,7 +33,6 @@ class AccessRuntimeMetrics;
 struct AccessWorkerResourcesOptions {
     std::size_t default_max_request_body_size = 400U << 20U;
     ClientMetadataResolverOptions client_metadata;
-    bool connection_secure = false;
     AccessLogOptions access_log;
     AccessDnsServiceOptions dns = AccessDnsServiceOptions::local_default();
     AccessDnsResolverFactory dns_resolver_factory = AccessDnsResolverFactory::system();
@@ -56,7 +55,9 @@ public:
 
     [[nodiscard]] async::Task<common::IoResult<void>> initialize() noexcept;
     [[nodiscard]] async::Task<void> shutdown() noexcept;
-    [[nodiscard]] async::Task<void> handle(http::HttpExchange &exchange) noexcept;
+    // connection_secure is per-listener: the TLS server passes true, the
+    // plaintext server false, so client metadata observes the real scheme.
+    [[nodiscard]] async::Task<void> handle(http::HttpExchange &exchange, bool connection_secure) noexcept;
 
     [[nodiscard]] AccessServerMetrics &metrics() noexcept { return metrics_; }
 

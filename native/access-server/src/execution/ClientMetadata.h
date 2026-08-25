@@ -75,12 +75,16 @@ class ClientMetadataResolver {
 public:
     explicit ClientMetadataResolver(ClientMetadataResolverOptions options = {}) noexcept;
 
-    [[nodiscard]] ClientMetadata resolve(const http::HttpExchange &exchange) const noexcept;
+    // The exchange overload takes the listener's per-request security so a
+    // single resolver can serve both the TLS and the plaintext listener.
+    [[nodiscard]] ClientMetadata resolve(const http::HttpExchange &exchange, bool connection_secure) const noexcept;
     [[nodiscard]] ClientMetadata resolve(const net::SocketAddress &peer,
                                          const http::HttpHeaders &headers) const noexcept;
     [[nodiscard]] const ClientMetadataResolverOptions &options() const noexcept { return options_; }
 
 private:
+    [[nodiscard]] ClientMetadata resolve(const net::SocketAddress &peer, const http::HttpHeaders &headers,
+                                         bool connection_secure) const noexcept;
     [[nodiscard]] bool is_trusted_proxy(const net::IpAddress &address) const noexcept;
 
     ClientMetadataResolverOptions options_;

@@ -204,18 +204,19 @@ one-shot migration/bootstrap containers.
 Once all services are ready:
 
 - Console: `http://localhost:8088`
-- Access Server HTTPS/HTTP2 demo: `curl -k --http2 -H 'Host: demo.local' https://localhost:16688/`
-- Access Server metrics: `http://localhost:16689/metrics`
+- Access Server HTTPS/HTTP2 demo: `curl -k --http2 -H 'Host: demo.local' https://localhost:8443/`
+- Access Server plaintext HTTP/1.1 demo: `curl -H 'Host: demo.local' http://localhost:8000/`
+- Access Server metrics: `http://localhost:8001/metrics`
 - R-Nacos Console: `http://localhost:10848/rnacos/`
 - MySQL: `127.0.0.1:3307`
 
 R-Nacos Console credentials and database secrets are stored only in the ignored local `.env` file;
 the self-signed certificate is under the ignored `deploy/demo/certs/` directory. Access Server port
-16688 publishes both TCP (HTTPS/HTTP2) and UDP (HTTP3) on all WSL interfaces by default; the other
-demo ports remain loopback-only. WSL2 NAT normally forwards TCP, but not UDP, from Windows
-`localhost`. To verify HTTP3 from a Windows browser, obtain the WSL address with `hostname -I`, add
-`<WSL-IP> demo.local` temporarily to the Windows hosts file, and open
-`https://demo.local:16688/`. Set `ACCESS_SERVER_PUBLISHED_HOST=127.0.0.1` in `.env` when the gateway
+8443 publishes both TCP (HTTPS/HTTP2) and UDP (HTTP3) on all WSL interfaces by default; the
+plaintext and metrics ports (8000/8001) remain loopback-only. WSL2 NAT normally forwards TCP, but
+not UDP, from Windows `localhost`. To verify HTTP3 from a Windows browser, obtain the WSL address
+with `hostname -I`, add `<WSL-IP> demo.local` temporarily to the Windows hosts file, and open
+`https://demo.local:8443/`. Set `ACCESS_SERVER_PUBLISHED_HOST=127.0.0.1` in `.env` when the gateway
 should only be reachable inside WSL. Browsers negotiate QUIC only after trusting the demo
 certificate; never trust or reuse this local self-signed certificate in production.
 The bootstrap creates a Configuration Version and Release through the Console API; the publication
@@ -274,16 +275,18 @@ cp native/access-server/access-server.env.example access-server.env
 Without an argument, the process reads `access-server.env` from the current directory. The default
 listeners are:
 
-- gateway HTTPS: `0.0.0.0:16688/tcp` with HTTP/1.1 and HTTP/2 through ALPN;
-- gateway HTTP/3: `0.0.0.0:16688/udp`;
-- Prometheus metrics: `0.0.0.0:16689`.
+- gateway TLS: `0.0.0.0:8443/tcp` with HTTP/1.1 and HTTP/2 through ALPN;
+- gateway HTTP/3: `0.0.0.0:8443/udp`;
+- plaintext HTTP/1.1: `0.0.0.0:8000/tcp`;
+- Prometheus metrics: `0.0.0.0:8001`.
 
-TLS and HTTP/3 are enabled by default. Access Server waits for
-`ploto.unified-access.tls-certificates` in group `ACCESS-SERVER`, derives SNI selectors from leaf DNS
-SANs, and hot-swaps only a fully validated snapshot. A missing snapshot, expired certificate,
-mismatched key, or failed TCP/UDP bind fails startup. File-based certificate settings have been
-removed. Legacy plaintext HTTP requires both `ACCESS_SERVER_TLS_ENABLED=false` and
-`ACCESS_SERVER_HTTP3_ENABLED=false`. The configuration format is strict `KEY=VALUE`; unknown or
+TLS and HTTP/3 are enabled by default; the plaintext listener runs alongside them. Access Server
+waits for `ploto.unified-access.tls-certificates` in group `ACCESS-SERVER`, derives SNI selectors
+from leaf DNS SANs, and hot-swaps only a fully validated snapshot. A missing snapshot, expired
+certificate, mismatched key, or failed TCP/UDP bind fails startup. File-based certificate settings
+have been removed. The TLS address:port is only bound while TLS is enabled; disable
+`ACCESS_SERVER_TLS_ENABLED` (and `ACCESS_SERVER_HTTP3_ENABLED`, which requires TLS) to run plaintext
+only on the plaintext listener. The configuration format is strict `KEY=VALUE`; unknown or
 duplicate keys fail startup. Do not commit local environment files, private keys, or credentials. See
 [`native/access-server/access-server.env.example`](native/access-server/access-server.env.example)
 for the full configuration surface.

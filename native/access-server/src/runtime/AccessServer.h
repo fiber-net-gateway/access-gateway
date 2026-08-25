@@ -37,6 +37,8 @@ struct AccessServerOptions {
     bool test_mode = false;
     http::HttpServerOptions http_server;
     std::string http3_alt_svc;
+    bool plain_listen_enabled = false;
+    http::HttpServerOptions plain_http_server;
 };
 
 class AccessServer final : public common::NonCopyable, public common::NonMovable {
@@ -48,18 +50,22 @@ public:
     [[nodiscard]] async::Task<common::IoResult<void>> initialize() noexcept;
     [[nodiscard]] common::IoResult<void> bind(const net::SocketAddress &address,
                                               const net::ListenOptions &options = {});
+    [[nodiscard]] common::IoResult<void> bind_plain(const net::SocketAddress &address,
+                                                    const net::ListenOptions &options = {});
     [[nodiscard]] common::IoResult<void> bind_metrics(const net::SocketAddress &address,
                                                       const net::ListenOptions &options = {});
     async::DetachedTask serve();
     async::DetachedTask serve_metrics();
     [[nodiscard]] async::Task<void> shutdown_and_wait() noexcept;
     [[nodiscard]] int fd() const noexcept { return server_.fd(); }
+    [[nodiscard]] int plain_fd() const noexcept { return plain_server_.fd(); }
     [[nodiscard]] int metrics_fd() const noexcept { return metrics_endpoint_.fd(); }
 
 private:
     event::EventLoop *accept_loop_ = nullptr;
     AccessWorkerResources worker_resources_;
     http::HttpServer server_;
+    http::HttpServer plain_server_;
     AccessMetricsEndpoint metrics_endpoint_;
     bool initialized_ = false;
 };

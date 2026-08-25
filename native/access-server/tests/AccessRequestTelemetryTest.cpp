@@ -150,7 +150,7 @@ fiber::async::DetachedTask run_component_request(fiber::event::EventLoop *loop,
                                         result](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
         fiber::access_server::ScriptExecutionContext execution(exchange);
         fiber::access_server::ClientMetadataResolver resolver;
-        const fiber::access_server::ClientMetadata metadata = resolver.resolve(exchange);
+        const fiber::access_server::ClientMetadata metadata = resolver.resolve(exchange, false);
         fiber::access_server::TracePropagation trace(exchange.pool());
         fiber::access_server::RequestObservability observability(exchange, nullptr, cat_client, nullptr, metadata,
                                                                  trace);

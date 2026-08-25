@@ -91,7 +91,7 @@ connection pool，以及 Nacos、CAT、Prometheus 组件。迁移不要求这些
   header；解析 `tracestate` 的 `bnrc` GMP Base62 context 并绑定 `$context`，route
   context 更新后在 upstream 发送前保留其他 vendor member 并重建 `bnrc`；CAT 不可用时
   仍由请求级 telemetry 保持上述传播状态；
-- 已接入独立 Prometheus listener，默认 `0.0.0.0:16689`；请求完成计数、inflight、
+- 已接入独立 Prometheus listener，默认 `0.0.0.0:8001`；请求完成计数、inflight、
   duration，以及配置结果/readiness/全局 route snapshot 规模和 age 均使用固定 schema；
   动态 project/route/cluster/Host/Data ID 不作为指标 label，避免配置和请求输入形成无限时序；
 - 已在同一运维 listener 上提供默认关闭、Bearer 鉴权的 `/v1/activation-evidence`：按实例报告
@@ -205,9 +205,11 @@ cp native/access-server/access-server.env.example access-server.env
 
 进程默认值与安全监听器约束是：
 
-- HTTPS 监听 `0.0.0.0:16688/tcp`，ALPN 提供 HTTP/2 与 HTTP/1.1；
-- HTTP/3 在相同地址和端口监听 UDP，并通过 `Alt-Svc` 发布；
-- Prometheus `/metrics` 监听 `0.0.0.0:16689`；同一 listener 上的实例证据接口默认关闭，启用时
+- TLS 监听 `0.0.0.0:8443/tcp`，ALPN 提供 HTTP/2 与 HTTP/1.1；仅当
+  `ACCESS_SERVER_TLS_ENABLED=true` 时绑定；
+- HTTP/3 在 TLS 监听相同地址和端口监听 UDP，并通过 `Alt-Svc` 发布；
+- 明文 HTTP/1.1 监听 `0.0.0.0:8000/tcp`，与 TLS 监听并行；禁用 TLS 时这是唯一流量监听；
+- Prometheus `/metrics` 监听 `0.0.0.0:8001`；同一 listener 上的实例证据接口默认关闭，启用时
   必须同时配置稳定实例 ID 和独立 Bearer token；
 - HTTP worker 数在启动时根据进程 CPU affinity 和 cgroup v1/v2 CPU quota 自动确定；
 - 默认 request body 上限 400 MiB；

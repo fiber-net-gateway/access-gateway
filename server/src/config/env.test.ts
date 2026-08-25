@@ -102,7 +102,7 @@ test('loadServerConfig validates bounded activation collector targets', () => {
       {
         environmentCode: 'prod-cn',
         instanceKey: 'access-0',
-        endpoint: 'https://access-0.internal:16689/v1/activation-evidence',
+        endpoint: 'https://access-0.internal:8001/v1/activation-evidence',
         token,
       },
     ]),

@@ -56,7 +56,7 @@ Run the collector separately:
 
 ```bash
 ACTIVATION_COLLECTOR_ENABLED=true \
-ACTIVATION_TARGETS_JSON='[{"environmentCode":"prod","instanceKey":"access-prod-0","endpoint":"https://access-prod-0.internal:16689/v1/activation-evidence","token":"..."}]' \
+ACTIVATION_TARGETS_JSON='[{"environmentCode":"prod","instanceKey":"access-prod-0","endpoint":"https://access-prod-0.internal:8001/v1/activation-evidence","token":"..."}]' \
 npm run activation-collector --workspace server
 ```
 

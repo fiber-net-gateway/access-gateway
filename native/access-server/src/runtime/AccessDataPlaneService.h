@@ -30,6 +30,9 @@ struct AccessDataPlaneOptions {
     net::SocketAddress metrics_listen_address;
     net::ListenOptions listen_options;
     http::HttpServerOptions http_server;
+    bool plain_listen_enabled = false;
+    net::SocketAddress plain_listen_address;
+    http::HttpServerOptions plain_http_server;
     AccessActivationEndpointOptions activation_endpoint;
     ClientMetadataResolverOptions client_metadata;
     AccessLogOptions access_log;
@@ -55,6 +58,7 @@ public:
     [[nodiscard]] async::Task<void> shutdown() noexcept;
 
     [[nodiscard]] int fd() const noexcept { return server_ ? server_->fd() : -1; }
+    [[nodiscard]] int plain_fd() const noexcept { return server_ ? server_->plain_fd() : -1; }
     [[nodiscard]] int metrics_fd() const noexcept { return server_ ? server_->metrics_fd() : -1; }
 
 private:

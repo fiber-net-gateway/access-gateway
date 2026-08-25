@@ -46,7 +46,7 @@ COPY deploy/access-server/entrypoint.sh /usr/local/bin/access-server-entrypoint
 RUN chmod 0755 /usr/local/bin/access-server-entrypoint
 
 USER access-gateway:access-gateway
-EXPOSE 16688/tcp 16688/udp 16689/tcp
+EXPOSE 8443/tcp 8443/udp 8000/tcp 8001/tcp
 ENTRYPOINT ["/usr/local/bin/access-server-entrypoint"]
 
 FROM mirror.gcr.io/library/node:22-trixie-slim AS console-build

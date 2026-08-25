@@ -73,6 +73,8 @@ AccessDataPlaneService::start(AccessControlPlaneReady ready) noexcept {
                             options_.http_server.http3.enabled
                                     ? "h3=\":" + std::to_string(options_.listen_address.port()) + "\"; ma=86400"
                                     : std::string{},
+                    .plain_listen_enabled = options_.plain_listen_enabled,
+                    .plain_http_server = std::move(options_.plain_http_server),
             }));
     if (!server_) {
         co_await rollback_start(ready);
@@ -88,14 +90,28 @@ AccessDataPlaneService::start(AccessControlPlaneReady ready) noexcept {
                                                                       initialized.error()));
     }
 
-    auto bound = server_->bind(options_.listen_address, options_.listen_options);
-    if (ready.tls_bootstrap) {
+    // The TLS listener is only bound when TLS is enabled; with TLS off the
+    // TLS address:port stays closed and only the plaintext listener serves.
+    if (options_.http_server.tls.enabled) {
+        auto bound = server_->bind(options_.listen_address, options_.listen_options);
+        if (ready.tls_bootstrap) {
+            ready.tls_bootstrap->close();
+        }
+        if (!bound) {
+            co_await rollback_start(ready);
+            co_return std::unexpected(
+                    make_access_server_runtime_io_error(AccessServerRuntimeErrorCode::Bind, bound.error()));
+        }
+    } else if (ready.tls_bootstrap) {
         ready.tls_bootstrap->close();
     }
-    if (!bound) {
-        co_await rollback_start(ready);
-        co_return std::unexpected(
-                make_access_server_runtime_io_error(AccessServerRuntimeErrorCode::Bind, bound.error()));
+    if (options_.plain_listen_enabled) {
+        auto plain_bound = server_->bind_plain(options_.plain_listen_address, options_.listen_options);
+        if (!plain_bound) {
+            co_await rollback_start(ready);
+            co_return std::unexpected(
+                    make_access_server_runtime_io_error(AccessServerRuntimeErrorCode::Bind, plain_bound.error()));
+        }
     }
     auto metrics_bound = server_->bind_metrics(options_.metrics_listen_address, options_.listen_options);
     if (!metrics_bound) {

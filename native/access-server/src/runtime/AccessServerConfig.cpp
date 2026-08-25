@@ -4,7 +4,6 @@
 #include <charconv>
 #include <fstream>
 #include <iterator>
-#include <limits>
 #include <set>
 #include <utility>
 #include <vector>
@@ -12,8 +11,13 @@
 namespace fiber::access_server {
 namespace {
 
-constexpr std::string_view kListenAddress = "ACCESS_SERVER_LISTEN_ADDRESS";
-constexpr std::string_view kListenPort = "ACCESS_SERVER_LISTEN_PORT";
+constexpr std::string_view kLegacyListenAddress = "ACCESS_SERVER_LISTEN_ADDRESS";
+constexpr std::string_view kLegacyListenPort = "ACCESS_SERVER_LISTEN_PORT";
+constexpr std::string_view kTlsListenAddress = "ACCESS_SERVER_TLS_LISTEN_ADDRESS";
+constexpr std::string_view kTlsListenPort = "ACCESS_SERVER_TLS_LISTEN_PORT";
+constexpr std::string_view kPlainListenEnabled = "ACCESS_SERVER_PLAIN_LISTEN_ENABLED";
+constexpr std::string_view kPlainListenAddress = "ACCESS_SERVER_PLAIN_LISTEN_ADDRESS";
+constexpr std::string_view kPlainListenPort = "ACCESS_SERVER_PLAIN_LISTEN_PORT";
 constexpr std::string_view kTlsEnabled = "ACCESS_SERVER_TLS_ENABLED";
 constexpr std::string_view kTlsCertificatesDataIdSetting = "ACCESS_SERVER_TLS_CERTIFICATES_DATA_ID";
 constexpr std::string_view kTlsCertificatesGroupSetting = "ACCESS_SERVER_TLS_CERTIFICATES_GROUP";
@@ -86,6 +90,12 @@ AccessServerConfigError error(AccessServerConfigErrorCode code, std::size_t line
             .key = std::string(key),
             .detail = std::move(detail),
     };
+}
+
+// Two listeners conflict when they share a port and either bind the same
+// address or one of them binds the wildcard address (which covers the other).
+bool conflicting_endpoints(const net::SocketAddress &a, const net::SocketAddress &b) noexcept {
+    return a.port() == b.port() && (a.ip() == b.ip() || a.ip().is_unspecified() || b.ip().is_unspecified());
 }
 
 std::string_view trim(std::string_view value) noexcept {
@@ -343,8 +353,8 @@ std::expected<std::vector<std::string>, AccessServerConfigError> parse_nacos_ser
     return servers;
 }
 
-std::expected<dns::DnsNameserverList, AccessServerConfigError>
-parse_dns_nameservers(std::string_view input, std::size_t line) {
+std::expected<dns::DnsNameserverList, AccessServerConfigError> parse_dns_nameservers(std::string_view input,
+                                                                                     std::size_t line) {
     dns::DnsNameserverList nameservers;
     if (input.empty()) {
         return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, line, kDnsServers,
@@ -390,18 +400,21 @@ AccessServerConfigError nacos_error(const nacos::NacosConfigError &source) {
 } // namespace
 
 AccessServerConfig::AccessServerConfig(
-        net::SocketAddress listen_address, http::HttpServerOptions http_server_options,
-        net::SocketAddress metrics_listen_address, AccessActivationEndpointOptions activation_endpoint_options,
-        std::chrono::milliseconds initial_config_timeout, std::size_t default_max_request_body_size, bool test_mode,
+        net::SocketAddress tls_listen_address, http::HttpServerOptions tls_http_server_options,
+        bool plain_listen_enabled, net::SocketAddress plain_listen_address,
+        http::HttpServerOptions plain_http_server_options, net::SocketAddress metrics_listen_address,
+        AccessActivationEndpointOptions activation_endpoint_options, std::chrono::milliseconds initial_config_timeout,
+        std::size_t default_max_request_body_size, bool test_mode,
         ClientMetadataResolverOptions client_metadata_options, AccessLogOptions access_log_options,
         UpstreamTlsClientPolicy upstream_tls_client_policy, std::chrono::milliseconds upstream_connect_timeout,
-        ProxyHappyEyeballsPolicy happy_eyeballs_policy, AccessDnsMode dns_mode,
-        std::string dns_resolver_config_path, dns::DnsNameserverList dns_override_nameservers,
-        std::optional<cat::CatClientConfig> cat_config,
+        ProxyHappyEyeballsPolicy happy_eyeballs_policy, AccessDnsMode dns_mode, std::string dns_resolver_config_path,
+        dns::DnsNameserverList dns_override_nameservers, std::optional<cat::CatClientConfig> cat_config,
         nacos::NacosClientConfig nacos_config, AccessConfigWatcherOptions watcher_options,
         GrayConfigWatcherOptions gray_watcher_options, TlsCertificateWatcherOptions tls_certificate_watcher_options,
         AccessServiceDiscoveryOptions service_discovery_options) noexcept :
-    listen_address_(std::move(listen_address)), http_server_options_(std::move(http_server_options)),
+    tls_listen_address_(std::move(tls_listen_address)), tls_http_server_options_(std::move(tls_http_server_options)),
+    plain_listen_enabled_(plain_listen_enabled), plain_listen_address_(std::move(plain_listen_address)),
+    plain_http_server_options_(std::move(plain_http_server_options)),
     metrics_listen_address_(std::move(metrics_listen_address)),
     activation_endpoint_options_(std::move(activation_endpoint_options)),
     initial_config_timeout_(initial_config_timeout), default_max_request_body_size_(default_max_request_body_size),
@@ -409,8 +422,7 @@ AccessServerConfig::AccessServerConfig(
     access_log_options_(std::move(access_log_options)),
     upstream_tls_client_policy_(std::move(upstream_tls_client_policy)),
     upstream_connect_timeout_(upstream_connect_timeout), happy_eyeballs_policy_(happy_eyeballs_policy),
-    dns_mode_(dns_mode),
-    dns_resolver_config_path_(std::move(dns_resolver_config_path)),
+    dns_mode_(dns_mode), dns_resolver_config_path_(std::move(dns_resolver_config_path)),
     dns_override_nameservers_(std::move(dns_override_nameservers)), cat_config_(std::move(cat_config)),
     nacos_config_(std::move(nacos_config)), watcher_options_(std::move(watcher_options)),
     gray_watcher_options_(std::move(gray_watcher_options)),
@@ -438,10 +450,14 @@ AccessServerConfig::load_from_string(std::string_view input) {
         return std::unexpected(std::move(entries.error()));
     }
 
-    net::IpAddress listen_ip = net::IpAddress::any_v4();
-    std::uint16_t listen_port = 16688;
+    net::IpAddress tls_listen_ip = net::IpAddress::any_v4();
+    std::uint16_t tls_listen_port = 8443;
     bool tls_enabled = true;
     bool http3_enabled = true;
+    bool http3_setting_present = false;
+    bool plain_listen_enabled = true;
+    net::IpAddress plain_listen_ip = net::IpAddress::any_v4();
+    std::uint16_t plain_listen_port = 8000;
     std::optional<net::IpAddress> metrics_ip;
     std::optional<std::uint16_t> metrics_port;
     AccessActivationEndpointOptions activation_endpoint_options;
@@ -474,13 +490,17 @@ AccessServerConfig::load_from_string(std::string_view input) {
 
     for (const Entry &entry: *entries) {
         const std::string_view value = entry.value;
-        if (entry.key == kListenAddress) {
-            if (!net::IpAddress::parse(value, listen_ip) || listen_ip.is_multicast()) {
+        if (entry.key == kLegacyListenAddress || entry.key == kLegacyListenPort) {
+            return std::unexpected(error(AccessServerConfigErrorCode::UnknownKey, entry.line, entry.key,
+                                         "ACCESS_SERVER_LISTEN_* was replaced by ACCESS_SERVER_TLS_LISTEN_* and "
+                                         "ACCESS_SERVER_PLAIN_LISTEN_*"));
+        } else if (entry.key == kTlsListenAddress) {
+            if (!net::IpAddress::parse(value, tls_listen_ip) || tls_listen_ip.is_multicast()) {
                 return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, entry.line, entry.key,
                                              "expected a non-multicast IP literal"));
             }
-        } else if (entry.key == kListenPort) {
-            if (!parse_unsigned(value, listen_port) || listen_port == 0) {
+        } else if (entry.key == kTlsListenPort) {
+            if (!parse_unsigned(value, tls_listen_port) || tls_listen_port == 0) {
                 return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, entry.line, entry.key,
                                              "expected a port in range 1..65535"));
             }
@@ -497,6 +517,22 @@ AccessServerConfig::load_from_string(std::string_view input) {
             if (!parse_boolean(value, http3_enabled)) {
                 return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, entry.line, entry.key,
                                              "expected true or false"));
+            }
+            http3_setting_present = true;
+        } else if (entry.key == kPlainListenEnabled) {
+            if (!parse_boolean(value, plain_listen_enabled)) {
+                return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, entry.line, entry.key,
+                                             "expected true or false"));
+            }
+        } else if (entry.key == kPlainListenAddress) {
+            if (!net::IpAddress::parse(value, plain_listen_ip) || plain_listen_ip.is_multicast()) {
+                return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, entry.line, entry.key,
+                                             "expected a non-multicast IP literal"));
+            }
+        } else if (entry.key == kPlainListenPort) {
+            if (!parse_unsigned(value, plain_listen_port) || plain_listen_port == 0) {
+                return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, entry.line, entry.key,
+                                             "expected a port in range 1..65535"));
             }
         } else if (entry.key == kMetricsListenAddress) {
             net::IpAddress address;
@@ -739,9 +775,22 @@ AccessServerConfig::load_from_string(std::string_view input) {
         return std::unexpected(
                 error(AccessServerConfigErrorCode::InvalidValue, 0, {}, "Nacos data IDs and groups must be non-empty"));
     }
+    if (!http3_setting_present) {
+        http3_enabled = tls_enabled;
+    }
     if (!tls_enabled && http3_enabled) {
         return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, 0, kHttp3Enabled,
                                      "HTTP/3 requires ACCESS_SERVER_TLS_ENABLED=true"));
+    }
+    const net::SocketAddress tls_address(tls_listen_ip, tls_listen_port);
+    const net::SocketAddress plain_address(plain_listen_ip, plain_listen_port);
+    if (!tls_enabled && !plain_listen_enabled) {
+        return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, 0, kTlsEnabled,
+                                     "at least one of the TLS or plaintext HTTP listener must be enabled"));
+    }
+    if (tls_enabled && plain_listen_enabled && conflicting_endpoints(plain_address, tls_address)) {
+        return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, 0, kPlainListenPort,
+                                     "plaintext and TLS listeners must use distinct address:port"));
     }
     if (client_metadata_options.mode == ClientMetadataMode::TrustedProxy &&
         client_metadata_options.trusted_proxy_cidrs.empty()) {
@@ -797,7 +846,6 @@ AccessServerConfig::load_from_string(std::string_view input) {
                                      "activation identity and token are only valid "
                                      "when activation evidence is enabled"));
     }
-    client_metadata_options.connection_secure = tls_enabled;
     auto nacos_config = nacos::NacosClientConfig::create(std::move(nacos_params));
     if (!nacos_config) {
         return std::unexpected(nacos_error(nacos_config.error()));
@@ -813,24 +861,28 @@ AccessServerConfig::load_from_string(std::string_view input) {
         cat_config = std::move(*created);
     }
     if (!metrics_port) {
-        if (listen_port == std::numeric_limits<std::uint16_t>::max()) {
-            return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, 0, kMetricsListenPort,
-                                         "metrics port must be explicit when the HTTP port is 65535"));
-        }
-        metrics_port = static_cast<std::uint16_t>(listen_port + 1);
+        metrics_port = 8001;
+    }
+    const net::SocketAddress metrics_address(metrics_ip.value_or(tls_listen_ip), *metrics_port);
+    if (conflicting_endpoints(metrics_address, tls_address) ||
+        (plain_listen_enabled && conflicting_endpoints(metrics_address, plain_address))) {
+        return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, 0, kMetricsListenPort,
+                                     "metrics listener must use a distinct address:port from the traffic listeners"));
     }
     http::HttpServerOptions http_options;
     http_options.tls.enabled = tls_enabled;
     http_options.tls.alpn = {"h2", "http/1.1"};
     http_options.http3.enabled = http3_enabled;
+    http::HttpServerOptions plain_http_options;
+    plain_http_options.tls.enabled = false;
+    plain_http_options.http3.enabled = false;
     return AccessServerConfig(
-            net::SocketAddress(listen_ip, listen_port), std::move(http_options),
-            net::SocketAddress(metrics_ip.value_or(listen_ip), *metrics_port), std::move(activation_endpoint_options),
-            std::chrono::milliseconds(timeout_millis), max_request_body, test_mode, std::move(client_metadata_options),
-            std::move(access_log_options), std::move(upstream_tls_client_policy),
-            std::chrono::milliseconds(upstream_connect_timeout_millis), happy_eyeballs_policy, dns_mode,
-            std::move(dns_resolver_config_path), std::move(dns_override_nameservers), std::move(cat_config),
-            std::move(*nacos_config), std::move(watcher_options), std::move(gray_options),
+            tls_address, std::move(http_options), plain_listen_enabled, plain_address, std::move(plain_http_options),
+            metrics_address, std::move(activation_endpoint_options), std::chrono::milliseconds(timeout_millis),
+            max_request_body, test_mode, std::move(client_metadata_options), std::move(access_log_options),
+            std::move(upstream_tls_client_policy), std::chrono::milliseconds(upstream_connect_timeout_millis),
+            happy_eyeballs_policy, dns_mode, std::move(dns_resolver_config_path), std::move(dns_override_nameservers),
+            std::move(cat_config), std::move(*nacos_config), std::move(watcher_options), std::move(gray_options),
             std::move(tls_certificate_options), std::move(service_discovery_options));
 }
 

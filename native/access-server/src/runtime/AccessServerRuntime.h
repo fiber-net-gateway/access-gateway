@@ -34,6 +34,7 @@ public:
 
     [[nodiscard]] AccessServerRuntimeState state() const noexcept { return coordinator_.state(); }
     [[nodiscard]] int fd() const noexcept;
+    [[nodiscard]] int plain_fd() const noexcept;
     [[nodiscard]] int metrics_fd() const noexcept;
 
 private:

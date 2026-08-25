@@ -170,9 +170,10 @@ services:
       RNACOS_HOST: rnacos
       ACCESS_SERVER_ACTIVATION_TOKEN: ${ACCESS_SERVER_ACTIVATION_TOKEN:?Run ./deploy/demo/init-env.sh before Docker Compose}
     ports:
-      - '${ACCESS_SERVER_PUBLISHED_HOST:-0.0.0.0}:${ACCESS_SERVER_HTTPS_PORT:-16688}:16688/tcp'
-      - '${ACCESS_SERVER_PUBLISHED_HOST:-0.0.0.0}:${ACCESS_SERVER_HTTPS_PORT:-16688}:16688/udp'
-      - '127.0.0.1:${ACCESS_SERVER_METRICS_PORT:-16689}:16689'
+      - '${ACCESS_SERVER_PUBLISHED_HOST:-0.0.0.0}:${ACCESS_SERVER_HTTPS_PORT:-8443}:8443/tcp'
+      - '${ACCESS_SERVER_PUBLISHED_HOST:-0.0.0.0}:${ACCESS_SERVER_HTTPS_PORT:-8443}:8443/udp'
+      - '${ACCESS_SERVER_PUBLISHED_HOST:-0.0.0.0}:${ACCESS_SERVER_PLAIN_PORT:-8000}:8000/tcp'
+      - '127.0.0.1:${ACCESS_SERVER_METRICS_PORT:-8001}:8001'
     depends_on:
       console-bootstrap:
         condition: service_completed_successfully
@@ -182,7 +183,7 @@ services:
         - CMD
         - node
         - -e
-        - require('node:https').get({host:'127.0.0.1',port:16688,path:'/health',headers:{Host:'demo.local'},rejectUnauthorized:false},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))
+        - require('node:https').get({host:'127.0.0.1',port:8443,path:'/health',headers:{Host:'demo.local'},rejectUnauthorized:false},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))
       interval: 5s
       timeout: 3s
       retries: 30
@@ -195,7 +196,7 @@ services:
     environment:
       <<: *console-environment
       ACTIVATION_TARGETS_JSON: >-
-        [{"environmentCode":"demo","instanceKey":"access-0","endpoint":"http://access-server:16689/v1/activation-evidence","token":"${ACCESS_SERVER_ACTIVATION_TOKEN:?Run ./deploy/demo/init-env.sh before Docker Compose}"}]
+        [{"environmentCode":"demo","instanceKey":"access-0","endpoint":"http://access-server:8001/v1/activation-evidence","token":"${ACCESS_SERVER_ACTIVATION_TOKEN:?Run ./deploy/demo/init-env.sh before Docker Compose}"}]
     command: ['node', 'server/dist/processes/activation-collector.js']
     depends_on:
       console-migrate:
