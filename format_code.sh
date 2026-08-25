@@ -30,7 +30,9 @@ Options:
   -a    Format all repository-owned C/C++ files, including unchanged files.
 
 Environment:
-  CLANG_FORMAT_BIN    Explicit clang-format 17+ executable.
+  CLANG_FORMAT_BIN    Explicit clang-format executable. When unset, the
+                      newest clang-format available on PATH is used, matching
+                      the pinned submodule's format_code.sh.
 EOF
 }
 
@@ -61,31 +63,39 @@ fi
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "${REPO_ROOT}"
 
-if [[ -z "${CLANG_FORMAT_BIN}" ]] && [[ -x "${REPO_ROOT}/node_modules/.bin/clang-format" ]]; then
-    CLANG_FORMAT_BIN="${REPO_ROOT}/node_modules/.bin/clang-format"
+# Resolve the clang-format binary, mirroring the pinned submodule's
+# format_code.sh: prefer the newest version-suffixed binary on PATH and fall
+# back to a bare `clang-format`. Candidates are probed so a broken binary (for
+# example a node_modules binary built for a newer glibc) is skipped instead of
+# failing startup. CLANG_FORMAT_BIN overrides the search.
+declare -a candidates=()
+if [[ -n "${CLANG_FORMAT_BIN}" ]]; then
+    candidates+=("${CLANG_FORMAT_BIN}")
 fi
+if [[ -x "${REPO_ROOT}/node_modules/.bin/clang-format" ]]; then
+    candidates+=("${REPO_ROOT}/node_modules/.bin/clang-format")
+fi
+for version in 22 21 20 19 18 17; do
+    if command -v "clang-format-${version}" >/dev/null 2>&1; then
+        candidates+=("clang-format-${version}")
+    fi
+done
+if command -v clang-format >/dev/null 2>&1; then
+    candidates+=("clang-format")
+fi
+
+CLANG_FORMAT_BIN=""
+version_output=""
+for candidate in "${candidates[@]}"; do
+    if output="$("${candidate}" --version 2>&1)"; then
+        CLANG_FORMAT_BIN="${candidate}"
+        version_output="${output}"
+        break
+    fi
+done
 
 if [[ -z "${CLANG_FORMAT_BIN}" ]]; then
-    for version in 22 21 20 19 18 17; do
-        if command -v "clang-format-${version}" >/dev/null 2>&1; then
-            CLANG_FORMAT_BIN="clang-format-${version}"
-            break
-        fi
-    done
-fi
-
-if [[ -z "${CLANG_FORMAT_BIN}" ]] && command -v clang-format >/dev/null 2>&1; then
-    CLANG_FORMAT_BIN="clang-format"
-fi
-
-if [[ -z "${CLANG_FORMAT_BIN}" ]]; then
-    echo "format_code.sh: clang-format 17+ not found; run npm install first" >&2
-    exit 1
-fi
-
-version_output="$("${CLANG_FORMAT_BIN}" --version)"
-if [[ ! "${version_output}" =~ version[[:space:]]+([0-9]+) ]] || (( BASH_REMATCH[1] < 17 )); then
-    echo "format_code.sh: clang-format 17+ required, found: ${version_output}" >&2
+    echo "format_code.sh: no clang-format binary found on PATH; run npm install or set CLANG_FORMAT_BIN" >&2
     exit 1
 fi
 
@@ -139,4 +149,24 @@ else
 fi
 printf '  %s\n' "${files[@]}"
 
+# Record content hashes before formatting so the run can report exactly which
+# files clang-format actually modified (many files pass through unchanged).
+declare -A hashes=()
+for path in "${files[@]}"; do
+    hashes["${path}"]="$(sha256sum "${path}" | awk '{print $1}')"
+done
+
 "${CLANG_FORMAT_BIN}" -i --style="file:${STYLE_FILE}" -- "${files[@]}"
+
+modified=()
+for path in "${files[@]}"; do
+    if [[ "$(sha256sum "${path}" | awk '{print $1}')" != "${hashes["${path}"]}" ]]; then
+        modified+=("${path}")
+    fi
+done
+if (( ${#modified[@]} > 0 )); then
+    printf 'format_code.sh: %d file(s) changed by clang-format\n' "${#modified[@]}"
+    printf '  %s\n' "${modified[@]}"
+else
+    echo 'format_code.sh: no files needed reformatting'
+fi
