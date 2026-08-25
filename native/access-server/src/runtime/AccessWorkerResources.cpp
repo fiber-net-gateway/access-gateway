@@ -14,13 +14,9 @@ namespace fiber::access_server {
 AccessWorkerResources::AccessWorkerResources(event::EventLoopGroup &workers, const RouteConfigStore &config_store,
                                              ProxyClusterMatcher cluster_matcher,
                                              AccessWorkerResourcesOptions options) :
-    workers_(&workers), client_metadata_resolver_([&options]() {
-        options.client_metadata.connection_secure = options.connection_secure;
-        return std::move(options.client_metadata);
-    }()),
+    workers_(&workers), client_metadata_resolver_(std::move(options.client_metadata)),
     access_log_policy_(std::move(options.access_log)), dns_(std::move(options.dns), options.dns_resolver_factory),
-    pool_(workers),
-    executor_(pool_, cluster_matcher, dns_.adapter(), std::move(options.executor)),
+    pool_(workers), executor_(pool_, cluster_matcher, dns_.adapter(), std::move(options.executor)),
     handler_(config_store.snapshot_provider(), options.script_adapter,
              AccessRequestHandlerOptions{
                      .default_max_request_body_size = options.default_max_request_body_size,
@@ -71,9 +67,10 @@ async::Task<void> AccessWorkerResources::shutdown() noexcept {
     initialized_ = false;
 }
 
-async::Task<void> AccessWorkerResources::handle(http::HttpExchange &exchange) noexcept {
+async::Task<void> AccessWorkerResources::handle(http::HttpExchange &exchange, bool connection_secure) noexcept {
     AccessServerMetrics::Worker &worker = metrics_.worker(event::EventLoop::current().group_index());
-    AccessRequestTelemetry telemetry(exchange, &worker, cat_client_, &access_log_policy_, &client_metadata_resolver_);
+    AccessRequestTelemetry telemetry(exchange, &worker, cat_client_, &access_log_policy_, &client_metadata_resolver_,
+                                     connection_secure);
     if (!http3_alt_svc_.empty()) {
         (void) telemetry.response_headers().set("Alt-Svc", http3_alt_svc_);
     }

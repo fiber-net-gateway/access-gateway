@@ -260,22 +260,22 @@ IpChain parse_ip_headers(const http::HttpHeaders &headers, std::string_view name
 
 ProtoChain parse_proto_headers(const http::HttpHeaders &headers) noexcept {
     ProtoChain chain;
-    if (!for_each_header_field(
-                headers, kXForwardedProto, kXForwardedProtoHash,
-                [&](const http::HttpHeaders::HeaderField &field) noexcept {
-                    chain.present = true;
-                    return for_each_delimited(field.value_view(), ',', [&](std::string_view item) noexcept {
-                        if (chain.size == chain.values.size()) {
-                            return false;
-                        }
-                        const ForwardedProto proto = parse_proto(item);
-                        if (proto == ForwardedProto::Missing) {
-                            return false;
-                        }
-                        chain.values[chain.size++] = proto;
-                        return true;
-                    });
-                })) {
+    if (!for_each_header_field(headers, kXForwardedProto, kXForwardedProtoHash,
+                               [&](const http::HttpHeaders::HeaderField &field) noexcept {
+                                   chain.present = true;
+                                   return for_each_delimited(field.value_view(), ',',
+                                                             [&](std::string_view item) noexcept {
+                                                                 if (chain.size == chain.values.size()) {
+                                                                     return false;
+                                                                 }
+                                                                 const ForwardedProto proto = parse_proto(item);
+                                                                 if (proto == ForwardedProto::Missing) {
+                                                                     return false;
+                                                                 }
+                                                                 chain.values[chain.size++] = proto;
+                                                                 return true;
+                                                             });
+                               })) {
         chain.valid = false;
         return chain;
     }
@@ -294,8 +294,7 @@ bool parse_forwarded_element(std::string_view element, net::IpAddress &address, 
         }
         const std::string_view name = trim_ows(parameter.substr(0, equals));
         const std::string_view value = trim_ows(parameter.substr(equals + 1));
-        if (!is_token(name) || value.empty() ||
-            !record_forwarded_parameter(parameter_names, parameter_count, name)) {
+        if (!is_token(name) || value.empty() || !record_forwarded_parameter(parameter_names, parameter_count, name)) {
             return false;
         }
         if (equals_ci(name, "for")) {
@@ -318,24 +317,24 @@ bool parse_forwarded_element(std::string_view element, net::IpAddress &address, 
 
 ForwardedChain parse_forwarded_headers(const http::HttpHeaders &headers) noexcept {
     ForwardedChain chain;
-    if (!for_each_header_field(headers, kForwarded, kForwardedHash,
-                               [&](const http::HttpHeaders::HeaderField &field) noexcept {
-            chain.addresses.present = true;
-            chain.protocols.present = true;
-            return for_each_delimited(field.value_view(), ',', [&](std::string_view element) noexcept {
-                if (chain.addresses.size == chain.addresses.values.size()) {
-                    return false;
-                }
-                net::IpAddress address;
-                ForwardedProto proto = ForwardedProto::Missing;
-                if (!parse_forwarded_element(element, address, proto)) {
-                    return false;
-                }
-                chain.addresses.values[chain.addresses.size++] = address;
-                chain.protocols.values[chain.protocols.size++] = proto;
-                return true;
-            });
-        })) {
+    if (!for_each_header_field(
+                headers, kForwarded, kForwardedHash, [&](const http::HttpHeaders::HeaderField &field) noexcept {
+                    chain.addresses.present = true;
+                    chain.protocols.present = true;
+                    return for_each_delimited(field.value_view(), ',', [&](std::string_view element) noexcept {
+                        if (chain.addresses.size == chain.addresses.values.size()) {
+                            return false;
+                        }
+                        net::IpAddress address;
+                        ForwardedProto proto = ForwardedProto::Missing;
+                        if (!parse_forwarded_element(element, address, proto)) {
+                            return false;
+                        }
+                        chain.addresses.values[chain.addresses.size++] = address;
+                        chain.protocols.values[chain.protocols.size++] = proto;
+                        return true;
+                    });
+                })) {
         chain.addresses.valid = false;
         chain.protocols.valid = false;
         return chain;
@@ -351,10 +350,8 @@ bool has_header(const http::HttpHeaders &headers, std::string_view name, std::ui
 }
 
 bool has_forwarding_headers(const http::HttpHeaders &headers) noexcept {
-    return has_header(headers, kForwarded, kForwardedHash) ||
-           has_header(headers, kXForwardedFor, kXForwardedForHash) ||
-           has_header(headers, kXRealIp, kXRealIpHash) ||
-           has_header(headers, kXForwardedProto, kXForwardedProtoHash);
+    return has_header(headers, kForwarded, kForwardedHash) || has_header(headers, kXForwardedFor, kXForwardedForHash) ||
+           has_header(headers, kXRealIp, kXRealIpHash) || has_header(headers, kXForwardedProto, kXForwardedProtoHash);
 }
 
 void set_exact_targets(ClientMetadata &metadata, const net::IpAddress &address) noexcept {
@@ -388,9 +385,8 @@ ClientMetadata direct_metadata(const net::SocketAddress &peer, bool secure, Forw
 ClientMetadata legacy_metadata(const net::SocketAddress &peer, const http::HttpHeaders &headers,
                                bool connection_secure) noexcept {
     const bool forwarding_present = has_forwarding_headers(headers);
-    ClientMetadata metadata = direct_metadata(peer, connection_secure,
-                                              forwarding_present ? ForwardingStatus::Legacy
-                                                                 : ForwardingStatus::NotPresent);
+    ClientMetadata metadata = direct_metadata(
+            peer, connection_secure, forwarding_present ? ForwardingStatus::Legacy : ForwardingStatus::NotPresent);
     metadata.route_policy_target.reset();
     metadata.gray_target.reset();
     metadata.has_client_address = false;
@@ -442,28 +438,33 @@ ClientMetadata legacy_metadata(const net::SocketAddress &peer, const http::HttpH
 ClientMetadataResolver::ClientMetadataResolver(ClientMetadataResolverOptions options) noexcept :
     options_(std::move(options)) {}
 
-ClientMetadata ClientMetadataResolver::resolve(const http::HttpExchange &exchange) const noexcept {
-    return resolve(exchange.remote_addr(), exchange.request_headers());
+ClientMetadata ClientMetadataResolver::resolve(const http::HttpExchange &exchange,
+                                               bool connection_secure) const noexcept {
+    return resolve(exchange.remote_addr(), exchange.request_headers(), connection_secure);
 }
 
 ClientMetadata ClientMetadataResolver::resolve(const net::SocketAddress &peer,
                                                const http::HttpHeaders &headers) const noexcept {
+    return resolve(peer, headers, options_.connection_secure);
+}
+
+ClientMetadata ClientMetadataResolver::resolve(const net::SocketAddress &peer, const http::HttpHeaders &headers,
+                                               bool connection_secure) const noexcept {
     if (options_.mode == ClientMetadataMode::LegacyHeaders) {
-        return legacy_metadata(peer, headers, options_.connection_secure);
+        return legacy_metadata(peer, headers, connection_secure);
     }
 
     const bool forwarding_present = has_forwarding_headers(headers);
     if (options_.mode == ClientMetadataMode::Direct) {
-        return direct_metadata(peer, options_.connection_secure,
-                               forwarding_present ? ForwardingStatus::IgnoredDirectMode
-                                                  : ForwardingStatus::NotPresent);
+        return direct_metadata(peer, connection_secure,
+                               forwarding_present ? ForwardingStatus::IgnoredDirectMode : ForwardingStatus::NotPresent);
     }
 
-    ClientMetadata metadata = direct_metadata(peer, options_.connection_secure, ForwardingStatus::NotPresent);
+    ClientMetadata metadata = direct_metadata(peer, connection_secure, ForwardingStatus::NotPresent);
     metadata.peer_trusted = is_trusted_proxy(peer.ip());
     if (!metadata.peer_trusted) {
-        metadata.forwarding_status = forwarding_present ? ForwardingStatus::IgnoredUntrustedPeer
-                                                        : ForwardingStatus::NotPresent;
+        metadata.forwarding_status =
+                forwarding_present ? ForwardingStatus::IgnoredUntrustedPeer : ForwardingStatus::NotPresent;
         return metadata;
     }
     if (!forwarding_present) {
@@ -527,8 +528,7 @@ ClientMetadata ClientMetadataResolver::resolve(const net::SocketAddress &peer,
                 protocol_index = selected_index;
             }
             if (protocol_index) {
-                set_forwarded_scheme(metadata, protocols.values[*protocol_index],
-                                     ClientSchemeSource::XForwardedProto);
+                set_forwarded_scheme(metadata, protocols.values[*protocol_index], ClientSchemeSource::XForwardedProto);
             } else {
                 scheme_invalid = true;
             }

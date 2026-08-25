@@ -139,9 +139,14 @@ TEST_F(AccessDataPlaneServiceTest, RollsBackBusinessBindFailureBeforeReturning) 
             co_return;
         }
 
-        AccessDataPlaneService service(
-                accept_loop_, workers_, route_store_, {}, runtime_metrics_, activation_evidence_, nullptr,
-                data_plane_options(*address, net::SocketAddress(net::IpAddress::loopback_v4(), 0)));
+        AccessDataPlaneOptions options =
+                data_plane_options(*address, net::SocketAddress(net::IpAddress::loopback_v4(), 0));
+        // TLS is off, so the business listener is the plaintext listener; its
+        // bind-failure exercises the same rollback path without a TLS bootstrap.
+        options.plain_listen_enabled = true;
+        options.plain_listen_address = *address;
+        AccessDataPlaneService service(accept_loop_, workers_, route_store_, {}, runtime_metrics_, activation_evidence_,
+                                       nullptr, std::move(options));
         auto started = co_await service.start({});
         EXPECT_FALSE(started);
         if (!started) {

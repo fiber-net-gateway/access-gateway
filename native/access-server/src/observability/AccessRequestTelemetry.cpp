@@ -34,10 +34,11 @@ const ClientMetadataResolver &default_client_metadata_resolver() noexcept {
 
 AccessRequestTelemetry::AccessRequestTelemetry(http::HttpExchange &exchange, AccessServerMetrics::Worker *metrics,
                                                cat::CatClient *cat_client, const AccessLogPolicy *access_log_policy,
-                                               const ClientMetadataResolver *client_metadata_resolver) noexcept :
+                                               const ClientMetadataResolver *client_metadata_resolver,
+                                               bool connection_secure) noexcept :
     execution_(exchange), response_writer_(http::make_http_response_writer(exchange)),
     client_metadata_((client_metadata_resolver ? *client_metadata_resolver : default_client_metadata_resolver())
-                             .resolve(exchange)),
+                             .resolve(exchange, connection_secure)),
     trace_(exchange.pool()),
     observability_(exchange, metrics, cat_client, access_log_policy, client_metadata_, trace_) {}
 

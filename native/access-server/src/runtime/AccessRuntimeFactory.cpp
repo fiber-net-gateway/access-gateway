@@ -68,8 +68,8 @@ AccessRuntimeFactory::create(event::EventLoop &accept_loop, event::EventLoop &na
                     .tls_certificate_watcher = config.tls_certificate_watcher_options(),
                     .service_discovery = config.service_discovery_options(),
                     .process_metrics = process_metrics,
-                    .tls_enabled = config.http_server_options().tls.enabled,
-                    .quic_enabled = config.http_server_options().http3.enabled,
+                    .tls_enabled = config.tls_http_server_options().tls.enabled,
+                    .quic_enabled = config.tls_http_server_options().http3.enabled,
             },
             AccessControlPlaneDependencies{
                     .cat_client = std::move(cat_client),
@@ -88,17 +88,21 @@ AccessRuntimeFactory::create(event::EventLoop &accept_loop, event::EventLoop &na
             accept_loop, http_workers, control_plane->route_store(), control_plane->gray_matcher(),
             control_plane->runtime_metrics(), control_plane->activation_evidence(), control_plane->cat_client(),
             AccessDataPlaneOptions{
-                    .listen_address = config.listen_address(),
+                    .listen_address = config.tls_listen_address(),
                     .metrics_listen_address = config.metrics_listen_address(),
                     .listen_options = listen_options,
-                    .http_server = config.http_server_options(),
+                    .http_server = config.tls_http_server_options(),
+                    .plain_listen_enabled = config.plain_listen_enabled(),
+                    .plain_listen_address = config.plain_listen_address(),
+                    .plain_http_server = config.plain_http_server_options(),
                     .activation_endpoint = config.activation_endpoint_options(),
                     .client_metadata = config.client_metadata_options(),
                     .access_log = config.access_log_options(),
-                    .dns = [&]() {
-                        dns_options->metrics = control_plane->runtime_metrics().dns().observer();
-                        return std::move(*dns_options);
-                    }(),
+                    .dns =
+                            [&]() {
+                                dns_options->metrics = control_plane->runtime_metrics().dns().observer();
+                                return std::move(*dns_options);
+                            }(),
                     .executor =
                             ProxyExecutorOptions{
                                     .connect_timeout = config.upstream_connect_timeout(),

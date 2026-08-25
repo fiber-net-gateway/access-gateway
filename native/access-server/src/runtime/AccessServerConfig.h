@@ -56,8 +56,15 @@ public:
     [[nodiscard]] static std::expected<AccessServerConfig, AccessServerConfigError>
     load_from_string(std::string_view input);
 
-    [[nodiscard]] const net::SocketAddress &listen_address() const noexcept { return listen_address_; }
-    [[nodiscard]] const http::HttpServerOptions &http_server_options() const noexcept { return http_server_options_; }
+    [[nodiscard]] const net::SocketAddress &tls_listen_address() const noexcept { return tls_listen_address_; }
+    [[nodiscard]] const http::HttpServerOptions &tls_http_server_options() const noexcept {
+        return tls_http_server_options_;
+    }
+    [[nodiscard]] bool plain_listen_enabled() const noexcept { return plain_listen_enabled_; }
+    [[nodiscard]] const net::SocketAddress &plain_listen_address() const noexcept { return plain_listen_address_; }
+    [[nodiscard]] const http::HttpServerOptions &plain_http_server_options() const noexcept {
+        return plain_http_server_options_;
+    }
     [[nodiscard]] const net::SocketAddress &metrics_listen_address() const noexcept { return metrics_listen_address_; }
     [[nodiscard]] const AccessActivationEndpointOptions &activation_endpoint_options() const noexcept {
         return activation_endpoint_options_;
@@ -95,23 +102,26 @@ public:
     }
 
 private:
-    AccessServerConfig(net::SocketAddress listen_address, http::HttpServerOptions http_server_options,
-                       net::SocketAddress metrics_listen_address,
+    AccessServerConfig(net::SocketAddress tls_listen_address, http::HttpServerOptions tls_http_server_options,
+                       bool plain_listen_enabled, net::SocketAddress plain_listen_address,
+                       http::HttpServerOptions plain_http_server_options, net::SocketAddress metrics_listen_address,
                        AccessActivationEndpointOptions activation_endpoint_options,
                        std::chrono::milliseconds initial_config_timeout, std::size_t default_max_request_body_size,
                        bool test_mode, ClientMetadataResolverOptions client_metadata_options,
                        AccessLogOptions access_log_options, UpstreamTlsClientPolicy upstream_tls_client_policy,
                        std::chrono::milliseconds upstream_connect_timeout,
-                       ProxyHappyEyeballsPolicy happy_eyeballs_policy,
-                       AccessDnsMode dns_mode, std::string dns_resolver_config_path,
-                       dns::DnsNameserverList dns_override_nameservers,
+                       ProxyHappyEyeballsPolicy happy_eyeballs_policy, AccessDnsMode dns_mode,
+                       std::string dns_resolver_config_path, dns::DnsNameserverList dns_override_nameservers,
                        std::optional<cat::CatClientConfig> cat_config, nacos::NacosClientConfig nacos_config,
                        AccessConfigWatcherOptions watcher_options, GrayConfigWatcherOptions gray_watcher_options,
                        TlsCertificateWatcherOptions tls_certificate_watcher_options,
                        AccessServiceDiscoveryOptions service_discovery_options) noexcept;
 
-    net::SocketAddress listen_address_;
-    http::HttpServerOptions http_server_options_;
+    net::SocketAddress tls_listen_address_;
+    http::HttpServerOptions tls_http_server_options_;
+    bool plain_listen_enabled_ = false;
+    net::SocketAddress plain_listen_address_;
+    http::HttpServerOptions plain_http_server_options_;
     net::SocketAddress metrics_listen_address_;
     AccessActivationEndpointOptions activation_endpoint_options_;
     std::chrono::milliseconds initial_config_timeout_{60000};

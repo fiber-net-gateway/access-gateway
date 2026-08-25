@@ -1,6 +1,7 @@
 #include "AccessServer.h"
 #include "../observability/AccessRuntimeMetrics.h"
 
+#include <fiber/async/Spawn.h>
 #include <fiber/common/Assert.h>
 
 namespace fiber::access_server {
@@ -21,7 +22,6 @@ AccessServer::AccessServer(event::EventLoop &accept_loop, event::EventLoopGroup 
                       AccessWorkerResourcesOptions{
                               .default_max_request_body_size = options.default_max_request_body_size,
                               .client_metadata = std::move(options.client_metadata),
-                              .connection_secure = options.http_server.tls.enabled,
                               .access_log = std::move(options.access_log),
                               .dns = std::move(options.dns),
                               .dns_resolver_factory = options.dns_resolver_factory,
@@ -33,8 +33,11 @@ AccessServer::AccessServer(event::EventLoop &accept_loop, event::EventLoopGroup 
                               .http3_alt_svc = std::move(options.http3_alt_svc),
                       }),
     server_(
-            accept_loop, [this](http::HttpExchange &exchange) { return worker_resources_.handle(exchange); },
+            accept_loop, [this](http::HttpExchange &exchange) { return worker_resources_.handle(exchange, true); },
             make_http_options(std::move(options.http_server)), &workers),
+    plain_server_(
+            accept_loop, [this](http::HttpExchange &exchange) { return worker_resources_.handle(exchange, false); },
+            make_http_options(std::move(options.plain_http_server)), &workers),
     metrics_endpoint_(
             accept_loop, workers, worker_resources_.metrics(),
             AccessMetricsEndpointOptions{
@@ -64,6 +67,12 @@ common::IoResult<void> AccessServer::bind(const net::SocketAddress &address, con
     return server_.bind(address, options);
 }
 
+common::IoResult<void> AccessServer::bind_plain(const net::SocketAddress &address, const net::ListenOptions &options) {
+    FIBER_ASSERT(accept_loop_->in_loop());
+    FIBER_ASSERT(initialized_);
+    return plain_server_.bind(address, options);
+}
+
 common::IoResult<void> AccessServer::bind_metrics(const net::SocketAddress &address,
                                                   const net::ListenOptions &options) {
     FIBER_ASSERT(accept_loop_->in_loop());
@@ -71,7 +80,12 @@ common::IoResult<void> AccessServer::bind_metrics(const net::SocketAddress &addr
     return metrics_endpoint_.bind(address, options);
 }
 
-async::DetachedTask AccessServer::serve() { return server_.serve(); }
+async::DetachedTask AccessServer::serve() {
+    // serve() on an unbound server is a no-op, so the plaintext server can be
+    // served unconditionally; it only accepts once bind_plain() has run.
+    async::spawn([this]() { return plain_server_.serve(); });
+    return server_.serve();
+}
 
 async::DetachedTask AccessServer::serve_metrics() { return metrics_endpoint_.serve(); }
 
@@ -79,6 +93,7 @@ async::Task<void> AccessServer::shutdown_and_wait() noexcept {
     FIBER_ASSERT(accept_loop_->in_loop());
     co_await metrics_endpoint_.shutdown_and_wait();
     server_.close();
+    plain_server_.close();
     co_await worker_resources_.shutdown();
     initialized_ = false;
 }

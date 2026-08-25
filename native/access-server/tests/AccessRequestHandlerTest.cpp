@@ -158,14 +158,15 @@ fiber::async::DetachedTask run_request_on_loop(fiber::event::EventLoop *loop, co
                                                AccessRequestScriptAdapter script_adapter,
                                                AccessRequestHandlerOptions options, AccessProxyAdapter proxy_adapter,
                                                ClientMetadataResolverOptions client_metadata_options,
-                                               std::string request, std::string *output, std::promise<void> *done) {
+                                               bool connection_secure, std::string request, std::string *output,
+                                               std::promise<void> *done) {
     auto transport = std::make_unique<RecordingTransport>(*loop, std::move(request), *output);
     AccessRequestHandler access_handler(store->snapshot_provider(), script_adapter, options, proxy_adapter);
     ClientMetadataResolver client_metadata_resolver(std::move(client_metadata_options));
-    fiber::http::HttpHandler handler = [&access_handler, &client_metadata_resolver](
+    fiber::http::HttpHandler handler = [&access_handler, &client_metadata_resolver, connection_secure](
                                                fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
         fiber::access_server::AccessRequestTelemetry telemetry(exchange, nullptr, nullptr, nullptr,
-                                                               &client_metadata_resolver);
+                                                               &client_metadata_resolver, connection_secure);
         co_await access_handler.handle(exchange, telemetry);
     };
     fiber::http::Http1Connection connection(nullptr, std::move(transport), std::move(handler), {});
@@ -210,7 +211,8 @@ ClientMetadataResolverOptions legacy_client_metadata_options() {
 std::string run_request(const RouteConfigStore &store, std::string request,
                         AccessRequestScriptAdapter script_adapter = {}, AccessRequestHandlerOptions options = {},
                         AccessProxyAdapter proxy_adapter = {},
-                        ClientMetadataResolverOptions client_metadata_options = legacy_client_metadata_options()) {
+                        ClientMetadataResolverOptions client_metadata_options = legacy_client_metadata_options(),
+                        bool connection_secure = false) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
@@ -219,7 +221,8 @@ std::string run_request(const RouteConfigStore &store, std::string request,
     auto completed = done.get_future();
     fiber::async::spawn(group.at(0), [&]() {
         return run_request_on_loop(&group.at(0), &store, script_adapter, options, proxy_adapter,
-                                   std::move(client_metadata_options), std::move(request), &output, &done);
+                                   std::move(client_metadata_options), connection_secure, std::move(request), &output,
+                                   &done);
     });
 
     EXPECT_EQ(completed.wait_for(2s), std::future_status::ready);
@@ -1126,15 +1129,13 @@ TEST(AccessRequestHandlerTest, DirectTlsListenerIsHttpsWithoutForwardingHeaders)
     strategy.https = HttpsStrategy::Redirect308;
     RouteConfigStore store;
     publish(store, project(strategy, {response_route("/ready", "ready")}));
-    ClientMetadataResolverOptions metadata_options{
-            .connection_secure = true,
-    };
+    ClientMetadataResolverOptions metadata_options{};
 
     const std::string response = run_request(store,
                                              "GET /ready HTTP/1.1\r\n"
                                              "Host: api.example.com\r\n"
                                              "Connection: close\r\n\r\n",
-                                             {}, {}, {}, std::move(metadata_options));
+                                             {}, {}, {}, std::move(metadata_options), /*connection_secure=*/true);
     EXPECT_TRUE(response.starts_with("HTTP/1.1 200 "));
     EXPECT_EQ(response_body(response), "ready");
 }
@@ -1374,7 +1375,7 @@ TEST(AccessRequestHandlerTest, PinsRouteSnapshotAcrossSuspendedProxyExecutionDur
     auto completed = done.get_future();
     fiber::async::spawn(group.at(0), [&]() {
         return run_request_on_loop(&group.at(0), &store, {}, {}, snapshot_rotation_proxy_adapter(state),
-                                   legacy_client_metadata_options(),
+                                   legacy_client_metadata_options(), /*connection_secure=*/false,
                                    "GET /pinned HTTP/1.1\r\n"
                                    "Host: api.example.com\r\n"
                                    "Connection: close\r\n\r\n",

@@ -51,6 +51,8 @@ async::Task<void> AccessServerRuntime::shutdown() noexcept { return coordinator_
 
 int AccessServerRuntime::fd() const noexcept { return data_plane_->fd(); }
 
+int AccessServerRuntime::plain_fd() const noexcept { return data_plane_->plain_fd(); }
+
 int AccessServerRuntime::metrics_fd() const noexcept { return data_plane_->metrics_fd(); }
 
 } // namespace fiber::access_server

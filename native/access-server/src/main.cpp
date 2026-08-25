@@ -8,6 +8,8 @@
 #include <expected>
 #include <iostream>
 #include <memory>
+#include <optional>
+#include <string>
 #include <string_view>
 #include <utility>
 
@@ -216,16 +218,6 @@ int main(int argc, char **argv) {
             co_return;
         }
 
-        auto port = bound_port(runtime->fd());
-        if (!port) {
-            std::cerr << "failed to resolve bound listener port: " << fiber::common::io_err_name(port.error()) << '\n';
-            exit_code = 1;
-            co_await runtime->shutdown();
-            signal_service.detach();
-            accept_loop.stop();
-            co_return;
-        }
-        const fiber::net::SocketAddress address(config.listen_address().ip(), *port);
         auto metrics_port = bound_port(runtime->metrics_fd());
         if (!metrics_port) {
             std::cerr << "failed to resolve metrics listener port: " << fiber::common::io_err_name(metrics_port.error())
@@ -237,22 +229,67 @@ int main(int argc, char **argv) {
             co_return;
         }
         const fiber::net::SocketAddress metrics_address(config.metrics_listen_address().ip(), *metrics_port);
-        const bool tls_enabled = config.http_server_options().tls.enabled;
-        const bool http3_enabled = config.http_server_options().http3.enabled;
-        std::cout << "access-server listening on " << (tls_enabled ? "https://" : "http://") << address.to_string()
-                  << ", protocols=" << (tls_enabled ? "http/1.1,h2" : "http/1.1") << (http3_enabled ? ",h3" : "")
-                  << ", metrics=http://" << metrics_address.to_string() << ", http workers=" << http_workers.size()
+        const bool tls_enabled = config.tls_http_server_options().tls.enabled;
+        const bool http3_enabled = config.tls_http_server_options().http3.enabled;
+        const bool plain_enabled = config.plain_listen_enabled();
+
+        std::optional<fiber::net::SocketAddress> tls_address;
+        if (tls_enabled) {
+            auto tls_port = bound_port(runtime->fd());
+            if (!tls_port) {
+                std::cerr << "failed to resolve bound TLS listener port: "
+                          << fiber::common::io_err_name(tls_port.error()) << '\n';
+                exit_code = 1;
+                co_await runtime->shutdown();
+                signal_service.detach();
+                accept_loop.stop();
+                co_return;
+            }
+            tls_address = fiber::net::SocketAddress(config.tls_listen_address().ip(), *tls_port);
+        }
+        std::optional<fiber::net::SocketAddress> plain_address;
+        if (plain_enabled) {
+            auto plain_port = bound_port(runtime->plain_fd());
+            if (!plain_port) {
+                std::cerr << "failed to resolve bound plaintext listener port: "
+                          << fiber::common::io_err_name(plain_port.error()) << '\n';
+                exit_code = 1;
+                co_await runtime->shutdown();
+                signal_service.detach();
+                accept_loop.stop();
+                co_return;
+            }
+            plain_address = fiber::net::SocketAddress(config.plain_listen_address().ip(), *plain_port);
+        }
+
+        std::cout << "access-server listening";
+        if (tls_address) {
+            std::cout << " on https://" << tls_address->to_string() << ", protocols=http/1.1,h2"
+                      << (http3_enabled ? ",h3" : "");
+        }
+        if (plain_address) {
+            std::cout << (tls_address ? " and" : " on") << " http://" << plain_address->to_string()
+                      << ", protocols=http/1.1";
+        }
+        std::cout << ", metrics=http://" << metrics_address.to_string() << ", http workers=" << http_workers.size()
                   << ", nacos servers=" << config.nacos_config().server_hosts().size() << std::endl;
-        LOG(LOG_LIFECYCLE, INFO) << "server listening address=" << fiber::log::quoted(address.to_string())
-                                 << " metrics_address=" << fiber::log::quoted(metrics_address.to_string())
-                                 << " http_workers=" << http_workers.size() << " cpu_affinity=" << cpu.affinity_count
-                                 << " cpu_quota_workers=" << cpu.quota_count << " cpu_quota_us=" << cpu.quota_us
-                                 << " cpu_period_us=" << cpu.period_us
+        std::string lifecycle_addresses;
+        if (tls_address) {
+            lifecycle_addresses += " tls_address=\"" + tls_address->to_string() + "\"";
+        }
+        if (plain_address) {
+            lifecycle_addresses += " plain_address=\"" + plain_address->to_string() + "\"";
+        }
+        lifecycle_addresses += " metrics_address=\"" + metrics_address.to_string() + "\"";
+        LOG(LOG_LIFECYCLE, INFO) << "server listening" << lifecycle_addresses << " http_workers=" << http_workers.size()
+                                 << " cpu_affinity=" << cpu.affinity_count << " cpu_quota_workers=" << cpu.quota_count
+                                 << " cpu_quota_us=" << cpu.quota_us << " cpu_period_us=" << cpu.period_us
                                  << " cpu_concurrency_source=" << fiber::util::cpu_concurrency_source_name(cpu.source)
                                  << " cgroup_probe_failed=" << cpu.cgroup_probe_failed
                                  << " nacos_servers=" << config.nacos_config().server_hosts().size()
                                  << " cat_enabled=" << config.cat_config().has_value() << " tls_enabled=" << tls_enabled
-                                 << " http2_enabled=" << tls_enabled << " http3_enabled=" << http3_enabled;
+                                 << " http2_enabled=" << tls_enabled << " http3_enabled=" << http3_enabled
+                                 << " plain_enabled=" << plain_enabled;
 
         auto signal = co_await fiber::async::when_any([]() { return fiber::async::wait_signal(SIGINT); },
                                                       []() { return fiber::async::wait_signal(SIGTERM); });

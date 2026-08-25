@@ -21,8 +21,12 @@ TEST(AccessServerConfigTest, LoadsJavaServerDefaultsAndNacosSettings) {
     )");
 
     ASSERT_TRUE(config) << config.error().detail;
-    EXPECT_EQ(config->listen_address().to_string(), "0.0.0.0:16688");
-    EXPECT_EQ(config->metrics_listen_address().to_string(), "0.0.0.0:16689");
+    EXPECT_EQ(config->tls_listen_address().to_string(), "0.0.0.0:8443");
+    EXPECT_EQ(config->metrics_listen_address().to_string(), "0.0.0.0:8001");
+    EXPECT_TRUE(config->plain_listen_enabled());
+    EXPECT_EQ(config->plain_listen_address().to_string(), "0.0.0.0:8000");
+    EXPECT_FALSE(config->plain_http_server_options().tls.enabled);
+    EXPECT_FALSE(config->plain_http_server_options().http3.enabled);
     EXPECT_FALSE(config->activation_endpoint_options().enabled);
     EXPECT_TRUE(config->activation_endpoint_options().instance_id.empty());
     EXPECT_TRUE(config->activation_endpoint_options().bearer_token.empty());
@@ -31,7 +35,9 @@ TEST(AccessServerConfigTest, LoadsJavaServerDefaultsAndNacosSettings) {
     EXPECT_FALSE(config->test_mode());
     EXPECT_EQ(config->client_metadata_options().mode, ClientMetadataMode::Direct);
     EXPECT_TRUE(config->client_metadata_options().trusted_proxy_cidrs.empty());
-    EXPECT_TRUE(config->client_metadata_options().connection_secure);
+    // Listener security is derived per request from the serving listener; the
+    // resolver carries no global connection_secure flag anymore.
+    EXPECT_FALSE(config->client_metadata_options().connection_secure);
     EXPECT_TRUE(config->access_log_options().query_allowlist.empty());
     EXPECT_TRUE(config->access_log_options().additional_sensitive_query_keys.empty());
     EXPECT_FALSE(config->access_log_options().query_hash_enabled);
@@ -48,10 +54,10 @@ TEST(AccessServerConfigTest, LoadsJavaServerDefaultsAndNacosSettings) {
     EXPECT_EQ(config->happy_eyeballs_policy().address_policy, net::HappyEyeballsAddressPolicy::V6First);
     EXPECT_EQ(config->dns_mode(), AccessDnsMode::System);
     EXPECT_EQ(config->dns_resolver_config_path(), "/etc/resolv.conf");
-    EXPECT_TRUE(config->http_server_options().tls.enabled);
-    EXPECT_TRUE(config->http_server_options().http3.enabled);
-    EXPECT_TRUE(config->http_server_options().tls.cert_file.empty());
-    EXPECT_TRUE(config->http_server_options().tls.key_file.empty());
+    EXPECT_TRUE(config->tls_http_server_options().tls.enabled);
+    EXPECT_TRUE(config->tls_http_server_options().http3.enabled);
+    EXPECT_TRUE(config->tls_http_server_options().tls.cert_file.empty());
+    EXPECT_TRUE(config->tls_http_server_options().tls.key_file.empty());
     ASSERT_EQ(config->nacos_config().server_hosts().size(), 2U);
     EXPECT_TRUE(config->nacos_config().server_hosts()[0].is_ip_literal());
     EXPECT_EQ(config->nacos_config().server_hosts()[0].value(), "127.0.0.1");
@@ -68,10 +74,9 @@ TEST(AccessServerConfigTest, LoadsJavaServerDefaultsAndNacosSettings) {
 }
 
 TEST(AccessServerConfigTest, LoadsBoundedDnsOverrideWithoutSystemFileIo) {
-    auto config = AccessServerConfig::load_from_string(
-            "NACOS_SERVER_ADDRESSES=127.0.0.1\n"
-            "ACCESS_SERVER_DNS_MODE=override\n"
-            "ACCESS_SERVER_DNS_SERVERS=192.0.2.1,2001:db8::53,192.0.2.2\n");
+    auto config = AccessServerConfig::load_from_string("NACOS_SERVER_ADDRESSES=127.0.0.1\n"
+                                                       "ACCESS_SERVER_DNS_MODE=override\n"
+                                                       "ACCESS_SERVER_DNS_SERVERS=192.0.2.1,2001:db8::53,192.0.2.2\n");
     ASSERT_TRUE(config) << config.error().detail;
     ASSERT_EQ(config->dns_mode(), AccessDnsMode::Override);
 
@@ -146,9 +151,9 @@ TEST(AccessServerConfigTest, RejectsInvalidDnsModeAndCrossModeSettings) {
 }
 
 TEST(AccessServerRuntimeTest, RejectsMissingSystemResolverConfigBeforeEventLoopsStart) {
-    auto config = AccessServerConfig::load_from_string(
-            "NACOS_SERVER_ADDRESSES=127.0.0.1\n"
-            "ACCESS_SERVER_DNS_RESOLV_CONF=/missing/access-server-resolv.conf\n");
+    auto config =
+            AccessServerConfig::load_from_string("NACOS_SERVER_ADDRESSES=127.0.0.1\n"
+                                                 "ACCESS_SERVER_DNS_RESOLV_CONF=/missing/access-server-resolv.conf\n");
     ASSERT_TRUE(config) << config.error().detail;
 
     event::EventLoop accept_loop;
@@ -167,10 +172,12 @@ TEST(AccessServerRuntimeTest, RejectsMissingSystemResolverConfigBeforeEventLoops
 
 TEST(AccessServerConfigTest, LoadsExplicitRuntimeAndCompatibilityKeys) {
     auto config = AccessServerConfig::load_from_string(R"(
-        ACCESS_SERVER_LISTEN_ADDRESS=127.0.0.1
-        ACCESS_SERVER_LISTEN_PORT=18080
+        ACCESS_SERVER_TLS_LISTEN_ADDRESS=127.0.0.1
+        ACCESS_SERVER_TLS_LISTEN_PORT=18080
         ACCESS_SERVER_TLS_ENABLED=false
         ACCESS_SERVER_HTTP3_ENABLED=false
+        ACCESS_SERVER_PLAIN_LISTEN_ADDRESS=127.0.0.3
+        ACCESS_SERVER_PLAIN_LISTEN_PORT=18090
         ACCESS_SERVER_METRICS_LISTEN_ADDRESS=127.0.0.2
         ACCESS_SERVER_METRICS_LISTEN_PORT=19090
         ACCESS_SERVER_ACTIVATION_EVIDENCE_ENABLED=true
@@ -204,7 +211,9 @@ TEST(AccessServerConfigTest, LoadsExplicitRuntimeAndCompatibilityKeys) {
     )");
 
     ASSERT_TRUE(config) << config.error().detail;
-    EXPECT_EQ(config->listen_address().to_string(), "127.0.0.1:18080");
+    EXPECT_EQ(config->tls_listen_address().to_string(), "127.0.0.1:18080");
+    EXPECT_TRUE(config->plain_listen_enabled());
+    EXPECT_EQ(config->plain_listen_address().to_string(), "127.0.0.3:18090");
     EXPECT_EQ(config->metrics_listen_address().to_string(), "127.0.0.2:19090");
     EXPECT_TRUE(config->activation_endpoint_options().enabled);
     EXPECT_EQ(config->activation_endpoint_options().instance_id, "access-0");
@@ -215,6 +224,8 @@ TEST(AccessServerConfigTest, LoadsExplicitRuntimeAndCompatibilityKeys) {
     EXPECT_EQ(config->client_metadata_options().mode, ClientMetadataMode::TrustedProxy);
     EXPECT_EQ(config->client_metadata_options().trusted_proxy_cidrs.size(), 2u);
     EXPECT_FALSE(config->client_metadata_options().connection_secure);
+    EXPECT_FALSE(config->plain_http_server_options().tls.enabled);
+    EXPECT_FALSE(config->plain_http_server_options().http3.enabled);
     EXPECT_EQ(config->access_log_options().query_allowlist, (std::vector<std::string>{"page", "requestId"}));
     EXPECT_EQ(config->access_log_options().additional_sensitive_query_keys,
               (std::vector<std::string>{"otp", "customsecret"}));
@@ -222,8 +233,8 @@ TEST(AccessServerConfigTest, LoadsExplicitRuntimeAndCompatibilityKeys) {
     EXPECT_EQ(config->access_log_options().success_sample_rate_bps, 2500u);
     EXPECT_EQ(config->access_log_options().max_path_bytes, 4096u);
     EXPECT_EQ(config->access_log_options().max_query_bytes, 512u);
-    EXPECT_FALSE(config->http_server_options().tls.enabled);
-    EXPECT_FALSE(config->http_server_options().http3.enabled);
+    EXPECT_FALSE(config->tls_http_server_options().tls.enabled);
+    EXPECT_FALSE(config->tls_http_server_options().http3.enabled);
     EXPECT_EQ(config->watcher_options().project_list_data_id, "custom.projects");
     EXPECT_EQ(config->watcher_options().project_route_data_id_prefix, "custom.route.");
     EXPECT_EQ(config->watcher_options().project_route_group, "CUSTOM-ROUTE");
@@ -275,14 +286,13 @@ TEST(AccessServerConfigTest, LoadsUpstreamTlsVerificationModes) {
 }
 
 TEST(AccessServerConfigTest, LoadsBoundedHappyEyeballsPolicy) {
-    auto config = AccessServerConfig::load_from_string(
-            "NACOS_SERVER_ADDRESSES=127.0.0.1\n"
-            "ACCESS_SERVER_UPSTREAM_CONNECT_TIMEOUT_MILLIS=5000\n"
-            "ACCESS_SERVER_HAPPY_EYEBALLS_ENABLED=false\n"
-            "ACCESS_SERVER_HAPPY_EYEBALLS_DELAY_MILLIS=40\n"
-            "ACCESS_SERVER_HAPPY_EYEBALLS_MAX_CONCURRENT_ATTEMPTS=4\n"
-            "ACCESS_SERVER_HAPPY_EYEBALLS_FIRST_ADDRESS_FAMILY_COUNT=3\n"
-            "ACCESS_SERVER_HAPPY_EYEBALLS_ADDRESS_POLICY=v4_first\n");
+    auto config = AccessServerConfig::load_from_string("NACOS_SERVER_ADDRESSES=127.0.0.1\n"
+                                                       "ACCESS_SERVER_UPSTREAM_CONNECT_TIMEOUT_MILLIS=5000\n"
+                                                       "ACCESS_SERVER_HAPPY_EYEBALLS_ENABLED=false\n"
+                                                       "ACCESS_SERVER_HAPPY_EYEBALLS_DELAY_MILLIS=40\n"
+                                                       "ACCESS_SERVER_HAPPY_EYEBALLS_MAX_CONCURRENT_ATTEMPTS=4\n"
+                                                       "ACCESS_SERVER_HAPPY_EYEBALLS_FIRST_ADDRESS_FAMILY_COUNT=3\n"
+                                                       "ACCESS_SERVER_HAPPY_EYEBALLS_ADDRESS_POLICY=v4_first\n");
 
     ASSERT_TRUE(config) << config.error().detail;
     EXPECT_EQ(config->upstream_connect_timeout(), std::chrono::seconds(5));
@@ -292,10 +302,9 @@ TEST(AccessServerConfigTest, LoadsBoundedHappyEyeballsPolicy) {
     EXPECT_EQ(config->happy_eyeballs_policy().first_address_family_count, 3U);
     EXPECT_EQ(config->happy_eyeballs_policy().address_policy, net::HappyEyeballsAddressPolicy::V4First);
 
-    auto serial = AccessServerConfig::load_from_string(
-            "NACOS_SERVER_ADDRESSES=127.0.0.1\n"
-            "ACCESS_SERVER_UPSTREAM_CONNECT_TIMEOUT_MILLIS=100\n"
-            "ACCESS_SERVER_HAPPY_EYEBALLS_ENABLED=false\n");
+    auto serial = AccessServerConfig::load_from_string("NACOS_SERVER_ADDRESSES=127.0.0.1\n"
+                                                       "ACCESS_SERVER_UPSTREAM_CONNECT_TIMEOUT_MILLIS=100\n"
+                                                       "ACCESS_SERVER_HAPPY_EYEBALLS_ENABLED=false\n");
     ASSERT_TRUE(serial) << serial.error().detail;
     EXPECT_EQ(serial->upstream_connect_timeout(), std::chrono::milliseconds(100));
 }
@@ -519,7 +528,7 @@ TEST(AccessServerConfigTest, LoadsLegacyClientMetadataModeAndRejectsUnsafeProxyC
 TEST(AccessServerConfigTest, LoadsTlsIdentityFromNacosAndRejectsRemovedFileSettings) {
     auto nacos_identity = AccessServerConfig::load_from_string("NACOS_SERVER_ADDRESSES=127.0.0.1\n");
     ASSERT_TRUE(nacos_identity);
-    EXPECT_TRUE(nacos_identity->http_server_options().tls.cert_file.empty());
+    EXPECT_TRUE(nacos_identity->tls_http_server_options().tls.cert_file.empty());
     EXPECT_EQ(nacos_identity->tls_certificate_watcher_options().data_id, "ploto.unified-access.tls-certificates");
     EXPECT_EQ(nacos_identity->tls_certificate_watcher_options().group, "ACCESS-SERVER");
 
@@ -532,11 +541,120 @@ TEST(AccessServerConfigTest, LoadsTlsIdentityFromNacosAndRejectsRemovedFileSetti
 }
 
 TEST(AccessServerConfigTest, RejectsHttp3WithoutTls) {
-    auto config =
+    // HTTP/3 defaults to follow the TLS listener, so TLS-off alone is a valid
+    // plaintext-only configuration.
+    auto plaintext_only =
             AccessServerConfig::load_from_string("NACOS_SERVER_ADDRESSES=127.0.0.1\nACCESS_SERVER_TLS_ENABLED=false\n");
+    ASSERT_TRUE(plaintext_only) << plaintext_only.error().detail;
+    EXPECT_TRUE(plaintext_only->plain_listen_enabled());
+    EXPECT_FALSE(plaintext_only->tls_http_server_options().tls.enabled);
+    EXPECT_FALSE(plaintext_only->tls_http_server_options().http3.enabled);
+
+    // An explicit HTTP/3 request without TLS is still rejected.
+    auto config = AccessServerConfig::load_from_string("NACOS_SERVER_ADDRESSES=127.0.0.1\n"
+                                                       "ACCESS_SERVER_TLS_ENABLED=false\n"
+                                                       "ACCESS_SERVER_HTTP3_ENABLED=true\n");
     ASSERT_FALSE(config);
     EXPECT_EQ(config.error().code, AccessServerConfigErrorCode::InvalidValue);
     EXPECT_EQ(config.error().key, "ACCESS_SERVER_HTTP3_ENABLED");
+}
+
+TEST(AccessServerConfigTest, LoadsDualListenerPortsAndDefaults) {
+    auto config = AccessServerConfig::load_from_string("NACOS_SERVER_ADDRESSES=127.0.0.1\n");
+    ASSERT_TRUE(config) << config.error().detail;
+    EXPECT_EQ(config->tls_listen_address().to_string(), "0.0.0.0:8443");
+    EXPECT_TRUE(config->tls_http_server_options().tls.enabled);
+    EXPECT_TRUE(config->tls_http_server_options().http3.enabled);
+    EXPECT_TRUE(config->plain_listen_enabled());
+    EXPECT_EQ(config->plain_listen_address().to_string(), "0.0.0.0:8000");
+    EXPECT_FALSE(config->plain_http_server_options().tls.enabled);
+    EXPECT_FALSE(config->plain_http_server_options().http3.enabled);
+    EXPECT_EQ(config->metrics_listen_address().to_string(), "0.0.0.0:8001");
+}
+
+TEST(AccessServerConfigTest, LoadsExplicitDualListenerAddresses) {
+    auto config = AccessServerConfig::load_from_string(R"(
+        ACCESS_SERVER_TLS_LISTEN_ADDRESS=127.0.0.1
+        ACCESS_SERVER_TLS_LISTEN_PORT=18443
+        ACCESS_SERVER_PLAIN_LISTEN_ADDRESS=127.0.0.4
+        ACCESS_SERVER_PLAIN_LISTEN_PORT=18000
+        ACCESS_SERVER_METRICS_LISTEN_ADDRESS=127.0.0.5
+        ACCESS_SERVER_METRICS_LISTEN_PORT=18001
+        NACOS_SERVER_ADDRESSES=127.0.0.1
+    )");
+    ASSERT_TRUE(config) << config.error().detail;
+    EXPECT_EQ(config->tls_listen_address().to_string(), "127.0.0.1:18443");
+    EXPECT_TRUE(config->plain_listen_enabled());
+    EXPECT_EQ(config->plain_listen_address().to_string(), "127.0.0.4:18000");
+    EXPECT_EQ(config->metrics_listen_address().to_string(), "127.0.0.5:18001");
+}
+
+TEST(AccessServerConfigTest, LoadsPlaintextOnlyAndTlsOnlyConfigurations) {
+    auto plaintext = AccessServerConfig::load_from_string("NACOS_SERVER_ADDRESSES=127.0.0.1\n"
+                                                          "ACCESS_SERVER_TLS_ENABLED=false\n");
+    ASSERT_TRUE(plaintext) << plaintext.error().detail;
+    EXPECT_TRUE(plaintext->plain_listen_enabled());
+    EXPECT_EQ(plaintext->plain_listen_address().to_string(), "0.0.0.0:8000");
+    EXPECT_FALSE(plaintext->tls_http_server_options().tls.enabled);
+
+    auto tls_only = AccessServerConfig::load_from_string("NACOS_SERVER_ADDRESSES=127.0.0.1\n"
+                                                         "ACCESS_SERVER_PLAIN_LISTEN_ENABLED=false\n");
+    ASSERT_TRUE(tls_only) << tls_only.error().detail;
+    EXPECT_FALSE(tls_only->plain_listen_enabled());
+    EXPECT_TRUE(tls_only->tls_http_server_options().tls.enabled);
+    EXPECT_TRUE(tls_only->tls_http_server_options().http3.enabled);
+}
+
+TEST(AccessServerConfigTest, RejectsListenerConfigurationErrors) {
+    const auto expect_invalid = [](std::string_view settings, std::string_view key) {
+        std::string input = "NACOS_SERVER_ADDRESSES=127.0.0.1\n";
+        input.append(settings);
+        auto config = AccessServerConfig::load_from_string(input);
+        EXPECT_FALSE(config) << settings;
+        if (!config) {
+            EXPECT_EQ(config.error().code, AccessServerConfigErrorCode::InvalidValue) << settings;
+            EXPECT_EQ(config.error().key, key) << settings;
+        }
+    };
+
+    // Both listeners disabled leaves no traffic path.
+    expect_invalid("ACCESS_SERVER_TLS_ENABLED=false\nACCESS_SERVER_PLAIN_LISTEN_ENABLED=false\n",
+                   "ACCESS_SERVER_TLS_ENABLED");
+    // Plaintext and TLS must not share an address:port.
+    expect_invalid("ACCESS_SERVER_TLS_LISTEN_ADDRESS=127.0.0.1\nACCESS_SERVER_TLS_LISTEN_PORT=8000\n",
+                   "ACCESS_SERVER_PLAIN_LISTEN_PORT");
+    // Metrics must not collide with a traffic listener.
+    expect_invalid("ACCESS_SERVER_METRICS_LISTEN_ADDRESS=0.0.0.0\nACCESS_SERVER_METRICS_LISTEN_PORT=8000\n",
+                   "ACCESS_SERVER_METRICS_LISTEN_PORT");
+    expect_invalid("ACCESS_SERVER_METRICS_LISTEN_ADDRESS=0.0.0.0\nACCESS_SERVER_METRICS_LISTEN_PORT=8443\n",
+                   "ACCESS_SERVER_METRICS_LISTEN_PORT");
+
+    auto bad_ip = AccessServerConfig::load_from_string("NACOS_SERVER_ADDRESSES=127.0.0.1\n"
+                                                       "ACCESS_SERVER_TLS_LISTEN_ADDRESS=not-an-ip\n");
+    ASSERT_FALSE(bad_ip);
+    EXPECT_EQ(bad_ip.error().code, AccessServerConfigErrorCode::InvalidValue);
+    EXPECT_EQ(bad_ip.error().key, "ACCESS_SERVER_TLS_LISTEN_ADDRESS");
+
+    auto bad_bool = AccessServerConfig::load_from_string("NACOS_SERVER_ADDRESSES=127.0.0.1\n"
+                                                         "ACCESS_SERVER_PLAIN_LISTEN_ENABLED=yes\n");
+    ASSERT_FALSE(bad_bool);
+    EXPECT_EQ(bad_bool.error().code, AccessServerConfigErrorCode::InvalidValue);
+    EXPECT_EQ(bad_bool.error().key, "ACCESS_SERVER_PLAIN_LISTEN_ENABLED");
+}
+
+TEST(AccessServerConfigTest, RejectsLegacyListenKeysWithMigrationHint) {
+    auto address = AccessServerConfig::load_from_string("NACOS_SERVER_ADDRESSES=127.0.0.1\n"
+                                                        "ACCESS_SERVER_LISTEN_ADDRESS=127.0.0.1\n");
+    ASSERT_FALSE(address);
+    EXPECT_EQ(address.error().code, AccessServerConfigErrorCode::UnknownKey);
+    EXPECT_EQ(address.error().key, "ACCESS_SERVER_LISTEN_ADDRESS");
+    EXPECT_NE(address.error().detail.find("ACCESS_SERVER_TLS_LISTEN_*"), std::string::npos);
+
+    auto port = AccessServerConfig::load_from_string("NACOS_SERVER_ADDRESSES=127.0.0.1\n"
+                                                     "ACCESS_SERVER_LISTEN_PORT=8080\n");
+    ASSERT_FALSE(port);
+    EXPECT_EQ(port.error().code, AccessServerConfigErrorCode::UnknownKey);
+    EXPECT_EQ(port.error().key, "ACCESS_SERVER_LISTEN_PORT");
 }
 
 } // namespace

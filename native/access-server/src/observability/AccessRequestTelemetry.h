@@ -44,7 +44,8 @@ class AccessRequestTelemetry final : public common::NonCopyable, public common::
 public:
     AccessRequestTelemetry(http::HttpExchange &exchange, AccessServerMetrics::Worker *metrics,
                            cat::CatClient *cat_client, const AccessLogPolicy *access_log_policy = nullptr,
-                           const ClientMetadataResolver *client_metadata_resolver = nullptr) noexcept;
+                           const ClientMetadataResolver *client_metadata_resolver = nullptr,
+                           bool connection_secure = false) noexcept;
     ~AccessRequestTelemetry() noexcept;
 
     void set_project(std::string_view project, std::string_view effective_host,
