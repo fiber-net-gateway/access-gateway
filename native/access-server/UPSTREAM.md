@@ -10,19 +10,20 @@ HTTP, JSON/script, Nacos, CAT, and Prometheus modules are consumed from the pinn
 historical application import revision.
 
 The current reusable Fiber dependency is pinned at
-`0df9dd0d533c96555653af9288faeb54964359bc`. The reviewed update range from the previous pin is
-`3d4b3504fec8ef72fec3700e399c5431e8466afc..0df9dd0d533c96555653af9288faeb54964359bc`.
+`05d88a300965f7e3755683ba954f9a58a04b80a7`. The reviewed update range from the previous pin is
+`0df9dd0d533c96555653af9288faeb54964359bc..05d88a300965f7e3755683ba954f9a58a04b80a7`.
 The complete reviewed range from the original import pin is
-`0fda7764bf94944aca4b674ab5ab311184703118..0df9dd0d533c96555653af9288faeb54964359bc`.
+`0fda7764bf94944aca4b674ab5ab311184703118..05d88a300965f7e3755683ba954f9a58a04b80a7`.
 It removes the obsolete upstream `apps/access-server`, adds Nacos hostname and bounded service
 status APIs, system resolver/multi-nameserver support, client TLS identities and HTTP/1 pool
 affinity, a cancellable Happy Eyeballs connector, and a reusable public HTTP gzip response writer
 shared by lite-nginx and repository-owned access-server. The script exchange now permits a request
-local response-writer decorator. The latest reviewed delta only makes lite-nginx wait for HTTP
-server shutdown before destroying its launcher-owned resources; Fiber public APIs and the
-repository-owned access-server application are unchanged. No application source was synchronized
-back from upstream as part of this dependency update; the historical import revision above remains
-unchanged.
+local response-writer decorator. The latest reviewed delta validates and scans DNS record sections
+without materializing unrelated records beyond the configured retention limit, and coalesces
+overlapping Prometheus collections onto one stable shard-snapshot generation. The DNS public API
+additions are backward compatible, and the repository-owned application required no source or wire
+contract changes. No application source was synchronized back from upstream as part of this
+dependency update; the historical import revision above remains unchanged.
 
 The import preserves upstream source, tests, fixtures, documentation, scripts, and the example
 environment file. Repository-integration changes replace upstream-relative test-support includes,
