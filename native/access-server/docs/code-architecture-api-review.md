@@ -69,12 +69,14 @@
   [`UPSTREAM.md`](../UPSTREAM.md#L12) 记录的是 `8e8e1d7933d4a30aa3b21feb6acc3e633a612b9b`；
 - 因此完整 runtime configure/regenerate 失败，离线 validator 因 runtime 被跳过而仍可构建。
 
-这是可复现构建问题，不应通过修改 submodule 内部文件解决。2026-08-19 已完成以下收口：
+这是可复现构建问题，不应通过修改 submodule 内部文件解决。2026-08-27 已完成最新依赖更新后的
+复核：
 
 1. gitlink 和 [`UPSTREAM.md`](../UPSTREAM.md#L12) 统一固定为
-   `0df9dd0d533c96555653af9288faeb54964359bc`；
-2. 已审阅 `3d4b350..0df9dd0`，增量仅修改未由本项目构建的 lite-nginx launcher shutdown；
-3. Release native configure、默认目标构建、337 项 access-server focused CTest 和 1,977 项完整
+   `05d88a300965f7e3755683ba954f9a58a04b80a7`；
+2. 已审阅 `0df9dd0..05d88a3`，增量修改本项目实际链接的 DNS 与 Prometheus 组件；公开 API
+   保持向后兼容，repository-owned access-server 不需要源代码或 wire contract 调整；
+3. Release native configure、默认目标构建、342 项 access-server focused CTest 和 1,990 项完整
    CTest 均通过，5 项按环境条件 skip。
 
 因此当前 pin 的 runtime 可复现构建阻断已经解除。对全部 runtime 必需 target 增加统一的
