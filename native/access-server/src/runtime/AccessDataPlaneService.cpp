@@ -58,6 +58,7 @@ AccessDataPlaneService::start(AccessControlPlaneReady ready) noexcept {
             AccessServerOptions{
                     .default_max_request_body_size = options_.default_max_request_body_size,
                     .client_metadata = std::move(options_.client_metadata),
+                    .network_entry = std::move(options_.network_entry),
                     .access_log = std::move(options_.access_log),
                     .dns = std::move(options_.dns),
                     .dns_resolver_factory = options_.dns_resolver_factory,

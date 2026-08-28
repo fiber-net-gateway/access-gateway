@@ -97,6 +97,7 @@ AccessRuntimeFactory::create(event::EventLoop &accept_loop, event::EventLoop &na
                     .plain_http_server = config.plain_http_server_options(),
                     .activation_endpoint = config.activation_endpoint_options(),
                     .client_metadata = config.client_metadata_options(),
+                    .network_entry = std::string(config.network_entry()),
                     .access_log = config.access_log_options(),
                     .dns =
                             [&]() {

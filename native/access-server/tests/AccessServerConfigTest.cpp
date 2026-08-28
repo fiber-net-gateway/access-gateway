@@ -525,6 +525,35 @@ TEST(AccessServerConfigTest, LoadsLegacyClientMetadataModeAndRejectsUnsafeProxyC
                    "ACCESS_SERVER_TRUSTED_PROXY_CIDRS=10.0.0.0/8,\n");
 }
 
+TEST(AccessServerConfigTest, LoadsNetworkEntryForEdgeProxyHeaderInjection) {
+    auto config = AccessServerConfig::load_from_string("NACOS_SERVER_ADDRESSES=127.0.0.1\n"
+                                                       "ACCESS_SERVER_NETWORK_ENTRY=internet\n");
+    ASSERT_TRUE(config) << config.error().detail;
+    EXPECT_EQ(config->network_entry(), "internet");
+}
+
+TEST(AccessServerConfigTest, NetworkEntryDefaultsToEmpty) {
+    auto config = AccessServerConfig::load_from_string("NACOS_SERVER_ADDRESSES=127.0.0.1\n");
+    ASSERT_TRUE(config) << config.error().detail;
+    EXPECT_TRUE(config->network_entry().empty());
+}
+
+TEST(AccessServerConfigTest, RejectsInvalidNetworkEntryValues) {
+    const auto expect_invalid = [](std::string_view setting) {
+        std::string input = "NACOS_SERVER_ADDRESSES=127.0.0.1\n";
+        input.append(setting);
+        auto config = AccessServerConfig::load_from_string(input);
+        EXPECT_FALSE(config);
+        if (!config) {
+            EXPECT_EQ(config.error().code, AccessServerConfigErrorCode::InvalidValue);
+            EXPECT_EQ(config.error().key, "ACCESS_SERVER_NETWORK_ENTRY");
+        }
+    };
+    expect_invalid("ACCESS_SERVER_NETWORK_ENTRY=two words\n");
+    expect_invalid("ACCESS_SERVER_NETWORK_ENTRY=internet/vdi\n");
+    expect_invalid(std::string("ACCESS_SERVER_NETWORK_ENTRY=").append(65, 'a').append("\n"));
+}
+
 TEST(AccessServerConfigTest, LoadsTlsIdentityFromNacosAndRejectsRemovedFileSettings) {
     auto nacos_identity = AccessServerConfig::load_from_string("NACOS_SERVER_ADDRESSES=127.0.0.1\n");
     ASSERT_TRUE(nacos_identity);

@@ -1,5 +1,6 @@
 #include "AccessWorkerResources.h"
 
+#include "../execution/NetworkEntryHeaders.h"
 #include "../observability/AccessRequestTelemetry.h"
 
 #include <utility>
@@ -24,7 +25,7 @@ AccessWorkerResources::AccessWorkerResources(event::EventLoopGroup &workers, con
              },
              executor_.adapter()),
     metrics_(workers, options.runtime_metrics), cat_client_(options.cat_client),
-    http3_alt_svc_(std::move(options.http3_alt_svc)) {
+    http3_alt_svc_(std::move(options.http3_alt_svc)), network_entry_(std::move(options.network_entry)) {
     FIBER_ASSERT(workers.size() > 0);
 }
 
@@ -68,6 +69,18 @@ async::Task<void> AccessWorkerResources::shutdown() noexcept {
 }
 
 async::Task<void> AccessWorkerResources::handle(http::HttpExchange &exchange, bool connection_secure) noexcept {
+    // Edge-proxy header synthesis must precede telemetry construction: client
+    // metadata resolution, host entry policy, script conditions, gray
+    // matching, and upstream forwarding all read these headers. On allocation
+    // failure the request continues unmodified and fails on its own.
+    //
+    // HttpExchange only exposes request_headers() as const; the exchange is
+    // non-const here, so mutating through the reference is defined behavior.
+    // TODO(upstream): replace with a mutable accessor on HttpExchange.
+    if (!network_entry_.empty()) {
+        (void) apply_network_entry_headers(const_cast<http::HttpHeaders &>(exchange.request_headers()),
+                                           exchange.remote_addr().ip(), network_entry_, connection_secure);
+    }
     AccessServerMetrics::Worker &worker = metrics_.worker(event::EventLoop::current().group_index());
     AccessRequestTelemetry telemetry(exchange, &worker, cat_client_, &access_log_policy_, &client_metadata_resolver_,
                                      connection_secure);

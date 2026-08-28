@@ -43,6 +43,7 @@
 build/
 Build/
 build-*/
+/temp
 
 # CMake generated files
 CMakeFiles/

@@ -33,6 +33,7 @@ class AccessRuntimeMetrics;
 struct AccessWorkerResourcesOptions {
     std::size_t default_max_request_body_size = 400U << 20U;
     ClientMetadataResolverOptions client_metadata;
+    std::string network_entry;
     AccessLogOptions access_log;
     AccessDnsServiceOptions dns = AccessDnsServiceOptions::local_default();
     AccessDnsResolverFactory dns_resolver_factory = AccessDnsResolverFactory::system();
@@ -77,6 +78,7 @@ private:
     async::WaitGroup cat_detach_tasks_;
     bool initialized_ = false;
     std::string http3_alt_svc_;
+    std::string network_entry_;
 };
 
 } // namespace fiber::access_server

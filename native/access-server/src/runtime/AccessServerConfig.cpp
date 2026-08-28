@@ -32,6 +32,9 @@ constexpr std::string_view kMaxRequestBody = "ACCESS_SERVER_MAX_REQUEST_BODY_SIZ
 constexpr std::string_view kTestMode = "ACCESS_SERVER_TEST_MODE";
 constexpr std::string_view kClientMetadataMode = "ACCESS_SERVER_CLIENT_METADATA_MODE";
 constexpr std::string_view kTrustedProxyCidrs = "ACCESS_SERVER_TRUSTED_PROXY_CIDRS";
+constexpr std::string_view kNetworkEntry = "ACCESS_SERVER_NETWORK_ENTRY";
+// Matches the gray-match entry byte limit the value feeds into.
+constexpr std::size_t kMaxNetworkEntryBytes = 64;
 constexpr std::string_view kAccessLogQueryAllowlist = "ACCESS_SERVER_ACCESS_LOG_QUERY_ALLOWLIST";
 constexpr std::string_view kAccessLogSensitiveQueryKeys = "ACCESS_SERVER_ACCESS_LOG_SENSITIVE_QUERY_KEYS";
 constexpr std::string_view kAccessLogQueryHashEnabled = "ACCESS_SERVER_ACCESS_LOG_QUERY_HASH_ENABLED";
@@ -106,6 +109,16 @@ std::string_view trim(std::string_view value) noexcept {
         value.remove_suffix(1);
     }
     return value;
+}
+
+bool is_header_token(std::string_view value) noexcept {
+    return !value.empty() && std::all_of(value.begin(), value.end(), [](const unsigned char character) {
+        return (character >= '0' && character <= '9') || (character >= 'A' && character <= 'Z') ||
+               (character >= 'a' && character <= 'z') || character == '!' || character == '#' || character == '$' ||
+               character == '%' || character == '&' || character == '\'' || character == '*' || character == '+' ||
+               character == '-' || character == '.' || character == '^' || character == '_' || character == '`' ||
+               character == '|' || character == '~';
+    });
 }
 
 std::expected<std::vector<Entry>, AccessServerConfigError> parse_entries(std::string_view input) {
@@ -405,12 +418,13 @@ AccessServerConfig::AccessServerConfig(
         http::HttpServerOptions plain_http_server_options, net::SocketAddress metrics_listen_address,
         AccessActivationEndpointOptions activation_endpoint_options, std::chrono::milliseconds initial_config_timeout,
         std::size_t default_max_request_body_size, bool test_mode,
-        ClientMetadataResolverOptions client_metadata_options, AccessLogOptions access_log_options,
-        UpstreamTlsClientPolicy upstream_tls_client_policy, std::chrono::milliseconds upstream_connect_timeout,
-        ProxyHappyEyeballsPolicy happy_eyeballs_policy, AccessDnsMode dns_mode, std::string dns_resolver_config_path,
-        dns::DnsNameserverList dns_override_nameservers, std::optional<cat::CatClientConfig> cat_config,
-        nacos::NacosClientConfig nacos_config, AccessConfigWatcherOptions watcher_options,
-        GrayConfigWatcherOptions gray_watcher_options, TlsCertificateWatcherOptions tls_certificate_watcher_options,
+        ClientMetadataResolverOptions client_metadata_options, std::string network_entry,
+        AccessLogOptions access_log_options, UpstreamTlsClientPolicy upstream_tls_client_policy,
+        std::chrono::milliseconds upstream_connect_timeout, ProxyHappyEyeballsPolicy happy_eyeballs_policy,
+        AccessDnsMode dns_mode, std::string dns_resolver_config_path, dns::DnsNameserverList dns_override_nameservers,
+        std::optional<cat::CatClientConfig> cat_config, nacos::NacosClientConfig nacos_config,
+        AccessConfigWatcherOptions watcher_options, GrayConfigWatcherOptions gray_watcher_options,
+        TlsCertificateWatcherOptions tls_certificate_watcher_options,
         AccessServiceDiscoveryOptions service_discovery_options) noexcept :
     tls_listen_address_(std::move(tls_listen_address)), tls_http_server_options_(std::move(tls_http_server_options)),
     plain_listen_enabled_(plain_listen_enabled), plain_listen_address_(std::move(plain_listen_address)),
@@ -419,7 +433,7 @@ AccessServerConfig::AccessServerConfig(
     activation_endpoint_options_(std::move(activation_endpoint_options)),
     initial_config_timeout_(initial_config_timeout), default_max_request_body_size_(default_max_request_body_size),
     test_mode_(test_mode), client_metadata_options_(std::move(client_metadata_options)),
-    access_log_options_(std::move(access_log_options)),
+    network_entry_(std::move(network_entry)), access_log_options_(std::move(access_log_options)),
     upstream_tls_client_policy_(std::move(upstream_tls_client_policy)),
     upstream_connect_timeout_(upstream_connect_timeout), happy_eyeballs_policy_(happy_eyeballs_policy),
     dns_mode_(dns_mode), dns_resolver_config_path_(std::move(dns_resolver_config_path)),
@@ -465,6 +479,7 @@ AccessServerConfig::load_from_string(std::string_view input) {
     std::size_t max_request_body = 400U << 20U;
     bool test_mode = false;
     ClientMetadataResolverOptions client_metadata_options;
+    std::string network_entry;
     AccessLogOptions access_log_options;
     UpstreamTlsClientPolicy upstream_tls_client_policy;
     std::uint64_t upstream_connect_timeout_millis = 3000;
@@ -590,6 +605,15 @@ AccessServerConfig::load_from_string(std::string_view input) {
                 return std::unexpected(std::move(parsed.error()));
             }
             client_metadata_options.trusted_proxy_cidrs = std::move(*parsed);
+        } else if (entry.key == kNetworkEntry) {
+            // The value becomes an X-Entry header value, so it must be a
+            // token and stay within the gray-match entry byte limit.
+            if (value.empty() || value.size() > kMaxNetworkEntryBytes || !is_header_token(value)) {
+                return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, entry.line, entry.key,
+                                             "expected a header token of at most 64 bytes (e.g. internet, vdi, "
+                                             "desktop)"));
+            }
+            network_entry = entry.value;
         } else if (entry.key == kAccessLogQueryAllowlist || entry.key == kAccessLogSensitiveQueryKeys) {
             const bool sensitive = entry.key == kAccessLogSensitiveQueryKeys;
             auto parsed = parse_query_keys(value, entry.line, entry.key, sensitive);
@@ -879,10 +903,11 @@ AccessServerConfig::load_from_string(std::string_view input) {
     return AccessServerConfig(
             tls_address, std::move(http_options), plain_listen_enabled, plain_address, std::move(plain_http_options),
             metrics_address, std::move(activation_endpoint_options), std::chrono::milliseconds(timeout_millis),
-            max_request_body, test_mode, std::move(client_metadata_options), std::move(access_log_options),
-            std::move(upstream_tls_client_policy), std::chrono::milliseconds(upstream_connect_timeout_millis),
-            happy_eyeballs_policy, dns_mode, std::move(dns_resolver_config_path), std::move(dns_override_nameservers),
-            std::move(cat_config), std::move(*nacos_config), std::move(watcher_options), std::move(gray_options),
+            max_request_body, test_mode, std::move(client_metadata_options), std::move(network_entry),
+            std::move(access_log_options), std::move(upstream_tls_client_policy),
+            std::chrono::milliseconds(upstream_connect_timeout_millis), happy_eyeballs_policy, dns_mode,
+            std::move(dns_resolver_config_path), std::move(dns_override_nameservers), std::move(cat_config),
+            std::move(*nacos_config), std::move(watcher_options), std::move(gray_options),
             std::move(tls_certificate_options), std::move(service_discovery_options));
 }
 

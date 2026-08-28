@@ -917,6 +917,29 @@ TEST(AccessRequestHandlerTest, ExecutesPrecompiledLocalConditionAndTemplates) {
     EXPECT_EQ(response_body(fallback_response), "fallback");
 }
 
+// nginx parity: the edge layer runs with underscores_in_headers on, and the
+// Java gateway forwarded such headers verbatim. Pin that the HTTP/1 parser
+// accepts underscore header names and stores them under their literal name
+// (upstream forwarding iterates stored fields, so acceptance implies
+// passthrough). A parser regression either rejects the request or silently
+// drops the header; both surface as the 'missing' fallback.
+TEST(AccessRequestHandlerTest, AcceptsUnderscoreRequestHeaderNames) {
+    AccessScriptRuntime scripts;
+    RouteConfig route = response_route("/underscore", "value=${$header.x_underscore_value || 'missing'}");
+    RouteConfigStore store(scripts.compiler_adapter());
+    publish(store, project({}, {std::move(route)}));
+
+    const std::string response = run_request(store,
+                                             "GET /underscore HTTP/1.1\r\n"
+                                             "Host: api.example.com\r\n"
+                                             "X_Underscore_Value: forwarded\r\n"
+                                             "Connection: close\r\n\r\n",
+                                             scripts.request_adapter());
+
+    EXPECT_TRUE(response.starts_with("HTTP/1.1 200 OK\r\n"));
+    EXPECT_EQ(response_body(response), "value=forwarded");
+}
+
 TEST(AccessRequestHandlerTest, MatchesRecordedConditionAndTemplateSyntaxSnapshot) {
     AccessScriptRuntime scripts;
     RouteConfig conditional =

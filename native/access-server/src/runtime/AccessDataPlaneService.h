@@ -35,6 +35,7 @@ struct AccessDataPlaneOptions {
     http::HttpServerOptions plain_http_server;
     AccessActivationEndpointOptions activation_endpoint;
     ClientMetadataResolverOptions client_metadata;
+    std::string network_entry;
     AccessLogOptions access_log;
     AccessDnsServiceOptions dns = AccessDnsServiceOptions::local_default();
     AccessDnsResolverFactory dns_resolver_factory = AccessDnsResolverFactory::system();

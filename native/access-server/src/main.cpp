@@ -289,7 +289,8 @@ int main(int argc, char **argv) {
                                  << " nacos_servers=" << config.nacos_config().server_hosts().size()
                                  << " cat_enabled=" << config.cat_config().has_value() << " tls_enabled=" << tls_enabled
                                  << " http2_enabled=" << tls_enabled << " http3_enabled=" << http3_enabled
-                                 << " plain_enabled=" << plain_enabled;
+                                 << " plain_enabled=" << plain_enabled << " network_entry=\"" << config.network_entry()
+                                 << "\"";
 
         auto signal = co_await fiber::async::when_any([]() { return fiber::async::wait_signal(SIGINT); },
                                                       []() { return fiber::async::wait_signal(SIGTERM); });
