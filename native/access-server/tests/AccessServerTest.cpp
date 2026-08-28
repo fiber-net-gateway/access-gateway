@@ -245,8 +245,7 @@ TEST(AccessDnsServiceTest, InjectsCompleteValidatedOptionsIntoEveryWorker) {
     AccessDnsServiceOptions options;
     ASSERT_TRUE(options.client.nameservers.add(net::SocketAddress(net::IpAddress::v4({192, 0, 2, 1}), 53)));
     ASSERT_TRUE(options.client.nameservers.add(
-            net::SocketAddress(net::IpAddress::v6({0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}),
-                               53)));
+            net::SocketAddress(net::IpAddress::v6({0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}), 53)));
     ASSERT_TRUE(options.client.nameservers.add(net::SocketAddress(net::IpAddress::v4({192, 0, 2, 2}), 53)));
     options.client.timeout = 3s;
     options.client.attempts = 4;
@@ -529,6 +528,82 @@ TEST(AccessServerTest, ServesPublishedSnapshotAndShutsDownWorkerResources) {
     EXPECT_EQ(access_logs.find("203.0.113.77"), std::string::npos);
     EXPECT_NE(access_logs.find("client_ip=\"127.0.0.1\" peer_ip=\"127.0.0.1\""), std::string::npos);
     EXPECT_NE(access_logs.find("forwarding_status=ignored_direct_mode"), std::string::npos);
+}
+
+TEST(AccessServerTest, InjectsNetworkEntryBeforeHostPolicyAndReplacesClientSuppliedEntry) {
+    ProjectConfig config = response_config();
+    ASSERT_TRUE(config.hosts.has_value() && !config.hosts->empty());
+    config.hosts->front().strategy = HostStrategyConfig{.net_mask = kNetVdi};
+    RouteConfigStore store;
+    auto published = store.apply("demo", std::move(config));
+    ASSERT_TRUE(published);
+
+    event::EventLoop accept_loop;
+    event::EventLoopGroup workers(1);
+    AccessServer server(accept_loop, workers, store, {},
+                        AccessServerOptions{
+                                .network_entry = "vdi",
+                        });
+    std::promise<std::uint16_t> port_promise;
+    auto port = port_promise.get_future();
+    std::promise<void> stopped_promise;
+    auto stopped = stopped_promise.get_future();
+    bool startup_ok = false;
+
+    testing::internal::CaptureStderr();
+    workers.start();
+    async::spawn(accept_loop, [&]() -> async::DetachedTask {
+        auto initialized = co_await server.initialize();
+        if (!initialized) {
+            port_promise.set_value(0);
+            accept_loop.stop();
+            co_return;
+        }
+        auto loopback = net::IpAddress::v4({127, 0, 0, 1});
+        auto bound = server.bind(net::SocketAddress(loopback, 0));
+        if (!bound) {
+            port_promise.set_value(0);
+            co_await server.shutdown_and_wait();
+            accept_loop.stop();
+            co_return;
+        }
+        startup_ok = true;
+        port_promise.set_value(listener_port(server.fd()));
+        async::spawn([&server]() { return server.serve(); });
+    });
+
+    std::string injected_response;
+    std::string spoofed_response;
+    std::thread client([&]() {
+        const std::uint16_t bound_port = port.get();
+        if (bound_port != 0) {
+            // No X-Entry from the client: the injected deployment entry must
+            // satisfy the VDI-only host policy...
+            injected_response = request(bound_port);
+            // ...and a client-supplied entry must never override it.
+            spoofed_response = request(bound_port, "X-Entry: desktop\r\n");
+        }
+        async::spawn(accept_loop, [&]() -> async::DetachedTask {
+            if (startup_ok) {
+                co_await server.shutdown_and_wait();
+            }
+            stopped_promise.set_value();
+            accept_loop.stop();
+        });
+    });
+
+    accept_loop.run();
+    client.join();
+    EXPECT_EQ(stopped.wait_for(2s), std::future_status::ready);
+    workers.stop();
+    workers.join();
+    (void) testing::internal::GetCapturedStderr();
+
+    ASSERT_TRUE(startup_ok);
+    EXPECT_NE(injected_response.find("HTTP/1.1 200"), std::string::npos);
+    EXPECT_TRUE(injected_response.ends_with("\r\n\r\nok"));
+    EXPECT_NE(spoofed_response.find("HTTP/1.1 200"), std::string::npos);
+    EXPECT_TRUE(spoofed_response.ends_with("\r\n\r\nok"));
 }
 
 TEST(AccessServerTest, ReturnsCatTraceIdFromTheUnifiedRequestContext) {

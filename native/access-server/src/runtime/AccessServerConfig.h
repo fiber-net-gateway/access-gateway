@@ -75,6 +75,7 @@ public:
     [[nodiscard]] const ClientMetadataResolverOptions &client_metadata_options() const noexcept {
         return client_metadata_options_;
     }
+    [[nodiscard]] std::string_view network_entry() const noexcept { return network_entry_; }
     [[nodiscard]] const AccessLogOptions &access_log_options() const noexcept { return access_log_options_; }
     [[nodiscard]] const UpstreamTlsClientPolicy &upstream_tls_client_policy() const noexcept {
         return upstream_tls_client_policy_;
@@ -107,7 +108,7 @@ private:
                        http::HttpServerOptions plain_http_server_options, net::SocketAddress metrics_listen_address,
                        AccessActivationEndpointOptions activation_endpoint_options,
                        std::chrono::milliseconds initial_config_timeout, std::size_t default_max_request_body_size,
-                       bool test_mode, ClientMetadataResolverOptions client_metadata_options,
+                       bool test_mode, ClientMetadataResolverOptions client_metadata_options, std::string network_entry,
                        AccessLogOptions access_log_options, UpstreamTlsClientPolicy upstream_tls_client_policy,
                        std::chrono::milliseconds upstream_connect_timeout,
                        ProxyHappyEyeballsPolicy happy_eyeballs_policy, AccessDnsMode dns_mode,
@@ -128,6 +129,7 @@ private:
     std::size_t default_max_request_body_size_ = 400U << 20U;
     bool test_mode_ = false;
     ClientMetadataResolverOptions client_metadata_options_;
+    std::string network_entry_;
     AccessLogOptions access_log_options_;
     UpstreamTlsClientPolicy upstream_tls_client_policy_;
     std::chrono::milliseconds upstream_connect_timeout_{3000};
