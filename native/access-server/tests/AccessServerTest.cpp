@@ -606,6 +606,75 @@ TEST(AccessServerTest, InjectsNetworkEntryBeforeHostPolicyAndReplacesClientSuppl
     EXPECT_TRUE(spoofed_response.ends_with("\r\n\r\nok"));
 }
 
+// The entry gate is server-authoritative even when the deployment declares
+// no entry network: a client-supplied X-Entry is stripped before host policy,
+// so an entry-gated host rejects the request instead of honoring the forged
+// value.
+TEST(AccessServerTest, EmptyNetworkEntryStripsClientSuppliedEntryBeforeHostPolicy) {
+    ProjectConfig config = response_config();
+    ASSERT_TRUE(config.hosts.has_value() && !config.hosts->empty());
+    config.hosts->front().strategy = HostStrategyConfig{.net_mask = kNetVdi};
+    RouteConfigStore store;
+    auto published = store.apply("demo", std::move(config));
+    ASSERT_TRUE(published);
+
+    event::EventLoop accept_loop;
+    event::EventLoopGroup workers(1);
+    AccessServer server(accept_loop, workers, store, {}, AccessServerOptions{});
+    std::promise<std::uint16_t> port_promise;
+    auto port = port_promise.get_future();
+    std::promise<void> stopped_promise;
+    auto stopped = stopped_promise.get_future();
+    bool startup_ok = false;
+
+    testing::internal::CaptureStderr();
+    workers.start();
+    async::spawn(accept_loop, [&]() -> async::DetachedTask {
+        auto initialized = co_await server.initialize();
+        if (!initialized) {
+            port_promise.set_value(0);
+            accept_loop.stop();
+            co_return;
+        }
+        auto loopback = net::IpAddress::v4({127, 0, 0, 1});
+        auto bound = server.bind(net::SocketAddress(loopback, 0));
+        if (!bound) {
+            port_promise.set_value(0);
+            co_await server.shutdown_and_wait();
+            accept_loop.stop();
+            co_return;
+        }
+        startup_ok = true;
+        port_promise.set_value(listener_port(server.fd()));
+        async::spawn([&server]() { return server.serve(); });
+    });
+
+    std::string forged_response;
+    std::thread client([&]() {
+        const std::uint16_t bound_port = port.get();
+        if (bound_port != 0) {
+            forged_response = request(bound_port, "X-Entry: vdi\r\n");
+        }
+        async::spawn(accept_loop, [&]() -> async::DetachedTask {
+            if (startup_ok) {
+                co_await server.shutdown_and_wait();
+            }
+            stopped_promise.set_value();
+            accept_loop.stop();
+        });
+    });
+
+    accept_loop.run();
+    client.join();
+    EXPECT_EQ(stopped.wait_for(2s), std::future_status::ready);
+    workers.stop();
+    workers.join();
+    (void) testing::internal::GetCapturedStderr();
+
+    ASSERT_TRUE(startup_ok);
+    EXPECT_NE(forged_response.find("HTTP/1.1 403"), std::string::npos);
+}
+
 TEST(AccessServerTest, ReturnsCatTraceIdFromTheUnifiedRequestContext) {
     RouteConfigStore store;
     auto published = store.apply("demo", response_config());
