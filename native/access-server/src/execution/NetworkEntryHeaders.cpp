@@ -35,6 +35,11 @@ constexpr std::uint64_t kEoConnectingIpHash = http::http_header_name_hash(kEoCon
 bool apply_network_entry_headers(http::HttpHeaders &headers, const net::IpAddress &peer, std::string_view entry,
                                  bool connection_secure) noexcept {
     if (entry.empty()) {
+        // No declared entry network: X-Entry is server-authoritative, so a
+        // client-supplied value must never reach the host entry-policy gate.
+        // Other client headers are left alone (their consumers are opt-in via
+        // client metadata mode).
+        (void) headers.remove(kEntryLowcase, kEntryHash);
         return true;
     }
 

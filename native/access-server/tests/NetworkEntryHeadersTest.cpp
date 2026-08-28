@@ -40,6 +40,23 @@ TEST(NetworkEntryHeadersTest, EmptyEntryLeavesRequestHeadersUntouched) {
     EXPECT_FALSE(headers.contains("X-Forwarded-For"));
 }
 
+// X-Entry is server-authoritative: a deployment that declares no entry
+// network must not adopt a client-supplied value, which would forge the host
+// entry-policy gate. Empty entry removes the header, while other client
+// headers stay untouched (their consumers are opt-in via client metadata
+// mode).
+TEST(NetworkEntryHeadersTest, EmptyEntryStripsClientSuppliedEntryHeader) {
+    mem::BufPool pool;
+    http::HttpHeaders headers(pool);
+    ASSERT_NE(headers.add("X-Entry", "vdi"), nullptr);
+    ASSERT_NE(headers.add("X-Real-Ip", "198.51.100.7"), nullptr);
+
+    EXPECT_TRUE(apply_network_entry_headers(headers, ip("203.0.113.9"), "", true));
+
+    EXPECT_FALSE(headers.contains("X-Entry"));
+    EXPECT_EQ(headers.get("X-Real-Ip"), "198.51.100.7");
+}
+
 TEST(NetworkEntryHeadersTest, InternetEntryInjectsProxyHeadersFromScratch) {
     mem::BufPool pool;
     http::HttpHeaders headers(pool);
