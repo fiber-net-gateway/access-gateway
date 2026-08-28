@@ -24,11 +24,11 @@ Issue/PR，合入后再审查 revision range、运行完整回归并更新 gitli
 - Access Gateway revision：`0f7b557`；
 - 当前 Access Gateway 复核基线：`74757014c4f396fb999030d6e972356c8d45ad3d`；
 - Fiber 初始 pinned revision：`0fda7764bf94944aca4b674ab5ab311184703118`；
-- Fiber 当前 pinned revision：`05d88a300965f7e3755683ba954f9a58a04b80a7`；
-- Fiber 累计审阅的 revision range：`0fda7764..05d88a3`；
-- 最新依赖更新的 revision range：`0df9dd0..05d88a3`；
+- Fiber 当前 pinned revision：`040ff9af46d3f3823b00b4320d071c64aeb38daf`；
+- Fiber 累计审阅的 revision range：`0fda7764..040ff9a`；
+- 最新依赖更新的 revision range：`05d88a3..040ff9a`；
 - 审阅日期：2026-08-16；
-- 实施状态和验证结果持续更新至：2026-08-27；
+- 实施状态和验证结果持续更新至：2026-08-28；
 - `native/access-server/src/` 约 1.37 万行代码；
 - 当前 Release/ThinLTO 构建、CMake target、兼容文档和测试注册；
 - `ctest --test-dir native/build --output-on-failure -L access-server`：共发现 342 个测试，
@@ -135,7 +135,7 @@ Access Gateway 的配置、secret、生命周期、指标、兼容和端到端�
 
 ### 4.2 当前未完成工作
 
-以 Fiber `05d88a3` 和本仓库当前实现为准，仍未完成的工作如下；其余表中项目已经解决：
+以 Fiber `040ff9a` 和本仓库当前实现为准，仍未完成的工作如下；其余表中项目已经解决：
 
 | ID | 已完成边界 | 剩余工作 |
 | --- | --- | --- |
@@ -1576,7 +1576,7 @@ artifact digest，拒绝路径穿越、symlink、状态/计数矛盾、未获批
 
 ## 13. Fiber 能力核对结果
 
-为了避免把“上游已提供”误写成“产品已交付”，本次已核对 `05d88a3` 的 Fiber API：
+为了避免把“上游已提供”误写成“产品已交付”，本次已核对 `040ff9a` 的 Fiber API：
 
 | 能力 | 当前 Fiber 状态 | 结论 |
 | --- | --- | --- |

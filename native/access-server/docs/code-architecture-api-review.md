@@ -69,13 +69,14 @@
   [`UPSTREAM.md`](../UPSTREAM.md#L12) 记录的是 `8e8e1d7933d4a30aa3b21feb6acc3e633a612b9b`；
 - 因此完整 runtime configure/regenerate 失败，离线 validator 因 runtime 被跳过而仍可构建。
 
-这是可复现构建问题，不应通过修改 submodule 内部文件解决。2026-08-27 已完成最新依赖更新后的
+这是可复现构建问题，不应通过修改 submodule 内部文件解决。2026-08-28 已完成最新依赖更新后的
 复核：
 
 1. gitlink 和 [`UPSTREAM.md`](../UPSTREAM.md#L12) 统一固定为
-   `05d88a300965f7e3755683ba954f9a58a04b80a7`；
-2. 已审阅 `0df9dd0..05d88a3`，增量修改本项目实际链接的 DNS 与 Prometheus 组件；公开 API
-   保持向后兼容，repository-owned access-server 不需要源代码或 wire contract 调整；
+   `040ff9af46d3f3823b00b4320d071c64aeb38daf`；
+2. 已审阅 `05d88a3..040ff9a`；该提交将 Fiber 内部 HTTP、QUIC、DNS、script 实现头文件移出
+   public include tree，并保留实际下游使用的公共头文件。本项目没有直接包含被移除的内部路径，
+   repository-owned access-server 不需要源代码或 wire contract 调整；
 3. Release native configure、默认目标构建、342 项 access-server focused CTest 和 1,990 项完整
    CTest 均通过，5 项按环境条件 skip。
 
