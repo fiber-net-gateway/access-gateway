@@ -150,9 +150,30 @@ TEST(AccessServerConfigTest, RejectsInvalidDnsModeAndCrossModeSettings) {
                    "ACCESS_SERVER_DNS_RESOLV_CONF=/tmp/resolv.conf\n");
 }
 
+TEST(AccessServerRuntimeTest, RejectsMissingNetworkEntryBeforeEventLoopsStart) {
+    auto config = AccessServerConfig::load_from_string("NACOS_SERVER_ADDRESSES=127.0.0.1\n");
+    ASSERT_TRUE(config) << config.error().detail;
+    ASSERT_TRUE(config->network_entry().empty());
+
+    event::EventLoop accept_loop;
+    event::EventLoopGroup http_workers(1);
+    event::EventLoopGroup nacos_group(1);
+    event::EventLoopGroup compiler_group(1);
+    event::EventLoopGroup cat_group(1);
+    auto runtime = AccessServerRuntime::create(accept_loop, nacos_group.at(0), compiler_group.at(0), cat_group.at(0),
+                                               http_workers, *config);
+
+    ASSERT_FALSE(runtime);
+    EXPECT_EQ(runtime.error().code, AccessServerRuntimeErrorCode::ValidateNetworkEntry);
+    EXPECT_EQ(runtime.error().io_error, common::IoErr::Invalid);
+    EXPECT_NE(runtime.error().message.find("ACCESS_SERVER_NETWORK_ENTRY"), std::string::npos);
+    EXPECT_EQ(access_server_runtime_stage_name(runtime.error().code), "validate network entry");
+}
+
 TEST(AccessServerRuntimeTest, RejectsMissingSystemResolverConfigBeforeEventLoopsStart) {
     auto config =
             AccessServerConfig::load_from_string("NACOS_SERVER_ADDRESSES=127.0.0.1\n"
+                                                 "ACCESS_SERVER_NETWORK_ENTRY=vdi\n"
                                                  "ACCESS_SERVER_DNS_RESOLV_CONF=/missing/access-server-resolv.conf\n");
     ASSERT_TRUE(config) << config.error().detail;
 
@@ -368,6 +389,7 @@ TEST(AccessServerRuntimeTest, RejectsInvalidUpstreamTrustStoreBeforeEventLoopsSt
     constexpr std::string_view kMissingCaPath = "/missing/runtime-upstream-ca.pem";
     auto config = AccessServerConfig::load_from_string(
             "NACOS_SERVER_ADDRESSES=127.0.0.1\n"
+            "ACCESS_SERVER_NETWORK_ENTRY=vdi\n"
             "ACCESS_SERVER_UPSTREAM_TLS_MODE=custom_ca\n"
             "ACCESS_SERVER_UPSTREAM_TLS_CA_FILE=/missing/runtime-upstream-ca.pem\n");
     ASSERT_TRUE(config) << config.error().detail;
