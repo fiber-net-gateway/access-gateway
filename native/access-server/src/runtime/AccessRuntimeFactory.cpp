@@ -15,6 +15,16 @@ AccessRuntimeFactory::create(event::EventLoop &accept_loop, event::EventLoop &na
                              event::EventLoop &compiler_loop, event::EventLoop &cat_loop,
                              event::EventLoopGroup &http_workers, const AccessServerConfig &config,
                              const net::ListenOptions &listen_options, AccessProcessMetricsSources process_metrics) {
+    // The deployment entry network is what makes X-Entry server-authoritative
+    // (the value nginx used to inject), so an instance without it must fail
+    // fast instead of serving entry-gated traffic with a client-supplied or
+    // missing entry.
+    if (config.network_entry().empty()) {
+        return std::unexpected(make_access_server_runtime_io_error(
+                AccessServerRuntimeErrorCode::ValidateNetworkEntry, common::IoErr::Invalid,
+                "ACCESS_SERVER_NETWORK_ENTRY is required: declare the deployment entry network (internet, vdi, "
+                "desktop)"));
+    }
     auto dns_options = config.resolve_dns_options();
     if (!dns_options) {
         return std::unexpected(make_access_server_runtime_io_error(
