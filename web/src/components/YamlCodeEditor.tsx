@@ -35,6 +35,12 @@ import {
 } from '@codemirror/view'
 import { useEffect, useRef } from 'react'
 
+import {
+  accessScriptHighlightStyle,
+  accessScriptTokenHighlighting,
+  completeAccessScript,
+} from './accessScriptEditor'
+
 interface YamlCodeEditorProps {
   ariaLabel: string
   diagnostics: readonly YamlCodeEditorDiagnostic[]
@@ -212,10 +218,14 @@ export function YamlCodeEditor({
           dropCursor(),
           EditorState.allowMultipleSelections.of(true),
           indentOnInput(),
-          syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
+          language === 'javascript'
+            ? [syntaxHighlighting(accessScriptHighlightStyle), accessScriptTokenHighlighting]
+            : syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
           bracketMatching(),
           closeBrackets(),
-          language === 'yaml' ? autocompletion({ override: [completeRouteField] }) : [],
+          autocompletion({
+            override: [language === 'yaml' ? completeRouteField : completeAccessScript],
+          }),
           rectangularSelection(),
           crosshairCursor(),
           highlightActiveLine(),
