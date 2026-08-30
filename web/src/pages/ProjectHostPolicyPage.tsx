@@ -1,23 +1,18 @@
-import { useEffect, useMemo, useState, type FormEvent } from 'react'
+import { useMemo, useState } from 'react'
 
-import { fetchCurrentConfigurationVersion, saveConfigurationVersion } from '../api/client'
-import type { HttpsRedirect, ProjectRoutesModel } from '../api/types'
-import { initialRouteModel, normalizeExactHost, validateHostAliases } from '../routes/model'
-import { useUnsavedChangesGuard } from '../routes/useUnsavedChangesGuard'
+import type { HttpsRedirect } from '../api/types'
+import { normalizeExactHost, validateHostAliases } from '../routes/model'
 import { useProjectContext } from './ProjectLayout'
 
 export function ProjectHostPolicyPage() {
-  const { project, refreshProject, systemStatus } = useProjectContext()
-  const [model, setModel] = useState<ProjectRoutesModel>(initialRouteModel)
-  const [baseVersionId, setBaseVersionId] = useState<string | null>(null)
-  const [baseVersionNumber, setBaseVersionNumber] = useState<number | null>(null)
-  const [lockVersion, setLockVersion] = useState('0')
-  const [savedHostAliases, setSavedHostAliases] = useState<readonly string[]>([])
-  const [savedHttpsRedirect, setSavedHttpsRedirect] = useState<HttpsRedirect>('off')
+  const {
+    project,
+    systemStatus,
+    workspace: model,
+    setWorkspace: setModel,
+    workspaceLoading: loading,
+  } = useProjectContext()
   const [hostAliasInput, setHostAliasInput] = useState('')
-  const [changeSummary, setChangeSummary] = useState('更新域名与 HTTPS 策略')
-  const [loading, setLoading] = useState(true)
-  const [saving, setSaving] = useState(false)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
 
   const routeLimits = systemStatus?.dependencies.nativeValidator.limits?.projectRoute ?? null
@@ -30,64 +25,6 @@ export function ProjectHostPolicyPage() {
     [model.hostAliases, project.domain, routeLimits?.maxHostPatternBytes, routeLimits?.maxHosts],
   )
   const hostAliasIssues = [...hostAliasChecks.validationIssues, ...hostAliasChecks.limitMessages]
-  const dirty =
-    !loading &&
-    (JSON.stringify(model.hostAliases) !== JSON.stringify(savedHostAliases) ||
-      model.networkPolicy.httpsRedirect !== savedHttpsRedirect)
-  useUnsavedChangesGuard(dirty)
-
-  useEffect(() => {
-    const controller = new AbortController()
-    setLoading(true)
-    void fetchCurrentConfigurationVersion(project.id, controller.signal)
-      .then((current) => {
-        const next = current?.version.model ?? initialRouteModel()
-        setModel(next)
-        setSavedHostAliases(next.hostAliases)
-        setSavedHttpsRedirect(next.networkPolicy.httpsRedirect)
-        setBaseVersionId(current?.version.id ?? null)
-        setBaseVersionNumber(current?.version.number ?? null)
-        setLockVersion(current?.lockVersion ?? project.draft?.lockVersion ?? '0')
-        setErrorMessage(null)
-      })
-      .catch((error: unknown) => {
-        if (!controller.signal.aborted) {
-          setErrorMessage(error instanceof Error ? error.message : '加载 Host Policy 失败')
-        }
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) setLoading(false)
-      })
-    return () => controller.abort()
-  }, [project.draft?.lockVersion, project.id])
-
-  const submit = async (event: FormEvent): Promise<void> => {
-    event.preventDefault()
-    setSaving(true)
-    setErrorMessage(null)
-    try {
-      if (hostAliasIssues.length > 0) throw new Error(hostAliasIssues[0])
-      const saved = await saveConfigurationVersion(
-        project.id,
-        lockVersion,
-        baseVersionId,
-        changeSummary,
-        model,
-      )
-      setModel(saved.version.model)
-      setSavedHostAliases(saved.version.model.hostAliases)
-      setSavedHttpsRedirect(saved.version.model.networkPolicy.httpsRedirect)
-      setBaseVersionId(saved.version.id)
-      setBaseVersionNumber(saved.version.number)
-      setLockVersion(saved.lockVersion)
-      await refreshProject()
-    } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : '保存 Host Policy 失败')
-    } finally {
-      setSaving(false)
-    }
-  }
-
   const updateHostAliases = (hostAliases: readonly string[]): void => {
     setModel((current) => ({ ...current, hostAliases }))
     setErrorMessage(null)
@@ -130,13 +67,7 @@ export function ProjectHostPolicyPage() {
             发布并经实例证据确认后才算激活。
           </p>
         </div>
-        <span className={`status-chip status-chip-${dirty ? 'pending' : 'ready'}`}>
-          {dirty
-            ? '有未保存修改'
-            : baseVersionNumber
-              ? `已保存于 V${baseVersionNumber}`
-              : '尚无版本'}
-        </span>
+        <span className="status-chip status-chip-unknown">由 Project 工作区统一保存</span>
       </header>
 
       {errorMessage ? (
@@ -161,7 +92,7 @@ export function ProjectHostPolicyPage() {
         </div>
       ) : null}
 
-      <form className="network-policy-form" onSubmit={(event) => void submit(event)}>
+      <div className="network-policy-form">
         <section className="host-bindings-card" aria-labelledby="host-bindings-title">
           <div className="host-bindings-heading">
             <div>
@@ -188,7 +119,7 @@ export function ProjectHostPolicyPage() {
                   <span>{alias}</span>
                   <button
                     aria-label={`移除额外域名 ${alias}`}
-                    disabled={loading || saving}
+                    disabled={loading}
                     onClick={() => removeHostAlias(alias)}
                     type="button"
                   >
@@ -206,7 +137,7 @@ export function ProjectHostPolicyPage() {
               <input
                 aria-label="添加额外域名"
                 autoComplete="off"
-                disabled={loading || saving}
+                disabled={loading}
                 maxLength={routeLimits?.maxHostPatternBytes ?? 255}
                 placeholder="www.example.com"
                 value={hostAliasInput}
@@ -221,7 +152,7 @@ export function ProjectHostPolicyPage() {
             </label>
             <button
               className="button-secondary"
-              disabled={loading || saving}
+              disabled={loading}
               onClick={addHostAlias}
               type="button"
             >
@@ -234,7 +165,7 @@ export function ProjectHostPolicyPage() {
           强制 HTTPS 仅在可信 Ingress/LB 同时接收 HTTP，并清洗、设置 X-Forwarded-Proto 时生效。 当前
           access-server 直连 TLS 监听器不接收明文 HTTP。
         </div>
-        <fieldset disabled={loading || saving}>
+        <fieldset disabled={loading}>
           <legend>HTTPS 强制策略</legend>
           <label className="policy-option">
             <input
@@ -258,7 +189,7 @@ export function ProjectHostPolicyPage() {
           <label className="https-redirect-status">
             重定向状态码
             <select
-              disabled={model.networkPolicy.httpsRedirect === 'off' || loading || saving}
+              disabled={model.networkPolicy.httpsRedirect === 'off' || loading}
               value={
                 model.networkPolicy.httpsRedirect === 'off'
                   ? '308'
@@ -283,28 +214,10 @@ export function ProjectHostPolicyPage() {
           </label>
         </fieldset>
 
-        <label className="network-change-summary">
-          版本说明
-          <input
-            maxLength={200}
-            required
-            value={changeSummary}
-            onChange={(event) => setChangeSummary(event.target.value)}
-          />
-        </label>
         <div className="form-actions">
-          <span>域名和 HTTPS 策略会随配置版本发布；保存本身不代表实例已经激活。</span>
-          <button
-            className="button-primary"
-            disabled={!dirty || saving || loading || hostAliasIssues.length > 0}
-            type="submit"
-          >
-            {saving
-              ? '保存中…'
-              : `保存为${baseVersionNumber ? ` V${baseVersionNumber + 1}` : ' V1'}`}
-          </button>
+          <span>修改已进入 Project Working Copy；请使用页面顶部的 Project 级“保存为版本”。</span>
         </div>
-      </form>
+      </div>
     </section>
   )
 }

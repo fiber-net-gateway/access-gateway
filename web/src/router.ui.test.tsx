@@ -290,6 +290,15 @@ function installApiMock(options: { releaseEvidence?: boolean } = {}) {
     if (url === `/api/projects/${projectId}/configuration-versions/current`) {
       return jsonResponse({ version: { ...version, model }, lockVersion: '8' })
     }
+    if (url === `/api/projects/${projectId}/routes/validate` && init?.method === 'POST') {
+      return jsonResponse({
+        valid: true,
+        issues: [],
+        wirePreview: '{"version":1,"host":{},"routes":[]}',
+        wireSha256: 'a'.repeat(64),
+        validator: { contractVersion: 1, revision: 'test' },
+      })
+    }
     if (
       url === `/api/projects/${projectId}/configuration-versions` &&
       (!init?.method || init.method === 'GET')
@@ -451,7 +460,7 @@ describe('application routes', () => {
     await user.click(screen.getByRole('button', { name: '添加额外域名' }))
 
     expect(await screen.findByText('www.example.com')).toBeTruthy()
-    expect(screen.getByText('有未保存修改')).toBeTruthy()
+    expect(screen.getByText(/个配置区域已修改/u)).toBeTruthy()
     await user.click(screen.getByRole('button', { name: '移除额外域名 www.example.com' }))
     expect(screen.getByText('尚未添加额外域名')).toBeTruthy()
   })
@@ -508,7 +517,8 @@ describe('application routes', () => {
     expect(router.state.location.search).toBe(`?sourceVersionId=${historicalVersionId}`)
 
     await user.click(screen.getByRole('button', { name: '保存为版本' }))
-    expect(await screen.findByText('历史 V7')).toBeTruthy()
+    expect(await screen.findByRole('heading', { name: '保存完整 Project 配置' })).toBeTruthy()
+    await user.type(screen.getByRole('textbox', { name: '变更摘要' }), '基于 V7 恢复')
     await user.click(screen.getByRole('button', { name: '保存为 V9' }))
 
     await waitFor(() => {
@@ -569,6 +579,8 @@ describe('application routes', () => {
     await screen.findByRole('heading', { name: 'Host Policy' })
     await user.click(screen.getByRole('checkbox', { name: /强制 HTTPS/u }))
     await user.selectOptions(screen.getByRole('combobox', { name: /重定向状态码/u }), '307')
+    await user.click(screen.getByRole('button', { name: '保存为版本' }))
+    await user.type(screen.getByRole('textbox', { name: '变更摘要' }), '启用 HTTPS')
     await user.click(screen.getByRole('button', { name: '保存为 V9' }))
 
     await waitFor(() => {
@@ -605,6 +617,8 @@ describe('application routes', () => {
     await user.click(screen.getByRole('radio', { name: /Project 统一强制/u }))
     await user.type(screen.getByLabelText(/允许 CIDR/u), '10.0.0.0/8')
     await user.type(screen.getByLabelText(/拒绝 CIDR/u), '10.1.0.0/16')
+    await user.click(screen.getByRole('button', { name: '保存为版本' }))
+    await user.type(screen.getByRole('textbox', { name: '变更摘要' }), '更新网络策略')
     await user.click(screen.getByRole('button', { name: '保存为 V9' }))
 
     await waitFor(() => {
@@ -629,6 +643,37 @@ describe('application routes', () => {
         allowedCidrs: ['10.0.0.0/8'],
         deniedCidrs: ['10.1.0.0/16'],
       })
+    })
+  })
+
+  test('keeps one Project working copy while switching configuration tabs', async () => {
+    const fetchMock = installApiMock()
+    const router = createMemoryRouter(appRoutes, {
+      initialEntries: [`/projects/${projectId}/host-policy`],
+    })
+    const user = userEvent.setup()
+    render(<RouterProvider router={router} />)
+
+    await screen.findByRole('heading', { name: 'Host Policy' })
+    await user.click(screen.getByRole('checkbox', { name: /强制 HTTPS/u }))
+    await user.click(screen.getByRole('link', { name: /Network Policy/u }))
+    await screen.findByRole('heading', { name: 'Network Policy' })
+    await user.click(screen.getByRole('radio', { name: /Project 统一强制/u }))
+    await user.click(screen.getByRole('button', { name: '保存为版本' }))
+    await user.type(screen.getByRole('textbox', { name: '变更摘要' }), '跨页面统一修改')
+    await user.click(screen.getByRole('button', { name: '保存为 V9' }))
+
+    await waitFor(() => {
+      const saveCall = fetchMock.mock.calls.find(
+        ([url, init]) =>
+          url === `/api/projects/${projectId}/configuration-versions` && init?.method === 'POST',
+      )
+      expect(saveCall).toBeTruthy()
+      const body = JSON.parse(String(saveCall?.[1]?.body)) as {
+        model: { networkPolicy: { source: string; httpsRedirect: string } }
+      }
+      expect(body.model.networkPolicy.source).toBe('project')
+      expect(body.model.networkPolicy.httpsRedirect).toBe('308')
     })
   })
 
