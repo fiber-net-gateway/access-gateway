@@ -8,8 +8,17 @@ node_modules
 **/dist
 **/*.tsbuildinfo
 
+!server/dist
+!server/dist/**
+!web/dist
+!web/dist/**
+
 native/build
 native/build-*
+!native/build
+!native/build/apps
+!native/build/apps/access-server
+!native/build/apps/access-gateway-validator
 third_party/fiber-gateway-cpp/temp
 third_party/fiber-gateway-cpp/build
 third_party/fiber-gateway-cpp/build-*
