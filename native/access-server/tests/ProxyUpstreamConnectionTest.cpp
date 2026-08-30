@@ -29,6 +29,7 @@
 #include <fiber/net/TlsContext.h>
 #include "QuicTestTlsCertificate.h"
 #include "TlsClientIdentityTestData.h"
+#include "execution/AccessHttpScriptServices.h"
 #include "execution/ProxyUpstreamConnection.h"
 #include "routing/UpstreamTlsTransportProfile.h"
 
@@ -362,6 +363,19 @@ fiber::async::DetachedTask run_ip_scenario(fiber::http::StealableHttp1Connection
     promise->set_value(std::move(result));
 }
 
+fiber::async::DetachedTask run_script_service_scenario(fiber::access_server::AccessHttpScriptServices *services,
+                                                       fiber::http::StealableHttp1ConnectionPoolSet *pool,
+                                                       fiber::http_script::HttpTargetSpec target,
+                                                       std::promise<fiber::common::IoErr> *promise) {
+    fiber::common::IoErr result;
+    {
+        auto acquired = co_await services->acquire(target, 500ms);
+        result = acquired ? fiber::common::IoErr::None : acquired.error();
+    }
+    co_await pool->shutdown_async();
+    promise->set_value(result);
+}
+
 fiber::async::DetachedTask run_pool_hit_scenario(fiber::http::StealableHttp1ConnectionPoolSet *pool,
                                                  fiber::http::Http1ConnectionGroupKey key, ResolverState *resolver,
                                                  std::promise<ConnectionScenarioResult> *promise) {
@@ -536,6 +550,36 @@ TEST(ProxyUpstreamConnectionTest, IpKeyBypassesDns) {
     EXPECT_EQ(result.observation.pool_misses, 1U);
     EXPECT_EQ(result.observation.connect_success, 1U);
     EXPECT_EQ(result.observation.dns_success, 0U);
+    listener.close();
+    group.stop();
+    group.join();
+}
+
+TEST(ProxyUpstreamConnectionTest, HttpScriptServiceAcquiresDirectiveUrlThroughSharedPool) {
+    fiber::event::EventLoopGroup group(1);
+    fiber::http::StealableHttp1ConnectionPoolSet pool(group);
+    ASSERT_TRUE(pool.init());
+    fiber::net::TcpListener listener(group.at(0));
+    ASSERT_TRUE(listener.bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), {}));
+    auto port = bound_port(listener.fd());
+    ASSERT_TRUE(port);
+
+    ResolverState resolver;
+    fiber::access_server::AccessHttpScriptServices services(pool, resolver_adapter(resolver));
+    fiber::http_script::HttpTargetSpec target{
+            .kind = fiber::http_script::HttpTargetSpec::Kind::Url,
+            .name = "127.0.0.1",
+            .port = *port,
+            .tls = false,
+    };
+    std::promise<fiber::common::IoErr> promise;
+    auto future = promise.get_future();
+    group.start();
+    fiber::async::spawn(group.at(0),
+                        [&]() { return run_script_service_scenario(&services, &pool, std::move(target), &promise); });
+
+    EXPECT_EQ(future.get(), fiber::common::IoErr::None);
+    EXPECT_EQ(resolver.calls, 0U);
     listener.close();
     group.stop();
     group.join();

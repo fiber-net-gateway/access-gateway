@@ -35,7 +35,8 @@ Access Gateway provides three contexts:
 | Template `${...}` | No; one expression per segment | Rejected                       | Sync metadata only | No       | Yes               |
 | JavaScript Route  | Yes; complete script           | Registered async calls allowed | Yes                | Yes      | Yes               |
 
-Outbound HTTP directives are disabled in every Access Gateway context.
+JavaScript Routes support outbound HTTP directives bound to fixed HTTP(S) URL authorities. Conditions and
+templates do not support directive statements or asynchronous outbound calls.
 
 ## 2. Value types
 
@@ -1466,23 +1467,44 @@ return {
 
 ## 17. Outbound HTTP capability
 
-Access Gateway JavaScript Routes do **not** provide:
+JavaScript Routes can bind a name to a fixed HTTP(S) URL authority during configuration compilation:
 
-```text
-fetch(...)
-http.request(...)
-http.proxyPass(...)
-directive backend = http "@service"
-backend.request(...)
-backend.proxyPass(...)
+```javascript
+directive google = http "https://www.google.com";
+
+let result = google.request({
+    method: "GET",
+    path: "/",
+    timeout: 5000,
+    includeHeaders: true
+});
+return {
+    status: result.status,
+    body: binary.base64Encode(result.body)
+};
 ```
 
-The pinned Fiber module contains upstream directives that another application host may enable, but
-`AccessScriptRuntime` explicitly uses `http_directives_enabled = false` and provides no outbound
-`HttpScriptServices`. These names fail configuration compilation rather than bypassing policy at runtime.
+Write only `http://host[:port]` or `https://host[:port]` in the target—no path, query, fragment, or userinfo.
+Put the request path in the call's `url` or `path/query` options. `options.url` is a `path[?query]`, not a full
+URL. The current access-server runtime connects only explicit URL authorities. Named upstream forms such as
+`"@service"` or `"service"` are not yet integrated with NamingService and fail during upstream acquisition.
 
-Use a YAML `PROXY` Route for upstream traffic so NamingService, static-target validation, protected headers,
-body limits, WebSocket behavior, pools, retries, traces, metrics, cancellation, and shutdown all apply.
+Each directive name provides two asynchronous methods, still called without `await`:
+
+- `service.request(options?)` sends an independent request and returns `{status, body}` plus `headers` when
+  `includeHeaders: true`. It buffers the complete response body and is intended for bounded responses.
+- `service.proxyPass(options?)` streams the inbound request and upstream response. It commits the downstream
+  response before success, so normally use `return service.proxyPass({...});`.
+
+Common options include `method`, `url`, `path`, `query`, `headers`, and a positive integer millisecond
+`timeout`. `request()` also accepts `body/includeHeaders`; `proxyPass()` also accepts
+`responseHeaders/flush/websocket`. There is no global `fetch()`, `http.request()`, or `http.proxyPass()`; the
+target must come from a directive. Outbound connections reuse access-server's per-worker DNS, connection pool,
+TLS verification, Happy Eyeballs, cancellation, and ordered shutdown.
+
+Prefer a YAML `PROXY` Route for ordinary forwarding, NamingService, retries, Route body limits/TLS profiles, and
+complete proxy observability. Use directives for bounded requests or conditional forwarding that must occur in
+a script.
 
 ## 18. Return, errors, and HTTP mapping
 

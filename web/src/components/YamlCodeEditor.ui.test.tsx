@@ -51,13 +51,16 @@ test('keeps the same focused CodeMirror instance when an invalid value is render
   })
 })
 
-test('highlights only supported script keywords with a dark-editor palette', async () => {
+test('highlights supported script keywords and directive syntax with a dark-editor palette', async () => {
   render(
     <YamlCodeEditor
       ariaLabel="Route script"
       diagnostics={[]}
       language="javascript"
-      value={'if (true) resp.sendJson(200, "ok"); class Unsupported; directive backend;'}
+      value={
+        'if (true) resp.sendJson(200, "ok"); class Unsupported;\n' +
+        'directive google = http "https://www.google.com";'
+      }
       onChange={vi.fn()}
       onSave={vi.fn()}
     />,
@@ -67,6 +70,9 @@ test('highlights only supported script keywords with a dark-editor palette', asy
     const spans = Array.from(document.querySelectorAll<HTMLElement>('.cm-content span'))
     const keyword = spans.find((span) => span.textContent === 'if')
     const string = spans.find((span) => span.textContent === '"ok"')
+    const directive = spans.find((span) => span.textContent === 'directive')
+    const directiveName = spans.find((span) => span.textContent === 'google')
+    const directiveType = spans.find((span) => span.textContent === 'http')
     expect(keyword).toBeTruthy()
     expect(string).toBeTruthy()
     expect(keyword?.classList).toContain('cm-access-script-keyword')
@@ -75,6 +81,9 @@ test('highlights only supported script keywords with a dark-editor palette', asy
         .filter((span) => span.classList.contains('cm-access-script-keyword'))
         .map((span) => span.textContent),
     ).toEqual(['if'])
+    expect(directive?.classList).toContain('cm-access-script-directive-keyword')
+    expect(directiveName?.classList).toContain('cm-access-script-directive-name')
+    expect(directiveType?.classList).toContain('cm-access-script-directive-type')
     expect(string?.className).not.toBe('')
   })
 })
@@ -103,6 +112,20 @@ test('completes access-server functions and fixed request properties', () => {
     'path',
     'query',
   ])
+
+  const directiveState = EditorState.create({
+    doc: 'directive google = http "https://www.google.com";\ngoogle.re',
+    extensions: [javascript()],
+  })
+  const directiveResult = completeAccessScript(
+    new CompletionContext(directiveState, directiveState.doc.length, false),
+  )
+  expect(directiveResult?.options).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ label: 'request', detail: 'request(options?)' }),
+      expect.objectContaining({ label: 'proxyPass', detail: 'proxyPass(options?)' }),
+    ]),
+  )
 })
 
 test('offers standard-library namespaces but not completions inside strings', () => {
@@ -119,7 +142,7 @@ test('offers standard-library namespaces but not completions inside strings', ()
   )
   const rootLabels = rootResult?.options.map(({ label }) => label)
   expect(rootLabels).not.toEqual(
-    expect.arrayContaining(['Array', 'Math', 'Date', 'Promise', 'fetch']),
+    expect.arrayContaining(['Array', 'Math', 'Date', 'Promise', 'fetch', 'directive', 'http']),
   )
 
   const stringState = EditorState.create({ doc: '"resp.se"', extensions: [javascript()] })

@@ -31,7 +31,7 @@ AccessScriptCompiler::compile_route_script(void *context, http_script::ConstPack
                                            std::string_view source, std::span<const std::string> path_variable_names) {
     auto &compiler = *static_cast<AccessScriptCompiler *>(context);
     http_script::RouteScriptExtension::CompileScope compile_scope(compiler.route_extension_, constants,
-                                                                  path_variable_names, false);
+                                                                  path_variable_names, true);
     auto compiled = script::compile_script(compiler.route_library_, source, true);
     if (!compiled) {
         std::string message = "route script compile failed at script offset ";
