@@ -31,7 +31,8 @@ Access Gateway 有三种脚本上下文：
 | Template `${...}` | 否；每段是一条表达式 | 拒绝               | 仅同步 metadata | 否       | 是       |
 | JavaScript Route  | 是；完整脚本         | 允许已注册异步函数 | 是              | 是       | 是       |
 
-所有 Access Gateway 上下文都禁用出站 HTTP directive。
+JavaScript Route 支持固定 HTTP(S) URL authority 的出站 HTTP directive；condition 和 template 不支持
+directive statement 或异步出站调用。
 
 ## 2. 数据类型
 
@@ -1432,23 +1433,42 @@ return {
 
 ## 17. 出站 HTTP 能力
 
-Access Gateway JavaScript Route **没有**以下 API：
+JavaScript Route 可以在配置编译期把一个名称绑定到固定 HTTP(S) URL authority：
 
-```text
-fetch(...)
-http.request(...)
-http.proxyPass(...)
-directive backend = http "@service"
-backend.request(...)
-backend.proxyPass(...)
+```javascript
+directive google = http "https://www.google.com";
+
+let result = google.request({
+    method: "GET",
+    path: "/",
+    timeout: 5000,
+    includeHeaders: true
+});
+return {
+    status: result.status,
+    body: binary.base64Encode(result.body)
+};
 ```
 
-固定 Fiber 模块包含可由其他应用宿主启用的 HTTP directive 和 upstream client，但
-`AccessScriptRuntime` 创建 compile scope 时明确传入 `http_directives_enabled = false`，也没有为请求
-注入 outbound `HttpScriptServices`。因此这些名字会在配置编译期失败，而不是在运行时偷偷绕过策略。
+目标只写 `http://host[:port]` 或 `https://host[:port]`，不能带 path、query、fragment 或 userinfo。请求路径
+写在调用 options 的 `url` 或 `path/query` 中；`options.url` 是 `path[?query]`，不能是完整 URL。当前
+access-server runtime 只连接显式 URL authority；`"@service"`/`"service"` 命名上游形式尚未接入
+NamingService，调用时会返回上游获取错误。
 
-需要 upstream 时使用 YAML `PROXY` Route。这样才能统一应用 NamingService、静态地址校验、header
-保护、body limit、WebSocket、连接池、重试、trace、metrics、取消和 shutdown 语义。
+directive 名称提供两个异步方法，调用时仍不写 `await`：
+
+- `service.request(options?)`：发送独立请求，返回 `{status, body}`；`includeHeaders: true` 时还返回
+  `headers`。它完整缓冲响应 body，适合有界的小响应。
+- `service.proxyPass(options?)`：流式转发当前请求和上游响应，成功前已经提交下游响应；通常应立即
+  `return service.proxyPass({...});`。
+
+常用 options 包括 `method`、`url`、`path`、`query`、`headers` 和正整数毫秒 `timeout`；
+`request()` 还接受 `body/includeHeaders`，`proxyPass()` 还接受 `responseHeaders/flush/websocket`。
+没有全局 `fetch()`、`http.request()` 或 `http.proxyPass()`；目标必须来自 directive。出站连接复用
+access-server 的 per-worker DNS、连接池、TLS 校验、Happy Eyeballs、取消和有序 shutdown。
+
+普通流量转发、NamingService、重试、Route 级 body limit/TLS profile 和完整代理观测仍优先使用 YAML
+`PROXY` Route。directive 适用于必须在脚本内发起的有界请求或条件化转发。
 
 ## 18. 返回、错误和 HTTP 映射
 

@@ -89,6 +89,23 @@ TEST(NativeValidatorProtocolTest, CompilesMixedMethodAndJavaScriptRoutes) {
     EXPECT_NE(response.find(R"("routeCount":2)"), std::string::npos) << response;
 }
 
+TEST(NativeValidatorProtocolTest, CompilesHttpDirectiveJavaScriptRoute) {
+    constexpr std::string_view payload = R"({
+        "version": 5,
+        "host": {"example.com": {}},
+        "routes": [{
+            "path": "/google",
+            "type": "SCRIPT",
+            "script": "directive google = http \"https://www.google.com\"; return google.request({path: \"/\"});"
+        }]
+    })";
+
+    const std::string response =
+            fiber::access_server::process_native_validator_request(request("project_route", "example", payload));
+    EXPECT_NE(response.find(R"("valid":true)"), std::string::npos) << response;
+    EXPECT_NE(response.find(R"("routeCount":1)"), std::string::npos) << response;
+}
+
 TEST(NativeValidatorProtocolTest, ValidatesClientIdentityReferenceWithoutClaimingRuntimeResolution) {
     constexpr std::string_view payload = R"({
         "version": 5,

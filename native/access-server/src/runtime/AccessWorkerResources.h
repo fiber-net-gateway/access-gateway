@@ -1,6 +1,7 @@
 #ifndef FIBER_ACCESS_SERVER_ACCESS_WORKER_RESOURCES_H
 #define FIBER_ACCESS_SERVER_ACCESS_WORKER_RESOURCES_H
 
+#include "../execution/AccessHttpScriptServices.h"
 #include "../execution/AccessRequestHandler.h"
 #include "../execution/ClientMetadata.h"
 #include "../execution/ProxyExecutor.h"
@@ -70,6 +71,7 @@ private:
     AccessLogPolicy access_log_policy_;
     AccessDnsService dns_;
     http::StealableHttp1ConnectionPoolSet pool_;
+    AccessHttpScriptServices script_http_services_;
     ProxyExecutor executor_;
     AccessRequestHandler handler_;
     AccessServerMetrics metrics_;

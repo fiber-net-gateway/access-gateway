@@ -529,18 +529,17 @@ return;
     <code>array.push(items, x)</code>;
   </li>
   <li>
-    outbound <code>directive backend = http &quot;...&quot;</code>, <code>http.request()</code>,
-    <code>proxyPass()</code>, or dynamic upstream APIs;
-  </li>
-  <li>
     execution of real request scripts in the Console, control-plane server, or Native Validator.
   </li>
 </ul>
 <p>
-  The pinned Fiber library contains HTTP upstream directives that other hosts may enable, but Access
-  Gateway compiles Routes with <code>http_directives_enabled = false</code>. Use a YAML
-  <code>PROXY</code> Route for upstream traffic so service discovery, protected headers, body
-  limits, observability, cancellation, and shutdown remain intact.
+  JavaScript Routes support
+  <code>directive backend = http &quot;https://host[:port]&quot;;</code> followed by
+  <code>backend.request()</code> or <code>backend.proxyPass()</code>. They reuse access-server DNS,
+  connection pooling, TLS verification, and shutdown lifecycle. Named
+  <code>@service</code> upstreams are not resolved yet. Continue to use YAML
+  <code>PROXY</code> Routes for ordinary forwarding and NamingService. See “Outbound HTTP
+  capability” in the script/API reference for options and boundaries.
 </p>
 <h2 id="10-recipes">
   10. Recipes<a

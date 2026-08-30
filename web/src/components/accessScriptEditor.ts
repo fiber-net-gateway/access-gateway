@@ -98,6 +98,11 @@ const constantProperties = {
   $conn: ['remote_addr', 'remote_port', 'http_version', 'scheme', 'tls'],
 } as const
 
+const directiveFunctions = [
+  ['request', 'request(options?)', '发送上游 HTTP 请求并返回 status/body'],
+  ['proxyPass', 'proxyPass(options?)', '将当前请求和上游响应流式转发'],
+] as const satisfies readonly ScriptFunction[]
+
 const globalCompletions: readonly Completion[] = [
   {
     label: 'length',
@@ -137,6 +142,12 @@ function isIgnoredSyntax(context: CompletionContext): boolean {
   return /Comment|String|TemplateString/u.test(node.name)
 }
 
+function hasHttpDirective(context: CompletionContext, owner: string): boolean {
+  const source = context.state.doc.toString()
+  directivePattern.lastIndex = 0
+  return Array.from(source.matchAll(directivePattern)).some((match) => match[1] === owner)
+}
+
 export function completeAccessScript(context: CompletionContext): CompletionResult | null {
   if (isIgnoredSyntax(context)) return null
 
@@ -148,6 +159,13 @@ export function completeAccessScript(context: CompletionContext): CompletionResu
       return {
         from: member.to - prefix.length,
         options: functionCompletions(functions),
+        validFor: /^[$\w]*$/u,
+      }
+    }
+    if (owner && hasHttpDirective(context, owner)) {
+      return {
+        from: member.to - prefix.length,
+        options: functionCompletions(directiveFunctions),
         validFor: /^[$\w]*$/u,
       }
     }
@@ -186,6 +204,7 @@ export const accessScriptHighlightStyle = HighlightStyle.define([
 const supportedKeywordPattern =
   /\b(?:break|catch|continue|else|for|if|in|let|of|return|throw|try|typeof)\b/gu
 const supportedAtomPattern = /\bundefined\b/gu
+const directivePattern = /\bdirective\s+([$A-Za-z_][$\w]*)\s*=\s*([$A-Za-z_][$\w]*)\s+(?=["'])/gu
 
 function isInsideTextOrComment(state: Parameters<typeof syntaxTree>[0], position: number): boolean {
   let node: ReturnType<typeof syntaxTree>['topNode'] | null = syntaxTree(state).resolveInner(
@@ -217,6 +236,30 @@ function markSupportedTokens(
 
 const supportedKeywordMark = Decoration.mark({ class: 'cm-access-script-keyword' })
 const supportedAtomMark = Decoration.mark({ class: 'cm-access-script-atom' })
+const directiveKeywordMark = Decoration.mark({ class: 'cm-access-script-directive-keyword' })
+const directiveNameMark = Decoration.mark({ class: 'cm-access-script-directive-name' })
+const directiveTypeMark = Decoration.mark({ class: 'cm-access-script-directive-type' })
+
+function markDirectives(state: Parameters<typeof syntaxTree>[0]) {
+  const ranges = []
+  const source = state.doc.toString()
+  directivePattern.lastIndex = 0
+  for (const match of source.matchAll(directivePattern)) {
+    const from = match.index
+    const name = match[1]
+    const type = match[2]
+    if (!name || !type) continue
+    if (isInsideTextOrComment(state, from)) continue
+    const nameFrom = from + match[0].indexOf(name, 'directive'.length)
+    const typeFrom = from + match[0].lastIndexOf(type)
+    ranges.push(
+      directiveKeywordMark.range(from, from + 'directive'.length),
+      directiveNameMark.range(nameFrom, nameFrom + name.length),
+      directiveTypeMark.range(typeFrom, typeFrom + type.length),
+    )
+  }
+  return ranges
+}
 
 export const accessScriptTokenHighlighting: Extension = [
   EditorView.decorations.compute(['doc'], (state) =>
@@ -224,11 +267,15 @@ export const accessScriptTokenHighlighting: Extension = [
       [
         ...markSupportedTokens(state, supportedKeywordPattern, supportedKeywordMark),
         ...markSupportedTokens(state, supportedAtomPattern, supportedAtomMark),
+        ...markDirectives(state),
       ].sort((left, right) => left.from - right.from),
     ),
   ),
   EditorView.baseTheme({
     '.cm-access-script-keyword': { color: '#ff9dca', fontWeight: '600' },
     '.cm-access-script-atom': { color: '#ffcb6b' },
+    '.cm-access-script-directive-keyword': { color: '#ff9dca', fontWeight: '700' },
+    '.cm-access-script-directive-name': { color: '#82d7ff', fontWeight: '600' },
+    '.cm-access-script-directive-type': { color: '#c7b6ff' },
   }),
 ]
