@@ -1,18 +1,7 @@
-import { lazy, Suspense, useEffect, useMemo, useState, type FormEvent } from 'react'
-import { useLocation, useNavigate, useSearchParams } from 'react-router'
+import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
+import { useLocation, useNavigate } from 'react-router'
 
-import {
-  ApiClientError,
-  fetchConfigurationVersion,
-  fetchConfigurationVersions,
-  fetchCurrentConfigurationVersion,
-  restoreConfigurationVersion,
-  saveConfigurationVersion,
-  validateProjectRoutes,
-} from '../api/client'
 import type {
-  ConfigurationVersionDetail,
-  ProjectRoutesModel,
   ProjectRoutesValidationView,
   RouteItemModel,
   RouteValidationIssue,
@@ -21,21 +10,15 @@ import {
   analyzeRouteSource,
   createRouteItem,
   duplicateRouteItem,
-  initialRouteModel,
   validateHostAliases,
   type RouteTemplate,
 } from '../routes/model'
-import { useUnsavedChangesGuard } from '../routes/useUnsavedChangesGuard'
 import { useProjectContext } from './ProjectLayout'
 
 const YamlCodeEditor = lazy(async () => {
   const module = await import('../components/YamlCodeEditor')
   return { default: module.YamlCodeEditor }
 })
-
-function modelFingerprint(model: ProjectRoutesModel): string {
-  return JSON.stringify(model)
-}
 
 const utf8Encoder = new TextEncoder()
 
@@ -59,70 +42,25 @@ function routeIssues(
 }
 
 export function ProjectRoutesPage() {
-  const { project, refreshProject, systemStatus } = useProjectContext()
+  const {
+    project,
+    systemStatus,
+    workspace: model,
+    setWorkspace: setModel,
+    workspaceLoading: routeLoading,
+    workspaceDirty: hasUnsavedChanges,
+    currentVersionNumber,
+    sourceVersion,
+    validation,
+    setValidation,
+  } = useProjectContext()
   const navigate = useNavigate()
   const location = useLocation()
-  const [searchParams] = useSearchParams()
-  const sourceVersionId = searchParams.get('sourceVersionId')
-  const [model, setModel] = useState<ProjectRoutesModel>(initialRouteModel)
-  const [savedFingerprint, setSavedFingerprint] = useState(modelFingerprint(initialRouteModel()))
-  const [sourceVersion, setSourceVersion] = useState<ConfigurationVersionDetail | null>(null)
-  const [currentVersionId, setCurrentVersionId] = useState<string | null>(null)
-  const [currentVersionNumber, setCurrentVersionNumber] = useState<number | null>(null)
-  const [configurationLockVersion, setConfigurationLockVersion] = useState('0')
-  const [routeLoading, setRouteLoading] = useState(true)
-  const [saving, setSaving] = useState(false)
-  const [validating, setValidating] = useState(false)
-  const [validation, setValidation] = useState<ProjectRoutesValidationView | null>(null)
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set())
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
-  const [saveDialogOpen, setSaveDialogOpen] = useState(false)
-  const [changeSummary, setChangeSummary] = useState('')
-
-  const hasUnsavedChanges = !routeLoading && modelFingerprint(model) !== savedFingerprint
   const sourceHasUserChanges = sourceVersion
-    ? modelFingerprint(model) !== modelFingerprint(sourceVersion.model)
+    ? JSON.stringify(model) !== JSON.stringify(sourceVersion.model)
     : false
-  useUnsavedChangesGuard(hasUnsavedChanges)
-
-  useEffect(() => {
-    const controller = new AbortController()
-    setRouteLoading(true)
-    void Promise.all([
-      fetchConfigurationVersions(project.id, controller.signal),
-      fetchCurrentConfigurationVersion(project.id, controller.signal),
-      sourceVersionId
-        ? fetchConfigurationVersion(project.id, sourceVersionId, controller.signal)
-        : Promise.resolve(null),
-    ])
-      .then(([versionList, current, requestedSource]) => {
-        const currentModel = current?.version.model ?? initialRouteModel()
-        const historicalSource =
-          requestedSource && requestedSource.id !== versionList.currentVersionId
-            ? requestedSource
-            : null
-        const next = historicalSource?.model ?? currentModel
-        setModel(next)
-        setSavedFingerprint(modelFingerprint(currentModel))
-        setSourceVersion(historicalSource)
-        setCurrentVersionId(versionList.currentVersionId)
-        setCurrentVersionNumber(current?.version.number ?? null)
-        setConfigurationLockVersion(versionList.lockVersion)
-        setValidation(null)
-        setErrorMessage(null)
-        setSaveDialogOpen(false)
-        setChangeSummary('')
-      })
-      .catch((error: unknown) => {
-        if (!controller.signal.aborted) {
-          setErrorMessage(error instanceof Error ? error.message : '加载 Route 工作区失败')
-        }
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) setRouteLoading(false)
-      })
-    return () => controller.abort()
-  }, [project.id, sourceVersionId])
 
   useEffect(() => {
     setExpanded((current) => {
@@ -210,22 +148,7 @@ export function ProjectRoutesPage() {
     setErrorMessage(null)
   }
 
-  const runAction = async (action: () => Promise<void>): Promise<void> => {
-    setErrorMessage(null)
-    try {
-      await action()
-    } catch (error) {
-      setErrorMessage(
-        error instanceof ApiClientError && error.code === 'CONFIG_VERSION_CONFLICT'
-          ? '当前配置已被其他用户更新。本地编辑内容已保留；请复制必要内容后重新加载并比较最新版本。'
-          : error instanceof Error
-            ? error.message
-            : '操作失败',
-      )
-    }
-  }
-
-  const openSaveDialog = (): void => {
+  const requestProjectSave = (): void => {
     if (hasLimitIssues) {
       setErrorMessage(limitMessages[0] ?? '配置超过 Native 资源上限')
       return
@@ -234,71 +157,10 @@ export function ProjectRoutesPage() {
       setErrorMessage(`当前有 ${localIssueCount} 个配置问题，请修复后再保存为版本。`)
       return
     }
-    if (sourceVersion && !changeSummary) {
-      setChangeSummary(`基于 V${sourceVersion.number} 编辑`)
-    }
-    setSaveDialogOpen(true)
-  }
-
-  const submitVersion = async (event: FormEvent): Promise<void> => {
-    event.preventDefault()
-    await runAction(async () => {
-      if (!hasUnsavedChanges) throw new Error('当前工作区没有需要保存的修改')
-      if (hasLocalIssues) {
-        throw new Error(
-          hasLimitIssues
-            ? (limitMessages[0] ?? '配置超过 Native 资源上限')
-            : `当前有 ${localIssueCount} 个配置问题，请修复后再保存为版本。`,
-        )
-      }
-      const saveBaseVersionId = currentVersionId
-      if (sourceVersion && !saveBaseVersionId) {
-        throw new Error('历史版本编辑需要一个当前配置版本作为保存基线')
-      }
-      setSaving(true)
-      try {
-        const submittedModel = model
-        const submittedFingerprint = modelFingerprint(submittedModel)
-        const saved =
-          sourceVersion && saveBaseVersionId
-            ? await restoreConfigurationVersion(
-                project.id,
-                sourceVersion.id,
-                saveBaseVersionId,
-                configurationLockVersion,
-                changeSummary,
-                submittedModel,
-              )
-            : await saveConfigurationVersion(
-                project.id,
-                configurationLockVersion,
-                saveBaseVersionId,
-                changeSummary,
-                submittedModel,
-              )
-        setCurrentVersionId(saved.version.id)
-        setCurrentVersionNumber(saved.version.number)
-        setConfigurationLockVersion(saved.lockVersion)
-        setSavedFingerprint(submittedFingerprint)
-        setValidation(null)
-        setSaveDialogOpen(false)
-        setChangeSummary('')
-        setSourceVersion(null)
-        await navigate({ pathname: location.pathname, search: '' }, { replace: true })
-        await refreshProject()
-      } finally {
-        setSaving(false)
-      }
-    })
-  }
-
-  const validateRoutes = async (): Promise<void> => {
-    setValidating(true)
-    try {
-      setValidation(await validateProjectRoutes(project.id, model))
-    } finally {
-      setValidating(false)
-    }
+    const button = document.querySelector<HTMLButtonElement>(
+      '[aria-label="Project 配置工作区"] .button-primary',
+    )
+    button?.click()
   }
 
   const addRoute = (template: RouteTemplate): void => {
@@ -366,26 +228,6 @@ export function ProjectRoutesPage() {
               </span>
             ) : null}
           </div>
-        </div>
-        <div className="header-actions">
-          <button
-            className="button-secondary"
-            disabled={routeLoading || validating || saving || hasLimitIssues}
-            onClick={() => void runAction(validateRoutes)}
-            type="button"
-          >
-            {validating ? '校验中…' : '校验配置'}
-          </button>
-          <button
-            aria-describedby={hasLocalIssues ? 'route-save-state' : undefined}
-            className="button-primary"
-            disabled={routeLoading || saving || !hasUnsavedChanges || hasLocalIssues}
-            onClick={openSaveDialog}
-            title={hasLocalIssues ? '请先修复配置问题' : undefined}
-            type="button"
-          >
-            {saving ? '保存中…' : '保存为版本'}
-          </button>
         </div>
       </header>
 
@@ -709,7 +551,7 @@ export function ProjectRoutesPage() {
                             ),
                           )
                         }
-                        onSave={openSaveDialog}
+                        onSave={requestProjectSave}
                       />
                     </Suspense>
                     {issues.length > 0 ? (
@@ -743,70 +585,6 @@ export function ProjectRoutesPage() {
           <summary>查看编译后的 rnacos JSON · {validation.wireSha256?.slice(0, 12)}</summary>
           <pre>{JSON.stringify(JSON.parse(validation.wirePreview), null, 2)}</pre>
         </details>
-      ) : null}
-
-      {saveDialogOpen ? (
-        <div className="dialog-backdrop" role="presentation">
-          <form
-            aria-labelledby="save-version-title"
-            className="dialog-card"
-            onSubmit={(event) => void submitVersion(event)}
-            role="dialog"
-          >
-            <p className="eyebrow">CREATE IMMUTABLE VERSION</p>
-            <h2 id="save-version-title">保存为配置版本</h2>
-            {sourceVersion ? (
-              <div className="version-source-summary">
-                <div>
-                  <span>编辑来源</span>
-                  <strong>历史 V{sourceVersion.number}</strong>
-                </div>
-                <div>
-                  <span>当前基线</span>
-                  <strong>{currentVersionNumber ? `V${currentVersionNumber}` : '—'}</strong>
-                </div>
-                <div>
-                  <span>保存结果</span>
-                  <strong>
-                    {currentVersionNumber ? `新建 V${currentVersionNumber + 1}` : '新版本'}
-                  </strong>
-                </div>
-              </div>
-            ) : null}
-            <p>
-              本次会创建 {currentVersionNumber ? `V${currentVersionNumber + 1}` : 'V1'}。
-              {sourceVersion
-                ? `历史 V${sourceVersion.number} 和当前 V${currentVersionNumber ?? '—'} 都不会被改写。`
-                : '保存后内容不可修改，后续修改会继续创建新版本。'}
-            </p>
-            <label>
-              变更摘要
-              <input
-                autoFocus
-                maxLength={200}
-                placeholder="例如：新增 /api 代理路由"
-                required
-                value={changeSummary}
-                onChange={(event) => setChangeSummary(event.target.value)}
-              />
-            </label>
-            <div className="dialog-actions">
-              <button
-                className="button-secondary"
-                disabled={saving}
-                onClick={() => setSaveDialogOpen(false)}
-                type="button"
-              >
-                取消
-              </button>
-              <button className="button-primary" disabled={saving || hasLimitIssues} type="submit">
-                {saving
-                  ? '保存中…'
-                  : `保存为 ${currentVersionNumber ? `V${currentVersionNumber + 1}` : 'V1'}`}
-              </button>
-            </div>
-          </form>
-        </div>
       ) : null}
     </section>
   )
