@@ -342,12 +342,13 @@ Unavailable:
 - Promise, `async`/`await`, user functions, or classes;
 - `while`, classic three-part `for`, or regular expressions;
 - dynamic object methods such as `items.push(x)`; use `array.push(items, x)`;
-- outbound `directive backend = http "..."`, `http.request()`, `proxyPass()`, or dynamic upstream APIs;
 - execution of real request scripts in the Console, control-plane server, or Native Validator.
 
-The pinned Fiber library contains HTTP upstream directives that other hosts may enable, but Access Gateway
-compiles Routes with `http_directives_enabled = false`. Use a YAML `PROXY` Route for upstream traffic so
-service discovery, protected headers, body limits, observability, cancellation, and shutdown remain intact.
+JavaScript Routes support `directive backend = http "https://host[:port]";` followed by
+`backend.request()` or `backend.proxyPass()`. They reuse access-server DNS, connection pooling, TLS verification,
+and shutdown lifecycle. Named `@service` upstreams are not resolved yet. Continue to use YAML `PROXY` Routes for
+ordinary forwarding and NamingService. See “Outbound HTTP capability” in the script/API reference for options
+and boundaries.
 
 ## 10. Recipes
 

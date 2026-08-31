@@ -343,12 +343,12 @@ Native Validator 的错误应包含稳定 code、Route field path 和有界编�
 - Promise、`async`/`await`、用户自定义 function/class；
 - `while`、传统三段式 `for`、正则表达式；
 - 动态对象方法，例如 `items.push(x)`；应写 `array.push(items, x)`；
-- 出站 `directive backend = http "..."`、`http.request()`、`proxyPass()` 或任何动态 upstream API；
 - 在 Console、server 或 Native Validator 中执行真实请求脚本；只有 access-server data plane 执行。
 
-虽然固定 Fiber 库包含可供其他宿主启用的 HTTP upstream directive，Access Gateway 的
-`AccessScriptRuntime` 明确以 `http_directives_enabled = false` 编译 Route。需要 upstream 时创建
-YAML `PROXY` Route，不能在脚本中绕过 service discovery、header 保护、body limit 和观测策略。
+JavaScript Route 支持 `directive backend = http "https://host[:port]";`，并通过
+`backend.request()`/`backend.proxyPass()` 发起请求。它复用 access-server 的 DNS、连接池、TLS 校验和
+shutdown 生命周期；当前不解析 `@service` 命名上游。普通转发和 NamingService 仍使用 YAML `PROXY`
+Route。完整 options 与边界见“脚本与 API 参考”的“出站 HTTP 能力”。
 
 ## 10. 常用配方
 

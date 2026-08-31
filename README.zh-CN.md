@@ -201,6 +201,13 @@ R-Nacos 并回读校验。独立采集器随后认证访问 demo Access Server�
 `npm run demo:ps`、`npm run demo:logs` 和 `npm run demo:down`
 管理演示环境。只有在确定要删除全部演示数据时，才为 `docker compose down` 添加 `--volumes`。
 
+`npm run demo:up` 会先在宿主机执行 TypeScript/Vite 和 C++ Release 编译，再把
+`server/dist/`、`web/dist/`、`native/build/apps/access-server` 和
+`native/build/apps/access-gateway-validator` 复制进运行镜像。Docker 构建本身不安装编译器，
+也不编译项目源码。宿主机应使用与目标镜像兼容的 Linux ABI；演示运行镜像为 Debian trixie，
+并安装原生程序所需的 `libstdc++6`、`libgcc`、glibc 和 CA 证书。仅重新生成本地产物可运行
+`npm run demo:build`。
+
 ## 构建和测试 Access Server
 
 根工作区提供了常用的原生开发流程：
