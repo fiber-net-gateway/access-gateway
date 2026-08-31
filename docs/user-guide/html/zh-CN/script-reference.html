@@ -78,7 +78,10 @@ return;
     </tr>
   </tbody>
 </table>
-<p>所有 Access Gateway 上下文都禁用出站 HTTP directive。</p>
+<p>
+  JavaScript Route 支持固定 HTTP(S) URL authority 的出站 HTTP directive；condition 和 template
+  不支持 directive statement 或异步出站调用。
+</p>
 <h2 id="2-数据类型">
   2. 数据类型<a
     class="documentation-heading-anchor"
@@ -2368,24 +2371,57 @@ declare const $conn: {
     >#</a
   >
 </h2>
-<p>Access Gateway JavaScript Route <strong>没有</strong>以下 API：</p>
-<pre><code class="language-text">fetch(...)
-http.request(...)
-http.proxyPass(...)
-directive backend = http &quot;@service&quot;
-backend.request(...)
-backend.proxyPass(...)
+<p>JavaScript Route 可以在配置编译期把一个名称绑定到固定 HTTP(S) URL authority：</p>
+<pre><code class="language-javascript">directive google = http &quot;https://www.google.com&quot;;
+
+let result = google.request({
+    method: &quot;GET&quot;,
+    path: &quot;/&quot;,
+    timeout: 5000,
+    includeHeaders: true
+});
+return {
+    status: result.status,
+    body: binary.base64Encode(result.body)
+};
 </code></pre>
 <p>
-  固定 Fiber 模块包含可由其他应用宿主启用的 HTTP directive 和 upstream client，但
-  <code>AccessScriptRuntime</code> 创建 compile scope 时明确传入
-  <code>http_directives_enabled = false</code>，也没有为请求 注入 outbound
-  <code>HttpScriptServices</code>。因此这些名字会在配置编译期失败，而不是在运行时偷偷绕过策略。
+  目标只写 <code>http://host[:port]</code> 或 <code>https://host[:port]</code>，不能带
+  path、query、fragment 或 userinfo。请求路径 写在调用 options 的 <code>url</code> 或
+  <code>path/query</code> 中；<code>options.url</code> 是 <code>path[?query]</code>，不能是完整
+  URL。当前 access-server runtime 只连接显式 URL authority；<code>&quot;@service&quot;</code>/<code
+    >&quot;service&quot;</code
+  >
+  命名上游形式尚未接入 NamingService，调用时会返回上游获取错误。
+</p>
+<p>directive 名称提供两个异步方法，调用时仍不写 <code>await</code>：</p>
+<ul>
+  <li>
+    <code>service.request(options?)</code>：发送独立请求，返回 <code>{status, body}</code>；<code
+      >includeHeaders: true</code
+    >
+    时还返回 <code>headers</code>。它完整缓冲响应 body，适合有界的小响应。
+  </li>
+  <li>
+    <code>service.proxyPass(options?)</code
+    >：流式转发当前请求和上游响应，成功前已经提交下游响应；通常应立即
+    <code>return service.proxyPass({...});</code>。
+  </li>
+</ul>
+<p>
+  常用 options 包括
+  <code>method</code>、<code>url</code>、<code>path</code>、<code>query</code>、<code>headers</code>
+  和正整数毫秒 <code>timeout</code>； <code>request()</code> 还接受
+  <code>body/includeHeaders</code>，<code>proxyPass()</code> 还接受
+  <code>responseHeaders/flush/websocket</code>。 没有全局 <code>fetch()</code>、<code
+    >http.request()</code
+  >
+  或 <code>http.proxyPass()</code>；目标必须来自 directive。出站连接复用 access-server 的 per-worker
+  DNS、连接池、TLS 校验、Happy Eyeballs、取消和有序 shutdown。
 </p>
 <p>
-  需要 upstream 时使用 YAML <code>PROXY</code> Route。这样才能统一应用
-  NamingService、静态地址校验、header 保护、body
-  limit、WebSocket、连接池、重试、trace、metrics、取消和 shutdown 语义。
+  普通流量转发、NamingService、重试、Route 级 body limit/TLS profile 和完整代理观测仍优先使用 YAML
+  <code>PROXY</code> Route。directive 适用于必须在脚本内发起的有界请求或条件化转发。
 </p>
 <h2 id="18-返回-错误和-http-映射">
   18. 返回、错误和 HTTP 映射<a

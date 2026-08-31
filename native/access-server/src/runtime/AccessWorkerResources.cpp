@@ -17,7 +17,9 @@ AccessWorkerResources::AccessWorkerResources(event::EventLoopGroup &workers, con
                                              AccessWorkerResourcesOptions options) :
     workers_(&workers), client_metadata_resolver_(std::move(options.client_metadata)),
     access_log_policy_(std::move(options.access_log)), dns_(std::move(options.dns), options.dns_resolver_factory),
-    pool_(workers), executor_(pool_, cluster_matcher, dns_.adapter(), std::move(options.executor)),
+    pool_(workers),
+    script_http_services_(pool_, dns_.adapter(), options.executor.upstream_tls, options.executor.happy_eyeballs),
+    executor_(pool_, cluster_matcher, dns_.adapter(), std::move(options.executor)),
     handler_(config_store.snapshot_provider(), options.script_adapter,
              AccessRequestHandlerOptions{
                      .default_max_request_body_size = options.default_max_request_body_size,
@@ -85,6 +87,7 @@ async::Task<void> AccessWorkerResources::handle(http::HttpExchange &exchange, bo
     AccessServerMetrics::Worker &worker = metrics_.worker(event::EventLoop::current().group_index());
     AccessRequestTelemetry telemetry(exchange, &worker, cat_client_, &access_log_policy_, &client_metadata_resolver_,
                                      connection_secure);
+    telemetry.script_context().set_services(&script_http_services_);
     if (!http3_alt_svc_.empty()) {
         (void) telemetry.response_headers().set("Alt-Svc", http3_alt_svc_);
     }

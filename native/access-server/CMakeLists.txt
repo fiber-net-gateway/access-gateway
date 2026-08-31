@@ -70,6 +70,7 @@ target_link_libraries(access_server_observability
 add_library(access_server::observability ALIAS access_server_observability)
 
 access_server_add_component(access_server_execution
+    "${CMAKE_CURRENT_LIST_DIR}/src/execution/AccessHttpScriptServices.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/execution/AccessResult.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/execution/ClientMetadata.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/execution/AccessRequestHandler.cpp"
