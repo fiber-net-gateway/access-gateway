@@ -10,6 +10,10 @@
 
 namespace fiber::access_server {
 
+#ifndef FIBER_ACCESS_SERVER_BUILD_VERSION
+#define FIBER_ACCESS_SERVER_BUILD_VERSION "unknown"
+#endif
+
 std::expected<AccessRuntimeComponents, AccessServerRuntimeError>
 AccessRuntimeFactory::create(event::EventLoop &accept_loop, event::EventLoop &nacos_loop,
                              event::EventLoop &compiler_loop, event::EventLoop &cat_loop,
@@ -68,6 +72,11 @@ AccessRuntimeFactory::create(event::EventLoop &accept_loop, event::EventLoop &na
     }
     process_metrics.cat_client = cat_client.get();
 
+    AccessInstanceRegistrationOptions instance_registration = config.instance_registration_options();
+    instance_registration.metadata = {
+            nacos::NamingMetadataEntry{.key = "v", .value = FIBER_ACCESS_SERVER_BUILD_VERSION},
+            nacos::NamingMetadataEntry{.key = "g", .value = config.watcher_options().project_list_data_id},
+    };
     auto control_plane = std::unique_ptr<AccessControlPlaneSupervisor>(new (std::nothrow) AccessControlPlaneSupervisor(
             accept_loop, nacos_loop, compiler_loop, cat_loop, http_workers,
             AccessControlPlaneOptions{
@@ -77,6 +86,7 @@ AccessRuntimeFactory::create(event::EventLoop &accept_loop, event::EventLoop &na
                     .gray_watcher = config.gray_watcher_options(),
                     .tls_certificate_watcher = config.tls_certificate_watcher_options(),
                     .service_discovery = config.service_discovery_options(),
+                    .instance_registration = std::move(instance_registration),
                     .process_metrics = process_metrics,
                     .tls_enabled = config.tls_http_server_options().tls.enabled,
                     .quic_enabled = config.tls_http_server_options().http3.enabled,
@@ -105,6 +115,7 @@ AccessRuntimeFactory::create(event::EventLoop &accept_loop, event::EventLoop &na
                     .plain_listen_enabled = config.plain_listen_enabled(),
                     .plain_listen_address = config.plain_listen_address(),
                     .plain_http_server = config.plain_http_server_options(),
+                    .registration_listener = config.registration_listener(),
                     .activation_endpoint = config.activation_endpoint_options(),
                     .client_metadata = config.client_metadata_options(),
                     .network_entry = std::string(config.network_entry()),

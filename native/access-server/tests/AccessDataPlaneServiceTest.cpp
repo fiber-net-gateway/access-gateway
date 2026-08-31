@@ -53,6 +53,8 @@ data_plane_options(net::SocketAddress listen_address, net::SocketAddress metrics
     return AccessDataPlaneOptions{
             .listen_address = listen_address,
             .metrics_listen_address = metrics_listen_address,
+            .plain_listen_enabled = true,
+            .plain_listen_address = listen_address,
             .dns_resolver_factory = dns_resolver_factory,
             .test_mode = true,
     };
@@ -218,6 +220,38 @@ TEST_F(AccessDataPlaneServiceTest, RollsBackBusinessListenerWhenMetricsBindFails
         metrics_blocker.close();
         co_await service.shutdown();
         co_await service.shutdown();
+        completed = true;
+        accept_loop_.stop();
+    });
+
+    accept_loop_.run();
+    EXPECT_TRUE(completed);
+}
+
+TEST_F(AccessDataPlaneServiceTest, ClosesBoundListenersWhenRegistrationFailsBeforeServe) {
+    bool completed = false;
+    async::spawn(accept_loop_, [&]() -> async::DetachedTask {
+        const net::SocketAddress loopback(net::IpAddress::loopback_v4(), 0);
+        AccessDataPlaneService service(accept_loop_, workers_, route_store_, {}, runtime_metrics_, activation_evidence_,
+                                       nullptr, data_plane_options(loopback, loopback));
+
+        auto bound = co_await service.bind({});
+        if (!bound) {
+            ADD_FAILURE() << "failed to bind listeners before the registration rollback test";
+            co_await service.shutdown();
+            completed = true;
+            accept_loop_.stop();
+            co_return;
+        }
+        EXPECT_FALSE(bound->tls);
+        EXPECT_EQ(bound->address.ip(), net::IpAddress::loopback_v4());
+        EXPECT_NE(bound->address.port(), 0U);
+        EXPECT_NE(service.plain_fd(), -1);
+        EXPECT_NE(service.metrics_fd(), -1);
+
+        co_await service.shutdown();
+        EXPECT_EQ(service.plain_fd(), -1);
+        EXPECT_EQ(service.metrics_fd(), -1);
         completed = true;
         accept_loop_.stop();
     });

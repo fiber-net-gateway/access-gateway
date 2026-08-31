@@ -33,6 +33,10 @@ enum class AccessServerRuntimeErrorCode : std::uint8_t {
     InitialTlsCertificateTimeout,
     Bind,
     BindMetrics,
+    ResolveBoundListener,
+    RegisterNacosInstance,
+    WaitNacosRegistration,
+    Serve,
 };
 
 struct AccessServerRuntimeError {

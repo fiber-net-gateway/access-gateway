@@ -12,6 +12,7 @@
 #include <fiber/async/Watch.h>
 #include <fiber/common/NonCopyable.h>
 #include <fiber/common/NonMovable.h>
+#include <fiber/net/SocketAddress.h>
 #include <fiber/net/TlsOptions.h>
 
 namespace fiber::access_server {
@@ -31,23 +32,39 @@ struct AccessControlPlaneReady {
     net::TlsIdentitySelectorOps tls_identity_selector;
 };
 
+struct AccessBoundEndpoint {
+    net::SocketAddress address;
+    bool tls = false;
+};
+
+enum class AccessRegistrationListener : std::uint8_t {
+    Tls,
+    Plain,
+};
+
 struct AccessControlPlaneLifecycle {
     using StartFunction =
             async::Task<std::expected<AccessControlPlaneReady, AccessServerRuntimeError>> (*)(void *context) noexcept;
+    using RegisterFunction = async::Task<std::expected<void, AccessServerRuntimeError>> (*)(
+            void *context, AccessBoundEndpoint endpoint) noexcept;
     using ShutdownFunction = async::Task<void> (*)(void *context) noexcept;
 
     void *context = nullptr;
     StartFunction start = nullptr;
+    RegisterFunction register_instance = nullptr;
+    ShutdownFunction deregister_instance = nullptr;
     ShutdownFunction shutdown = nullptr;
 };
 
 struct AccessDataPlaneLifecycle {
-    using StartFunction = async::Task<std::expected<void, AccessServerRuntimeError>> (*)(
+    using BindFunction = async::Task<std::expected<AccessBoundEndpoint, AccessServerRuntimeError>> (*)(
             void *context, AccessControlPlaneReady ready) noexcept;
+    using ServeFunction = async::Task<std::expected<void, AccessServerRuntimeError>> (*)(void *context) noexcept;
     using ShutdownFunction = async::Task<void> (*)(void *context) noexcept;
 
     void *context = nullptr;
-    StartFunction start = nullptr;
+    BindFunction bind = nullptr;
+    ServeFunction serve = nullptr;
     ShutdownFunction shutdown = nullptr;
 };
 
@@ -67,7 +84,8 @@ private:
     async::Watch<bool> shutdown_complete_{false};
     std::optional<async::Watch<bool>::Publisher> shutdown_publisher_;
     AccessServerRuntimeState state_ = AccessServerRuntimeState::Created;
-    bool data_plane_start_attempted_ = false;
+    bool data_plane_bind_attempted_ = false;
+    bool registration_attempted_ = false;
     bool control_plane_shutdown_required_ = true;
 };
 

@@ -229,6 +229,7 @@ private:
     AccessConfigWatcherState state_ = AccessConfigWatcherState::Created;
     bool initial_project_list_received_ = false;
     bool initial_batch_active_ = false;
+    bool initial_snapshot_published_ = false;
     bool defer_readiness_updates_ = false;
     AccessActivationCandidateStatus project_list_candidate_status_ = AccessActivationCandidateStatus::Awaiting;
     std::string project_list_observed_md5_;

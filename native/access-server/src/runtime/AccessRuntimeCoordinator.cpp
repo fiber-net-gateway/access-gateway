@@ -11,8 +11,11 @@ AccessRuntimeCoordinator::AccessRuntimeCoordinator(AccessControlPlaneLifecycle c
     control_plane_(control_plane), data_plane_(data_plane),
     shutdown_publisher_(shutdown_complete_.acquire_publisher()) {
     FIBER_ASSERT(control_plane_.start);
+    FIBER_ASSERT(control_plane_.register_instance);
+    FIBER_ASSERT(control_plane_.deregister_instance);
     FIBER_ASSERT(control_plane_.shutdown);
-    FIBER_ASSERT(data_plane_.start);
+    FIBER_ASSERT(data_plane_.bind);
+    FIBER_ASSERT(data_plane_.serve);
     FIBER_ASSERT(data_plane_.shutdown);
     FIBER_ASSERT(shutdown_publisher_.has_value());
 }
@@ -32,10 +35,25 @@ async::Task<std::expected<void, AccessServerRuntimeError>> AccessRuntimeCoordina
         co_return std::unexpected(std::move(error));
     }
 
-    data_plane_start_attempted_ = true;
-    auto data_started = co_await data_plane_.start(data_plane_.context, std::move(*control_started));
-    if (!data_started) {
-        AccessServerRuntimeError error = std::move(data_started.error());
+    data_plane_bind_attempted_ = true;
+    auto bound = co_await data_plane_.bind(data_plane_.context, std::move(*control_started));
+    if (!bound) {
+        AccessServerRuntimeError error = std::move(bound.error());
+        co_await shutdown();
+        co_return std::unexpected(std::move(error));
+    }
+
+    registration_attempted_ = true;
+    auto registered = co_await control_plane_.register_instance(control_plane_.context, std::move(*bound));
+    if (!registered) {
+        AccessServerRuntimeError error = std::move(registered.error());
+        co_await shutdown();
+        co_return std::unexpected(std::move(error));
+    }
+
+    auto serving = co_await data_plane_.serve(data_plane_.context);
+    if (!serving) {
+        AccessServerRuntimeError error = std::move(serving.error());
         co_await shutdown();
         co_return std::unexpected(std::move(error));
     }
@@ -59,9 +77,13 @@ async::Task<void> AccessRuntimeCoordinator::shutdown() noexcept {
     }
 
     state_ = AccessServerRuntimeState::Stopping;
-    if (data_plane_start_attempted_) {
+    if (registration_attempted_) {
+        co_await control_plane_.deregister_instance(control_plane_.context);
+        registration_attempted_ = false;
+    }
+    if (data_plane_bind_attempted_) {
         co_await data_plane_.shutdown(data_plane_.context);
-        data_plane_start_attempted_ = false;
+        data_plane_bind_attempted_ = false;
     }
     if (control_plane_shutdown_required_) {
         co_await control_plane_.shutdown(control_plane_.context);

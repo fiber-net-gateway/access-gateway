@@ -792,6 +792,46 @@ TEST(TlsCertificateWatcherTest, CompilesOffLoopAndCoalescesLatestSnapshot) {
     EXPECT_TRUE(completed);
 }
 
+TEST(TlsCertificateWatcherTest, KeepsInitialRejectionLatchedAfterLaterValidSnapshot) {
+    auto [certificate_pem, private_key_pem] = make_test_identity();
+    event::EventLoop owner_loop;
+    event::EventLoopGroup compiler_group(1);
+    event::EventLoopGroup http_workers(1);
+    AccessConfigCompiler compiler(compiler_group.at(0));
+    FakeTlsConfigService service;
+    TlsCertificateStore store(owner_loop, http_workers, false);
+    TlsCertificateWatcher watcher(owner_loop, compiler, service, store);
+    bool completed = false;
+
+    async::spawn(owner_loop, [&]() -> async::DetachedTask {
+        auto readiness = watcher.subscribe_readiness();
+        EXPECT_TRUE(watcher.start());
+        service.push({}, "empty");
+
+        auto snapshot = readiness.current();
+        EXPECT_TRUE(snapshot.value);
+        if (snapshot.value) {
+            EXPECT_EQ(*snapshot.value, TlsCertificateReadiness::Failed);
+        }
+        service.push(tls_snapshot(1, certificate_pem, private_key_pem), "valid-after-rejection");
+        snapshot = readiness.current();
+        EXPECT_TRUE(snapshot.value);
+        if (snapshot.value) {
+            EXPECT_EQ(*snapshot.value, TlsCertificateReadiness::Failed);
+        }
+        EXPECT_EQ(store.version(), 0U);
+        EXPECT_EQ(watcher.failed_updates(), 1U);
+        EXPECT_EQ(watcher.successful_updates(), 0U);
+
+        co_await watcher.shutdown();
+        co_await store.shutdown();
+        completed = true;
+        owner_loop.stop();
+    });
+    owner_loop.run();
+    EXPECT_TRUE(completed);
+}
+
 TEST(TlsCertificateWatcherTest, RejectsProcessingCandidateWhenSubscriptionCloses) {
     auto [certificate_pem, private_key_pem] = make_test_identity();
     event::EventLoop owner_loop;

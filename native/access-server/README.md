@@ -58,8 +58,9 @@ connection pool，以及 Nacos、CAT、Prometheus 组件。迁移不要求这些
   请求只同步执行不可变程序；支持 `$path/$query/$header/$cookie/$req/$context`，
   编译失败保留上一版配置，通用 Java 脚本兼容不属于本次迁移范围；
 - Java golden fixtures 已覆盖未知字段、重复字段、null、标量转型和主要配置字段；
-- 已实现 owner-loop Nacos 配置图：项目列表驱动逐项目订阅增删，空/同 version/非法
-  更新保留当前路由，列表移除卸载项目，shutdown 等待全部 listener 关闭；
+- 已实现 owner-loop Nacos 配置图：项目列表驱动逐项目订阅增删；首次项目列表/route
+  缺失、为空或非法时 fail closed，首次完整原子快照成功后，空/同 version/非法热更新
+  保留当前路由，列表移除卸载项目，shutdown 等待全部 listener 关闭；
 - 已实现独立 TLS 证书快照 watcher：从 leaf DNS SAN 编译 exact/单层 wildcard 索引，
   完整校验候选后原子切换，非法或空候选保留旧快照；ClientHello 热路径不分配、不加锁；
 - 已实现 production gray 配置 codec、失败保旧的原子规则快照，以及 CIDR/ratio 对
@@ -70,16 +71,18 @@ connection pool，以及 Nacos、CAT、Prometheus 组件。迁移不要求这些
 - 已建立兼容边界、详细配置/请求契约和分阶段验收清单；
 - 已实现 `AccessServerRuntime`：启动 Nacos client/config/naming，建立 project/gray
   watcher 和 NamingService selector，在每个 HTTP worker 初始化 DNS resolver 与本地
-  connection pool，并在收到项目列表首值后才绑定 listener；
+  connection pool；首次 route/TLS 快照完整有效后绑定 listener，以实际端口注册 Nacos，
+  等待实例状态成为 `Registered` 后才启动 serve；
 - `AccessServer` 已收敛为 data-plane façade：`AccessWorkerResources` 独占 request handler、
   DNS、connection pool、worker metrics 和 CAT detach 生命周期，`AccessMetricsEndpoint`
   独占 metrics/activation listener；façade 只编排 initialize、bind、serve 和异步 shutdown；
 - `main` 已装配 SIGINT/SIGTERM、accept loop、HTTP worker group、CAT sender loop、
-  Nacos owner loop 和逆序关闭；关闭顺序为 metrics/业务 listener 与 active exchange、
-  指标采集和 CAT worker 上下文、connection pool/DNS、CAT client、配置和服务订阅、
-  NamingService、ConfigService、NacosClient；
-- 已通过真实 rnacos 验证启动、项目/路由首值、version 热更新和 SIGTERM 退出，并通过
-  loopback listener 测试验证 HTTP worker 资源关闭；
+  Nacos owner loop 和逆序关闭；关闭时先撤销实例注册，再关闭 metrics/业务 listener 与
+  active exchange、指标采集和 CAT worker 上下文、connection pool/DNS、CAT client、配置和
+  服务订阅、NamingService、ConfigService、NacosClient；
+- 已通过真实 rnacos 验证既有启动、项目/路由首值、version 热更新和 SIGTERM 退出，并通过
+  loopback listener 测试验证 HTTP worker 资源关闭；新增的 `Registered` 启动门禁已有确定性
+  NamingService fake 覆盖，尚需重新执行真实 rnacos 互操作门禁，不能据此声称生产激活；
 - 已实现 Java 测试环境 Host cluster 入口规则：`api_gray.example.com` 以
   `api.example.com` 路由，`gray` 作为请求 cluster，并向上游传递
   `ploto-origin-host`；无 Host cluster 时读取 `HI-TRACE-CLUSTER`；
@@ -316,10 +319,11 @@ python3 native/access-server/scripts/sync_test_nacos.py \
 `corpus_sha256`。若项目列表引用了不存在的 route，该 dataId 保持 rnacos `NotFound` 状态，并记录
 在 `missingRoutes` 中；这样的不完整 corpus 不能通过最终门禁。
 
-listener 只在 Nacos client/config/naming、project/gray watcher、项目列表首值，以及 TLS 开启时
-首个有效证书快照全部就绪后开放；若项目列表或 TLS 快照不存在，服务会等待到
-`ACCESS_SERVER_INITIAL_CONFIG_TIMEOUT_MILLIS` 后失败退出。某个项目的 route 配置尚未
-到达或不可用时不会开放对应 Host/Path，请求仍按现有稳定错误结果 fail closed。
+首次项目列表和每个引用 route 必须存在、非空且通过完整编译/跨项目校验，TLS 开启时证书快照也
+必须有效；确定性缺失或非法候选立即失败，尚未到达的订阅最多等待
+`ACCESS_SERVER_INITIAL_CONFIG_TIMEOUT_MILLIS`。门禁成功后先绑定 listener，再向 Nacos 注册所选
+业务 address:port；只有注册状态成为 `Registered` 才开始 accept/serve。运行期非法候选只记录
+拒绝证据并保留 last-known-good 快照，不撤销注册或停止监听。
 
 ## 目录
 

@@ -76,6 +76,7 @@ struct FakeResourceLifecycle {
 };
 
 enum class ProjectListReplay : std::uint8_t {
+    Valid,
     NotFound,
     Closed,
 };
@@ -182,12 +183,27 @@ public:
                 on_notify(context, fiber::nacos::SubscriptionResult<fiber::nacos::ConfigData>{
                                            .kind = fiber::nacos::ResultKind::Closed,
                                    });
-            } else {
+            } else if (project_list_replay_ == ProjectListReplay::NotFound) {
                 on_notify(context, fiber::nacos::SubscriptionResult<fiber::nacos::ConfigData>{
                                            .kind = fiber::nacos::ResultKind::Success,
                                            .data = fiber::tests::make_config_data(fiber::nacos::ConfigState::NotFound),
                                    });
+            } else {
+                on_notify(context, fiber::nacos::SubscriptionResult<fiber::nacos::ConfigData>{
+                                           .kind = fiber::nacos::ResultKind::Success,
+                                           .data = fiber::tests::make_config_data(fiber::nacos::ConfigState::Present,
+                                                                                  "projects-md5", "demo"),
+                                   });
             }
+        } else if (data_id == "routes.demo") {
+            on_notify(
+                    context,
+                    fiber::nacos::SubscriptionResult<fiber::nacos::ConfigData>{
+                            .kind = fiber::nacos::ResultKind::Success,
+                            .data = fiber::tests::make_config_data(
+                                    fiber::nacos::ConfigState::Present, "route-md5",
+                                    R"({"version":1,"host":{"demo.example.com":{}},"routes":[{"path":"/","type":"RESPONSE","status":200,"body":{"type":"TEXT","content":"ok"}}]})"),
+                    });
         }
         return fiber::nacos::Subscription<fiber::nacos::ConfigData>(node, &close_subscription, &subscription_closed);
     }
@@ -212,7 +228,7 @@ private:
     LifecycleEvents *events_ = nullptr;
     bool fail_start_ = false;
     std::string failed_subscription_;
-    ProjectListReplay project_list_replay_ = ProjectListReplay::NotFound;
+    ProjectListReplay project_list_replay_ = ProjectListReplay::Valid;
     bool tls_closed_replay_ = false;
     fiber::async::Watch<fiber::nacos::ConfigServiceStatus> status_{fiber::nacos::ConfigServiceStatus{}};
     std::optional<fiber::async::Watch<fiber::nacos::ConfigServiceStatus>::Publisher> status_publisher_;
@@ -354,7 +370,7 @@ TEST_P(AccessControlPlaneSupervisorFailureTest, RollsBackOnlyAttemptedResourcesI
             : test.point == FailurePoint::TlsWatcher    ? "tls"
             : test.point == FailurePoint::AccessWatcher ? "projects"
                                                         : "",
-            test.point == FailurePoint::InitialReadiness ? ProjectListReplay::Closed : ProjectListReplay::NotFound,
+            test.point == FailurePoint::InitialReadiness ? ProjectListReplay::Closed : ProjectListReplay::Valid,
             test.point == FailurePoint::SynchronousTlsClosedReplay);
     auto naming_service = std::make_unique<FakeNamingService>(events, test.point == FailurePoint::NamingService);
 
@@ -392,7 +408,11 @@ TEST_P(AccessControlPlaneSupervisorFailureTest, RollsBackOnlyAttemptedResourcesI
 
         fiber::async::spawn(coordinator_loop, [&]() -> fiber::async::DetachedTask {
             auto started = co_await supervisor.start();
-            EXPECT_EQ(started.has_value(), !test.error.has_value());
+            EXPECT_EQ(started.has_value(), !test.error.has_value())
+                    << (started ? std::string{}
+                                : std::string(fiber::access_server::access_server_runtime_stage_name(
+                                          started.error().code)) +
+                                          ": " + started.error().message);
             if (!started && test.error) {
                 EXPECT_EQ(started.error().code, *test.error);
             }
@@ -451,8 +471,9 @@ INSTANTIATE_TEST_SUITE_P(
         testing::Values(
                 FailureCase{
                         .expected_events = {"cat.start", "nacos.start", "config.start", "naming.start", "gray.start",
-                                            "tls.start", "projects.start", "projects.stop", "tls.stop", "gray.stop",
-                                            "naming.stop", "config.stop", "nacos.stop", "cat.stop"},
+                                            "tls.start", "projects.start", "routes.demo.start", "projects.stop",
+                                            "routes.demo.stop", "tls.stop", "gray.stop", "naming.stop", "config.stop",
+                                            "nacos.stop", "cat.stop"},
                 },
                 FailureCase{
                         .point = FailurePoint::CatClient,
