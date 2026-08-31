@@ -58,6 +58,11 @@ constexpr std::string_view kRouteGroup = "ACCESS_SERVER_ROUTE_GROUP";
 constexpr std::string_view kGrayDataId = "ACCESS_SERVER_GRAY_DATA_ID";
 constexpr std::string_view kNamingGroup = "ACCESS_SERVER_NAMING_GROUP";
 constexpr std::string_view kZone = "ACCESS_SERVER_ZONE";
+constexpr std::string_view kCluster = "ACCESS_SERVER_CLUSTER";
+constexpr std::string_view kServiceName = "ACCESS_SERVER_SERVICE_NAME";
+constexpr std::string_view kAdvertiseAddress = "ACCESS_SERVER_ADVERTISE_ADDRESS";
+constexpr std::string_view kRegistrationListener = "ACCESS_SERVER_REGISTRATION_LISTENER";
+constexpr std::string_view kRegistrationTimeout = "ACCESS_SERVER_REGISTRATION_TIMEOUT_MILLIS";
 constexpr std::string_view kNacosServers = "NACOS_SERVER_ADDRESSES";
 constexpr std::string_view kNacosHttpPort = "NACOS_HTTP_PORT";
 constexpr std::string_view kNacosGrpcPort = "NACOS_GRPC_PORT";
@@ -425,7 +430,9 @@ AccessServerConfig::AccessServerConfig(
         std::optional<cat::CatClientConfig> cat_config, nacos::NacosClientConfig nacos_config,
         AccessConfigWatcherOptions watcher_options, GrayConfigWatcherOptions gray_watcher_options,
         TlsCertificateWatcherOptions tls_certificate_watcher_options,
-        AccessServiceDiscoveryOptions service_discovery_options) noexcept :
+        AccessServiceDiscoveryOptions service_discovery_options,
+        AccessInstanceRegistrationOptions instance_registration_options,
+        AccessRegistrationListener registration_listener) noexcept :
     tls_listen_address_(std::move(tls_listen_address)), tls_http_server_options_(std::move(tls_http_server_options)),
     plain_listen_enabled_(plain_listen_enabled), plain_listen_address_(std::move(plain_listen_address)),
     plain_http_server_options_(std::move(plain_http_server_options)),
@@ -441,7 +448,9 @@ AccessServerConfig::AccessServerConfig(
     nacos_config_(std::move(nacos_config)), watcher_options_(std::move(watcher_options)),
     gray_watcher_options_(std::move(gray_watcher_options)),
     tls_certificate_watcher_options_(std::move(tls_certificate_watcher_options)),
-    service_discovery_options_(std::move(service_discovery_options)) {}
+    service_discovery_options_(std::move(service_discovery_options)),
+    instance_registration_options_(std::move(instance_registration_options)),
+    registration_listener_(registration_listener) {}
 
 std::expected<AccessServerConfig, AccessServerConfigError> AccessServerConfig::load_from_file(std::string_view path) {
     std::ifstream input(std::string(path), std::ios::binary);
@@ -502,6 +511,10 @@ AccessServerConfig::load_from_string(std::string_view input) {
     GrayConfigWatcherOptions gray_options;
     TlsCertificateWatcherOptions tls_certificate_options;
     AccessServiceDiscoveryOptions service_discovery_options;
+    AccessInstanceRegistrationOptions instance_registration_options;
+    std::string registration_cluster_component;
+    std::optional<AccessRegistrationListener> registration_listener;
+    std::uint64_t registration_timeout_millis = 10000;
 
     for (const Entry &entry: *entries) {
         const std::string_view value = entry.value;
@@ -743,8 +756,35 @@ AccessServerConfig::load_from_string(std::string_view input) {
         } else if (entry.key == kNamingGroup) {
             service_discovery_options.group = entry.value;
             gray_options.group = entry.value;
+            instance_registration_options.group = entry.value;
         } else if (entry.key == kZone) {
             service_discovery_options.zone = entry.value;
+        } else if (entry.key == kCluster) {
+            registration_cluster_component = entry.value;
+        } else if (entry.key == kServiceName) {
+            instance_registration_options.service_name = entry.value;
+        } else if (entry.key == kAdvertiseAddress) {
+            net::IpAddress address;
+            if (!net::IpAddress::parse(value, address) || address.is_unspecified() || address.is_multicast()) {
+                return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, entry.line, entry.key,
+                                             "expected a concrete non-multicast IP literal"));
+            }
+            instance_registration_options.advertise_address = address;
+        } else if (entry.key == kRegistrationListener) {
+            if (value == "plain") {
+                registration_listener = AccessRegistrationListener::Plain;
+            } else if (value == "tls") {
+                registration_listener = AccessRegistrationListener::Tls;
+            } else {
+                return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, entry.line, entry.key,
+                                             "expected plain or tls"));
+            }
+        } else if (entry.key == kRegistrationTimeout) {
+            if (!parse_unsigned(value, registration_timeout_millis) || registration_timeout_millis == 0 ||
+                registration_timeout_millis > 60000) {
+                return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, entry.line, entry.key,
+                                             "expected milliseconds in range 1..60000"));
+            }
         } else if (entry.key == kNacosServers) {
             auto parsed = parse_nacos_servers(value, entry.line);
             if (!parsed) {
@@ -812,6 +852,32 @@ AccessServerConfig::load_from_string(std::string_view input) {
         return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, 0, kTlsEnabled,
                                      "at least one of the TLS or plaintext HTTP listener must be enabled"));
     }
+    const AccessRegistrationListener selected_registration_listener = registration_listener.value_or(
+            plain_listen_enabled ? AccessRegistrationListener::Plain : AccessRegistrationListener::Tls);
+    if (selected_registration_listener == AccessRegistrationListener::Plain && !plain_listen_enabled) {
+        return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, 0, kRegistrationListener,
+                                     "plain registration listener requires plaintext HTTP to be enabled"));
+    }
+    if (selected_registration_listener == AccessRegistrationListener::Tls && !tls_enabled) {
+        return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, 0, kRegistrationListener,
+                                     "TLS registration listener requires TLS HTTP to be enabled"));
+    }
+    if (instance_registration_options.service_name.empty() ||
+        instance_registration_options.service_name.size() > 1024) {
+        return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, 0, kServiceName,
+                                     "service name must contain 1..1024 bytes"));
+    }
+    if (registration_cluster_component.empty()) {
+        instance_registration_options.cluster_name =
+                service_discovery_options.zone.empty() ? "DEFAULT" : service_discovery_options.zone;
+    } else if (service_discovery_options.zone.empty()) {
+        instance_registration_options.cluster_name = std::move(registration_cluster_component);
+    } else {
+        instance_registration_options.cluster_name = service_discovery_options.zone;
+        instance_registration_options.cluster_name.push_back('-');
+        instance_registration_options.cluster_name.append(registration_cluster_component);
+    }
+    instance_registration_options.timeout = std::chrono::milliseconds(registration_timeout_millis);
     if (tls_enabled && plain_listen_enabled && conflicting_endpoints(plain_address, tls_address)) {
         return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, 0, kPlainListenPort,
                                      "plaintext and TLS listeners must use distinct address:port"));
@@ -908,7 +974,8 @@ AccessServerConfig::load_from_string(std::string_view input) {
             std::chrono::milliseconds(upstream_connect_timeout_millis), happy_eyeballs_policy, dns_mode,
             std::move(dns_resolver_config_path), std::move(dns_override_nameservers), std::move(cat_config),
             std::move(*nacos_config), std::move(watcher_options), std::move(gray_options),
-            std::move(tls_certificate_options), std::move(service_discovery_options));
+            std::move(tls_certificate_options), std::move(service_discovery_options),
+            std::move(instance_registration_options), selected_registration_listener);
 }
 
 std::expected<AccessDnsServiceOptions, AccessServerConfigError> AccessServerConfig::resolve_dns_options() const {

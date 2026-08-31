@@ -58,6 +58,11 @@ struct ConfigBatchUpdateResult {
 
 using ConfigBatchUpdateOutcome = std::expected<ConfigBatchUpdateResult, AccessConfigError>;
 
+enum class ConfigBatchCommitMode : std::uint8_t {
+    IsolateRejectedProjects,
+    RequireAllProjects,
+};
+
 class PreparedProjectUpdate;
 
 // Proof that a prepared Project candidate completed every required readiness
@@ -144,10 +149,13 @@ public:
                                                                 std::optional<ProjectRouteSnapshot> project_snapshot);
     [[nodiscard]] ConfigUpdateOutcome apply(std::string_view project, const std::optional<ProjectConfig> &config);
     [[nodiscard]] ConfigUpdateOutcome commit(ReadyProjectUpdate ready);
-    // Applies one deterministic project-name-ordered transaction. A candidate
-    // rejected by cross-project validation retains that project's old record;
-    // accepted siblings are assembled and atomically published once.
-    [[nodiscard]] ConfigBatchUpdateOutcome commit_batch(std::vector<ReadyProjectUpdate> ready);
+    // Applies one deterministic project-name-ordered transaction. By default,
+    // a candidate rejected by cross-project validation retains that project's
+    // old record while accepted siblings publish once. RequireAllProjects
+    // rejects the complete transaction, including an empty global snapshot.
+    [[nodiscard]] ConfigBatchUpdateOutcome
+    commit_batch(std::vector<ReadyProjectUpdate> ready,
+                 ConfigBatchCommitMode mode = ConfigBatchCommitMode::IsolateRejectedProjects);
     [[nodiscard]] ConfigUpdateOutcome remove_project(std::string_view project);
     void clear() noexcept;
     void set_tls_client_identity_resolver(UpstreamTlsClientIdentityResolver resolver) noexcept {

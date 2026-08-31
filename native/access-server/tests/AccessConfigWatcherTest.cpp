@@ -439,7 +439,7 @@ TEST(AccessConfigWatcherTest, ReconcilesProjectsAndRetainsLastValidSnapshots) {
         readiness_snapshot = readiness.current();
         EXPECT_TRUE(readiness_snapshot.value);
         if (readiness_snapshot.value) {
-            EXPECT_EQ(readiness_snapshot.value->state, fiber::access_server::AccessConfigReadinessState::Unavailable);
+            EXPECT_EQ(readiness_snapshot.value->state, fiber::access_server::AccessConfigReadinessState::Ready);
         }
         EXPECT_TRUE(watcher.last_failure());
         if (watcher.last_failure()) {
@@ -582,6 +582,75 @@ TEST(AccessConfigWatcherTest, ReconcilesProjectsAndRetainsLastValidSnapshots) {
     EXPECT_EQ(metrics.find("example.com"), std::string::npos);
 }
 
+TEST(AccessConfigWatcherTest, RejectsMissingInitialProjectListWithoutPublishingSnapshot) {
+    fiber::event::EventLoop loop;
+    fiber::event::EventLoopGroup compiler_group(1);
+    fiber::access_server::AccessConfigCompiler compiler(compiler_group.at(0));
+    FakeConfigService service;
+    fiber::access_server::RouteConfigStore store;
+    fiber::access_server::AccessConfigWatcher watcher(loop, compiler, service, store);
+    bool completed = false;
+
+    fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
+        auto readiness = watcher.subscribe_readiness();
+        EXPECT_TRUE(watcher.start());
+        service.push_not_found(fiber::access_server::kProjectListDataId);
+        auto snapshot = readiness.current();
+        EXPECT_TRUE(snapshot.value);
+        if (snapshot.value) {
+            EXPECT_EQ(snapshot.value->state, fiber::access_server::AccessConfigReadinessState::Unavailable);
+            EXPECT_EQ(snapshot.value->io_error, fiber::common::IoErr::NotFound);
+        }
+        EXPECT_TRUE(store.pin()->projects().empty());
+        EXPECT_TRUE(watcher.last_failure());
+        if (watcher.last_failure()) {
+            EXPECT_EQ(watcher.last_failure()->data_id, fiber::access_server::kProjectListDataId);
+            EXPECT_EQ(watcher.last_failure()->error.field, "project_list");
+        }
+        co_await watcher.shutdown();
+        completed = true;
+        loop.stop();
+    });
+    loop.run();
+    EXPECT_TRUE(completed);
+}
+
+TEST(AccessConfigWatcherTest, RejectsInvalidInitialRouteWithoutWaitingForOtherProjects) {
+    fiber::event::EventLoop loop;
+    fiber::event::EventLoopGroup compiler_group(1);
+    fiber::access_server::AccessConfigCompiler compiler(compiler_group.at(0));
+    FakeConfigService service;
+    fiber::access_server::RouteConfigStore store;
+    fiber::access_server::AccessConfigWatcher watcher(loop, compiler, service, store);
+    bool completed = false;
+
+    compiler_group.start();
+    fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
+        auto readiness = watcher.subscribe_readiness();
+        auto snapshot = readiness.current();
+        EXPECT_TRUE(watcher.start());
+        service.push(fiber::access_server::kProjectListDataId, "invalid;never-arrives");
+        service.push("ploto.unified-access.route.invalid", "{", "invalid");
+
+        co_await wait_for_readiness(readiness, snapshot, fiber::access_server::AccessConfigReadinessState::Unavailable);
+        EXPECT_TRUE(store.pin()->projects().empty());
+        EXPECT_EQ(watcher.failed_updates(), 1U);
+        EXPECT_TRUE(watcher.last_failure());
+        if (watcher.last_failure()) {
+            EXPECT_EQ(watcher.last_failure()->data_id, "ploto.unified-access.route.invalid");
+            EXPECT_EQ(watcher.last_failure()->stage, fiber::access_server::AccessConfigWatcherFailureStage::Decode);
+        }
+
+        co_await watcher.shutdown();
+        completed = true;
+        loop.stop();
+    });
+    loop.run();
+    compiler_group.stop();
+    compiler_group.join();
+    EXPECT_TRUE(completed);
+}
+
 TEST(AccessConfigWatcherTest, RetriesLatestCandidateAfterTlsIdentityPublication) {
     constexpr std::string_view identity_id = "123e4567-e89b-42d3-a456-426614174000";
     fiber::event::EventLoop loop;
@@ -601,7 +670,7 @@ TEST(AccessConfigWatcherTest, RetriesLatestCandidateAfterTlsIdentityPublication)
         EXPECT_TRUE(watcher.start());
         service.push(fiber::access_server::kProjectListDataId, "secure");
         service.push("ploto.unified-access.route.secure", mtls_route_config(1, identity_id), "route-v1");
-        co_await wait_for_readiness(readiness, snapshot, fiber::access_server::AccessConfigReadinessState::Ready);
+        co_await wait_for_readiness(readiness, snapshot, fiber::access_server::AccessConfigReadinessState::Unavailable);
         EXPECT_FALSE(store.current_version("secure"));
         auto rejected = watcher.project_status("secure");
         EXPECT_TRUE(rejected);
@@ -647,7 +716,7 @@ TEST(AccessConfigWatcherTest, RetriesLatestCandidateAfterTlsIdentityPublication)
     EXPECT_TRUE(completed);
 }
 
-TEST(AccessConfigWatcherTest, InitialBatchIsolatesHostConflictsAndPublishesOnce) {
+TEST(AccessConfigWatcherTest, InitialBatchRejectsHostConflictsWithoutPublishingPartialSnapshot) {
     fiber::event::EventLoop loop;
     fiber::event::EventLoopGroup compiler_group(1);
     fiber::access_server::AccessConfigCompiler compiler(compiler_group.at(0));
@@ -674,18 +743,12 @@ TEST(AccessConfigWatcherTest, InitialBatchIsolatesHostConflictsAndPublishesOnce)
         service.push("ploto.unified-access.route.valid", route_config(1, "valid.example.com", "valid"));
         service.push("ploto.unified-access.route.left", route_config(1, "shared.EXAMPLE.com", "left"));
 
-        co_await wait_for_readiness(readiness, snapshot, fiber::access_server::AccessConfigReadinessState::Ready);
+        co_await wait_for_readiness(readiness, snapshot, fiber::access_server::AccessConfigReadinessState::Unavailable);
 
-        EXPECT_EQ(observer_updates, 1U);
-        EXPECT_EQ(watcher.successful_updates(), 2U);
-        EXPECT_EQ(watcher.failed_updates(), 1U);
-        EXPECT_EQ(store.pin()->projects().size(), 2U);
-        const auto shared = store.pin()->match_host("shared.example.com");
-        EXPECT_TRUE(shared);
-        if (shared) {
-            EXPECT_EQ(shared.project->project(), "left");
-        }
-        EXPECT_TRUE(store.pin()->match_host("valid.example.com"));
+        EXPECT_EQ(observer_updates, 0U);
+        EXPECT_EQ(watcher.successful_updates(), 0U);
+        EXPECT_EQ(watcher.failed_updates(), 3U);
+        EXPECT_TRUE(store.pin()->projects().empty());
         const auto left = watcher.project_status("left");
         const auto right = watcher.project_status("right");
         const auto valid = watcher.project_status("valid");
@@ -693,10 +756,10 @@ TEST(AccessConfigWatcherTest, InitialBatchIsolatesHostConflictsAndPublishesOnce)
         EXPECT_TRUE(right);
         EXPECT_TRUE(valid);
         if (left) {
-            EXPECT_EQ(left->config_state, fiber::access_server::AccessProjectConfigState::Accepted);
+            EXPECT_EQ(left->config_state, fiber::access_server::AccessProjectConfigState::Rejected);
         }
         if (valid) {
-            EXPECT_EQ(valid->config_state, fiber::access_server::AccessProjectConfigState::Accepted);
+            EXPECT_EQ(valid->config_state, fiber::access_server::AccessProjectConfigState::Rejected);
         }
         if (right) {
             EXPECT_EQ(right->config_state, fiber::access_server::AccessProjectConfigState::Rejected);
@@ -712,6 +775,50 @@ TEST(AccessConfigWatcherTest, InitialBatchIsolatesHostConflictsAndPublishesOnce)
         loop.stop();
     });
 
+    loop.run();
+    compiler_group.stop();
+    compiler_group.join();
+    EXPECT_TRUE(completed);
+}
+
+TEST(AccessConfigWatcherTest, InitialBatchRejectsUnloadOnlySnapshotWithoutPublishing) {
+    fiber::event::EventLoop loop;
+    fiber::event::EventLoopGroup compiler_group(1);
+    fiber::access_server::AccessConfigCompiler compiler(compiler_group.at(0));
+    FakeConfigService service;
+    fiber::access_server::RouteConfigStore store;
+    std::size_t observer_updates = 0;
+    fiber::access_server::RouteSnapshotObserver observer{
+            .context = &observer_updates,
+            .on_update =
+                    [](void *context, std::shared_ptr<const fiber::access_server::AccessRouteSnapshot>) noexcept {
+                        ++*static_cast<std::size_t *>(context);
+                    },
+    };
+    fiber::access_server::AccessConfigWatcher watcher(loop, compiler, service, store, {}, observer);
+    bool completed = false;
+
+    compiler_group.start();
+    fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
+        auto readiness = watcher.subscribe_readiness();
+        auto snapshot = readiness.current();
+        EXPECT_TRUE(watcher.start());
+        service.push(fiber::access_server::kProjectListDataId, "empty");
+        service.push("ploto.unified-access.route.empty", R"({"version":1,"host":{},"routes":[]})", "empty");
+
+        co_await wait_for_readiness(readiness, snapshot, fiber::access_server::AccessConfigReadinessState::Unavailable);
+        EXPECT_EQ(observer_updates, 0U);
+        EXPECT_TRUE(store.pin()->projects().empty());
+        EXPECT_EQ(watcher.failed_updates(), 1U);
+        EXPECT_TRUE(watcher.last_failure());
+        if (watcher.last_failure()) {
+            EXPECT_EQ(watcher.last_failure()->error.field, "host");
+        }
+
+        co_await watcher.shutdown();
+        completed = true;
+        loop.stop();
+    });
     loop.run();
     compiler_group.stop();
     compiler_group.join();
@@ -1071,7 +1178,7 @@ TEST(AccessConfigWatcherTest, RetriesTransientProjectSubscriptionsAndReportsType
                                        .io_error = fiber::common::IoErr::NotConnected,
                                        .message = "transient subscription failure",
                                });
-    service.prime("ploto.unified-access.route.b", "{", "bad-md5");
+    service.prime("ploto.unified-access.route.b", route_config(1, "b.example.com", "billing"), "initial-md5");
     fiber::access_server::RouteConfigStore store;
     fiber::access_server::AccessConfigWatcherOptions options;
     options.subscription_retry_initial_delay = 0ms;
@@ -1112,26 +1219,26 @@ TEST(AccessConfigWatcherTest, RetriesTransientProjectSubscriptionsAndReportsType
         if (snapshot.value) {
             EXPECT_EQ(snapshot.value->state, fiber::access_server::AccessConfigReadinessState::Ready);
             EXPECT_EQ(snapshot.value->synchronized_projects, 1u);
-            EXPECT_EQ(snapshot.value->rejected_projects, 1u);
+            EXPECT_EQ(snapshot.value->rejected_projects, 0u);
         }
         auto status = watcher.project_status("b");
         EXPECT_TRUE(status);
         if (status) {
             EXPECT_EQ(status->subscription_state, fiber::access_server::AccessProjectSubscriptionState::Subscribed);
-            EXPECT_EQ(status->config_state, fiber::access_server::AccessProjectConfigState::Rejected);
+            EXPECT_EQ(status->config_state, fiber::access_server::AccessProjectConfigState::Accepted);
             EXPECT_TRUE(status->first_value_received);
             EXPECT_TRUE(status->synchronized);
-            EXPECT_EQ(status->observed_md5, "bad-md5");
+            EXPECT_EQ(status->observed_md5, "initial-md5");
         }
 
-        service.push("ploto.unified-access.route.b", route_config(1, "b.example.com", "billing"), "good-md5");
+        service.push("ploto.unified-access.route.b", route_config(2, "b2.example.com", "billing"), "good-md5");
         co_await wait_for_readiness(readiness, snapshot, fiber::access_server::AccessConfigReadinessState::Ready);
-        EXPECT_TRUE(store.pin()->match_host("b.example.com"));
+        EXPECT_TRUE(store.pin()->match_host("b2.example.com"));
         status = watcher.project_status("b");
         EXPECT_TRUE(status);
         if (status) {
             EXPECT_EQ(status->config_state, fiber::access_server::AccessProjectConfigState::Accepted);
-            EXPECT_EQ(status->observed_version, 1);
+            EXPECT_EQ(status->observed_version, 2);
             EXPECT_GT(status->published_generation, 0u);
         }
         snapshot = readiness.current();

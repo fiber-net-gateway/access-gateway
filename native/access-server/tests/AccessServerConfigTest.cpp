@@ -71,6 +71,34 @@ TEST(AccessServerConfigTest, LoadsJavaServerDefaultsAndNacosSettings) {
     EXPECT_EQ(config->watcher_options().project_route_group, kProjectRouteGroup);
     EXPECT_EQ(config->gray_watcher_options().data_id, kGrayConfigDataId);
     EXPECT_EQ(config->service_discovery_options().group, kDefaultNacosGroup);
+    EXPECT_EQ(config->instance_registration_options().service_name, "unified-access-server");
+    EXPECT_EQ(config->instance_registration_options().group, kDefaultNacosGroup);
+    EXPECT_EQ(config->instance_registration_options().cluster_name, "DEFAULT");
+    EXPECT_EQ(config->instance_registration_options().timeout, std::chrono::seconds(10));
+    EXPECT_FALSE(config->instance_registration_options().advertise_address);
+    EXPECT_EQ(config->registration_listener(), AccessRegistrationListener::Plain);
+}
+
+TEST(AccessServerConfigTest, LoadsBoundedNacosInstanceRegistrationSettings) {
+    auto config = AccessServerConfig::load_from_string(R"(
+        NACOS_SERVER_ADDRESSES=127.0.0.1
+        ACCESS_SERVER_NAMING_GROUP=ACCESS-SERVER
+        ACCESS_SERVER_ZONE=prod
+        ACCESS_SERVER_CLUSTER=blue
+        ACCESS_SERVER_SERVICE_NAME=unified-access-server-v2
+        ACCESS_SERVER_ADVERTISE_ADDRESS=192.0.2.10
+        ACCESS_SERVER_REGISTRATION_LISTENER=tls
+        ACCESS_SERVER_REGISTRATION_TIMEOUT_MILLIS=3210
+    )");
+    ASSERT_TRUE(config) << config.error().detail;
+    const AccessInstanceRegistrationOptions &registration = config->instance_registration_options();
+    EXPECT_EQ(registration.service_name, "unified-access-server-v2");
+    EXPECT_EQ(registration.group, "ACCESS-SERVER");
+    EXPECT_EQ(registration.cluster_name, "prod-blue");
+    ASSERT_TRUE(registration.advertise_address);
+    EXPECT_EQ(registration.advertise_address->to_string(), "192.0.2.10");
+    EXPECT_EQ(registration.timeout, std::chrono::milliseconds(3210));
+    EXPECT_EQ(config->registration_listener(), AccessRegistrationListener::Tls);
 }
 
 TEST(AccessServerConfigTest, LoadsBoundedDnsOverrideWithoutSystemFileIo) {
@@ -679,6 +707,12 @@ TEST(AccessServerConfigTest, RejectsListenerConfigurationErrors) {
                    "ACCESS_SERVER_METRICS_LISTEN_PORT");
     expect_invalid("ACCESS_SERVER_METRICS_LISTEN_ADDRESS=0.0.0.0\nACCESS_SERVER_METRICS_LISTEN_PORT=8443\n",
                    "ACCESS_SERVER_METRICS_LISTEN_PORT");
+    expect_invalid("ACCESS_SERVER_TLS_ENABLED=false\nACCESS_SERVER_REGISTRATION_LISTENER=tls\n",
+                   "ACCESS_SERVER_REGISTRATION_LISTENER");
+    expect_invalid("ACCESS_SERVER_PLAIN_LISTEN_ENABLED=false\nACCESS_SERVER_REGISTRATION_LISTENER=plain\n",
+                   "ACCESS_SERVER_REGISTRATION_LISTENER");
+    expect_invalid("ACCESS_SERVER_ADVERTISE_ADDRESS=0.0.0.0\n", "ACCESS_SERVER_ADVERTISE_ADDRESS");
+    expect_invalid("ACCESS_SERVER_REGISTRATION_TIMEOUT_MILLIS=0\n", "ACCESS_SERVER_REGISTRATION_TIMEOUT_MILLIS");
 
     auto bad_ip = AccessServerConfig::load_from_string("NACOS_SERVER_ADDRESSES=127.0.0.1\n"
                                                        "ACCESS_SERVER_TLS_LISTEN_ADDRESS=not-an-ip\n");

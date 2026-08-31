@@ -7,10 +7,29 @@
 #include <string>
 #include <utility>
 
+#include <cerrno>
+#include <sys/socket.h>
+
 #include <fiber/async/Spawn.h>
 #include <fiber/common/Assert.h>
 
 namespace fiber::access_server {
+namespace {
+
+common::IoResult<net::SocketAddress> bound_address(int fd) noexcept {
+    sockaddr_storage address{};
+    socklen_t length = sizeof(address);
+    if (::getsockname(fd, reinterpret_cast<sockaddr *>(&address), &length) != 0) {
+        return std::unexpected(common::io_err_from_errno(errno));
+    }
+    net::SocketAddress result;
+    if (!net::SocketAddress::from_sockaddr(reinterpret_cast<const sockaddr *>(&address), length, result)) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    return result;
+}
+
+} // namespace
 
 AccessDataPlaneService::AccessDataPlaneService(event::EventLoop &accept_loop, event::EventLoopGroup &http_workers,
                                                const RouteConfigStore &route_store, ProxyClusterMatcher gray_matcher,
@@ -26,14 +45,20 @@ AccessDataPlaneService::~AccessDataPlaneService() noexcept = default;
 AccessDataPlaneLifecycle AccessDataPlaneService::lifecycle() noexcept {
     return AccessDataPlaneLifecycle{
             .context = this,
-            .start = &start_lifecycle,
+            .bind = &bind_lifecycle,
+            .serve = &serve_lifecycle,
             .shutdown = &shutdown_lifecycle,
     };
 }
 
+async::Task<std::expected<AccessBoundEndpoint, AccessServerRuntimeError>>
+AccessDataPlaneService::bind_lifecycle(void *context, AccessControlPlaneReady ready) noexcept {
+    return static_cast<AccessDataPlaneService *>(context)->bind(std::move(ready));
+}
+
 async::Task<std::expected<void, AccessServerRuntimeError>>
-AccessDataPlaneService::start_lifecycle(void *context, AccessControlPlaneReady ready) noexcept {
-    return static_cast<AccessDataPlaneService *>(context)->start(std::move(ready));
+AccessDataPlaneService::serve_lifecycle(void *context) noexcept {
+    return static_cast<AccessDataPlaneService *>(context)->serve();
 }
 
 async::Task<void> AccessDataPlaneService::shutdown_lifecycle(void *context) noexcept {
@@ -42,6 +67,15 @@ async::Task<void> AccessDataPlaneService::shutdown_lifecycle(void *context) noex
 
 async::Task<std::expected<void, AccessServerRuntimeError>>
 AccessDataPlaneService::start(AccessControlPlaneReady ready) noexcept {
+    auto bound = co_await bind(std::move(ready));
+    if (!bound) {
+        co_return std::unexpected(std::move(bound.error()));
+    }
+    co_return co_await serve();
+}
+
+async::Task<std::expected<AccessBoundEndpoint, AccessServerRuntimeError>>
+AccessDataPlaneService::bind(AccessControlPlaneReady ready) noexcept {
     FIBER_ASSERT(accept_loop_->in_loop());
     FIBER_ASSERT(!server_);
     FIBER_ASSERT(!shutdown_complete_);
@@ -121,8 +155,30 @@ AccessDataPlaneService::start(AccessControlPlaneReady ready) noexcept {
                 make_access_server_runtime_io_error(AccessServerRuntimeErrorCode::BindMetrics, metrics_bound.error()));
     }
 
+    const bool use_tls = options_.registration_listener == AccessRegistrationListener::Tls;
+    const int registration_fd = use_tls ? server_->fd() : server_->plain_fd();
+    auto endpoint = bound_address(registration_fd);
+    if (!endpoint) {
+        co_await rollback_start(ready);
+        co_return std::unexpected(make_access_server_runtime_io_error(
+                AccessServerRuntimeErrorCode::ResolveBoundListener, endpoint.error(),
+                "failed to resolve the bound registration listener"));
+    }
+    bound_ = true;
+    co_return AccessBoundEndpoint{.address = *endpoint, .tls = use_tls};
+}
+
+async::Task<std::expected<void, AccessServerRuntimeError>> AccessDataPlaneService::serve() noexcept {
+    FIBER_ASSERT(accept_loop_->in_loop());
+    FIBER_ASSERT(bound_);
+    FIBER_ASSERT(server_);
+    if (serving_) {
+        co_return std::unexpected(make_access_server_runtime_io_error(
+                AccessServerRuntimeErrorCode::Serve, common::IoErr::Already, "data plane is already serving"));
+    }
     async::spawn([this]() { return server_->serve(); });
     async::spawn([this]() { return server_->serve_metrics(); });
+    serving_ = true;
     co_return std::expected<void, AccessServerRuntimeError>{};
 }
 
@@ -134,6 +190,8 @@ async::Task<void> AccessDataPlaneService::rollback_start(AccessControlPlaneReady
     if (server_) {
         co_await server_->shutdown_and_wait();
     }
+    bound_ = false;
+    serving_ = false;
     shutdown_complete_ = true;
 }
 
@@ -145,6 +203,8 @@ async::Task<void> AccessDataPlaneService::shutdown() noexcept {
     if (server_) {
         co_await server_->shutdown_and_wait();
     }
+    bound_ = false;
+    serving_ = false;
     shutdown_complete_ = true;
 }
 

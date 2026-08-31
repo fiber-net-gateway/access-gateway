@@ -6,6 +6,7 @@
 #include "AccessActivationEndpoint.h"
 #include "AccessConfigCompiler.h"
 #include "AccessConfigWatcher.h"
+#include "AccessInstanceRegistration.h"
 #include "AccessRuntimeCoordinator.h"
 #include "AccessServiceDiscovery.h"
 #include "GrayConfigWatcher.h"
@@ -65,6 +66,7 @@ struct AccessControlPlaneOptions {
     GrayConfigWatcherOptions gray_watcher;
     TlsCertificateWatcherOptions tls_certificate_watcher;
     AccessServiceDiscoveryOptions service_discovery;
+    AccessInstanceRegistrationOptions instance_registration;
     AccessProcessMetricsSources process_metrics;
     bool tls_enabled = false;
     bool quic_enabled = false;
@@ -80,6 +82,9 @@ public:
 
     [[nodiscard]] AccessControlPlaneLifecycle lifecycle() noexcept;
     [[nodiscard]] async::Task<std::expected<AccessControlPlaneReady, AccessServerRuntimeError>> start() noexcept;
+    [[nodiscard]] async::Task<std::expected<void, AccessServerRuntimeError>>
+    register_instance(AccessBoundEndpoint endpoint) noexcept;
+    [[nodiscard]] async::Task<void> deregister_instance() noexcept;
     [[nodiscard]] async::Task<void> shutdown() noexcept;
 
     [[nodiscard]] RouteConfigStore &route_store() noexcept { return route_store_; }
@@ -107,19 +112,30 @@ private:
         AccessServerRuntimeError error;
     };
 
+    struct InstanceRegistrationStatus {
+        bool success = false;
+        AccessServerRuntimeError error;
+    };
+
     [[nodiscard]] static async::Task<std::expected<AccessControlPlaneReady, AccessServerRuntimeError>>
     start_lifecycle(void *context) noexcept;
     [[nodiscard]] static async::Task<void> shutdown_lifecycle(void *context) noexcept;
+    [[nodiscard]] static async::Task<std::expected<void, AccessServerRuntimeError>>
+    register_instance_lifecycle(void *context, AccessBoundEndpoint endpoint) noexcept;
+    [[nodiscard]] static async::Task<void> deregister_instance_lifecycle(void *context) noexcept;
 
     [[nodiscard]] async::DetachedTask start_nacos_on_owner() noexcept;
     [[nodiscard]] async::DetachedTask start_cat_on_owner() noexcept;
     [[nodiscard]] async::DetachedTask shutdown_nacos_on_owner() noexcept;
     [[nodiscard]] async::DetachedTask shutdown_cat_on_owner() noexcept;
+    [[nodiscard]] async::DetachedTask register_instance_on_owner(AccessBoundEndpoint endpoint) noexcept;
+    [[nodiscard]] async::DetachedTask deregister_instance_on_owner() noexcept;
     [[nodiscard]] async::Task<void> stop_nacos() noexcept;
     [[nodiscard]] async::Task<void> stop_cat() noexcept;
-    [[nodiscard]] async::Task<std::expected<void, AccessServerRuntimeError>> wait_for_access_config() noexcept;
+    [[nodiscard]] async::Task<std::expected<void, AccessServerRuntimeError>>
+    wait_for_access_config(std::chrono::steady_clock::time_point deadline) noexcept;
     [[nodiscard]] async::Task<std::expected<AccessControlPlaneReady, AccessServerRuntimeError>>
-    wait_for_tls_certificate() noexcept;
+    wait_for_tls_certificate(std::chrono::steady_clock::time_point deadline) noexcept;
 
     event::EventLoop *coordinator_loop_ = nullptr;
     event::EventLoop *nacos_loop_ = nullptr;
@@ -129,6 +145,7 @@ private:
     std::unique_ptr<nacos::NacosClient> nacos_client_;
     std::unique_ptr<nacos::ConfigService> config_service_;
     std::unique_ptr<nacos::NamingService> naming_service_;
+    AccessInstanceRegistration instance_registration_;
     AccessControlResourceLifecycle cat_lifecycle_;
     AccessControlResourceLifecycle nacos_lifecycle_;
     AccessConfigCompiler config_compiler_;
@@ -144,10 +161,15 @@ private:
     TlsCertificateWatcher tls_certificate_watcher_;
     async::WaitGroup nacos_start_tasks_;
     async::WaitGroup cat_start_tasks_;
+    async::WaitGroup instance_registration_tasks_;
     async::Watch<NacosStartStatus> nacos_start_status_;
     std::optional<async::Watch<NacosStartStatus>::Publisher> nacos_start_publisher_;
     async::Watch<CatStartStatus> cat_start_status_;
     std::optional<async::Watch<CatStartStatus>::Publisher> cat_start_publisher_;
+    async::Watch<InstanceRegistrationStatus> instance_registration_status_;
+    std::optional<async::Watch<InstanceRegistrationStatus>::Publisher> instance_registration_publisher_;
+    async::Watch<bool> instance_deregistered_{false};
+    std::optional<async::Watch<bool>::Publisher> instance_deregistered_publisher_;
     async::Watch<bool> nacos_stopped_{false};
     std::optional<async::Watch<bool>::Publisher> nacos_stopped_publisher_;
     async::Watch<bool> cat_stopped_{false};
@@ -163,6 +185,8 @@ private:
     bool config_watcher_started_ = false;
     bool nacos_shutdown_spawned_ = false;
     bool cat_shutdown_spawned_ = false;
+    bool instance_registration_started_ = false;
+    bool instance_deregistration_spawned_ = false;
 };
 
 } // namespace fiber::access_server

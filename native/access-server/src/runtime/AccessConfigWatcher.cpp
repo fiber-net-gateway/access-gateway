@@ -260,6 +260,7 @@ std::expected<void, nacos::ConfigServiceError> AccessConfigWatcher::start() {
 
     state_ = AccessConfigWatcherState::Running;
     initial_batch_active_ = store_->pin()->projects().empty();
+    initial_snapshot_published_ = !initial_batch_active_;
     project_list_ = std::make_unique<ProjectListEntry>(*this);
     auto subscribed = project_list_->subscription.subscribe(*config_service_, options_.project_list_data_id,
                                                             options_.project_route_group, &project_list_notify,
@@ -366,6 +367,20 @@ void AccessConfigWatcher::apply_project_list(const nacos::ConfigData &data) {
     }
     project_list_observed_md5_ = std::string(data.md5);
     project_list_observed_at_unix_millis_ = access_activation_unix_millis(*loop_);
+    if (data.state == nacos::ConfigState::NotFound && !initial_snapshot_published_) {
+        project_list_candidate_status_ = AccessActivationCandidateStatus::Rejected;
+        report_failure(nullptr, AccessConfigWatcherFailureStage::Decode, options_.project_list_data_id,
+                       std::string(data.md5), common::IoErr::NotFound,
+                       AccessConfigError{
+                               .code = AccessConfigErrorCode::InvalidCombination,
+                               .field = "project_list",
+                               .message = "project list configuration was not found",
+                       });
+        project_list_failure_ = last_failure_;
+        unavailable_failure_ = project_list_failure_;
+        publish_readiness();
+        return;
+    }
     ProjectListResult parsed = data.state == nacos::ConfigState::NotFound
                                        ? ProjectListResult(std::vector<std::string>{})
                                        : parse_project_list(data.content);
@@ -374,6 +389,23 @@ void AccessConfigWatcher::apply_project_list(const nacos::ConfigData &data) {
         report_failure(nullptr, AccessConfigWatcherFailureStage::Decode, options_.project_list_data_id,
                        std::string(data.md5), common::IoErr::Invalid, std::move(parsed.error()));
         project_list_failure_ = last_failure_;
+        if (!initial_snapshot_published_) {
+            unavailable_failure_ = project_list_failure_;
+        }
+        publish_readiness();
+        return;
+    }
+    if (!initial_snapshot_published_ && parsed->empty()) {
+        project_list_candidate_status_ = AccessActivationCandidateStatus::Rejected;
+        report_failure(nullptr, AccessConfigWatcherFailureStage::Decode, options_.project_list_data_id,
+                       std::string(data.md5), common::IoErr::Invalid,
+                       AccessConfigError{
+                               .code = AccessConfigErrorCode::InvalidCombination,
+                               .field = "project_list",
+                               .message = "initial project list configuration is empty",
+                       });
+        project_list_failure_ = last_failure_;
+        unavailable_failure_ = project_list_failure_;
         publish_readiness();
         return;
     }
@@ -402,6 +434,21 @@ void AccessConfigWatcher::apply_project(const std::shared_ptr<ProjectEntry> &ent
     publish_readiness();
 
     if (data->state == nacos::ConfigState::NotFound || data->content.empty()) {
+        if (!initial_snapshot_published_) {
+            report_failure(entry, AccessConfigWatcherFailureStage::Decode,
+                           options_.project_route_data_id_prefix + entry->project, std::string(data->md5),
+                           data->state == nacos::ConfigState::NotFound ? common::IoErr::NotFound
+                                                                       : common::IoErr::Invalid,
+                           AccessConfigError{
+                                   .code = AccessConfigErrorCode::InvalidCombination,
+                                   .field = "route",
+                                   .message = data->state == nacos::ConfigState::NotFound
+                                                      ? "initial project route configuration was not found"
+                                                      : "initial project route configuration is empty",
+                           });
+            settle_project(entry, AccessProjectConfigState::Rejected);
+            return;
+        }
         auto ignored = store_->prepare(entry->project, std::nullopt);
         FIBER_ASSERT(ignored.has_value());
         observe_metric_event(AccessConfigMetricEvent::ProjectRouteIgnoredEmpty);
@@ -664,7 +711,8 @@ void AccessConfigWatcher::commit_ready_project(const std::shared_ptr<ProjectEntr
 
 void AccessConfigWatcher::commit_initial_batch_if_ready() {
     FIBER_ASSERT(loop_->in_loop());
-    if (!initial_batch_active_ || defer_readiness_updates_ || state_ != AccessConfigWatcherState::Running) {
+    if (!initial_batch_active_ || defer_readiness_updates_ || unavailable_failure_ ||
+        state_ != AccessConfigWatcherState::Running) {
         return;
     }
     for (const auto &[project, entry]: projects_) {
@@ -679,6 +727,22 @@ void AccessConfigWatcher::commit_initial_batch_if_ready() {
         return;
     }
 
+    for (const auto &[project, entry]: projects_) {
+        (void) project;
+        if (entry->config_state != AccessProjectConfigState::Rejected) {
+            continue;
+        }
+        if (entry->last_failure) {
+            unavailable_failure_ = entry->last_failure;
+        } else {
+            set_unavailable(options_.project_route_data_id_prefix + entry->project, common::IoErr::Invalid,
+                            "initial project route configuration was rejected");
+            return;
+        }
+        publish_readiness();
+        return;
+    }
+
     struct PendingResult {
         std::shared_ptr<ProjectEntry> entry;
         std::uint64_t generation = 0;
@@ -686,7 +750,6 @@ void AccessConfigWatcher::commit_initial_batch_if_ready() {
         std::string md5;
     };
 
-    initial_batch_active_ = false;
     std::vector<ReadyProjectUpdate> ready;
     std::vector<PendingResult> pending;
     ready.reserve(projects_.size());
@@ -708,11 +771,13 @@ void AccessConfigWatcher::commit_initial_batch_if_ready() {
     }
 
     if (ready.empty()) {
+        set_unavailable(options_.project_list_data_id, common::IoErr::Invalid,
+                        "initial access configuration produced no route candidates");
         publish_readiness();
         return;
     }
 
-    auto updated = store_->commit_batch(std::move(ready));
+    auto updated = store_->commit_batch(std::move(ready), ConfigBatchCommitMode::RequireAllProjects);
     defer_readiness_updates_ = true;
     if (!updated) {
         for (PendingResult &item: pending) {
@@ -720,6 +785,9 @@ void AccessConfigWatcher::commit_initial_batch_if_ready() {
                            std::move(item.md5), common::IoErr::Invalid, updated.error());
             item.entry->config_state = AccessProjectConfigState::Rejected;
             item.entry->synchronized = true;
+        }
+        if (!pending.empty()) {
+            unavailable_failure_ = pending.front().entry->last_failure;
         }
     } else {
         observe_publication_timing(updated->global_build_duration, updated->publish_duration, updated->published);
@@ -770,6 +838,17 @@ void AccessConfigWatcher::commit_initial_batch_if_ready() {
         }
     }
     defer_readiness_updates_ = false;
+    if (!updated || !updated->published || updated->snapshot->host_count() == 0) {
+        if (!unavailable_failure_) {
+            set_unavailable(options_.project_list_data_id, common::IoErr::Invalid,
+                            "initial access configuration produced no routable hosts");
+        } else {
+            publish_readiness();
+        }
+        return;
+    }
+    initial_batch_active_ = false;
+    initial_snapshot_published_ = true;
     publish_readiness();
 }
 
@@ -969,6 +1048,8 @@ void AccessConfigWatcher::settle_project(const std::shared_ptr<ProjectEntry> &en
     entry->config_state = state;
     if (state == AccessProjectConfigState::Accepted) {
         entry->retry_identity_data.reset();
+    } else if (initial_batch_active_ && entry->last_failure) {
+        unavailable_failure_ = entry->last_failure;
     }
     entry->synchronized = true;
     publish_readiness();
@@ -979,6 +1060,9 @@ void AccessConfigWatcher::retry_missing_tls_identities() {
     FIBER_ASSERT(loop_->in_loop());
     if (state_ != AccessConfigWatcherState::Running) {
         return;
+    }
+    if (unavailable_failure_ && unavailable_failure_->error.code == AccessConfigErrorCode::MissingDependency) {
+        unavailable_failure_.reset();
     }
     for (const auto &[project, entry]: projects_) {
         (void) project;
@@ -1041,7 +1125,7 @@ void AccessConfigWatcher::publish_readiness() {
         next.state = AccessConfigReadinessState::Unavailable;
         next.io_error = unavailable_failure_->io_error;
         next.message = unavailable_failure_->error.message;
-    } else if (project_list_failure_) {
+    } else if (!initial_snapshot_published_ && project_list_failure_) {
         next.state = AccessConfigReadinessState::Unavailable;
         next.io_error = project_list_failure_->io_error;
         next.message = project_list_failure_->error.message;

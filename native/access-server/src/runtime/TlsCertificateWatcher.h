@@ -110,6 +110,7 @@ private:
     bool starting_subscription_ = false;
     bool pending_force_compile_ = false;
     bool published_processing_ = false;
+    bool initial_rejected_ = false;
     std::uint64_t successful_updates_ = 0;
     std::uint64_t failed_updates_ = 0;
 };

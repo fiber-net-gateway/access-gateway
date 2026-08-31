@@ -4,10 +4,8 @@
 #include <string>
 #include <utility>
 
-#include <fiber/async/Sleep.h>
 #include <fiber/async/Spawn.h>
 #include <fiber/async/Timeout.h>
-#include <fiber/async/WhenAny.h>
 #include <fiber/common/Assert.h>
 
 namespace fiber::access_server {
@@ -63,9 +61,10 @@ AccessControlPlaneSupervisor::AccessControlPlaneSupervisor(event::EventLoop &coo
     coordinator_loop_(&coordinator_loop), nacos_loop_(&nacos_loop), cat_loop_(&cat_loop),
     initial_config_timeout_(options.initial_config_timeout), cat_client_(std::move(dependencies.cat_client)),
     nacos_client_(std::move(dependencies.nacos_client)), config_service_(std::move(dependencies.config_service)),
-    naming_service_(std::move(dependencies.naming_service)), cat_lifecycle_(dependencies.cat_lifecycle),
-    nacos_lifecycle_(dependencies.nacos_lifecycle), config_compiler_(compiler_loop),
-    runtime_metrics_(nacos_loop, options.process_metrics),
+    naming_service_(std::move(dependencies.naming_service)),
+    instance_registration_(nacos_loop, *naming_service_, std::move(options.instance_registration)),
+    cat_lifecycle_(dependencies.cat_lifecycle), nacos_lifecycle_(dependencies.nacos_lifecycle),
+    config_compiler_(compiler_loop), runtime_metrics_(nacos_loop, options.process_metrics),
     nacos_status_monitor_(nacos_loop, *config_service_, *naming_service_, runtime_metrics_.discovery().observer()),
     activation_evidence_(nacos_loop, activation_identity(options.activation_endpoint)), gray_store_(http_workers),
     service_discovery_(nacos_loop, *naming_service_,
@@ -132,18 +131,25 @@ AccessControlPlaneSupervisor::AccessControlPlaneSupervisor(event::EventLoop &coo
     FIBER_ASSERT(cat_start_publisher_.has_value());
     cat_stopped_publisher_ = cat_stopped_.acquire_publisher();
     FIBER_ASSERT(cat_stopped_publisher_.has_value());
+    instance_registration_publisher_ = instance_registration_status_.acquire_publisher();
+    FIBER_ASSERT(instance_registration_publisher_.has_value());
+    instance_deregistered_publisher_ = instance_deregistered_.acquire_publisher();
+    FIBER_ASSERT(instance_deregistered_publisher_.has_value());
 }
 
 AccessControlPlaneSupervisor::~AccessControlPlaneSupervisor() noexcept {
     FIBER_ASSERT(state_ == State::Created || state_ == State::Stopped);
     FIBER_ASSERT(nacos_start_tasks_.empty());
     FIBER_ASSERT(cat_start_tasks_.empty());
+    FIBER_ASSERT(instance_registration_tasks_.empty());
 }
 
 AccessControlPlaneLifecycle AccessControlPlaneSupervisor::lifecycle() noexcept {
     return AccessControlPlaneLifecycle{
             .context = this,
             .start = &start_lifecycle,
+            .register_instance = &register_instance_lifecycle,
+            .deregister_instance = &deregister_instance_lifecycle,
             .shutdown = &shutdown_lifecycle,
     };
 }
@@ -155,6 +161,35 @@ AccessControlPlaneSupervisor::start_lifecycle(void *context) noexcept {
 
 async::Task<void> AccessControlPlaneSupervisor::shutdown_lifecycle(void *context) noexcept {
     return static_cast<AccessControlPlaneSupervisor *>(context)->shutdown();
+}
+
+async::Task<std::expected<void, AccessServerRuntimeError>>
+AccessControlPlaneSupervisor::register_instance_lifecycle(void *context, AccessBoundEndpoint endpoint) noexcept {
+    return static_cast<AccessControlPlaneSupervisor *>(context)->register_instance(std::move(endpoint));
+}
+
+async::Task<void> AccessControlPlaneSupervisor::deregister_instance_lifecycle(void *context) noexcept {
+    return static_cast<AccessControlPlaneSupervisor *>(context)->deregister_instance();
+}
+
+async::DetachedTask AccessControlPlaneSupervisor::register_instance_on_owner(AccessBoundEndpoint endpoint) noexcept {
+    FIBER_ASSERT(nacos_loop_->in_loop());
+    auto registered = co_await instance_registration_.start(endpoint.address.ip(), endpoint.address.port());
+    if (!registered) {
+        instance_registration_publisher_->publish(InstanceRegistrationStatus{
+                .error = std::move(registered.error()),
+        });
+    } else {
+        instance_registration_publisher_->publish(InstanceRegistrationStatus{.success = true});
+    }
+    instance_registration_tasks_.done();
+}
+
+async::DetachedTask AccessControlPlaneSupervisor::deregister_instance_on_owner() noexcept {
+    FIBER_ASSERT(nacos_loop_->in_loop());
+    instance_registration_.close();
+    co_await instance_registration_tasks_.join();
+    instance_deregistered_publisher_->publish(true);
 }
 
 async::DetachedTask AccessControlPlaneSupervisor::start_cat_on_owner() noexcept {
@@ -259,6 +294,8 @@ async::DetachedTask AccessControlPlaneSupervisor::shutdown_nacos_on_owner() noex
     FIBER_ASSERT(nacos_loop_->in_loop());
     const AccessDiscoveryMetricsObserver metrics = runtime_metrics_.discovery().observer();
     co_await nacos_start_tasks_.join();
+    instance_registration_.close();
+    co_await instance_registration_tasks_.join();
     if (config_watcher_started_) {
         co_await config_watcher_.shutdown();
         config_watcher_started_ = false;
@@ -294,6 +331,44 @@ async::DetachedTask AccessControlPlaneSupervisor::shutdown_nacos_on_owner() noex
         nacos_client_start_attempted_ = false;
     }
     nacos_stopped_publisher_->publish(true);
+}
+
+async::Task<std::expected<void, AccessServerRuntimeError>>
+AccessControlPlaneSupervisor::register_instance(AccessBoundEndpoint endpoint) noexcept {
+    FIBER_ASSERT(coordinator_loop_->in_loop());
+    FIBER_ASSERT(state_ == State::Running);
+    FIBER_ASSERT(!instance_registration_started_);
+    instance_registration_started_ = true;
+    auto status = instance_registration_status_.subscribe();
+    auto snapshot = status.current();
+    instance_registration_tasks_.add();
+    async::spawn(*nacos_loop_, [this, endpoint = std::move(endpoint)]() mutable {
+        return register_instance_on_owner(std::move(endpoint));
+    });
+    while (!snapshot.value) {
+        snapshot = co_await status.next(snapshot.version);
+    }
+    if (!snapshot.value->success) {
+        co_return std::unexpected(snapshot.value->error);
+    }
+    co_return std::expected<void, AccessServerRuntimeError>{};
+}
+
+async::Task<void> AccessControlPlaneSupervisor::deregister_instance() noexcept {
+    FIBER_ASSERT(coordinator_loop_->in_loop());
+    if (!instance_registration_started_) {
+        co_return;
+    }
+    auto deregistered = instance_deregistered_.subscribe();
+    auto snapshot = deregistered.current();
+    if (!instance_deregistration_spawned_) {
+        instance_deregistration_spawned_ = true;
+        async::spawn(*nacos_loop_, [this]() { return deregister_instance_on_owner(); });
+    }
+    while (!snapshot.value || !*snapshot.value) {
+        snapshot = co_await deregistered.next(snapshot.version);
+    }
+    instance_registration_started_ = false;
 }
 
 async::DetachedTask AccessControlPlaneSupervisor::shutdown_cat_on_owner() noexcept {
@@ -336,19 +411,14 @@ async::Task<void> AccessControlPlaneSupervisor::stop_cat() noexcept {
 }
 
 async::Task<std::expected<void, AccessServerRuntimeError>>
-AccessControlPlaneSupervisor::wait_for_access_config() noexcept {
+AccessControlPlaneSupervisor::wait_for_access_config(std::chrono::steady_clock::time_point deadline) noexcept {
     auto readiness = config_watcher_.subscribe_readiness();
     auto readiness_snapshot = readiness.current();
     const auto readiness_pending = [](const std::shared_ptr<const AccessConfigReadiness> &value) noexcept {
         return !value || value->state == AccessConfigReadinessState::WaitingForProjectList ||
                value->state == AccessConfigReadinessState::SynchronizingProjects;
     };
-    const auto now = event::EventLoop::current().now();
     const auto maximum_deadline = std::chrono::steady_clock::time_point::max();
-    const auto timeout = std::chrono::duration_cast<std::chrono::steady_clock::duration>(initial_config_timeout_);
-    const auto deadline = timeout <= std::chrono::steady_clock::duration::zero() ? maximum_deadline
-                          : timeout >= maximum_deadline - now                    ? maximum_deadline
-                                                                                 : now + timeout;
     while (readiness_pending(readiness_snapshot.value)) {
         if (deadline == maximum_deadline) {
             readiness_snapshot = co_await readiness.next(readiness_snapshot.version);
@@ -400,7 +470,7 @@ AccessControlPlaneSupervisor::wait_for_access_config() noexcept {
 }
 
 async::Task<std::expected<AccessControlPlaneReady, AccessServerRuntimeError>>
-AccessControlPlaneSupervisor::wait_for_tls_certificate() noexcept {
+AccessControlPlaneSupervisor::wait_for_tls_certificate(std::chrono::steady_clock::time_point deadline) noexcept {
     AccessControlPlaneReady ready;
     if (!tls_enabled_) {
         co_return ready;
@@ -408,18 +478,19 @@ AccessControlPlaneSupervisor::wait_for_tls_certificate() noexcept {
 
     auto tls_readiness = tls_certificate_watcher_.subscribe_readiness();
     auto tls_snapshot = tls_readiness.current();
+    const auto maximum_deadline = std::chrono::steady_clock::time_point::max();
     if ((!tls_snapshot.value || *tls_snapshot.value == TlsCertificateReadiness::Awaiting) &&
-        initial_config_timeout_ > std::chrono::milliseconds::zero()) {
-        auto result = co_await async::when_any(
-                [&tls_readiness, version = tls_snapshot.version]() { return tls_readiness.next(version); },
-                [timeout = initial_config_timeout_]() { return async::sleep(timeout); });
-        if (result.is<1>()) {
-            std::move(result).get<1>();
+        deadline != maximum_deadline) {
+        const auto now = event::EventLoop::current().now();
+        const auto remaining = deadline > now ? deadline - now : std::chrono::steady_clock::duration::zero();
+        auto next = co_await async::timeout_for(
+                [&tls_readiness, version = tls_snapshot.version]() { return tls_readiness.next(version); }, remaining);
+        if (!next) {
             co_return std::unexpected(make_access_server_runtime_io_error(
                     AccessServerRuntimeErrorCode::InitialTlsCertificateTimeout, common::IoErr::TimedOut,
                     "initial TLS certificate synchronization timed out"));
         }
-        tls_snapshot = std::move(result).get<0>();
+        tls_snapshot = std::move(*next);
     } else if (!tls_snapshot.value || *tls_snapshot.value == TlsCertificateReadiness::Awaiting) {
         while (!tls_snapshot.value || *tls_snapshot.value == TlsCertificateReadiness::Awaiting) {
             tls_snapshot = co_await tls_readiness.next(tls_snapshot.version);
@@ -467,13 +538,20 @@ AccessControlPlaneSupervisor::start() noexcept {
         co_return std::unexpected(nacos_snapshot.value->error);
     }
 
-    auto config_ready = co_await wait_for_access_config();
-    if (!config_ready) {
-        co_return std::unexpected(std::move(config_ready.error()));
-    }
-    auto tls_ready = co_await wait_for_tls_certificate();
+    const auto now = event::EventLoop::current().now();
+    const auto maximum_deadline = std::chrono::steady_clock::time_point::max();
+    const auto timeout = std::chrono::duration_cast<std::chrono::steady_clock::duration>(initial_config_timeout_);
+    const auto initial_config_deadline = timeout <= std::chrono::steady_clock::duration::zero() ? maximum_deadline
+                                         : timeout >= maximum_deadline - now                    ? maximum_deadline
+                                                                                                : now + timeout;
+
+    auto tls_ready = co_await wait_for_tls_certificate(initial_config_deadline);
     if (!tls_ready) {
         co_return std::unexpected(std::move(tls_ready.error()));
+    }
+    auto config_ready = co_await wait_for_access_config(initial_config_deadline);
+    if (!config_ready) {
+        co_return std::unexpected(std::move(config_ready.error()));
     }
     state_ = State::Running;
     co_return std::move(*tls_ready);

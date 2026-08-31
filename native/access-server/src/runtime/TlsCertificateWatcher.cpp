@@ -205,6 +205,9 @@ void TlsCertificateWatcher::on_notify(void *context,
 void TlsCertificateWatcher::apply(std::shared_ptr<const nacos::ConfigData> data) {
     FIBER_ASSERT(loop_->in_loop());
     FIBER_ASSERT(data);
+    if (initial_rejected_) {
+        return;
+    }
     cancel_compile();
     observed_md5_ = std::string(data->md5);
     observed_at_unix_millis_ = access_activation_unix_millis(*loop_);
@@ -212,8 +215,14 @@ void TlsCertificateWatcher::apply(std::shared_ptr<const nacos::ConfigData> data)
     last_failure_.reset();
     publish_evidence();
     if (data->state == nacos::ConfigState::NotFound || data->content.empty()) {
-        candidate_status_ = AccessActivationCandidateStatus::Accepted;
-        publish_evidence();
+        report_failure(std::string(data->md5),
+                       TlsCertificateConfigError{
+                               .code = TlsCertificateConfigErrorCode::MissingField,
+                               .field = "certificates",
+                               .message = data->state == nacos::ConfigState::NotFound
+                                                  ? "TLS certificate configuration was not found"
+                                                  : "TLS certificate configuration is empty",
+                       });
         return;
     }
     if (data->content.size() > kMaxTlsSnapshotBytes) {
@@ -334,6 +343,11 @@ void TlsCertificateWatcher::report_failure(std::string md5, TlsCertificateConfig
             .error = std::move(error),
             .observed_at_unix_millis = access_activation_unix_millis(*loop_),
     };
+    const auto readiness = readiness_.current();
+    if (!readiness.value || *readiness.value == TlsCertificateReadiness::Awaiting) {
+        initial_rejected_ = true;
+        readiness_publisher_->publish(TlsCertificateReadiness::Failed);
+    }
     publish_evidence();
 }
 

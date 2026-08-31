@@ -60,6 +60,14 @@ AccessConfigError project_count_error() {
     };
 }
 
+AccessConfigError empty_initial_snapshot_error() {
+    return AccessConfigError{
+            .code = AccessConfigErrorCode::InvalidCombination,
+            .field = "host",
+            .message = "initial access configuration contains no routable hosts",
+    };
+}
+
 } // namespace
 
 ReadyProjectUpdate::ReadyProjectUpdate(ReadyProjectUpdate &&other) noexcept :
@@ -265,7 +273,8 @@ ConfigUpdateOutcome RouteConfigStore::commit(ReadyProjectUpdate ready) {
     };
 }
 
-ConfigBatchUpdateOutcome RouteConfigStore::commit_batch(std::vector<ReadyProjectUpdate> ready) {
+ConfigBatchUpdateOutcome RouteConfigStore::commit_batch(std::vector<ReadyProjectUpdate> ready,
+                                                        ConfigBatchCommitMode mode) {
     std::vector<std::size_t> order(ready.size());
     std::iota(order.begin(), order.end(), 0U);
     std::sort(order.begin(), order.end(), [&](std::size_t left, std::size_t right) {
@@ -372,11 +381,23 @@ ConfigBatchUpdateOutcome RouteConfigStore::commit_batch(std::vector<ReadyProject
         has_mutation = true;
     }
 
+    if (mode == ConfigBatchCommitMode::RequireAllProjects) {
+        for (std::size_t index = 0; index < accepted.size(); ++index) {
+            if (!accepted[index]) {
+                FIBER_ASSERT(failures[index].has_value());
+                return std::unexpected(std::move(*failures[index]));
+            }
+        }
+    }
+
     std::optional<AccessRouteSnapshot> final_snapshot;
     if (has_mutation) {
         auto built = build_candidate(candidate, result.global_build_duration);
         if (!built) {
             return std::unexpected(std::move(built.error()));
+        }
+        if (mode == ConfigBatchCommitMode::RequireAllProjects && built->host_count() == 0) {
+            return std::unexpected(empty_initial_snapshot_error());
         }
         final_snapshot.emplace(std::move(*built));
     }

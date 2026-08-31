@@ -33,6 +33,7 @@ struct AccessDataPlaneOptions {
     bool plain_listen_enabled = false;
     net::SocketAddress plain_listen_address;
     http::HttpServerOptions plain_http_server;
+    AccessRegistrationListener registration_listener = AccessRegistrationListener::Plain;
     AccessActivationEndpointOptions activation_endpoint;
     ClientMetadataResolverOptions client_metadata;
     std::string network_entry;
@@ -54,6 +55,9 @@ public:
     ~AccessDataPlaneService() noexcept;
 
     [[nodiscard]] AccessDataPlaneLifecycle lifecycle() noexcept;
+    [[nodiscard]] async::Task<std::expected<AccessBoundEndpoint, AccessServerRuntimeError>>
+    bind(AccessControlPlaneReady ready) noexcept;
+    [[nodiscard]] async::Task<std::expected<void, AccessServerRuntimeError>> serve() noexcept;
     [[nodiscard]] async::Task<std::expected<void, AccessServerRuntimeError>>
     start(AccessControlPlaneReady ready) noexcept;
     [[nodiscard]] async::Task<void> shutdown() noexcept;
@@ -63,8 +67,10 @@ public:
     [[nodiscard]] int metrics_fd() const noexcept { return server_ ? server_->metrics_fd() : -1; }
 
 private:
+    [[nodiscard]] static async::Task<std::expected<AccessBoundEndpoint, AccessServerRuntimeError>>
+    bind_lifecycle(void *context, AccessControlPlaneReady ready) noexcept;
     [[nodiscard]] static async::Task<std::expected<void, AccessServerRuntimeError>>
-    start_lifecycle(void *context, AccessControlPlaneReady ready) noexcept;
+    serve_lifecycle(void *context) noexcept;
     [[nodiscard]] static async::Task<void> shutdown_lifecycle(void *context) noexcept;
     [[nodiscard]] async::Task<void> rollback_start(AccessControlPlaneReady &ready) noexcept;
 
@@ -78,6 +84,8 @@ private:
     AccessDataPlaneOptions options_;
     AccessScriptRuntime script_runtime_;
     std::unique_ptr<AccessServer> server_;
+    bool bound_ = false;
+    bool serving_ = false;
     bool shutdown_complete_ = false;
 };
 

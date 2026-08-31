@@ -67,6 +67,14 @@ std::string_view access_server_runtime_stage_name(AccessServerRuntimeErrorCode c
             return "bind gateway listener";
         case AccessServerRuntimeErrorCode::BindMetrics:
             return "bind Prometheus listener";
+        case AccessServerRuntimeErrorCode::ResolveBoundListener:
+            return "resolve bound registration listener";
+        case AccessServerRuntimeErrorCode::RegisterNacosInstance:
+            return "register access-server instance in Nacos";
+        case AccessServerRuntimeErrorCode::WaitNacosRegistration:
+            return "wait for Nacos instance registration";
+        case AccessServerRuntimeErrorCode::Serve:
+            return "start gateway serving";
     }
     return "start access-server";
 }

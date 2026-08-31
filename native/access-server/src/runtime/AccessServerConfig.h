@@ -7,6 +7,8 @@
 #include "AccessActivationEndpoint.h"
 #include "AccessConfigWatcher.h"
 #include "AccessDnsService.h"
+#include "AccessInstanceRegistration.h"
+#include "AccessRuntimeCoordinator.h"
 #include "AccessServiceDiscovery.h"
 #include "GrayConfigWatcher.h"
 #include "TlsCertificateWatcher.h"
@@ -101,6 +103,10 @@ public:
     [[nodiscard]] const AccessServiceDiscoveryOptions &service_discovery_options() const noexcept {
         return service_discovery_options_;
     }
+    [[nodiscard]] const AccessInstanceRegistrationOptions &instance_registration_options() const noexcept {
+        return instance_registration_options_;
+    }
+    [[nodiscard]] AccessRegistrationListener registration_listener() const noexcept { return registration_listener_; }
 
 private:
     AccessServerConfig(net::SocketAddress tls_listen_address, http::HttpServerOptions tls_http_server_options,
@@ -116,7 +122,9 @@ private:
                        std::optional<cat::CatClientConfig> cat_config, nacos::NacosClientConfig nacos_config,
                        AccessConfigWatcherOptions watcher_options, GrayConfigWatcherOptions gray_watcher_options,
                        TlsCertificateWatcherOptions tls_certificate_watcher_options,
-                       AccessServiceDiscoveryOptions service_discovery_options) noexcept;
+                       AccessServiceDiscoveryOptions service_discovery_options,
+                       AccessInstanceRegistrationOptions instance_registration_options,
+                       AccessRegistrationListener registration_listener) noexcept;
 
     net::SocketAddress tls_listen_address_;
     http::HttpServerOptions tls_http_server_options_;
@@ -143,6 +151,8 @@ private:
     GrayConfigWatcherOptions gray_watcher_options_;
     TlsCertificateWatcherOptions tls_certificate_watcher_options_;
     AccessServiceDiscoveryOptions service_discovery_options_;
+    AccessInstanceRegistrationOptions instance_registration_options_;
+    AccessRegistrationListener registration_listener_ = AccessRegistrationListener::Plain;
 };
 
 } // namespace fiber::access_server
