@@ -403,8 +403,8 @@ shutdown barrier 已完成。
   [script-corpus-differential.md](script-corpus-differential.md)；
 - [x] 将 project、route、cluster、upstream、错误和最终响应映射到统一请求观测上下文；
 - [x] CAT 使用 `URL/<project><route>`、继续/生成三段 message ID、响应回传 trace ID；
-- [x] Prometheus 使用独立 `main-port + 1` listener 和固定 result schema，避免动态
-  cluster/header 产生无限时序；
+- [x] Prometheus 使用独立配置的 listener（默认端口 `8001`，不从 HTTP/HTTPS 端口派生）和固定
+  result schema，避免动态 cluster/header 产生无限时序；
 - [x] 共享异步 logging 输出同一请求上下文，观测失败不改变 HTTP 结果。
 
 门槛：
