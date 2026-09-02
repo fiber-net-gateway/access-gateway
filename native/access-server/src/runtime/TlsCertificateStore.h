@@ -22,7 +22,8 @@
 #include <fiber/common/NonMovable.h>
 #include <fiber/event/EventLoop.h>
 #include <fiber/event/EventLoopGroup.h>
-#include <fiber/net/TlsOptions.h>
+#include <fiber/net/TlsParams.h>
+#include <fiber/net/TlsServerHandshakeConfig.h>
 
 namespace fiber::access_server {
 
@@ -48,23 +49,15 @@ struct TlsCertificateIdentityObserver {
     void (*on_update)(void *context) noexcept = nullptr;
 };
 
+// RAII lifecycle token for the bootstrap identity: holders keep the sealed
+// bootstrap identity alive while the first certificate snapshot is being
+// prepared and installed.
 class TlsBootstrapIdentity final : public common::NonCopyable, public common::NonMovable {
 public:
     ~TlsBootstrapIdentity();
 
-    [[nodiscard]] static std::expected<std::shared_ptr<TlsBootstrapIdentity>, TlsCertificateConfigError>
-    create(std::string_view certificate_pem, std::string_view private_key_pem);
-    [[nodiscard]] const std::string &certificate_path() const noexcept { return certificate_path_; }
-    [[nodiscard]] const std::string &private_key_path() const noexcept { return private_key_path_; }
+    [[nodiscard]] static std::shared_ptr<TlsBootstrapIdentity> create();
     void close() noexcept;
-
-private:
-    TlsBootstrapIdentity(int certificate_fd, int private_key_fd);
-
-    std::atomic<int> certificate_fd_{-1};
-    std::atomic<int> private_key_fd_{-1};
-    std::string certificate_path_;
-    std::string private_key_path_;
 };
 
 class TlsCertificateStore final : public common::NonCopyable, public common::NonMovable {
@@ -102,7 +95,9 @@ public:
     [[nodiscard]] std::expected<TlsCertificateUpdateStatus, TlsCertificateConfigError> commit(PreparedUpdate prepared);
     [[nodiscard]] async::Task<void> shutdown() noexcept;
 
-    [[nodiscard]] net::TlsIdentitySelectorOps selector_ops() noexcept;
+    [[nodiscard]] net::TlsServerParam tls_server_param() noexcept;
+    [[nodiscard]] const net::TlsCredential *select_credential(std::string_view server_name,
+                                                              net::TlsTransportKind transport) noexcept;
     [[nodiscard]] UpstreamTlsClientIdentityResolver client_identity_resolver() noexcept;
     [[nodiscard]] std::shared_ptr<TlsBootstrapIdentity> bootstrap_identity() const noexcept { return bootstrap_; }
     [[nodiscard]] std::uint64_t version() const noexcept { return version_; }
@@ -124,8 +119,8 @@ private:
         std::chrono::steady_clock::time_point retired_at;
     };
 
-    [[nodiscard]] static net::TlsContext *select_identity(void *context,
-                                                          const net::TlsIdentitySelectInput &input) noexcept;
+    [[nodiscard]] static common::IoErr configure_handshake(void *context, net::TlsServerHandshakeConfig &config,
+                                                           const net::TlsClientHelloView &client_hello) noexcept;
     [[nodiscard]] static std::shared_ptr<const UpstreamTlsClientIdentity>
     find_client_identity(void *context, std::string_view id) noexcept;
     static void clear_hazard(WorkerSlot *slot) noexcept;

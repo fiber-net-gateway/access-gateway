@@ -504,7 +504,9 @@ AccessControlPlaneSupervisor::wait_for_tls_certificate(std::chrono::steady_clock
     FIBER_ASSERT(*tls_snapshot.value == TlsCertificateReadiness::Ready);
     ready.tls_bootstrap = tls_certificate_store_.bootstrap_identity();
     FIBER_ASSERT(ready.tls_bootstrap);
-    ready.tls_identity_selector = tls_certificate_store_.selector_ops();
+    net::TlsServerParam tls_param = tls_certificate_store_.tls_server_param();
+    ready.tls_configure_callback = tls_param.configure_callback;
+    ready.tls_configure_context = tls_param.configure_ctx;
     co_return ready;
 }
 

@@ -482,7 +482,7 @@ TEST(ProjectRouteSnapshotTest, CompilesImmutableUpstreamTlsProfileAndPoolAffinit
     EXPECT_EQ(first_profile.verification(), UpstreamTlsVerificationMode::CustomCa);
     EXPECT_EQ(first_profile.server_name(), "sni.example.com");
     EXPECT_EQ(first_profile.verify_name(), "identity.example.com");
-    EXPECT_TRUE(first_profile.ca_file().starts_with("/proc/self/fd/"));
+    EXPECT_TRUE(first_profile.trust_store());
     EXPECT_NE(first_profile.pool_affinity(), 0U);
 
     auto base = fiber::http::Http1ConnectionGroupKey::from_name("upstream.example.com", 443,
@@ -550,8 +550,7 @@ TEST(ProjectRouteSnapshotTest, BindsClientIdentityWithoutRetainingPemInRouteConf
     ProjectRouteSnapshot &snapshot = **compiled;
     const auto &unbound = *snapshot.routes()[0].proxy->upstream_tls;
     const std::uint64_t transport_affinity = unbound.pool_affinity();
-    EXPECT_TRUE(unbound.client_certificate_file().empty());
-    EXPECT_TRUE(unbound.client_private_key_file().empty());
+    EXPECT_FALSE(unbound.client_credential());
 
     auto missing = fiber::access_server::bind_project_tls_client_identities(snapshot, {});
     ASSERT_FALSE(missing);
@@ -571,8 +570,7 @@ TEST(ProjectRouteSnapshotTest, BindsClientIdentityWithoutRetainingPemInRouteConf
     auto bound = fiber::access_server::bind_project_tls_client_identities(snapshot, resolver.resolver());
     ASSERT_TRUE(bound) << bound.error().message;
     const auto &profile = *snapshot.routes()[0].proxy->upstream_tls;
-    EXPECT_TRUE(profile.client_certificate_file().starts_with("/proc/self/fd/"));
-    EXPECT_TRUE(profile.client_private_key_file().starts_with("/proc/self/fd/"));
+    EXPECT_TRUE(profile.client_credential());
     EXPECT_NE(profile.pool_affinity(), transport_affinity);
 
     identity->reset();

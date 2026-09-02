@@ -82,13 +82,7 @@ protected:
 };
 
 TEST_F(AccessDataPlaneServiceTest, RollsBackWorkerInitializationFailureBeforeReturning) {
-    auto bootstrap_result = TlsBootstrapIdentity::create("unused-certificate", "unused-private-key");
-    ASSERT_TRUE(bootstrap_result);
-    std::shared_ptr<TlsBootstrapIdentity> bootstrap = std::move(*bootstrap_result);
-    const std::string certificate_path = bootstrap->certificate_path();
-    const std::string private_key_path = bootstrap->private_key_path();
-    ASSERT_EQ(::access(certificate_path.c_str(), F_OK), 0);
-    ASSERT_EQ(::access(private_key_path.c_str(), F_OK), 0);
+    std::shared_ptr<TlsBootstrapIdentity> bootstrap = TlsBootstrapIdentity::create();
     bool completed = false;
     FailingDnsFactoryState dns_factory_state;
     async::spawn(accept_loop_, [&]() -> async::DetachedTask {
@@ -98,11 +92,14 @@ TEST_F(AccessDataPlaneServiceTest, RollsBackWorkerInitializationFailureBeforeRet
                                                                     .context = &dns_factory_state,
                                                                     .create = fail_dns_resolver,
                                                             });
-        options.http_server.tls.enabled = true;
+        options.http_server.tls.configure_callback = &net::configure_tls_with_credential;
         AccessDataPlaneService service(accept_loop_, workers_, route_store_, {}, runtime_metrics_, activation_evidence_,
                                        nullptr, std::move(options));
 
-        auto started = co_await service.start(AccessControlPlaneReady{.tls_bootstrap = bootstrap});
+        auto started = co_await service.start(AccessControlPlaneReady{
+                .tls_bootstrap = bootstrap,
+                .tls_configure_callback = &net::configure_tls_with_credential,
+        });
         EXPECT_FALSE(started);
         if (!started) {
             EXPECT_EQ(started.error().code, AccessServerRuntimeErrorCode::InitializeWorkers);
@@ -110,8 +107,6 @@ TEST_F(AccessDataPlaneServiceTest, RollsBackWorkerInitializationFailureBeforeRet
         EXPECT_EQ(dns_factory_state.calls, 1U);
         EXPECT_EQ(service.fd(), -1);
         EXPECT_EQ(service.metrics_fd(), -1);
-        EXPECT_NE(::access(certificate_path.c_str(), F_OK), 0);
-        EXPECT_NE(::access(private_key_path.c_str(), F_OK), 0);
 
         co_await service.shutdown();
         co_await service.shutdown();

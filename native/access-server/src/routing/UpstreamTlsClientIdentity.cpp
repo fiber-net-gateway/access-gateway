@@ -1,45 +1,12 @@
 #include "UpstreamTlsClientIdentity.h"
 
-#include <cerrno>
-#include <fcntl.h>
 #include <new>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <unistd.h>
+#include <utility>
 
 #include <openssl/evp.h>
 
 namespace fiber::access_server {
 namespace {
-
-std::expected<int, common::IoErr> seal(std::string_view name, std::string_view content) noexcept {
-    const int fd = memfd_create(name.data(), MFD_CLOEXEC | MFD_ALLOW_SEALING);
-    if (fd < 0) {
-        return std::unexpected(common::IoErr::NoMem);
-    }
-    if (fchmod(fd, S_IRUSR) < 0) {
-        close(fd);
-        return std::unexpected(common::IoErr::Permission);
-    }
-    std::size_t offset = 0;
-    while (offset < content.size()) {
-        const ssize_t written = write(fd, content.data() + offset, content.size() - offset);
-        if (written < 0 && errno == EINTR) {
-            continue;
-        }
-        if (written <= 0) {
-            close(fd);
-            return std::unexpected(common::IoErr::Unknown);
-        }
-        offset += static_cast<std::size_t>(written);
-    }
-    if (lseek(fd, 0, SEEK_SET) < 0 ||
-        fcntl(fd, F_ADD_SEALS, F_SEAL_SEAL | F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE) < 0) {
-        close(fd);
-        return std::unexpected(common::IoErr::Unknown);
-    }
-    return fd;
-}
 
 bool add_u64(EVP_MD_CTX &context, std::uint64_t value) noexcept {
     std::array<std::uint8_t, 8> encoded{};
@@ -72,20 +39,11 @@ identity_digest(std::string_view certificate_pem, std::string_view private_key_p
 
 } // namespace
 
-UpstreamTlsClientIdentity::UpstreamTlsClientIdentity(int certificate_fd, int private_key_fd,
+UpstreamTlsClientIdentity::UpstreamTlsClientIdentity(std::unique_ptr<net::TlsCredential> credential,
                                                      UpstreamTlsClientIdentityDigest digest) noexcept :
-    certificate_fd_(certificate_fd), private_key_fd_(private_key_fd),
-    certificate_path_("/proc/self/fd/" + std::to_string(certificate_fd)),
-    private_key_path_("/proc/self/fd/" + std::to_string(private_key_fd)), digest_(digest) {}
+    credential_(std::move(credential)), digest_(digest) {}
 
-UpstreamTlsClientIdentity::~UpstreamTlsClientIdentity() {
-    if (certificate_fd_ >= 0) {
-        close(certificate_fd_);
-    }
-    if (private_key_fd_ >= 0) {
-        close(private_key_fd_);
-    }
-}
+UpstreamTlsClientIdentity::~UpstreamTlsClientIdentity() = default;
 
 std::expected<std::shared_ptr<const UpstreamTlsClientIdentity>, common::IoErr>
 UpstreamTlsClientIdentity::create(std::string_view certificate_pem, std::string_view private_key_pem) noexcept {
@@ -93,19 +51,15 @@ UpstreamTlsClientIdentity::create(std::string_view certificate_pem, std::string_
     if (!digest) {
         return std::unexpected(digest.error());
     }
-    auto certificate_fd = seal("access-server-upstream-certificate", certificate_pem);
-    if (!certificate_fd) {
-        return std::unexpected(certificate_fd.error());
+    net::TlsCredentialOptions credential_options{};
+    credential_options.certificate_chain = net::TlsPemSource::from_content(std::string(certificate_pem));
+    credential_options.private_key = net::TlsPemSource::from_content(std::string(private_key_pem));
+    auto credential = net::TlsCredential::create(credential_options);
+    if (!credential) {
+        return std::unexpected(credential.error());
     }
-    auto private_key_fd = seal("access-server-upstream-private-key", private_key_pem);
-    if (!private_key_fd) {
-        close(*certificate_fd);
-        return std::unexpected(private_key_fd.error());
-    }
-    auto *identity = new (std::nothrow) UpstreamTlsClientIdentity(*certificate_fd, *private_key_fd, std::move(*digest));
+    auto *identity = new (std::nothrow) UpstreamTlsClientIdentity(std::move(*credential), *digest);
     if (!identity) {
-        close(*certificate_fd);
-        close(*private_key_fd);
         return std::unexpected(common::IoErr::NoMem);
     }
     return std::shared_ptr<const UpstreamTlsClientIdentity>(identity);

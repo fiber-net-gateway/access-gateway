@@ -5,32 +5,41 @@
 
 #include <fiber/common/IoError.h>
 
+#include <memory>
 #include <string>
 #include <string_view>
+
+namespace fiber::net {
+class TlsCredential;
+class TrustStore;
+} // namespace fiber::net
 
 namespace fiber::access_server {
 
 struct UpstreamTlsClientPolicy {
     UpstreamTlsVerificationMode verification = UpstreamTlsVerificationMode::LegacyInsecure;
     std::string ca_file;
+    std::shared_ptr<const net::TrustStore> trust_store;
 };
 
 struct UpstreamTlsClientPolicyView {
     UpstreamTlsVerificationMode verification = UpstreamTlsVerificationMode::LegacyInsecure;
-    std::string_view ca_file;
+    const net::TrustStore *trust_store = nullptr;
     std::string_view server_name;
     std::string_view verify_name;
-    std::string_view client_certificate_file;
-    std::string_view client_private_key_file;
+    const net::TlsCredential *client_credential = nullptr;
 };
 
 [[nodiscard]] inline UpstreamTlsClientPolicyView
 upstream_tls_client_policy_view(const UpstreamTlsClientPolicy &policy) noexcept {
     return UpstreamTlsClientPolicyView{
             .verification = policy.verification,
-            .ca_file = policy.ca_file,
+            .trust_store = policy.trust_store.get(),
     };
 }
+
+[[nodiscard]] common::IoResult<UpstreamTlsClientPolicy>
+prepare_upstream_tls_client_policy(UpstreamTlsClientPolicy policy) noexcept;
 
 [[nodiscard]] common::IoResult<void>
 validate_upstream_tls_client_policy(const UpstreamTlsClientPolicy &policy) noexcept;

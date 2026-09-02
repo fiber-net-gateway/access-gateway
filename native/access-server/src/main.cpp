@@ -229,7 +229,7 @@ int main(int argc, char **argv) {
             co_return;
         }
         const fiber::net::SocketAddress metrics_address(config.metrics_listen_address().ip(), *metrics_port);
-        const bool tls_enabled = config.tls_http_server_options().tls.enabled;
+        const bool tls_enabled = config.tls_http_server_options().tls.enabled();
         const bool http3_enabled = config.tls_http_server_options().http3.enabled;
         const bool plain_enabled = config.plain_listen_enabled();
 

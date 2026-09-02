@@ -26,7 +26,9 @@
 #include <fiber/http/HttpTransport.h>
 #include <fiber/net/SocketAddress.h>
 #include <fiber/net/TcpListener.h>
-#include <fiber/net/TlsContext.h>
+#include <fiber/net/TlsCredential.h>
+#include <fiber/net/TlsServerHandshakeConfig.h>
+#include <fiber/net/TrustStore.h>
 #include "QuicTestTlsCertificate.h"
 #include "TlsClientIdentityTestData.h"
 #include "execution/AccessHttpScriptServices.h"
@@ -221,7 +223,6 @@ struct ConnectionScenarioResult {
     bool rotated_hit = false;
     bool tls_enabled = false;
     bool verify_peer = false;
-    std::string ca_file;
     std::string server_name;
     std::string verify_name;
     fiber::access_server::ProxyConnectionObservation observation;
@@ -229,7 +230,7 @@ struct ConnectionScenarioResult {
     fiber::access_server::ProxyConnectionObservation rotated_observation;
 };
 
-fiber::async::DetachedTask run_tls_server(fiber::net::TcpListener *listener, fiber::net::TlsContext *context,
+fiber::async::DetachedTask run_tls_server(fiber::net::TcpListener *listener, fiber::net::TlsServerParam *tls,
                                           std::promise<fiber::common::IoErr> *promise) {
     auto accepted = co_await listener->accept();
     listener->close();
@@ -237,8 +238,7 @@ fiber::async::DetachedTask run_tls_server(fiber::net::TcpListener *listener, fib
         promise->set_value(accepted.error());
         co_return;
     }
-    auto created =
-            fiber::http::TlsTransport::create(fiber::event::EventLoop::current(), std::move(*accepted), *context);
+    auto created = fiber::http::TlsTransport::create(fiber::event::EventLoop::current(), std::move(*accepted), *tls);
     if (!created) {
         promise->set_value(created.error());
         co_return;
@@ -265,10 +265,9 @@ fiber::async::DetachedTask run_tls_client_scenario(fiber::http::StealableHttp1Co
         const auto &tls = connected->connection->options().tls;
         result.first_hit = connected->lease.hit();
         result.connected_ip = connected->connection->options().peer_addr.ip();
-        result.tls_enabled = tls.enabled;
+        result.tls_enabled = tls.enabled();
         result.verify_peer = tls.verify_peer;
-        result.ca_file = tls.ca_file;
-        result.server_name = tls.server_name;
+        result.server_name = tls.sni_name;
         result.verify_name = tls.verify_name;
         connected->lease.reset();
     }
@@ -279,7 +278,8 @@ fiber::async::DetachedTask run_tls_client_scenario(fiber::http::StealableHttp1Co
 ConnectionScenarioResult run_tls_scenario(const std::string &certificate_path, const std::string &private_key_path,
                                           std::string_view host,
                                           fiber::access_server::UpstreamTlsClientPolicyView policy,
-                                          bool use_ip_key = false, std::string_view client_ca_file = {}) {
+                                          bool use_ip_key = false, std::string_view client_ca_file = {},
+                                          std::string_view custom_ca_pem = {}) {
     fiber::event::EventLoopGroup group(1);
     fiber::http::StealableHttp1ConnectionPoolSet pool(group);
     if (!pool.init()) {
@@ -296,18 +296,43 @@ ConnectionScenarioResult run_tls_scenario(const std::string &certificate_path, c
         return ConnectionScenarioResult{.error = fiber::common::IoErr::Invalid};
     }
 
-    fiber::net::TlsOptions server_options;
-    server_options.cert_file = certificate_path;
-    server_options.key_file = private_key_path;
-    if (!client_ca_file.empty()) {
-        server_options.verify_client = true;
-        server_options.ca_file = client_ca_file;
-    }
-    fiber::net::TlsContext server_context(std::move(server_options), true);
-    auto initialized = server_context.init();
-    if (!initialized) {
+    fiber::net::TlsCredentialOptions credential_options{};
+    credential_options.certificate_chain = fiber::net::TlsPemSource::from_file(certificate_path);
+    credential_options.private_key = fiber::net::TlsPemSource::from_file(private_key_path);
+    auto server_credential = fiber::net::TlsCredential::create(credential_options);
+    if (!server_credential) {
         listener.close();
-        return ConnectionScenarioResult{.error = initialized.error()};
+        return ConnectionScenarioResult{.error = server_credential.error()};
+    }
+    std::unique_ptr<fiber::net::TrustStore> server_trust_store;
+    fiber::net::TlsServerParam server_options;
+    server_options.configure_callback = &fiber::net::configure_tls_with_credential;
+    server_options.configure_ctx = server_credential->get();
+    if (!client_ca_file.empty()) {
+        auto trust_store =
+                fiber::net::TrustStore::create(fiber::net::TrustStoreOptions::from_file(std::string(client_ca_file)));
+        if (!trust_store) {
+            listener.close();
+            return ConnectionScenarioResult{.error = trust_store.error()};
+        }
+        server_trust_store = std::move(*trust_store);
+        server_options.trust_store = server_trust_store.get();
+        server_options.client_certificate_mode = fiber::net::TlsClientCertificateMode::Required;
+    }
+    std::unique_ptr<fiber::net::TrustStore> client_trust_store;
+    if (policy.verification != fiber::access_server::UpstreamTlsVerificationMode::LegacyInsecure &&
+        !policy.trust_store) {
+        const fiber::net::TrustStoreOptions trust_options =
+                policy.verification == fiber::access_server::UpstreamTlsVerificationMode::CustomCa
+                        ? fiber::net::TrustStoreOptions::from_content(std::string(custom_ca_pem))
+                        : fiber::net::TrustStoreOptions::system();
+        auto trust_store = fiber::net::TrustStore::create(trust_options);
+        if (!trust_store) {
+            listener.close();
+            return ConnectionScenarioResult{.error = trust_store.error()};
+        }
+        client_trust_store = std::move(*trust_store);
+        policy.trust_store = client_trust_store.get();
     }
     auto key =
             use_ip_key
@@ -327,7 +352,7 @@ ConnectionScenarioResult run_tls_scenario(const std::string &certificate_path, c
     std::promise<ConnectionScenarioResult> client_promise;
     auto client_future = client_promise.get_future();
     group.start();
-    fiber::async::spawn(group.at(0), [&]() { return run_tls_server(&listener, &server_context, &server_promise); });
+    fiber::async::spawn(group.at(0), [&]() { return run_tls_server(&listener, &server_options, &server_promise); });
     fiber::async::spawn(group.at(0), [&]() {
         return run_tls_client_scenario(&pool, *key, &resolver, std::move(policy), &client_promise);
     });
@@ -934,7 +959,6 @@ TEST(ProxyUpstreamConnectionTest, LegacyModePreservesInsecureHttpsCompatibility)
     EXPECT_EQ(result.resolver_calls, 1U);
     EXPECT_TRUE(result.tls_enabled);
     EXPECT_FALSE(result.verify_peer);
-    EXPECT_TRUE(result.ca_file.empty());
     EXPECT_EQ(result.server_name, "untrusted.example");
     EXPECT_TRUE(result.verify_name.empty());
     EXPECT_EQ(result.observation.dns_success, 1U);
@@ -944,10 +968,8 @@ TEST(ProxyUpstreamConnectionTest, LegacyModePreservesInsecureHttpsCompatibility)
 TEST(ProxyUpstreamConnectionTest, CustomCaVerifiesPeerAndDerivesSniFromUpstreamName) {
     const auto &chain = trusted_test_tls_chain();
     ASSERT_TRUE(chain);
-    fiber::test::QuicTestTlsFile ca_certificate("access-upstream-custom-ca", chain->ca_certificate_pem);
     fiber::test::QuicTestTlsFile certificate("access-upstream-custom-cert", chain->server_certificate_pem);
     fiber::test::QuicTestTlsFile private_key("access-upstream-custom-key", chain->server_private_key_pem);
-    ASSERT_TRUE(ca_certificate.valid());
     ASSERT_TRUE(certificate.valid());
     ASSERT_TRUE(private_key.valid());
 
@@ -955,14 +977,13 @@ TEST(ProxyUpstreamConnectionTest, CustomCaVerifiesPeerAndDerivesSniFromUpstreamN
             run_tls_scenario(certificate.path(), private_key.path(), "localhost",
                              {
                                      .verification = fiber::access_server::UpstreamTlsVerificationMode::CustomCa,
-                                     .ca_file = ca_certificate.path(),
-                             });
+                             },
+                             false, {}, chain->ca_certificate_pem);
     EXPECT_EQ(result.error, fiber::common::IoErr::None);
     EXPECT_EQ(result.server_error, fiber::common::IoErr::None);
     EXPECT_EQ(result.resolver_calls, 1U);
     EXPECT_TRUE(result.tls_enabled);
     EXPECT_TRUE(result.verify_peer);
-    EXPECT_EQ(result.ca_file, ca_certificate.path());
     EXPECT_EQ(result.server_name, "localhost");
     EXPECT_TRUE(result.verify_name.empty());
     EXPECT_EQ(result.observation.dns_success, 1U);
@@ -1006,8 +1027,7 @@ TEST(ProxyUpstreamConnectionTest, RouteClientIdentityCompletesMutualTlsAndAnonym
             *profile, {.context = &resolver, .find = &ResolverState::find}, 0);
     ASSERT_TRUE(bound) << bound.error().message;
     EXPECT_NE(profile->pool_affinity(), transport_affinity);
-    EXPECT_TRUE(profile->client_certificate_file().starts_with("/proc/self/fd/"));
-    EXPECT_TRUE(profile->client_private_key_file().starts_with("/proc/self/fd/"));
+    EXPECT_TRUE(profile->client_credential());
 
     const fiber::access_server::UpstreamTlsClientPolicy environment;
     const auto mutual_policy = fiber::access_server::effective_upstream_tls_client_policy(environment, &*profile);
@@ -1021,9 +1041,8 @@ TEST(ProxyUpstreamConnectionTest, RouteClientIdentityCompletesMutualTlsAndAnonym
             run_tls_scenario(server_certificate.path(), server_key.path(), "server.identity.test",
                              {
                                      .verification = fiber::access_server::UpstreamTlsVerificationMode::CustomCa,
-                                     .ca_file = root.path(),
                              },
-                             false, root.path());
+                             false, root.path(), fiber::test::kRootCertPem);
     // TLS 1.3 can let the client finish its side of the handshake before it
     // consumes the server's certificate-required alert. The authoritative
     // upstream side still rejects the anonymous peer.
@@ -1057,7 +1076,6 @@ TEST(ProxyUpstreamConnectionTest, RouteProfileSeparatesSniFromCertificateVerific
     EXPECT_EQ(result.error, fiber::common::IoErr::None);
     EXPECT_EQ(result.server_error, fiber::common::IoErr::None);
     EXPECT_TRUE(result.verify_peer);
-    EXPECT_EQ(result.ca_file, profile->ca_file());
     EXPECT_EQ(result.server_name, "sni.example.com");
     EXPECT_EQ(result.verify_name, "localhost");
     EXPECT_EQ(result.observation.connect_success, 1U);
@@ -1066,10 +1084,8 @@ TEST(ProxyUpstreamConnectionTest, RouteProfileSeparatesSniFromCertificateVerific
 TEST(ProxyUpstreamConnectionTest, CustomCaRejectsMismatchedCertificateNameAsTlsFailure) {
     const auto &chain = trusted_test_tls_chain();
     ASSERT_TRUE(chain);
-    fiber::test::QuicTestTlsFile ca_certificate("access-upstream-name-ca", chain->ca_certificate_pem);
     fiber::test::QuicTestTlsFile certificate("access-upstream-name-cert", chain->server_certificate_pem);
     fiber::test::QuicTestTlsFile private_key("access-upstream-name-key", chain->server_private_key_pem);
-    ASSERT_TRUE(ca_certificate.valid());
     ASSERT_TRUE(certificate.valid());
     ASSERT_TRUE(private_key.valid());
 
@@ -1077,8 +1093,8 @@ TEST(ProxyUpstreamConnectionTest, CustomCaRejectsMismatchedCertificateNameAsTlsF
             run_tls_scenario(certificate.path(), private_key.path(), "wrong.example",
                              {
                                      .verification = fiber::access_server::UpstreamTlsVerificationMode::CustomCa,
-                                     .ca_file = ca_certificate.path(),
-                             });
+                             },
+                             false, {}, chain->ca_certificate_pem);
     EXPECT_EQ(result.error_code, fiber::access_server::ProxyConnectErrorCode::Tls);
     EXPECT_EQ(result.error, fiber::common::IoErr::Invalid);
     EXPECT_EQ(result.observation.dns_success, 1U);
@@ -1091,10 +1107,8 @@ TEST(ProxyUpstreamConnectionTest, CustomCaRejectsCertificateFromUnknownAuthority
     const auto &untrusted_chain = untrusted_test_tls_chain();
     ASSERT_TRUE(trusted_chain);
     ASSERT_TRUE(untrusted_chain);
-    fiber::test::QuicTestTlsFile trusted_ca("access-upstream-trusted-ca", trusted_chain->ca_certificate_pem);
     fiber::test::QuicTestTlsFile certificate("access-upstream-unknown-cert", untrusted_chain->server_certificate_pem);
     fiber::test::QuicTestTlsFile private_key("access-upstream-unknown-key", untrusted_chain->server_private_key_pem);
-    ASSERT_TRUE(trusted_ca.valid());
     ASSERT_TRUE(certificate.valid());
     ASSERT_TRUE(private_key.valid());
 
@@ -1102,8 +1116,8 @@ TEST(ProxyUpstreamConnectionTest, CustomCaRejectsCertificateFromUnknownAuthority
             run_tls_scenario(certificate.path(), private_key.path(), "localhost",
                              {
                                      .verification = fiber::access_server::UpstreamTlsVerificationMode::CustomCa,
-                                     .ca_file = trusted_ca.path(),
-                             });
+                             },
+                             false, {}, trusted_chain->ca_certificate_pem);
     EXPECT_EQ(result.error_code, fiber::access_server::ProxyConnectErrorCode::Tls);
     EXPECT_EQ(result.error, fiber::common::IoErr::Invalid);
     EXPECT_EQ(result.observation.dns_success, 1U);
@@ -1132,10 +1146,8 @@ TEST(ProxyUpstreamConnectionTest, SystemCaRejectsPrivateCertificateAuthorityAsTl
 TEST(ProxyUpstreamConnectionTest, VerifiedIpTargetRequiresCertificateIpIdentityWithoutIpSni) {
     const auto &chain = trusted_test_tls_chain();
     ASSERT_TRUE(chain);
-    fiber::test::QuicTestTlsFile ca_certificate("access-upstream-ip-ca", chain->ca_certificate_pem);
     fiber::test::QuicTestTlsFile certificate("access-upstream-ip-cert", chain->server_certificate_pem);
     fiber::test::QuicTestTlsFile private_key("access-upstream-ip-key", chain->server_private_key_pem);
-    ASSERT_TRUE(ca_certificate.valid());
     ASSERT_TRUE(certificate.valid());
     ASSERT_TRUE(private_key.valid());
 
@@ -1143,9 +1155,8 @@ TEST(ProxyUpstreamConnectionTest, VerifiedIpTargetRequiresCertificateIpIdentityW
             run_tls_scenario(certificate.path(), private_key.path(), {},
                              {
                                      .verification = fiber::access_server::UpstreamTlsVerificationMode::CustomCa,
-                                     .ca_file = ca_certificate.path(),
                              },
-                             true);
+                             true, {}, chain->ca_certificate_pem);
     EXPECT_EQ(result.error_code, fiber::access_server::ProxyConnectErrorCode::Tls);
     EXPECT_EQ(result.error, fiber::common::IoErr::Invalid);
     EXPECT_EQ(result.resolver_calls, 0U);

@@ -35,10 +35,10 @@ AccessRuntimeFactory::create(event::EventLoop &accept_loop, event::EventLoop &na
                 AccessServerRuntimeErrorCode::LoadDnsConfiguration, common::IoErr::Invalid,
                 "failed to load bounded DNS resolver configuration"));
     }
-    auto upstream_tls_validated = validate_upstream_tls_client_policy(config.upstream_tls_client_policy());
-    if (!upstream_tls_validated) {
+    auto upstream_tls_policy = prepare_upstream_tls_client_policy(config.upstream_tls_client_policy());
+    if (!upstream_tls_policy) {
         return std::unexpected(make_access_server_runtime_io_error(AccessServerRuntimeErrorCode::InitializeUpstreamTls,
-                                                                   upstream_tls_validated.error(),
+                                                                   upstream_tls_policy.error(),
                                                                    "failed to initialize upstream TLS trust store"));
     }
 
@@ -88,7 +88,7 @@ AccessRuntimeFactory::create(event::EventLoop &accept_loop, event::EventLoop &na
                     .service_discovery = config.service_discovery_options(),
                     .instance_registration = std::move(instance_registration),
                     .process_metrics = process_metrics,
-                    .tls_enabled = config.tls_http_server_options().tls.enabled,
+                    .tls_enabled = config.tls_http_server_options().tls.enabled(),
                     .quic_enabled = config.tls_http_server_options().http3.enabled,
             },
             AccessControlPlaneDependencies{
@@ -129,7 +129,7 @@ AccessRuntimeFactory::create(event::EventLoop &accept_loop, event::EventLoop &na
                             ProxyExecutorOptions{
                                     .connect_timeout = config.upstream_connect_timeout(),
                                     .happy_eyeballs = config.happy_eyeballs_policy(),
-                                    .upstream_tls = config.upstream_tls_client_policy(),
+                                    .upstream_tls = std::move(*upstream_tls_policy),
                             },
                     .default_max_request_body_size = config.default_max_request_body_size(),
                     .test_mode = config.test_mode(),

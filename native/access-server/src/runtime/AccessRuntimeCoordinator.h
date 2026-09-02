@@ -13,7 +13,7 @@
 #include <fiber/common/NonCopyable.h>
 #include <fiber/common/NonMovable.h>
 #include <fiber/net/SocketAddress.h>
-#include <fiber/net/TlsOptions.h>
+#include <fiber/net/TlsParams.h>
 
 namespace fiber::access_server {
 
@@ -29,7 +29,8 @@ enum class AccessServerRuntimeState : std::uint8_t {
 
 struct AccessControlPlaneReady {
     std::shared_ptr<TlsBootstrapIdentity> tls_bootstrap;
-    net::TlsIdentitySelectorOps tls_identity_selector;
+    net::ConfigureTlsCallback tls_configure_callback = nullptr;
+    void *tls_configure_context = nullptr;
 };
 
 struct AccessBoundEndpoint {

@@ -80,11 +80,11 @@ AccessDataPlaneService::bind(AccessControlPlaneReady ready) noexcept {
     FIBER_ASSERT(!server_);
     FIBER_ASSERT(!shutdown_complete_);
 
-    if (options_.http_server.tls.enabled) {
+    if (options_.http_server.tls.enabled()) {
         FIBER_ASSERT(ready.tls_bootstrap);
-        options_.http_server.tls.cert_file = ready.tls_bootstrap->certificate_path();
-        options_.http_server.tls.key_file = ready.tls_bootstrap->private_key_path();
-        options_.http_server.tls.identity_selector_ops = ready.tls_identity_selector;
+        FIBER_ASSERT(ready.tls_configure_callback);
+        options_.http_server.tls.configure_callback = ready.tls_configure_callback;
+        options_.http_server.tls.configure_ctx = ready.tls_configure_context;
     }
 
     server_.reset(new (std::nothrow) AccessServer(
@@ -127,7 +127,7 @@ AccessDataPlaneService::bind(AccessControlPlaneReady ready) noexcept {
 
     // The TLS listener is only bound when TLS is enabled; with TLS off the
     // TLS address:port stays closed and only the plaintext listener serves.
-    if (options_.http_server.tls.enabled) {
+    if (options_.http_server.tls.enabled()) {
         auto bound = server_->bind(options_.listen_address, options_.listen_options);
         if (ready.tls_bootstrap) {
             ready.tls_bootstrap->close();
