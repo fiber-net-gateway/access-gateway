@@ -22,13 +22,11 @@ UpstreamTlsClientPolicyView effective_upstream_tls_client_policy(const UpstreamT
     }
     if (profile->verification() != UpstreamTlsVerificationMode::Inherit) {
         result.verification = profile->verification();
-        result.ca_file = profile->verification() == UpstreamTlsVerificationMode::CustomCa ? profile->ca_file()
-                                                                                          : std::string_view{};
+        result.trust_store = profile->trust_store();
     }
     result.server_name = profile->server_name();
     result.verify_name = profile->verify_name();
-    result.client_certificate_file = profile->client_certificate_file();
-    result.client_private_key_file = profile->client_private_key_file();
+    result.client_credential = profile->client_credential();
     return result;
 }
 
@@ -61,16 +59,14 @@ http::Http1ClientConnectionOptions connection_options(const http::Http1Connectio
     result.peer_addr = net::SocketAddress(ip, key.port());
     result.pool_affinity = key.pool_affinity();
     if (key.scheme() == http::Http1ConnectionGroupKey::Scheme::Https) {
-        result.tls.enabled = true;
+        result.tls.enable_tls = true;
         result.tls.verify_peer = verified_tls(tls_policy);
-        if (tls_policy.verification == UpstreamTlsVerificationMode::CustomCa) {
-            FIBER_ASSERT(!tls_policy.ca_file.empty());
-            result.tls.ca_file.assign(tls_policy.ca_file);
-        }
+        FIBER_ASSERT(!result.tls.verify_peer || tls_policy.trust_store);
+        result.tls.trust_store = tls_policy.trust_store;
         if (!tls_policy.server_name.empty()) {
-            result.tls.server_name.assign(tls_policy.server_name);
+            result.tls.sni_name.assign(tls_policy.server_name);
         } else if (key.is_name()) {
-            result.tls.server_name.assign(key.host_name());
+            result.tls.sni_name.assign(key.host_name());
         }
         if (!tls_policy.verify_name.empty()) {
             result.tls.verify_name.assign(tls_policy.verify_name);
@@ -79,11 +75,7 @@ http::Http1ClientConnectionOptions connection_options(const http::Http1Connectio
             // IP-valued SNI extension.
             result.tls.verify_name = key.ip_address().to_string();
         }
-        if (!tls_policy.client_certificate_file.empty()) {
-            FIBER_ASSERT(!tls_policy.client_private_key_file.empty());
-            result.tls.cert_file.assign(tls_policy.client_certificate_file);
-            result.tls.key_file.assign(tls_policy.client_private_key_file);
-        }
+        result.tls.credential = tls_policy.client_credential;
     }
     return result;
 }
@@ -96,6 +88,15 @@ acquire_proxy_upstream_connection(http::StealableHttp1ConnectionPoolSet &pool, P
                                   std::chrono::milliseconds connect_timeout,
                                   ProxyHappyEyeballsPolicy happy_eyeballs) noexcept {
     ProxyUpstreamConnection output;
+    if (key.scheme() == http::Http1ConnectionGroupKey::Scheme::Https && verified_tls(tls_policy) &&
+        !tls_policy.trust_store) {
+        // Fail closed: a verified policy without a materialized trust store is a TLS
+        // configuration failure (e.g. an unreadable CA file), never a reason to dial
+        // unverified. Report a stable redacted error like a handshake failure.
+        ++output.observation.tls_failure;
+        co_return std::unexpected(error(ProxyConnectErrorCode::Tls, "upstream TLS trust store is unavailable",
+                                        common::IoErr::Invalid, std::move(output.observation)));
+    }
     output.lease = co_await pool.acquire(key);
     if (!output.lease.valid()) {
         ++output.observation.pool_shutdown;

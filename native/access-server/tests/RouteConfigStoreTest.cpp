@@ -116,7 +116,7 @@ TEST(RouteConfigStoreTest, RetainsOldIdentityAndSnapshotWhenRotationDependencyIs
     auto old_pin = store.pin();
     const auto &old_profile = *old_pin->projects()[0]->routes()[0].proxy->upstream_tls;
     const std::uint64_t old_affinity = old_profile.pool_affinity();
-    EXPECT_FALSE(old_profile.client_certificate_file().empty());
+    EXPECT_TRUE(old_profile.client_credential());
 
     auto v2 = project_config(2, "secure.example.com", "/");
     (*v2.routes)[0]->upstream_tls = fiber::access_server::RouteUpstreamTlsConfig{

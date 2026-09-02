@@ -8,8 +8,15 @@
 #include <utility>
 #include <vector>
 
+#include <fiber/net/TlsServerHandshakeConfig.h>
+
 namespace fiber::access_server {
 namespace {
+
+common::IoErr pending_tls_configuration(void *, net::TlsServerHandshakeConfig &,
+                                        const net::TlsClientHelloView &) noexcept {
+    return common::IoErr::Invalid;
+}
 
 constexpr std::string_view kLegacyListenAddress = "ACCESS_SERVER_LISTEN_ADDRESS";
 constexpr std::string_view kLegacyListenPort = "ACCESS_SERVER_LISTEN_PORT";
@@ -960,11 +967,12 @@ AccessServerConfig::load_from_string(std::string_view input) {
                                      "metrics listener must use a distinct address:port from the traffic listeners"));
     }
     http::HttpServerOptions http_options;
-    http_options.tls.enabled = tls_enabled;
+    if (tls_enabled) {
+        http_options.tls.configure_callback = &pending_tls_configuration;
+    }
     http_options.tls.alpn = {"h2", "http/1.1"};
     http_options.http3.enabled = http3_enabled;
     http::HttpServerOptions plain_http_options;
-    plain_http_options.tls.enabled = false;
     plain_http_options.http3.enabled = false;
     return AccessServerConfig(
             tls_address, std::move(http_options), plain_listen_enabled, plain_address, std::move(plain_http_options),

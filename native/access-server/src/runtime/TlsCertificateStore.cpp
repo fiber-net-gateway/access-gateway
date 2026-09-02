@@ -1,33 +1,24 @@
 #include "TlsCertificateStore.h"
 
 #include <algorithm>
-#include <cerrno>
 #include <climits>
-#include <fcntl.h>
 #include <memory>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <unistd.h>
 #include <utility>
 
 #include <openssl/bio.h>
 #include <openssl/err.h>
-#include <openssl/evp.h>
 #include <openssl/mem.h>
 #include <openssl/pem.h>
 #include <openssl/sha.h>
-#include <openssl/ssl.h>
 #include <openssl/x509.h>
 #include <openssl/x509v3.h>
 
 #include <fiber/common/Assert.h>
-#include <fiber/net/TlsContext.h>
 
 namespace fiber::access_server {
 namespace {
 
 using BioPtr = std::unique_ptr<BIO, decltype(&BIO_free)>;
-using KeyPtr = std::unique_ptr<EVP_PKEY, decltype(&EVP_PKEY_free)>;
 using X509Ptr = std::unique_ptr<X509, decltype(&X509_free)>;
 using GeneralNamesPtr = std::unique_ptr<GENERAL_NAMES, decltype(&GENERAL_NAMES_free)>;
 
@@ -136,82 +127,6 @@ std::expected<std::vector<std::string>, TlsCertificateConfigError> certificate_d
     return result;
 }
 
-std::expected<std::unique_ptr<net::TlsContext>, TlsCertificateConfigError>
-make_context(std::string_view certificate_pem, std::string_view private_key_pem, bool quic, std::string_view field) {
-    net::TlsOptions options;
-    options.enabled = true;
-    options.alpn = quic ? std::vector<std::string>{"h3"} : std::vector<std::string>{"h2", "http/1.1"};
-    auto context = std::make_unique<net::TlsContext>(std::move(options), true, false);
-    auto initialized = context->init();
-    if (!initialized) {
-        return std::unexpected(config_error(TlsCertificateConfigErrorCode::InvalidCertificate, std::string(field),
-                                            "failed to initialize TLS context"));
-    }
-
-    BioPtr cert_bio(BIO_new_mem_buf(certificate_pem.data(), static_cast<int>(certificate_pem.size())), &BIO_free);
-    X509Ptr leaf(cert_bio ? PEM_read_bio_X509(cert_bio.get(), nullptr, nullptr, nullptr) : nullptr, &X509_free);
-    if (!leaf || SSL_CTX_use_certificate(context->raw(), leaf.get()) != 1) {
-        ERR_clear_error();
-        return std::unexpected(config_error(TlsCertificateConfigErrorCode::InvalidCertificate, std::string(field),
-                                            "failed to load leaf certificate"));
-    }
-    for (;;) {
-        X509Ptr chain(PEM_read_bio_X509(cert_bio.get(), nullptr, nullptr, nullptr), &X509_free);
-        if (!chain) {
-            ERR_clear_error();
-            break;
-        }
-        if (SSL_CTX_add1_chain_cert(context->raw(), chain.get()) != 1) {
-            return std::unexpected(config_error(TlsCertificateConfigErrorCode::InvalidCertificate, std::string(field),
-                                                "failed to load certificate chain"));
-        }
-    }
-
-    BioPtr key_bio(BIO_new_mem_buf(private_key_pem.data(), static_cast<int>(private_key_pem.size())), &BIO_free);
-    KeyPtr key(key_bio ? PEM_read_bio_PrivateKey(key_bio.get(), nullptr, nullptr, nullptr) : nullptr, &EVP_PKEY_free);
-    if (!key || SSL_CTX_use_PrivateKey(context->raw(), key.get()) != 1 ||
-        SSL_CTX_check_private_key(context->raw()) != 1) {
-        ERR_clear_error();
-        return std::unexpected(config_error(TlsCertificateConfigErrorCode::InvalidPrivateKey, std::string(field),
-                                            "private key is invalid or does not match the leaf certificate"));
-    }
-    return context;
-}
-
-std::expected<int, TlsCertificateConfigError> make_sealed_memfd(std::string_view name, std::string_view content,
-                                                                std::string_view field) {
-    const int fd = memfd_create(std::string(name).c_str(), MFD_CLOEXEC | MFD_ALLOW_SEALING);
-    if (fd < 0) {
-        return std::unexpected(config_error(TlsCertificateConfigErrorCode::InvalidField, std::string(field),
-                                            "failed to create in-memory bootstrap identity"));
-    }
-    if (fchmod(fd, S_IRUSR) < 0) {
-        close(fd);
-        return std::unexpected(config_error(TlsCertificateConfigErrorCode::InvalidField, std::string(field),
-                                            "failed to protect in-memory bootstrap identity"));
-    }
-    std::size_t offset = 0;
-    while (offset < content.size()) {
-        const ssize_t written = write(fd, content.data() + offset, content.size() - offset);
-        if (written < 0 && errno == EINTR) {
-            continue;
-        }
-        if (written <= 0) {
-            close(fd);
-            return std::unexpected(config_error(TlsCertificateConfigErrorCode::InvalidField, std::string(field),
-                                                "failed to write in-memory bootstrap identity"));
-        }
-        offset += static_cast<std::size_t>(written);
-    }
-    if (lseek(fd, 0, SEEK_SET) < 0 ||
-        fcntl(fd, F_ADD_SEALS, F_SEAL_SEAL | F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE) < 0) {
-        close(fd);
-        return std::unexpected(config_error(TlsCertificateConfigErrorCode::InvalidField, std::string(field),
-                                            "failed to seal in-memory bootstrap identity"));
-    }
-    return fd;
-}
-
 int compare_ascii_case_insensitive(std::string_view left, std::string_view right) noexcept {
     const std::size_t common = std::min(left.size(), right.size());
     for (std::size_t i = 0; i < common; ++i) {
@@ -236,8 +151,6 @@ class TlsCertificateStore::Snapshot {
 public:
     struct Identity {
         std::string id;
-        std::unique_ptr<net::TlsContext> tcp;
-        std::unique_ptr<net::TlsContext> quic;
         std::shared_ptr<const UpstreamTlsClientIdentity> client;
     };
 
@@ -246,7 +159,7 @@ public:
         Identity *identity = nullptr;
     };
 
-    [[nodiscard]] net::TlsContext *select(std::string_view server_name, net::TlsTransportKind transport) noexcept {
+    [[nodiscard]] const net::TlsCredential *select(std::string_view server_name) noexcept {
         Identity *identity = nullptr;
         if (!server_name.empty()) {
             identity = find(exact_names, server_name);
@@ -260,7 +173,7 @@ public:
         if (!identity) {
             identity = default_identity;
         }
-        return transport == net::TlsTransportKind::Quic ? identity->quic.get() : identity->tcp.get();
+        return &identity->client->credential();
     }
 
     static Identity *find(const std::vector<NameEntry> &entries, std::string_view name) noexcept {
@@ -306,6 +219,7 @@ namespace {
 
 std::expected<std::unique_ptr<TlsCertificateStore::Snapshot>, TlsCertificateConfigError>
 compile_snapshot(const TlsCertificateSnapshotConfig &config, bool quic_enabled) {
+    (void) quic_enabled;
     auto snapshot = std::make_unique<TlsCertificateStore::Snapshot>();
     snapshot->version = config.version;
     snapshot->identities.reserve(config.certificates.size());
@@ -324,27 +238,13 @@ compile_snapshot(const TlsCertificateSnapshotConfig &config, bool quic_enabled) 
             return std::unexpected(config_error(TlsCertificateConfigErrorCode::LimitExceeded, "certificates",
                                                 "snapshot has more than 8192 DNS SAN entries"));
         }
-        auto tcp = make_context(source.certificate_pem, source.private_key_pem, false, field);
-        if (!tcp) {
-            return std::unexpected(std::move(tcp.error()));
-        }
-        std::unique_ptr<net::TlsContext> quic;
-        if (quic_enabled) {
-            auto context = make_context(source.certificate_pem, source.private_key_pem, true, field);
-            if (!context) {
-                return std::unexpected(std::move(context.error()));
-            }
-            quic = std::move(*context);
-        }
         auto client = UpstreamTlsClientIdentity::create(source.certificate_pem, source.private_key_pem);
         if (!client) {
-            return std::unexpected(config_error(TlsCertificateConfigErrorCode::InvalidField, field,
-                                                "failed to protect TLS identity material"));
+            return std::unexpected(config_error(TlsCertificateConfigErrorCode::InvalidPrivateKey, field,
+                                                "private key is invalid or does not match the leaf certificate"));
         }
         snapshot->identities.push_back(TlsCertificateStore::Snapshot::Identity{
                 .id = source.id,
-                .tcp = std::move(*tcp),
-                .quic = std::move(quic),
                 .client = std::move(*client),
         });
         dns_names.push_back(std::move(*names));
@@ -395,25 +295,10 @@ compile_snapshot(const TlsCertificateSnapshotConfig &config, bool quic_enabled) 
 
 } // namespace
 
-TlsBootstrapIdentity::TlsBootstrapIdentity(int certificate_fd, int private_key_fd) :
-    certificate_fd_(certificate_fd), private_key_fd_(private_key_fd),
-    certificate_path_("/proc/self/fd/" + std::to_string(certificate_fd)),
-    private_key_path_("/proc/self/fd/" + std::to_string(private_key_fd)) {}
+TlsBootstrapIdentity::~TlsBootstrapIdentity() = default;
 
-TlsBootstrapIdentity::~TlsBootstrapIdentity() { close(); }
-
-std::expected<std::shared_ptr<TlsBootstrapIdentity>, TlsCertificateConfigError>
-TlsBootstrapIdentity::create(std::string_view certificate_pem, std::string_view private_key_pem) {
-    auto certificate_fd = make_sealed_memfd("access-server-certificate", certificate_pem, "certificatePem");
-    if (!certificate_fd) {
-        return std::unexpected(std::move(certificate_fd.error()));
-    }
-    auto private_key_fd = make_sealed_memfd("access-server-private-key", private_key_pem, "privateKeyPem");
-    if (!private_key_fd) {
-        ::close(*certificate_fd);
-        return std::unexpected(std::move(private_key_fd.error()));
-    }
-    return std::shared_ptr<TlsBootstrapIdentity>(new TlsBootstrapIdentity(*certificate_fd, *private_key_fd));
+std::shared_ptr<TlsBootstrapIdentity> TlsBootstrapIdentity::create() {
+    return std::shared_ptr<TlsBootstrapIdentity>(new TlsBootstrapIdentity());
 }
 
 TlsCertificateContentDigest TlsCertificateStore::content_digest(std::string_view wire_content) noexcept {
@@ -435,29 +320,12 @@ TlsCertificateStore::prepare(const TlsCertificateSnapshotConfig &config, TlsCert
     prepared.content_digest_ = digest;
     prepared.snapshot_ = std::move(*candidate);
     if (prepare_bootstrap) {
-        const auto default_config =
-                std::find_if(config.certificates.begin(), config.certificates.end(),
-                             [&](const auto &entry) { return entry.id == config.default_certificate; });
-        FIBER_ASSERT(default_config != config.certificates.end());
-        auto bootstrap = TlsBootstrapIdentity::create(default_config->certificate_pem, default_config->private_key_pem);
-        if (!bootstrap) {
-            return std::unexpected(std::move(bootstrap.error()));
-        }
-        prepared.bootstrap_ = std::move(*bootstrap);
+        prepared.bootstrap_ = TlsBootstrapIdentity::create();
     }
     return prepared;
 }
 
-void TlsBootstrapIdentity::close() noexcept {
-    const int certificate_fd = certificate_fd_.exchange(-1, std::memory_order_acq_rel);
-    if (certificate_fd >= 0) {
-        ::close(certificate_fd);
-    }
-    const int private_key_fd = private_key_fd_.exchange(-1, std::memory_order_acq_rel);
-    if (private_key_fd >= 0) {
-        ::close(private_key_fd);
-    }
-}
+void TlsBootstrapIdentity::close() noexcept {}
 
 TlsCertificateStore::TlsCertificateStore(event::EventLoop &owner_loop, event::EventLoopGroup &workers,
                                          bool quic_enabled, AccessTlsMetricsObserver metrics_observer,
@@ -577,11 +445,11 @@ TlsCertificateStore::commit(PreparedUpdate prepared) {
     return TlsCertificateUpdateStatus::Published;
 }
 
-net::TlsIdentitySelectorOps TlsCertificateStore::selector_ops() noexcept {
-    return net::TlsIdentitySelectorOps{
-            .select = &select_identity,
-            .ctx = this,
-    };
+net::TlsServerParam TlsCertificateStore::tls_server_param() noexcept {
+    net::TlsServerParam param;
+    param.configure_callback = &configure_handshake;
+    param.configure_ctx = this;
+    return param;
 }
 
 UpstreamTlsClientIdentityResolver TlsCertificateStore::client_identity_resolver() noexcept {
@@ -604,23 +472,30 @@ TlsCertificateStore::find_client_identity(void *context, std::string_view id) no
 
 std::size_t TlsCertificateStore::certificate_count() const noexcept { return active_ ? active_->identities.size() : 0; }
 
-net::TlsContext *TlsCertificateStore::select_identity(void *context,
-                                                      const net::TlsIdentitySelectInput &input) noexcept {
+common::IoErr TlsCertificateStore::configure_handshake(void *context, net::TlsServerHandshakeConfig &config,
+                                                       const net::TlsClientHelloView &client_hello) noexcept {
     auto &store = *static_cast<TlsCertificateStore *>(context);
+    const net::TlsCredential *selected = store.select_credential(client_hello.server_name, client_hello.transport);
+    return selected ? config.add_credential(*selected) : common::IoErr::Invalid;
+}
+
+const net::TlsCredential *TlsCertificateStore::select_credential(std::string_view server_name,
+                                                                 net::TlsTransportKind transport) noexcept {
+    (void) transport;
     event::EventLoop *loop = event::EventLoop::current_or_null();
-    if (!loop || !loop->has_group_index() || loop->group() != store.workers_) {
+    if (!loop || !loop->has_group_index() || loop->group() != workers_) {
         return nullptr;
     }
-    WorkerSlot &slot = *store.worker_slots_[loop->group_index()];
+    WorkerSlot &slot = *worker_slots_[loop->group_index()];
     Snapshot *snapshot;
     do {
-        snapshot = store.current_.load(std::memory_order_acquire);
+        snapshot = current_.load(std::memory_order_acquire);
         if (!snapshot) {
             return nullptr;
         }
         slot.hazard.store(snapshot, std::memory_order_seq_cst);
-    } while (snapshot != store.current_.load(std::memory_order_seq_cst));
-    net::TlsContext *selected = snapshot->select(input.server_name, input.transport);
+    } while (snapshot != current_.load(std::memory_order_seq_cst));
+    const net::TlsCredential *selected = snapshot->select(server_name);
     loop->post_local<WorkerSlot, &WorkerSlot::clear_entry, &clear_hazard>(slot);
     return selected;
 }

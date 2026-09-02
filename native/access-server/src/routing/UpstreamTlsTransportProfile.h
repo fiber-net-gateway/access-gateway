@@ -15,11 +15,14 @@
 
 #include <fiber/http/Http1ConnectionGroupKey.h>
 
+namespace fiber::net {
+class TlsCredential;
+class TrustStore;
+} // namespace fiber::net
+
 namespace fiber::access_server {
 
-class UpstreamTlsCaBundle;
-
-// Connection-bound route TLS settings. The sealed CA descriptor is owned by
+// Connection-bound route TLS settings. The compiled trust store is owned by
 // the same immutable route snapshot that owns this profile, so a request which
 // pins an old snapshot can still finish while a newer generation is published.
 class UpstreamTlsTransportProfile final {
@@ -34,12 +37,11 @@ public:
     [[nodiscard]] std::uint64_t generation() const noexcept { return generation_; }
     [[nodiscard]] std::uint64_t pool_affinity() const noexcept { return pool_affinity_; }
     [[nodiscard]] UpstreamTlsVerificationMode verification() const noexcept { return verification_; }
-    [[nodiscard]] std::string_view ca_file() const noexcept;
+    [[nodiscard]] const net::TrustStore *trust_store() const noexcept { return trust_store_.get(); }
     [[nodiscard]] std::string_view server_name() const noexcept { return server_name_; }
     [[nodiscard]] std::string_view verify_name() const noexcept { return verify_name_; }
     [[nodiscard]] std::string_view client_identity_ref() const noexcept { return client_identity_ref_; }
-    [[nodiscard]] std::string_view client_certificate_file() const noexcept;
-    [[nodiscard]] std::string_view client_private_key_file() const noexcept;
+    [[nodiscard]] const net::TlsCredential *client_credential() const noexcept;
     [[nodiscard]] std::optional<http::Http1ConnectionGroupKey>
     connection_key(const http::Http1ConnectionGroupKey &base) const noexcept;
 
@@ -52,7 +54,7 @@ private:
 
     UpstreamTlsTransportProfile() = default;
 
-    std::shared_ptr<const UpstreamTlsCaBundle> ca_bundle_;
+    std::shared_ptr<const net::TrustStore> trust_store_;
     std::shared_ptr<const UpstreamTlsClientIdentity> client_identity_;
     std::string server_name_;
     std::string verify_name_;

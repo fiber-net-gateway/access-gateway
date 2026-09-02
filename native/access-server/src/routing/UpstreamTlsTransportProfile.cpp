@@ -2,20 +2,14 @@
 
 #include <algorithm>
 #include <array>
-#include <cerrno>
-#include <fcntl.h>
 #include <memory>
-#include <new>
 #include <string>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <unistd.h>
 #include <utility>
 
 #include <openssl/sha.h>
 
 #include <fiber/net/IpAddress.h>
-#include <fiber/net/TlsContext.h>
+#include <fiber/net/TrustStore.h>
 
 namespace fiber::access_server {
 namespace {
@@ -153,91 +147,23 @@ std::uint64_t identity_affinity(std::uint64_t transport_affinity,
     return affinity == 0 ? 1 : affinity;
 }
 
-} // namespace
-
-class UpstreamTlsCaBundle final {
-public:
-    explicit UpstreamTlsCaBundle(int fd) : fd_(fd), path_("/proc/self/fd/" + std::to_string(fd)) {}
-    ~UpstreamTlsCaBundle() {
-        if (fd_ >= 0) {
-            close(fd_);
-        }
-    }
-
-    UpstreamTlsCaBundle(const UpstreamTlsCaBundle &) = delete;
-    UpstreamTlsCaBundle &operator=(const UpstreamTlsCaBundle &) = delete;
-
-    [[nodiscard]] std::string_view path() const noexcept { return path_; }
-
-private:
-    int fd_ = -1;
-    std::string path_;
-};
-
-namespace {
-
-std::expected<std::shared_ptr<const UpstreamTlsCaBundle>, AccessConfigError> seal_ca_bundle(std::string_view pem,
-                                                                                            std::size_t route_index) {
-    const int fd = memfd_create("access-server-upstream-ca", MFD_CLOEXEC | MFD_ALLOW_SEALING);
-    if (fd < 0) {
-        return std::unexpected(profile_error(AccessConfigErrorCode::InvalidField, route_index, "ca_pem",
-                                             "failed to create sealed upstream CA bundle"));
-    }
-    if (fchmod(fd, S_IRUSR) < 0) {
-        close(fd);
-        return std::unexpected(profile_error(AccessConfigErrorCode::InvalidField, route_index, "ca_pem",
-                                             "failed to protect upstream CA bundle"));
-    }
-    std::size_t offset = 0;
-    while (offset < pem.size()) {
-        const ssize_t written = write(fd, pem.data() + offset, pem.size() - offset);
-        if (written < 0 && errno == EINTR) {
-            continue;
-        }
-        if (written <= 0) {
-            close(fd);
-            return std::unexpected(profile_error(AccessConfigErrorCode::InvalidField, route_index, "ca_pem",
-                                                 "failed to prepare upstream CA bundle"));
-        }
-        offset += static_cast<std::size_t>(written);
-    }
-    if (lseek(fd, 0, SEEK_SET) < 0 ||
-        fcntl(fd, F_ADD_SEALS, F_SEAL_SEAL | F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE) < 0) {
-        close(fd);
-        return std::unexpected(profile_error(AccessConfigErrorCode::InvalidField, route_index, "ca_pem",
-                                             "failed to seal upstream CA bundle"));
-    }
-    auto *allocated = new (std::nothrow) UpstreamTlsCaBundle(fd);
-    if (!allocated) {
-        close(fd);
-        return std::unexpected(profile_error(AccessConfigErrorCode::LimitExceeded, route_index, "ca_pem",
-                                             "failed to allocate upstream CA bundle"));
-    }
-    std::shared_ptr<const UpstreamTlsCaBundle> bundle(allocated);
-    return bundle;
-}
-
-std::expected<void, AccessConfigError> validate_trust(UpstreamTlsVerificationMode verification,
-                                                      std::string_view ca_file, std::size_t route_index) {
+std::expected<std::shared_ptr<const net::TrustStore>, AccessConfigError>
+make_trust_store(UpstreamTlsVerificationMode verification, std::string_view ca_pem, std::size_t route_index) {
     if (verification == UpstreamTlsVerificationMode::Inherit ||
         verification == UpstreamTlsVerificationMode::LegacyInsecure) {
-        return {};
+        return std::shared_ptr<const net::TrustStore>{};
     }
-    net::TlsOptions options;
-    options.enabled = true;
-    options.verify_peer = true;
-    if (verification == UpstreamTlsVerificationMode::CustomCa) {
-        options.ca_file = ca_file;
-    }
-    net::TlsContext context(std::move(options), false, false);
-    auto initialized = context.init();
-    if (!initialized) {
+    const net::TrustStoreOptions options = verification == UpstreamTlsVerificationMode::CustomCa
+                                                   ? net::TrustStoreOptions::from_content(std::string(ca_pem))
+                                                   : net::TrustStoreOptions::system();
+    auto trust_store = net::TrustStore::create(options);
+    if (!trust_store) {
         return std::unexpected(
                 profile_error(AccessConfigErrorCode::InvalidField, route_index,
                               verification == UpstreamTlsVerificationMode::CustomCa ? "ca_pem" : "verification",
                               "failed to initialize upstream TLS trust profile"));
     }
-    return {};
+    return std::shared_ptr<const net::TrustStore>(std::move(*trust_store));
 }
 
 } // namespace
@@ -249,16 +175,8 @@ UpstreamTlsTransportProfile::operator=(UpstreamTlsTransportProfile &&other) noex
 
 UpstreamTlsTransportProfile::~UpstreamTlsTransportProfile() = default;
 
-std::string_view UpstreamTlsTransportProfile::ca_file() const noexcept {
-    return ca_bundle_ ? ca_bundle_->path() : std::string_view{};
-}
-
-std::string_view UpstreamTlsTransportProfile::client_certificate_file() const noexcept {
-    return client_identity_ ? client_identity_->certificate_path() : std::string_view{};
-}
-
-std::string_view UpstreamTlsTransportProfile::client_private_key_file() const noexcept {
-    return client_identity_ ? client_identity_->private_key_path() : std::string_view{};
+const net::TlsCredential *UpstreamTlsTransportProfile::client_credential() const noexcept {
+    return client_identity_ ? &client_identity_->credential() : nullptr;
 }
 
 std::optional<http::Http1ConnectionGroupKey>
@@ -315,17 +233,12 @@ compile_upstream_tls_transport_profile(const RouteUpstreamTlsConfig &config, std
     if (config.client_identity_ref) {
         result.client_identity_ref_ = ascii_lower(*config.client_identity_ref);
     }
-    if (has_ca) {
-        auto sealed = seal_ca_bundle(*config.ca_pem, route_index);
-        if (!sealed) {
-            return std::unexpected(std::move(sealed.error()));
-        }
-        result.ca_bundle_ = std::move(*sealed);
+    auto trust_store = make_trust_store(config.verification,
+                                        has_ca ? std::string_view(*config.ca_pem) : std::string_view{}, route_index);
+    if (!trust_store) {
+        return std::unexpected(std::move(trust_store.error()));
     }
-    auto trusted = validate_trust(config.verification, result.ca_file(), route_index);
-    if (!trusted) {
-        return std::unexpected(std::move(trusted.error()));
-    }
+    result.trust_store_ = std::move(*trust_store);
     return result;
 }
 
