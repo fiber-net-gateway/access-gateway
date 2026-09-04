@@ -475,13 +475,11 @@ std::size_t TlsCertificateStore::certificate_count() const noexcept { return act
 common::IoErr TlsCertificateStore::configure_handshake(void *context, net::TlsServerHandshakeConfig &config,
                                                        const net::TlsClientHelloView &client_hello) noexcept {
     auto &store = *static_cast<TlsCertificateStore *>(context);
-    const net::TlsCredential *selected = store.select_credential(client_hello.server_name, client_hello.transport);
+    const net::TlsCredential *selected = store.select_credential(client_hello.server_name);
     return selected ? config.add_credential(*selected) : common::IoErr::Invalid;
 }
 
-const net::TlsCredential *TlsCertificateStore::select_credential(std::string_view server_name,
-                                                                 net::TlsTransportKind transport) noexcept {
-    (void) transport;
+const net::TlsCredential *TlsCertificateStore::select_credential(std::string_view server_name) noexcept {
     event::EventLoop *loop = event::EventLoop::current_or_null();
     if (!loop || !loop->has_group_index() || loop->group() != workers_) {
         return nullptr;

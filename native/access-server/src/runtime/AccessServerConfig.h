@@ -23,6 +23,7 @@
 
 #include <fiber/cat/CatClientConfig.h>
 #include <fiber/http/HttpExchange.h>
+#include <fiber/http/HttpServerOptions.h>
 #include <fiber/nacos/NacosClientConfig.h>
 #include <fiber/net/SocketAddress.h>
 

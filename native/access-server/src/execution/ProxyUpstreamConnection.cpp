@@ -59,23 +59,23 @@ http::Http1ClientConnectionOptions connection_options(const http::Http1Connectio
     result.peer_addr = net::SocketAddress(ip, key.port());
     result.pool_affinity = key.pool_affinity();
     if (key.scheme() == http::Http1ConnectionGroupKey::Scheme::Https) {
-        result.tls.enable_tls = true;
-        result.tls.verify_peer = verified_tls(tls_policy);
-        FIBER_ASSERT(!result.tls.verify_peer || tls_policy.trust_store);
-        result.tls.trust_store = tls_policy.trust_store;
+        http::HttpClientTlsOptions &tls = result.tls.emplace();
+        tls.security.verify_peer = verified_tls(tls_policy);
+        FIBER_ASSERT(!tls.security.verify_peer || tls_policy.trust_store);
+        tls.security.trust_store = tls_policy.trust_store;
         if (!tls_policy.server_name.empty()) {
-            result.tls.sni_name.assign(tls_policy.server_name);
+            tls.server_name.assign(tls_policy.server_name);
         } else if (key.is_name()) {
-            result.tls.sni_name.assign(key.host_name());
+            tls.server_name.assign(key.host_name());
         }
         if (!tls_policy.verify_name.empty()) {
-            result.tls.verify_name.assign(tls_policy.verify_name);
-        } else if (key.is_ip() && result.tls.verify_peer && tls_policy.server_name.empty()) {
+            tls.verify_name.assign(tls_policy.verify_name);
+        } else if (key.is_ip() && tls.security.verify_peer && tls_policy.server_name.empty()) {
             // IP literals are authenticated as IP identities without emitting an
             // IP-valued SNI extension.
-            result.tls.verify_name = key.ip_address().to_string();
+            tls.verify_name = key.ip_address().to_string();
         }
-        result.tls.credential = tls_policy.client_credential;
+        tls.security.credential = tls_policy.client_credential;
     }
     return result;
 }

@@ -96,8 +96,7 @@ public:
     [[nodiscard]] async::Task<void> shutdown() noexcept;
 
     [[nodiscard]] net::TlsServerParam tls_server_param() noexcept;
-    [[nodiscard]] const net::TlsCredential *select_credential(std::string_view server_name,
-                                                              net::TlsTransportKind transport) noexcept;
+    [[nodiscard]] const net::TlsCredential *select_credential(std::string_view server_name) noexcept;
     [[nodiscard]] UpstreamTlsClientIdentityResolver client_identity_resolver() noexcept;
     [[nodiscard]] std::shared_ptr<TlsBootstrapIdentity> bootstrap_identity() const noexcept { return bootstrap_; }
     [[nodiscard]] std::uint64_t version() const noexcept { return version_; }

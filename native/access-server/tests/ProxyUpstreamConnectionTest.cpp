@@ -238,12 +238,12 @@ fiber::async::DetachedTask run_tls_server(fiber::net::TcpListener *listener, fib
         promise->set_value(accepted.error());
         co_return;
     }
-    auto created = fiber::http::TlsTransport::create(fiber::event::EventLoop::current(), std::move(*accepted), *tls);
+    auto created = fiber::http::TlsTransport::create(fiber::event::EventLoop::current(), std::move(*accepted));
     if (!created) {
         promise->set_value(created.error());
         co_return;
     }
-    auto handshake = co_await (*created)->handshake(2s);
+    auto handshake = co_await (*created)->handshake(*tls, 2s);
     (*created)->close();
     promise->set_value(handshake ? fiber::common::IoErr::None : handshake.error());
 }
@@ -265,10 +265,12 @@ fiber::async::DetachedTask run_tls_client_scenario(fiber::http::StealableHttp1Co
         const auto &tls = connected->connection->options().tls;
         result.first_hit = connected->lease.hit();
         result.connected_ip = connected->connection->options().peer_addr.ip();
-        result.tls_enabled = tls.enabled();
-        result.verify_peer = tls.verify_peer;
-        result.server_name = tls.sni_name;
-        result.verify_name = tls.verify_name;
+        result.tls_enabled = tls.has_value();
+        if (tls) {
+            result.verify_peer = tls->security.verify_peer;
+            result.server_name = tls->server_name;
+            result.verify_name = tls->verify_name;
+        }
         connected->lease.reset();
     }
     co_await pool->shutdown_async();

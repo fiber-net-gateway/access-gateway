@@ -36,10 +36,6 @@ class TelemetryTransport final : public fiber::test::HttpTransportStub {
 public:
     TelemetryTransport(fiber::event::EventLoop &loop, std::string input) : loop_(loop), input_(std::move(input)) {}
 
-    fiber::async::Task<fiber::common::IoResult<void>> handshake(std::chrono::milliseconds) override {
-        co_return fiber::common::IoResult<void>{};
-    }
-
     fiber::async::Task<fiber::common::IoResult<void>> shutdown(std::chrono::milliseconds) override {
         co_return fiber::common::IoResult<void>{};
     }
