@@ -27,7 +27,6 @@
 #include <fiber/async/Spawn.h>
 #include <fiber/async/Yield.h>
 #include <fiber/event/EventLoopGroup.h>
-#include <fiber/net/TlsContext.h>
 
 #include "runtime/TlsCertificateStore.h"
 
@@ -178,7 +177,9 @@ fiber::async::DetachedTask run_benchmark(TlsCertificateStore *store, const TlsCe
         co_return;
     }
 
-    const fiber::net::TlsIdentitySelectorOps selector = store->selector_ops();
+    // select_credential requires the calling thread to be a worker of the store's
+    // EventLoopGroup (it publishes a hazard pointer and defers the clear on that
+    // loop), which run_benchmark satisfies by running on workers.at(0).
     constexpr std::array<std::string_view, 3> kServerNames{
             "api.example.com",
             "tenant.example.org",
@@ -191,11 +192,7 @@ fiber::async::DetachedTask run_benchmark(TlsCertificateStore *store, const TlsCe
             std::uint64_t checksum = 0;
             const auto started = std::chrono::steady_clock::now();
             for (std::uint64_t operation = 0; operation < selection_operations; ++operation) {
-                fiber::net::TlsContext *selected =
-                        selector.select(selector.ctx, fiber::net::TlsIdentitySelectInput{
-                                                              .server_name = kServerNames[case_index],
-                                                              .transport = fiber::net::TlsTransportKind::Tcp,
-                                                      });
+                const fiber::net::TlsCredential *selected = store->select_credential(kServerNames[case_index]);
                 checksum += reinterpret_cast<std::uintptr_t>(selected) != 0 ? 1U : 0U;
             }
             elapsed.push_back(static_cast<std::uint64_t>(
@@ -212,11 +209,7 @@ fiber::async::DetachedTask run_benchmark(TlsCertificateStore *store, const TlsCe
     rotation_elapsed.reserve(prepared->size());
     for (auto &candidate: *prepared) {
         const auto started = std::chrono::steady_clock::now();
-        fiber::net::TlsContext *selected =
-                selector.select(selector.ctx, fiber::net::TlsIdentitySelectInput{
-                                                      .server_name = "api.example.com",
-                                                      .transport = fiber::net::TlsTransportKind::Tcp,
-                                              });
+        const fiber::net::TlsCredential *selected = store->select_credential("api.example.com");
         auto committed = store->commit(std::move(candidate));
         if (selected == nullptr || !committed || *committed != TlsCertificateUpdateStatus::Published) {
             co_await store->shutdown();
