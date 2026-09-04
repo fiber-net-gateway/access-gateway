@@ -10,6 +10,7 @@ build_jobs=${NATIVE_BUILD_JOBS:-2}
 max_workers=${ACCESS_SERVER_BENCHMARK_MAX_WORKERS:-4}
 quick=${ACCESS_SERVER_BENCHMARK_QUICK:-0}
 cpu_set=${ACCESS_SERVER_BENCHMARK_CPUSET:-}
+extra_cmake_args=${ACCESS_SERVER_BENCHMARK_CMAKE_ARGS:-}
 
 for required_command in cmake git sha256sum sort timeout xargs; do
     if ! command -v "${required_command}" >/dev/null 2>&1; then
@@ -80,11 +81,18 @@ else
     connects=101
 fi
 
-cmake -S "${repository_root}/native" -B "${build_dir}" -G Ninja \
+if command -v ninja >/dev/null 2>&1; then
+    generator=Ninja
+else
+    generator="Unix Makefiles"
+fi
+
+cmake -S "${repository_root}/native" -B "${build_dir}" -G "${generator}" \
     -DCMAKE_BUILD_TYPE=Release \
     -DFIBER_BUILD_TESTS=OFF \
     -DFIBER_ENABLE_LTO=ON \
-    -DACCESS_SERVER_BUILD_BENCHMARKS=ON
+    -DACCESS_SERVER_BUILD_BENCHMARKS=ON \
+    ${extra_cmake_args}
 
 targets=(
     fiber_access_service_selection_benchmark
@@ -109,7 +117,22 @@ dirty=false
 if [[ -n "$(git -C "${repository_root}" status --porcelain --untracked-files=normal)" ]]; then
     dirty=true
 fi
-compiler_path=$(sed -n 's/^CMAKE_CXX_COMPILER:[^=]*=//p' "${build_dir}/CMakeCache.txt" | head -n 1)
+# The cache may hold several CMAKE_CXX_COMPILER entries when the compiler was
+# passed via -D (an UNINITIALIZED caller value alongside CMake's resolved one).
+# Prefer the first executable match; fall back to resolving a bare name on PATH.
+compiler_path=""
+while IFS= read -r candidate; do
+    if [[ "${candidate}" == */* ]] && [[ -x "${candidate}" ]]; then
+        compiler_path="${candidate}"
+        break
+    fi
+done < <(sed -n 's/^CMAKE_CXX_COMPILER:[^=]*=//p' "${build_dir}/CMakeCache.txt")
+if [[ -z "${compiler_path}" ]]; then
+    candidate=$(sed -n 's/^CMAKE_CXX_COMPILER:[^=]*=//p' "${build_dir}/CMakeCache.txt" | head -n 1)
+    if [[ -n "${candidate}" ]] && command -v "${candidate}" >/dev/null 2>&1; then
+        compiler_path=$(command -v "${candidate}")
+    fi
+fi
 if [[ -z "${compiler_path}" ]] || [[ ! -x "${compiler_path}" ]]; then
     echo "unable to resolve CMAKE_CXX_COMPILER from ${build_dir}/CMakeCache.txt" >&2
     exit 2
