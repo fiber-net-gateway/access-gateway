@@ -74,10 +74,6 @@ public:
     RecordingTransport(fiber::event::EventLoop &loop, std::string input, std::string &output) :
         loop_(loop), input_(std::move(input)), output_(output) {}
 
-    fiber::async::Task<fiber::common::IoResult<void>> handshake(std::chrono::milliseconds) override {
-        co_return fiber::common::IoResult<void>{};
-    }
-
     fiber::async::Task<fiber::common::IoResult<void>> shutdown(std::chrono::milliseconds) override {
         co_return fiber::common::IoResult<void>{};
     }

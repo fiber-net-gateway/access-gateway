@@ -970,7 +970,6 @@ AccessServerConfig::load_from_string(std::string_view input) {
     if (tls_enabled) {
         http_options.tls.configure_callback = &pending_tls_configuration;
     }
-    http_options.tls.alpn = {"h2", "http/1.1"};
     http_options.http3.enabled = http3_enabled;
     http::HttpServerOptions plain_http_options;
     plain_http_options.http3.enabled = false;

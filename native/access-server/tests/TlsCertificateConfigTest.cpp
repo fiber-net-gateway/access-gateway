@@ -247,7 +247,7 @@ struct RotateDuringTlsSelect {
 common::IoErr rotate_during_tls_select(void *context, net::TlsServerHandshakeConfig &config,
                                        const net::TlsClientHelloView &input) noexcept {
     auto &state = *static_cast<RotateDuringTlsSelect *>(context);
-    const net::TlsCredential *selected = state.store->select_credential(input.server_name, input.transport);
+    const net::TlsCredential *selected = state.store->select_credential(input.server_name);
     common::IoErr result = selected ? config.add_credential(*selected) : common::IoErr::Invalid;
     if (state.calls < state.selected_credentials.size()) {
         state.selected_credentials[state.calls] = reinterpret_cast<std::uintptr_t>(selected);
@@ -280,13 +280,13 @@ async::Task<TlsHandshakePairResult> run_tls_handshake_pair(event::EventLoop &loo
     const net::SocketAddress peer(net::IpAddress::loopback_v4(), 443);
     net::AcceptResult server_accept(sockets[0], peer);
     net::AcceptResult client_accept(sockets[1], peer);
-    auto server_transport = http::TlsTransport::create(loop, std::move(server_accept), server_options, {});
+    auto server_transport = http::TlsTransport::create(loop, std::move(server_accept));
     if (!server_transport) {
         result.server = server_transport.error();
         result.client = result.server;
         co_return result;
     }
-    auto client_transport = http::TlsTransport::create(loop, std::move(client_accept), client_options, {});
+    auto client_transport = http::TlsTransport::create(loop, std::move(client_accept));
     if (!client_transport) {
         result.server = common::IoErr::Canceled;
         result.client = client_transport.error();
@@ -296,11 +296,11 @@ async::Task<TlsHandshakePairResult> run_tls_handshake_pair(event::EventLoop &loo
     async::WaitGroup server_handshake;
     server_handshake.add();
     async::spawn(loop, [&]() -> async::DetachedTask {
-        auto handshake = co_await (*server_transport)->handshake(std::chrono::seconds(2));
+        auto handshake = co_await (*server_transport)->handshake(server_options, std::chrono::seconds(2));
         result.server = handshake ? common::IoErr::None : handshake.error();
         server_handshake.done();
     });
-    auto client_handshake = co_await (*client_transport)->handshake(std::chrono::seconds(2));
+    auto client_handshake = co_await (*client_transport)->handshake(client_options, std::chrono::seconds(2));
     result.client = client_handshake ? common::IoErr::None : client_handshake.error();
     if (!client_handshake) {
         (*client_transport)->close();
@@ -469,7 +469,7 @@ TEST(TlsCertificateStoreTest, PostsReaperOnlyForSnapshotsStillHeldByHazards) {
                   std::string::npos);
         EXPECT_NE(idle_output.find("access_server_tls_certificate_retired_snapshots 0"), std::string::npos);
 
-        const net::TlsCredential *selected = store.select_credential("api.example.com", net::TlsTransportKind::Tcp);
+        const net::TlsCredential *selected = store.select_credential("api.example.com");
         EXPECT_NE(selected, nullptr);
         config.version = 2;
         auto rotated = store.apply(config, "wire-v2");
@@ -541,7 +541,7 @@ TEST(TlsCertificateStoreTest, PostsReaperOnlyForSnapshotsStillHeldByHazards) {
         if (published) {
             EXPECT_EQ(*published, TlsCertificateUpdateStatus::Published);
         }
-        const net::TlsCredential *selected = store.select_credential("api.example.com", net::TlsTransportKind::Tcp);
+        const net::TlsCredential *selected = store.select_credential("api.example.com");
         EXPECT_NE(selected, nullptr);
         after_idle_clear.schedule();
         co_return;
@@ -597,17 +597,14 @@ TEST(TlsCertificateStoreTest, KeepsSelectedIdentityAliveWhenRotationInterleavesW
             };
 
             net::TlsServerParam server_options;
-            server_options.alpn = {"http/1.1"};
             server_options.configure_callback = &rotate_during_tls_select;
             server_options.configure_ctx = &rotation;
             bootstrap->close();
 
             net::TlsClientParam client_options;
-            client_options.enable_tls = true;
-            client_options.alpn = {"http/1.1"};
-            client_options.sni_name = "api.example.com";
+            client_options.server_name = "api.example.com";
 
-            if (server_options.enabled() && client_options.enabled()) {
+            if (server_options.enabled()) {
                 const TlsHandshakePairResult first =
                         co_await run_tls_handshake_pair(loop, server_options, client_options);
                 EXPECT_EQ(first.server, common::IoErr::None);

@@ -165,10 +165,6 @@ public:
         loop_(loop), input_(std::move(input)), output_(output), hold_open_after_input_(hold_open_after_input),
         fail_writes_(fail_writes), observed_output_(observed_output), output_observed_(output_observed) {}
 
-    fiber::async::Task<fiber::common::IoResult<void>> handshake(std::chrono::milliseconds) override {
-        co_return fiber::common::IoResult<void>{};
-    }
-
     fiber::async::Task<fiber::common::IoResult<void>> shutdown(std::chrono::milliseconds) override {
         co_return fiber::common::IoResult<void>{};
     }

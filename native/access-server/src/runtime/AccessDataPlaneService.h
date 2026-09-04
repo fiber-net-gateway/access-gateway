@@ -18,6 +18,7 @@
 #include <fiber/event/EventLoop.h>
 #include <fiber/event/EventLoopGroup.h>
 #include <fiber/http/HttpExchange.h>
+#include <fiber/http/HttpServerOptions.h>
 #include <fiber/net/SocketAddress.h>
 #include <fiber/net/TcpListener.h>
 
