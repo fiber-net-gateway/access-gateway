@@ -105,7 +105,7 @@ AccessDataPlaneService::bind(AccessControlPlaneReady ready) noexcept {
                     .test_mode = options_.test_mode,
                     .http_server = options_.http_server,
                     .http3_alt_svc =
-                            options_.http_server.http3.enabled
+                            options_.http_server.http3_enabled
                                     ? "h3=\":" + std::to_string(options_.listen_address.port()) + "\"; ma=86400"
                                     : std::string{},
                     .plain_listen_enabled = options_.plain_listen_enabled,

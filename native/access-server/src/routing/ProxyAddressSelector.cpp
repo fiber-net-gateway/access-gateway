@@ -8,7 +8,7 @@
 
 namespace fiber::access_server {
 
-AccessUpstreamInstance::AccessUpstreamInstance(http::Http1ConnectionGroupKey connection_key, std::string authority,
+AccessUpstreamInstance::AccessUpstreamInstance(http::HttpConnectionGroupKey connection_key, std::string authority,
                                                std::shared_ptr<AccessUpstreamCircuit> circuit) :
     data_(std::make_shared<const Data>(Data{
             .connection_key = std::move(connection_key),
@@ -16,7 +16,7 @@ AccessUpstreamInstance::AccessUpstreamInstance(http::Http1ConnectionGroupKey con
     })),
     circuit_(std::move(circuit)) {}
 
-const http::Http1ConnectionGroupKey &AccessUpstreamInstance::connection_key() const noexcept {
+const http::HttpConnectionGroupKey &AccessUpstreamInstance::connection_key() const noexcept {
     FIBER_ASSERT(data_ != nullptr);
     return data_->connection_key;
 }

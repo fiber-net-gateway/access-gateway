@@ -13,7 +13,7 @@
 #include <string>
 #include <string_view>
 
-#include <fiber/http/Http1ConnectionGroupKey.h>
+#include <fiber/http/HttpConnectionGroupKey.h>
 
 namespace fiber::net {
 class TlsCredential;
@@ -42,8 +42,8 @@ public:
     [[nodiscard]] std::string_view verify_name() const noexcept { return verify_name_; }
     [[nodiscard]] std::string_view client_identity_ref() const noexcept { return client_identity_ref_; }
     [[nodiscard]] const net::TlsCredential *client_credential() const noexcept;
-    [[nodiscard]] std::optional<http::Http1ConnectionGroupKey>
-    connection_key(const http::Http1ConnectionGroupKey &base) const noexcept;
+    [[nodiscard]] std::optional<http::HttpConnectionGroupKey>
+    connection_key(const http::HttpConnectionGroupKey &base) const noexcept;
 
 private:
     friend std::expected<UpstreamTlsTransportProfile, AccessConfigError>

@@ -10,10 +10,10 @@ HTTP, JSON/script, Nacos, CAT, and Prometheus modules are consumed from the pinn
 historical application import revision.
 
 The current reusable Fiber dependency is pinned at
-`a1181674187afa71e55a919ad0fa258c6f7fb706`. The reviewed update range from the previous pin is
-`1162be70a08521b14744650bffed8e7c1451ff37..a1181674187afa71e55a919ad0fa258c6f7fb706`.
+`dfa5676c0a4e186767372ea5d2e1dd5573ba925a`. The reviewed update range from the previous pin is
+`a1181674187afa71e55a919ad0fa258c6f7fb706..dfa5676c0a4e186767372ea5d2e1dd5573ba925a`.
 The complete reviewed range from the original import pin is
-`0fda7764bf94944aca4b674ab5ab311184703118..a1181674187afa71e55a919ad0fa258c6f7fb706`.
+`0fda7764bf94944aca4b674ab5ab311184703118..dfa5676c0a4e186767372ea5d2e1dd5573ba925a`.
 It removes the obsolete upstream `apps/access-server`, adds Nacos hostname and bounded service
 status APIs, system resolver/multi-nameserver support, client TLS identities and HTTP/1 pool
 affinity, a cancellable Happy Eyeballs connector, and a reusable public HTTP gzip response writer
@@ -39,9 +39,21 @@ advertise their own fixed ALPN protocol sets, `TlsTransport` receives its TLS pa
 `handshake()` rather than `create()`, and `TlsTransportKind`, `TlsNewSessionOps`, the ClientHello
 address/transport fields, and `TlsServerHandshakeConfig::select_alpn` are removed. The tip commit
 adds a process-wide `TrustStore::system_default()` cache used to fall back to system trust roots
-when verifying clients. Access-server was adapted to the reshaped options in the same change; no
-wire contract changes were required. No application source was synchronized back from upstream as
-part of this dependency update; the historical import revision above remains unchanged.
+when verifying clients. The latest reviewed delta rewrites the HTTP server stack around a
+`Server`/`Endpoint` lifecycle: endpoints (`Http1Endpoint`, `Http2Endpoint` with optional HTTP/1
+negotiation over TLS, `Http3Endpoint` sharing the TCP listener's port with server-side GOAWAY
+drain) are staged on a `Server` before one `start()` and torn down via `stop()`/`stop_and_wait()`,
+and the legacy `HttpServer`/`Http3Server` trio is deleted. On the client side it adds multiplexed
+HTTP/2 connection pools with a reuse fast path and surfaced dial failures, a protocol-agnostic
+`ClientHttpExchange` entry point, and per-`connect()` client parameters: connect options move out
+of connection state, `HttpClientTlsOptions` names become borrowed `string_view`s, and the shared
+pool grouping components are renamed `HttpConnectionGroupKey`/`HttpConnectionPoolAffinity`.
+HTTP/2 server connections are sharded into per-loop workers with keepalive collapsed to one
+`read_timeout` and idle h2 server connections retired. Access-server was adapted to the rewritten
+server lifecycle, per-call connect parameters, and renames in the same change (runtime listener
+staging via `http::Server` + typed endpoints, proxy upstream dialing, and test/benchmark fixtures);
+no wire contract changes were required. No application source was synchronized back from upstream
+as part of this dependency update; the historical import revision above remains unchanged.
 
 The import preserves upstream source, tests, fixtures, documentation, scripts, and the example
 environment file. Repository-integration changes replace upstream-relative test-support includes,

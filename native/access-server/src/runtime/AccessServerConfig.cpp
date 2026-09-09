@@ -425,9 +425,9 @@ AccessServerConfigError nacos_error(const nacos::NacosConfigError &source) {
 } // namespace
 
 AccessServerConfig::AccessServerConfig(
-        net::SocketAddress tls_listen_address, http::HttpServerOptions tls_http_server_options,
+        net::SocketAddress tls_listen_address, AccessHttpListenerOptions tls_http_server_options,
         bool plain_listen_enabled, net::SocketAddress plain_listen_address,
-        http::HttpServerOptions plain_http_server_options, net::SocketAddress metrics_listen_address,
+        AccessHttpListenerOptions plain_http_server_options, net::SocketAddress metrics_listen_address,
         AccessActivationEndpointOptions activation_endpoint_options, std::chrono::milliseconds initial_config_timeout,
         std::size_t default_max_request_body_size, bool test_mode,
         ClientMetadataResolverOptions client_metadata_options, std::string network_entry,
@@ -966,13 +966,13 @@ AccessServerConfig::load_from_string(std::string_view input) {
         return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, 0, kMetricsListenPort,
                                      "metrics listener must use a distinct address:port from the traffic listeners"));
     }
-    http::HttpServerOptions http_options;
+    AccessHttpListenerOptions http_options;
     if (tls_enabled) {
         http_options.tls.configure_callback = &pending_tls_configuration;
     }
-    http_options.http3.enabled = http3_enabled;
-    http::HttpServerOptions plain_http_options;
-    plain_http_options.http3.enabled = false;
+    http_options.http3_enabled = http3_enabled;
+    AccessHttpListenerOptions plain_http_options;
+    plain_http_options.http3_enabled = false;
     return AccessServerConfig(
             tls_address, std::move(http_options), plain_listen_enabled, plain_address, std::move(plain_http_options),
             metrics_address, std::move(activation_endpoint_options), std::chrono::milliseconds(timeout_millis),

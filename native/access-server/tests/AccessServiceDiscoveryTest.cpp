@@ -584,7 +584,7 @@ TEST(AccessServiceDiscoveryTest, WaitsBeforePublishAndPinsDiscoveryGeneration) {
             EXPECT_NE(hostname->connection_key, nullptr);
             if (hostname->connection_key) {
                 EXPECT_TRUE(hostname->connection_key->is_name());
-                EXPECT_EQ(hostname->connection_key->scheme(), fiber::http::Http1ConnectionGroupKey::Scheme::Https);
+                EXPECT_EQ(hostname->connection_key->scheme(), fiber::http::HttpConnectionGroupKey::Scheme::Https);
             }
             if (stable) {
                 EXPECT_NE(hostname->selection_token, stable->selection_token);

@@ -3,15 +3,17 @@
 #include <string_view>
 #include <utility>
 
+#include <fiber/async/Spawn.h>
 #include <fiber/common/Assert.h>
+#include <fiber/http/Http1ServerOptions.h>
 #include <fiber/http/HttpBodySpec.h>
 #include <fiber/http/HttpHeaders.h>
 
 namespace fiber::access_server {
 namespace {
 
-http::HttpServerOptions metrics_http_options() noexcept {
-    http::HttpServerOptions options;
+http::Http1ServerOptions metrics_http1_options() noexcept {
+    http::Http1ServerOptions options;
     options.drain_unread_body = true;
     return options;
 }
@@ -22,30 +24,54 @@ AccessMetricsEndpoint::AccessMetricsEndpoint(event::EventLoop &accept_loop, even
                                              AccessServerMetrics &metrics, AccessMetricsEndpointOptions options) :
     accept_loop_(&accept_loop), metrics_(&metrics),
     activation_endpoint_(options.activation_evidence, options.discovery_metrics, std::move(options.activation)),
-    server_(
-            accept_loop, [this](http::HttpExchange &exchange) { return handle(exchange); }, metrics_http_options(),
-            &workers) {}
+    server_(accept_loop, http::HttpHandler{}, &workers) {}
 
 AccessMetricsEndpoint::~AccessMetricsEndpoint() { FIBER_ASSERT(!bound_); }
 
 common::IoResult<void> AccessMetricsEndpoint::bind(const net::SocketAddress &address,
                                                    const net::ListenOptions &options) {
     FIBER_ASSERT(accept_loop_->in_loop());
-    auto bound = server_.bind(address, options);
-    if (bound) {
-        bound_ = true;
+    if (bound_) {
+        return std::unexpected(common::IoErr::Already);
     }
-    return bound;
+    endpoint_ = server_.add_endpoint<http::Http1Endpoint>(http::Http1Endpoint::Options{
+            .address = address,
+            .listen = options,
+            .http1 = metrics_http1_options(),
+            .handler = [this](http::HttpExchange &exchange) { return handle(exchange); },
+    });
+    if (endpoint_ == nullptr) {
+        return std::unexpected(common::IoErr::NoMem);
+    }
+    auto started = server_.start();
+    if (!started) {
+        return std::unexpected(started.error());
+    }
+    bound_ = true;
+    return {};
 }
 
-async::DetachedTask AccessMetricsEndpoint::serve() { return server_.serve(); }
+async::DetachedTask AccessMetricsEndpoint::serve() {
+    FIBER_ASSERT(accept_loop_->in_loop());
+    if (!bound_) {
+        co_return;
+    }
+    serve_tasks_.add();
+    async::spawn([this]() -> async::DetachedTask {
+        co_await server_.serve();
+        serve_tasks_.done();
+    });
+    co_return;
+}
 
 async::Task<void> AccessMetricsEndpoint::shutdown_and_wait() noexcept {
     FIBER_ASSERT(accept_loop_->in_loop());
     if (!bound_) {
         co_return;
     }
-    co_await server_.shutdown_and_wait();
+    server_.stop();
+    co_await server_.stop_and_wait();
+    co_await serve_tasks_.join();
     bound_ = false;
 }
 

@@ -5,6 +5,7 @@
 #include "../execution/UpstreamTlsClientPolicy.h"
 #include "../observability/AccessActivationEvidence.h"
 #include "../observability/AccessLogPolicy.h"
+#include "AccessHttpListenerOptions.h"
 #include "AccessRuntimeCoordinator.h"
 #include "AccessScriptRuntime.h"
 #include "AccessServer.h"
@@ -18,7 +19,6 @@
 #include <fiber/event/EventLoop.h>
 #include <fiber/event/EventLoopGroup.h>
 #include <fiber/http/HttpExchange.h>
-#include <fiber/http/HttpServerOptions.h>
 #include <fiber/net/SocketAddress.h>
 #include <fiber/net/TcpListener.h>
 
@@ -30,10 +30,10 @@ struct AccessDataPlaneOptions {
     net::SocketAddress listen_address;
     net::SocketAddress metrics_listen_address;
     net::ListenOptions listen_options;
-    http::HttpServerOptions http_server;
+    AccessHttpListenerOptions http_server;
     bool plain_listen_enabled = false;
     net::SocketAddress plain_listen_address;
-    http::HttpServerOptions plain_http_server;
+    AccessHttpListenerOptions plain_http_server;
     AccessRegistrationListener registration_listener = AccessRegistrationListener::Plain;
     AccessActivationEndpointOptions activation_endpoint;
     ClientMetadataResolverOptions client_metadata;

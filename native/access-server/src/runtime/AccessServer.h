@@ -1,6 +1,7 @@
 #ifndef FIBER_ACCESS_SERVER_ACCESS_SERVER_H
 #define FIBER_ACCESS_SERVER_ACCESS_SERVER_H
 
+#include "AccessHttpListenerOptions.h"
 #include "AccessMetricsEndpoint.h"
 #include "AccessWorkerResources.h"
 #include "RouteConfigStore.h"
@@ -9,12 +10,16 @@
 #include <string>
 
 #include <fiber/async/Task.h>
+#include <fiber/async/WaitGroup.h>
 #include <fiber/common/IoError.h>
 #include <fiber/common/NonCopyable.h>
 #include <fiber/common/NonMovable.h>
 #include <fiber/event/EventLoop.h>
 #include <fiber/event/EventLoopGroup.h>
-#include <fiber/http/HttpServer.h>
+#include <fiber/http/Server.h>
+#include <fiber/http/endpoint/Http1Endpoint.h>
+#include <fiber/http/endpoint/Http2Endpoint.h>
+#include <fiber/http/endpoint/Http3Endpoint.h>
 #include <fiber/net/SocketAddress.h>
 #include <fiber/net/TcpListener.h>
 
@@ -36,10 +41,10 @@ struct AccessServerOptions {
     AccessActivationEndpointOptions activation_endpoint;
     cat::CatClient *cat_client = nullptr;
     bool test_mode = false;
-    http::HttpServerOptions http_server;
+    AccessHttpListenerOptions http_server;
     std::string http3_alt_svc;
     bool plain_listen_enabled = false;
-    http::HttpServerOptions plain_http_server;
+    AccessHttpListenerOptions plain_http_server;
 };
 
 class AccessServer final : public common::NonCopyable, public common::NonMovable {
@@ -49,6 +54,9 @@ public:
     ~AccessServer();
 
     [[nodiscard]] async::Task<common::IoResult<void>> initialize() noexcept;
+    // Stages the listener endpoints and binds them. Each bind may run at most
+    // once, after initialize() and before serve(); the listeners it starts are
+    // torn down by shutdown_and_wait().
     [[nodiscard]] common::IoResult<void> bind(const net::SocketAddress &address,
                                               const net::ListenOptions &options = {});
     [[nodiscard]] common::IoResult<void> bind_plain(const net::SocketAddress &address,
@@ -58,17 +66,27 @@ public:
     async::DetachedTask serve();
     async::DetachedTask serve_metrics();
     [[nodiscard]] async::Task<void> shutdown_and_wait() noexcept;
-    [[nodiscard]] int fd() const noexcept { return server_.fd(); }
-    [[nodiscard]] int plain_fd() const noexcept { return plain_server_.fd(); }
+    [[nodiscard]] int fd() const noexcept { return tls_endpoint_ ? tls_endpoint_->listener_fd() : -1; }
+    [[nodiscard]] int plain_fd() const noexcept { return plain_endpoint_ ? plain_endpoint_->listener_fd() : -1; }
     [[nodiscard]] int metrics_fd() const noexcept { return metrics_endpoint_.fd(); }
 
 private:
     event::EventLoop *accept_loop_ = nullptr;
     AccessWorkerResources worker_resources_;
-    http::HttpServer server_;
-    http::HttpServer plain_server_;
+    AccessHttpListenerOptions http_options_;
+    AccessHttpListenerOptions plain_options_;
+    http::Server server_;
+    http::Server plain_server_;
     AccessMetricsEndpoint metrics_endpoint_;
+    http::Http2Endpoint *tls_endpoint_ = nullptr;
+    http::Http3Endpoint *http3_endpoint_ = nullptr;
+    http::Http1Endpoint *plain_endpoint_ = nullptr;
+    // One count per serve task spawned by serve()/serve_metrics(); drained by
+    // shutdown_and_wait() so no task touches a server past its lifetime.
+    async::WaitGroup serve_tasks_{};
     bool initialized_ = false;
+    bool main_bound_ = false;
+    bool plain_bound_ = false;
 };
 
 } // namespace fiber::access_server

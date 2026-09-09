@@ -75,8 +75,8 @@ int compare_ip(const net::IpAddress &left, const net::IpAddress &right) noexcept
     return 0;
 }
 
-int compare_connection_key(const http::Http1ConnectionGroupKey &left,
-                           const http::Http1ConnectionGroupKey &right) noexcept {
+int compare_connection_key(const http::HttpConnectionGroupKey &left,
+                           const http::HttpConnectionGroupKey &right) noexcept {
     if (left.host_kind() != right.host_kind()) {
         return left.host_kind() < right.host_kind() ? -1 : 1;
     }
@@ -194,11 +194,11 @@ public:
 
             net::IpAddress ip;
             const bool parsed_ip = net::IpAddress::parse(instance.ip, ip);
-            const auto scheme = instance.port == 443 ? http::Http1ConnectionGroupKey::Scheme::Https
-                                                     : http::Http1ConnectionGroupKey::Scheme::Http;
-            std::optional<http::Http1ConnectionGroupKey> connection_key =
-                    parsed_ip ? std::optional(http::Http1ConnectionGroupKey::from_ip(ip, instance.port, scheme))
-                              : http::Http1ConnectionGroupKey::from_name(instance.ip, instance.port, scheme);
+            const auto scheme = instance.port == 443 ? http::HttpConnectionGroupKey::Scheme::Https
+                                                     : http::HttpConnectionGroupKey::Scheme::Http;
+            std::optional<http::HttpConnectionGroupKey> connection_key =
+                    parsed_ip ? std::optional(http::HttpConnectionGroupKey::from_ip(ip, instance.port, scheme))
+                              : http::HttpConnectionGroupKey::from_name(instance.ip, instance.port, scheme);
             if (!connection_key) {
                 continue;
             }

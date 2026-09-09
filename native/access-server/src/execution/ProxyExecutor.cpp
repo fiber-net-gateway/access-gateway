@@ -961,8 +961,8 @@ async::Task<Result<void>> ProxyExecutor::execute_impl(http::HttpExchange &exchan
             telemetry.record_proxy_failure(metric_failure_phase(selected_failure.phase));
             co_return proxy_failure_result(selected_failure);
         }
-        std::optional<http::Http1ConnectionGroupKey> profiled_connection_key;
-        const http::Http1ConnectionGroupKey *connection_key = selected->connection_key;
+        std::optional<http::HttpConnectionGroupKey> profiled_connection_key;
+        const http::HttpConnectionGroupKey *connection_key = selected->connection_key;
         if (tls_profile) {
             profiled_connection_key = tls_profile->connection_key(*connection_key);
             if (!profiled_connection_key) {

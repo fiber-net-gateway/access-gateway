@@ -179,13 +179,13 @@ const net::TlsCredential *UpstreamTlsTransportProfile::client_credential() const
     return client_identity_ ? &client_identity_->credential() : nullptr;
 }
 
-std::optional<http::Http1ConnectionGroupKey>
-UpstreamTlsTransportProfile::connection_key(const http::Http1ConnectionGroupKey &base) const noexcept {
-    const http::Http1ConnectionPoolAffinity affinity(pool_affinity_);
+std::optional<http::HttpConnectionGroupKey>
+UpstreamTlsTransportProfile::connection_key(const http::HttpConnectionGroupKey &base) const noexcept {
+    const http::HttpConnectionPoolAffinity affinity(pool_affinity_);
     if (base.is_ip()) {
-        return http::Http1ConnectionGroupKey::from_ip(base.ip_address(), base.port(), base.scheme(), affinity);
+        return http::HttpConnectionGroupKey::from_ip(base.ip_address(), base.port(), base.scheme(), affinity);
     }
-    return http::Http1ConnectionGroupKey::from_name(base.host_name(), base.port(), base.scheme(), affinity);
+    return http::HttpConnectionGroupKey::from_name(base.host_name(), base.port(), base.scheme(), affinity);
 }
 
 std::expected<UpstreamTlsTransportProfile, AccessConfigError>

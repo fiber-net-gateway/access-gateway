@@ -7,6 +7,7 @@
 #include "AccessActivationEndpoint.h"
 #include "AccessConfigWatcher.h"
 #include "AccessDnsService.h"
+#include "AccessHttpListenerOptions.h"
 #include "AccessInstanceRegistration.h"
 #include "AccessRuntimeCoordinator.h"
 #include "AccessServiceDiscovery.h"
@@ -23,7 +24,6 @@
 
 #include <fiber/cat/CatClientConfig.h>
 #include <fiber/http/HttpExchange.h>
-#include <fiber/http/HttpServerOptions.h>
 #include <fiber/nacos/NacosClientConfig.h>
 #include <fiber/net/SocketAddress.h>
 
@@ -60,12 +60,12 @@ public:
     load_from_string(std::string_view input);
 
     [[nodiscard]] const net::SocketAddress &tls_listen_address() const noexcept { return tls_listen_address_; }
-    [[nodiscard]] const http::HttpServerOptions &tls_http_server_options() const noexcept {
+    [[nodiscard]] const AccessHttpListenerOptions &tls_http_server_options() const noexcept {
         return tls_http_server_options_;
     }
     [[nodiscard]] bool plain_listen_enabled() const noexcept { return plain_listen_enabled_; }
     [[nodiscard]] const net::SocketAddress &plain_listen_address() const noexcept { return plain_listen_address_; }
-    [[nodiscard]] const http::HttpServerOptions &plain_http_server_options() const noexcept {
+    [[nodiscard]] const AccessHttpListenerOptions &plain_http_server_options() const noexcept {
         return plain_http_server_options_;
     }
     [[nodiscard]] const net::SocketAddress &metrics_listen_address() const noexcept { return metrics_listen_address_; }
@@ -110,9 +110,9 @@ public:
     [[nodiscard]] AccessRegistrationListener registration_listener() const noexcept { return registration_listener_; }
 
 private:
-    AccessServerConfig(net::SocketAddress tls_listen_address, http::HttpServerOptions tls_http_server_options,
+    AccessServerConfig(net::SocketAddress tls_listen_address, AccessHttpListenerOptions tls_http_server_options,
                        bool plain_listen_enabled, net::SocketAddress plain_listen_address,
-                       http::HttpServerOptions plain_http_server_options, net::SocketAddress metrics_listen_address,
+                       AccessHttpListenerOptions plain_http_server_options, net::SocketAddress metrics_listen_address,
                        AccessActivationEndpointOptions activation_endpoint_options,
                        std::chrono::milliseconds initial_config_timeout, std::size_t default_max_request_body_size,
                        bool test_mode, ClientMetadataResolverOptions client_metadata_options, std::string network_entry,
@@ -128,10 +128,10 @@ private:
                        AccessRegistrationListener registration_listener) noexcept;
 
     net::SocketAddress tls_listen_address_;
-    http::HttpServerOptions tls_http_server_options_;
+    AccessHttpListenerOptions tls_http_server_options_;
     bool plain_listen_enabled_ = false;
     net::SocketAddress plain_listen_address_;
-    http::HttpServerOptions plain_http_server_options_;
+    AccessHttpListenerOptions plain_http_server_options_;
     net::SocketAddress metrics_listen_address_;
     AccessActivationEndpointOptions activation_endpoint_options_;
     std::chrono::milliseconds initial_config_timeout_{60000};

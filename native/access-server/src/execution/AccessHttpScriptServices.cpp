@@ -1,7 +1,7 @@
 #include "AccessHttpScriptServices.h"
 
 #include <fiber/http/Http1ClientConnection.h>
-#include <fiber/http/Http1ConnectionGroupKey.h>
+#include <fiber/http/HttpConnectionGroupKey.h>
 #include <fiber/http_script/HttpTarget.h>
 #include <fiber/net/IpAddress.h>
 
@@ -24,18 +24,18 @@ private:
     ProxyUpstreamConnection connection_;
 };
 
-std::optional<http::Http1ConnectionGroupKey> connection_key(const http_script::HttpTargetSpec &target) noexcept {
+std::optional<http::HttpConnectionGroupKey> connection_key(const http_script::HttpTargetSpec &target) noexcept {
     if (target.kind != http_script::HttpTargetSpec::Kind::Url || target.name.empty()) {
         return std::nullopt;
     }
     const std::uint16_t port = target.port != 0 ? target.port : static_cast<std::uint16_t>(target.tls ? 443 : 80);
     const auto scheme =
-            target.tls ? http::Http1ConnectionGroupKey::Scheme::Https : http::Http1ConnectionGroupKey::Scheme::Http;
+            target.tls ? http::HttpConnectionGroupKey::Scheme::Https : http::HttpConnectionGroupKey::Scheme::Http;
     net::IpAddress ip;
     if (net::IpAddress::parse(target.name, ip)) {
-        return http::Http1ConnectionGroupKey::from_ip(ip, port, scheme);
+        return http::HttpConnectionGroupKey::from_ip(ip, port, scheme);
     }
-    return http::Http1ConnectionGroupKey::from_name(target.name, port, scheme);
+    return http::HttpConnectionGroupKey::from_name(target.name, port, scheme);
 }
 
 } // namespace

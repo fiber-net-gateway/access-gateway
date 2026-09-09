@@ -165,7 +165,7 @@ fiber::async::DetachedTask run_request_on_loop(fiber::event::EventLoop *loop, co
                                                                &client_metadata_resolver, connection_secure);
         co_await access_handler.handle(exchange, telemetry);
     };
-    fiber::http::Http1Connection connection(nullptr, std::move(transport), std::move(handler), {});
+    fiber::http::Http1Connection connection(std::move(transport), handler, {});
     co_await connection.run();
     done->set_value();
     co_return;
@@ -192,7 +192,7 @@ fiber::async::DetachedTask run_committed_response_on_loop(fiber::event::EventLoo
         }
         co_return;
     };
-    fiber::http::Http1Connection connection(nullptr, std::move(transport), std::move(handler), {});
+    fiber::http::Http1Connection connection(std::move(transport), handler, {});
     co_await connection.run();
     done->set_value();
     co_return;

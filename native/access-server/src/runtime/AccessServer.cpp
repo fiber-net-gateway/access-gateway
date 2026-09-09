@@ -7,7 +7,8 @@
 namespace fiber::access_server {
 namespace {
 
-http::HttpServerOptions make_http_options(http::HttpServerOptions options = {}) noexcept {
+http::Http1ServerOptions make_http1_options() noexcept {
+    http::Http1ServerOptions options;
     options.drain_unread_body = true;
     return options;
 }
@@ -33,12 +34,8 @@ AccessServer::AccessServer(event::EventLoop &accept_loop, event::EventLoopGroup 
                               .test_mode = options.test_mode,
                               .http3_alt_svc = std::move(options.http3_alt_svc),
                       }),
-    server_(
-            accept_loop, [this](http::HttpExchange &exchange) { return worker_resources_.handle(exchange, true); },
-            make_http_options(std::move(options.http_server)), &workers),
-    plain_server_(
-            accept_loop, [this](http::HttpExchange &exchange) { return worker_resources_.handle(exchange, false); },
-            make_http_options(std::move(options.plain_http_server)), &workers),
+    http_options_(options.http_server), plain_options_(options.plain_http_server),
+    server_(accept_loop, http::HttpHandler{}, &workers), plain_server_(accept_loop, http::HttpHandler{}, &workers),
     metrics_endpoint_(
             accept_loop, workers, worker_resources_.metrics(),
             AccessMetricsEndpointOptions{
@@ -65,13 +62,63 @@ async::Task<common::IoResult<void>> AccessServer::initialize() noexcept {
 common::IoResult<void> AccessServer::bind(const net::SocketAddress &address, const net::ListenOptions &options) {
     FIBER_ASSERT(accept_loop_->in_loop());
     FIBER_ASSERT(initialized_);
-    return server_.bind(address, options);
+    if (main_bound_) {
+        return std::unexpected(common::IoErr::Already);
+    }
+    if (http_options_.http3_enabled && !http_options_.tls.enabled()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    tls_endpoint_ = server_.add_endpoint<http::Http2Endpoint>(http::Http2Endpoint::Options{
+            .address = address,
+            .listen = options,
+            .tls = http_options_.tls,
+            .http1 = make_http1_options(),
+            .allow_http1 = true,
+            .handler = [this](http::HttpExchange &exchange) { return worker_resources_.handle(exchange, true); },
+    });
+    if (tls_endpoint_ == nullptr) {
+        return std::unexpected(common::IoErr::NoMem);
+    }
+    if (http_options_.http3_enabled) {
+        http3_endpoint_ = server_.add_endpoint<http::Http3Endpoint>(http::Http3Endpoint::Options{
+                .address = address,
+                .inherit_port_from = tls_endpoint_,
+                .tls = http_options_.tls,
+                .handler = [this](http::HttpExchange &exchange) { return worker_resources_.handle(exchange, true); },
+        });
+        if (http3_endpoint_ == nullptr) {
+            return std::unexpected(common::IoErr::NoMem);
+        }
+    }
+    auto started = server_.start();
+    if (!started) {
+        return std::unexpected(started.error());
+    }
+    main_bound_ = true;
+    return {};
 }
 
 common::IoResult<void> AccessServer::bind_plain(const net::SocketAddress &address, const net::ListenOptions &options) {
     FIBER_ASSERT(accept_loop_->in_loop());
     FIBER_ASSERT(initialized_);
-    return plain_server_.bind(address, options);
+    if (plain_bound_) {
+        return std::unexpected(common::IoErr::Already);
+    }
+    plain_endpoint_ = plain_server_.add_endpoint<http::Http1Endpoint>(http::Http1Endpoint::Options{
+            .address = address,
+            .listen = options,
+            .http1 = make_http1_options(),
+            .handler = [this](http::HttpExchange &exchange) { return worker_resources_.handle(exchange, false); },
+    });
+    if (plain_endpoint_ == nullptr) {
+        return std::unexpected(common::IoErr::NoMem);
+    }
+    auto started = plain_server_.start();
+    if (!started) {
+        return std::unexpected(started.error());
+    }
+    plain_bound_ = true;
+    return {};
 }
 
 common::IoResult<void> AccessServer::bind_metrics(const net::SocketAddress &address,
@@ -82,10 +129,22 @@ common::IoResult<void> AccessServer::bind_metrics(const net::SocketAddress &addr
 }
 
 async::DetachedTask AccessServer::serve() {
-    // serve() on an unbound server is a no-op, so the plaintext server can be
-    // served unconditionally; it only accepts once bind_plain() has run.
-    async::spawn([this]() { return plain_server_.serve(); });
-    return server_.serve();
+    FIBER_ASSERT(accept_loop_->in_loop());
+    if (main_bound_) {
+        serve_tasks_.add();
+        async::spawn([this]() -> async::DetachedTask {
+            co_await server_.serve();
+            serve_tasks_.done();
+        });
+    }
+    if (plain_bound_) {
+        serve_tasks_.add();
+        async::spawn([this]() -> async::DetachedTask {
+            co_await plain_server_.serve();
+            serve_tasks_.done();
+        });
+    }
+    co_return;
 }
 
 async::DetachedTask AccessServer::serve_metrics() { return metrics_endpoint_.serve(); }
@@ -93,8 +152,11 @@ async::DetachedTask AccessServer::serve_metrics() { return metrics_endpoint_.ser
 async::Task<void> AccessServer::shutdown_and_wait() noexcept {
     FIBER_ASSERT(accept_loop_->in_loop());
     co_await metrics_endpoint_.shutdown_and_wait();
-    server_.close();
-    plain_server_.close();
+    server_.stop();
+    plain_server_.stop();
+    co_await server_.stop_and_wait();
+    co_await plain_server_.stop_and_wait();
+    co_await serve_tasks_.join();
     co_await worker_resources_.shutdown();
     initialized_ = false;
 }

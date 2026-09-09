@@ -12,7 +12,7 @@
 
 #include <fiber/async/Spawn.h>
 #include <fiber/event/EventLoop.h>
-#include <fiber/http/Http1ConnectionGroupKey.h>
+#include <fiber/http/HttpConnectionGroupKey.h>
 
 #include "TlsClientIdentityTestData.h"
 #include "routing/AccessRouteSnapshot.h"
@@ -435,7 +435,7 @@ TEST(ProjectRouteSnapshotTest, CompilesStaticAddressesWithJavaHttpHostRules) {
     EXPECT_TRUE(snapshot.routes()[0].proxy->address_selector->service_name().empty());
     const auto addresses = select_addresses(*snapshot.routes()[0].proxy->address_selector, 4);
     ASSERT_EQ(addresses.size(), 4U);
-    using ConnectionKey = fiber::http::Http1ConnectionGroupKey;
+    using ConnectionKey = fiber::http::HttpConnectionGroupKey;
     EXPECT_EQ(addresses[0].connection_key().scheme(), ConnectionKey::Scheme::Http);
     EXPECT_TRUE(addresses[0].connection_key().is_ip());
     EXPECT_EQ(addresses[0].connection_key().ip_address().to_string(), "127.0.0.1");
@@ -485,8 +485,8 @@ TEST(ProjectRouteSnapshotTest, CompilesImmutableUpstreamTlsProfileAndPoolAffinit
     EXPECT_TRUE(first_profile.trust_store());
     EXPECT_NE(first_profile.pool_affinity(), 0U);
 
-    auto base = fiber::http::Http1ConnectionGroupKey::from_name("upstream.example.com", 443,
-                                                                fiber::http::Http1ConnectionGroupKey::Scheme::Https);
+    auto base = fiber::http::HttpConnectionGroupKey::from_name("upstream.example.com", 443,
+                                                               fiber::http::HttpConnectionGroupKey::Scheme::Https);
     ASSERT_TRUE(base);
     auto profiled = first_profile.connection_key(*base);
     ASSERT_TRUE(profiled);

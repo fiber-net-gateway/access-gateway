@@ -89,7 +89,7 @@ AccessRuntimeFactory::create(event::EventLoop &accept_loop, event::EventLoop &na
                     .instance_registration = std::move(instance_registration),
                     .process_metrics = process_metrics,
                     .tls_enabled = config.tls_http_server_options().tls.enabled(),
-                    .quic_enabled = config.tls_http_server_options().http3.enabled,
+                    .quic_enabled = config.tls_http_server_options().http3_enabled,
             },
             AccessControlPlaneDependencies{
                     .cat_client = std::move(cat_client),
