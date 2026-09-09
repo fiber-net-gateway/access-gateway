@@ -16,9 +16,11 @@
 
 #include <fiber/async/Sleep.h>
 #include <fiber/async/Spawn.h>
+#include <fiber/async/WaitGroup.h>
 #include <fiber/event/EventLoopGroup.h>
 #include <fiber/http/Http1Connection.h>
-#include <fiber/http/HttpServer.h>
+#include <fiber/http/Server.h>
+#include <fiber/http/endpoint/Http1Endpoint.h>
 #include <fiber/net/SocketAddress.h>
 #include <fiber/net/TcpListener.h>
 #include <fiber/net/TcpStream.h>
@@ -86,8 +88,8 @@ struct ServiceSelectorState {
     std::uint16_t port = 0;
     std::string good_host_header;
     std::string bad_host_header;
-    std::optional<fiber::http::Http1ConnectionGroupKey> good_connection_key;
-    std::optional<fiber::http::Http1ConnectionGroupKey> bad_connection_key;
+    std::optional<fiber::http::HttpConnectionGroupKey> good_connection_key;
+    std::optional<fiber::http::HttpConnectionGroupKey> bad_connection_key;
     std::size_t select_count = 0;
     std::size_t cluster_match_count = 0;
     std::optional<std::string> expected_cluster_override;
@@ -534,29 +536,50 @@ fiber::async::Task<void> serve_upstream(fiber::http::HttpExchange &exchange, Ups
     }
 }
 
+// A loopback HTTP/1 fixture server plus the bookkeeping needed to tear it down
+// safely: the fiber Server must outlive its serve() task, so shutdown() awaits
+// this WaitGroup before destroying it.
+struct TestHttpServer {
+    fiber::http::Server *server = nullptr;
+    std::unique_ptr<fiber::async::WaitGroup> serve_tasks = std::make_unique<fiber::async::WaitGroup>();
+};
+
+fiber::async::DetachedTask serve_fixture_server(fiber::http::Server *server, fiber::async::WaitGroup *serve_tasks) {
+    co_await server->serve();
+    serve_tasks->done();
+}
+
 fiber::async::DetachedTask start_server(fiber::event::EventLoop *loop, UpstreamState *state,
                                         std::promise<std::uint16_t> *port_promise,
-                                        std::promise<fiber::http::HttpServer *> *server_promise) {
+                                        std::promise<TestHttpServer> *server_promise) {
     fiber::http::HttpHandler handler = [state](fiber::http::HttpExchange &exchange) {
         return serve_upstream(exchange, state);
     };
-    auto *server = new (std::nothrow) fiber::http::HttpServer(*loop, std::move(handler));
+    auto *server = new (std::nothrow) fiber::http::Server(*loop, fiber::http::HttpHandler{});
     if (!server) {
         port_promise->set_value(0);
-        server_promise->set_value(nullptr);
+        server_promise->set_value({});
         co_return;
     }
-    auto bound = server->bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), {});
-    if (!bound) {
+    auto *endpoint = server->add_endpoint<fiber::http::Http1Endpoint>(fiber::http::Http1Endpoint::Options{
+            .address = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0),
+            .handler = std::move(handler),
+    });
+    auto started = endpoint != nullptr ? server->start()
+                                       : fiber::common::IoResult<void>(std::unexpected(fiber::common::IoErr::NoMem));
+    if (!started) {
         delete server;
         port_promise->set_value(0);
-        server_promise->set_value(nullptr);
+        server_promise->set_value({});
         co_return;
     }
-    const auto port = bound_port(server->fd());
-    port_promise->set_value(port ? *port : 0);
-    server_promise->set_value(server);
-    fiber::async::spawn(*loop, [server]() { return server->serve(); });
+    TestHttpServer running;
+    running.server = server;
+    running.serve_tasks->add();
+    fiber::async::WaitGroup *serve_tasks = running.serve_tasks.get();
+    fiber::async::spawn(*loop, [server, serve_tasks] { return serve_fixture_server(server, serve_tasks); });
+    port_promise->set_value(endpoint->local_addr().port());
+    server_promise->set_value(std::move(running));
 }
 
 fiber::async::DetachedTask
@@ -585,7 +608,7 @@ run_downstream(fiber::event::EventLoop *loop, const fiber::access_server::RouteC
                                                                &client_metadata_resolver);
         co_await handler.handle(exchange, telemetry);
     };
-    fiber::http::Http1Connection connection(nullptr, std::move(transport), std::move(http_handler), {});
+    fiber::http::Http1Connection connection(std::move(transport), http_handler, {});
     co_await connection.run();
     done->set_value();
 }
@@ -618,9 +641,13 @@ fiber::async::DetachedTask disconnect_after(std::chrono::milliseconds delay, Rec
     transport->disconnect();
 }
 
-fiber::async::DetachedTask shutdown(fiber::http::StealableHttp1ConnectionPoolSet *pool, fiber::http::HttpServer *server,
+fiber::async::DetachedTask shutdown(fiber::http::StealableHttp1ConnectionPoolSet *pool, TestHttpServer *running,
                                     std::promise<void> *done) {
-    server->close();
+    running->server->stop();
+    co_await running->server->stop_and_wait();
+    co_await running->serve_tasks->join();
+    delete running->server;
+    running->server = nullptr;
     co_await pool->shutdown_async();
     done->set_value();
 }
@@ -876,14 +903,14 @@ TEST(ProxyExecutorTest, StreamsJavaCompatibleRequestsAndReusesTheUpstreamConnect
 
     UpstreamState upstream_state;
     std::promise<std::uint16_t> port_promise;
-    std::promise<fiber::http::HttpServer *> server_promise;
+    std::promise<TestHttpServer> server_promise;
     auto port_future = port_promise.get_future();
     auto server_future = server_promise.get_future();
     fiber::async::spawn(group.at(0),
                         [&]() { return start_server(&group.at(0), &upstream_state, &port_promise, &server_promise); });
 
-    fiber::http::HttpServer *server = server_future.get();
-    ASSERT_NE(server, nullptr);
+    TestHttpServer server = server_future.get();
+    ASSERT_NE(server.server, nullptr);
     const std::uint16_t port = port_future.get();
     ASSERT_NE(port, 0);
 
@@ -1058,7 +1085,7 @@ TEST(ProxyExecutorTest, StreamsJavaCompatibleRequestsAndReusesTheUpstreamConnect
 
     std::promise<void> shutdown_promise;
     auto shutdown_future = shutdown_promise.get_future();
-    fiber::async::spawn(group.at(0), [&]() { return shutdown(&pool, server, &shutdown_promise); });
+    fiber::async::spawn(group.at(0), [&]() { return shutdown(&pool, &server, &shutdown_promise); });
     ASSERT_EQ(shutdown_future.wait_for(2s), std::future_status::ready);
     std::promise<void> cat_shutdown_promise;
     auto cat_shutdown = cat_shutdown_promise.get_future();
@@ -1070,7 +1097,6 @@ TEST(ProxyExecutorTest, StreamsJavaCompatibleRequestsAndReusesTheUpstreamConnect
     ASSERT_EQ(cat_capture_done.wait_for(2s), std::future_status::ready);
     group.stop();
     group.join();
-    delete server;
 }
 
 TEST(ProxyExecutorTest, ReusesAnUpstreamConnectionAcrossWorkers) {
@@ -1080,15 +1106,15 @@ TEST(ProxyExecutorTest, ReusesAnUpstreamConnectionAcrossWorkers) {
 
     UpstreamState upstream_state;
     std::promise<std::uint16_t> port_promise;
-    std::promise<fiber::http::HttpServer *> server_promise;
+    std::promise<TestHttpServer> server_promise;
     auto port_future = port_promise.get_future();
     auto server_future = server_promise.get_future();
     group.start();
     fiber::async::spawn(group.at(0),
                         [&]() { return start_server(&group.at(0), &upstream_state, &port_promise, &server_promise); });
 
-    fiber::http::HttpServer *server = server_future.get();
-    ASSERT_NE(server, nullptr);
+    TestHttpServer server = server_future.get();
+    ASSERT_NE(server.server, nullptr);
     const std::uint16_t port = port_future.get();
     ASSERT_NE(port, 0);
 
@@ -1123,11 +1149,10 @@ TEST(ProxyExecutorTest, ReusesAnUpstreamConnectionAcrossWorkers) {
 
     std::promise<void> shutdown_promise;
     auto shutdown_future = shutdown_promise.get_future();
-    fiber::async::spawn(group.at(0), [&]() { return shutdown(&pool, server, &shutdown_promise); });
+    fiber::async::spawn(group.at(0), [&]() { return shutdown(&pool, &server, &shutdown_promise); });
     ASSERT_EQ(shutdown_future.wait_for(2s), std::future_status::ready);
     group.stop();
     group.join();
-    delete server;
 }
 
 TEST(ProxyExecutorTest, RetriesAServiceSelectionBeforeSendingRequestHeaders) {
@@ -1138,14 +1163,14 @@ TEST(ProxyExecutorTest, RetriesAServiceSelectionBeforeSendingRequestHeaders) {
 
     UpstreamState upstream_state;
     std::promise<std::uint16_t> port_promise;
-    std::promise<fiber::http::HttpServer *> server_promise;
+    std::promise<TestHttpServer> server_promise;
     auto port_future = port_promise.get_future();
     auto server_future = server_promise.get_future();
     fiber::async::spawn(group.at(0),
                         [&]() { return start_server(&group.at(0), &upstream_state, &port_promise, &server_promise); });
 
-    fiber::http::HttpServer *server = server_future.get();
-    ASSERT_NE(server, nullptr);
+    TestHttpServer server = server_future.get();
+    ASSERT_NE(server.server, nullptr);
     const std::uint16_t port = port_future.get();
     ASSERT_NE(port, 0);
 
@@ -1153,10 +1178,10 @@ TEST(ProxyExecutorTest, RetriesAServiceSelectionBeforeSendingRequestHeaders) {
             .port = port,
             .good_host_header = "127.0.0.1:" + std::to_string(port),
             .bad_host_header = "127.0.0.2:" + std::to_string(port),
-            .good_connection_key = fiber::http::Http1ConnectionGroupKey::from_ip(
-                    fiber::net::IpAddress::loopback_v4(), port, fiber::http::Http1ConnectionGroupKey::Scheme::Http),
-            .bad_connection_key = fiber::http::Http1ConnectionGroupKey::from_name(
-                    "unreachable.example", port, fiber::http::Http1ConnectionGroupKey::Scheme::Http),
+            .good_connection_key = fiber::http::HttpConnectionGroupKey::from_ip(
+                    fiber::net::IpAddress::loopback_v4(), port, fiber::http::HttpConnectionGroupKey::Scheme::Http),
+            .bad_connection_key = fiber::http::HttpConnectionGroupKey::from_name(
+                    "unreachable.example", port, fiber::http::HttpConnectionGroupKey::Scheme::Http),
     };
     fiber::access_server::AccessScriptCompiler scripts;
     fiber::access_server::RouteConfigStore store(scripts.adapter(),
@@ -1176,22 +1201,20 @@ TEST(ProxyExecutorTest, RetriesAServiceSelectionBeforeSendingRequestHeaders) {
     ASSERT_TRUE(published) << published.error().message;
 
     ProxyResolverState resolver{
-            .addresses = {fiber::net::IpAddress::v4({127, 0, 0, 2}),
-                          fiber::net::IpAddress::v4({127, 0, 0, 3})},
+            .addresses = {fiber::net::IpAddress::v4({127, 0, 0, 2}), fiber::net::IpAddress::v4({127, 0, 0, 3})},
     };
     fiber::access_server::ProxyExecutorOptions executor_options;
     executor_options.happy_eyeballs.connection_attempt_delay = 10ms;
-    fiber::access_server::ProxyExecutor executor(
-            pool,
-            fiber::access_server::ProxyClusterMatcher{
-                    .context = &selector_state,
-                    .matches = never_match_gray,
-            },
-            fiber::access_server::ProxyDnsResolver{
-                    .context = &resolver,
-                    .resolve = resolve_proxy_addresses,
-            },
-            executor_options);
+    fiber::access_server::ProxyExecutor executor(pool,
+                                                 fiber::access_server::ProxyClusterMatcher{
+                                                         .context = &selector_state,
+                                                         .matches = never_match_gray,
+                                                 },
+                                                 fiber::access_server::ProxyDnsResolver{
+                                                         .context = &resolver,
+                                                         .resolve = resolve_proxy_addresses,
+                                                 },
+                                                 executor_options);
     std::string output;
     std::promise<void> request_promise;
     auto request_future = request_promise.get_future();
@@ -1231,11 +1254,10 @@ TEST(ProxyExecutorTest, RetriesAServiceSelectionBeforeSendingRequestHeaders) {
 
     std::promise<void> shutdown_promise;
     auto shutdown_future = shutdown_promise.get_future();
-    fiber::async::spawn(group.at(0), [&]() { return shutdown(&pool, server, &shutdown_promise); });
+    fiber::async::spawn(group.at(0), [&]() { return shutdown(&pool, &server, &shutdown_promise); });
     ASSERT_EQ(shutdown_future.wait_for(2s), std::future_status::ready);
     group.stop();
     group.join();
-    delete server;
 }
 
 TEST(ProxyExecutorTest, PreservesPreConnectSelectionFailureKinds) {
@@ -1309,11 +1331,11 @@ TEST(ProxyExecutorTest, StopsBeforeConnectionAcquisitionWhenRequestHeadPreparati
             .good_host_header = "127.0.0.1:1",
             .bad_host_header = "127.0.0.2:1",
             .good_connection_key =
-                    fiber::http::Http1ConnectionGroupKey::from_ip(fiber::net::IpAddress::loopback_v4(), kUnusedPort,
-                                                                  fiber::http::Http1ConnectionGroupKey::Scheme::Http),
-            .bad_connection_key = fiber::http::Http1ConnectionGroupKey::from_ip(
-                    fiber::net::IpAddress::v4({127, 0, 0, 2}), kUnusedPort,
-                    fiber::http::Http1ConnectionGroupKey::Scheme::Http),
+                    fiber::http::HttpConnectionGroupKey::from_ip(fiber::net::IpAddress::loopback_v4(), kUnusedPort,
+                                                                 fiber::http::HttpConnectionGroupKey::Scheme::Http),
+            .bad_connection_key =
+                    fiber::http::HttpConnectionGroupKey::from_ip(fiber::net::IpAddress::v4({127, 0, 0, 2}), kUnusedPort,
+                                                                 fiber::http::HttpConnectionGroupKey::Scheme::Http),
     };
     fiber::access_server::AccessScriptCompiler scripts;
     fiber::access_server::RouteConfigStore store(scripts.adapter(),
@@ -1374,14 +1396,14 @@ TEST(ProxyExecutorTest, DoesNotPenalizeUpstreamForDownstreamRequestBodyLimit) {
 
     UpstreamState upstream_state;
     std::promise<std::uint16_t> port_promise;
-    std::promise<fiber::http::HttpServer *> server_promise;
+    std::promise<TestHttpServer> server_promise;
     auto port_future = port_promise.get_future();
     auto server_future = server_promise.get_future();
     fiber::async::spawn(group.at(0),
                         [&]() { return start_server(&group.at(0), &upstream_state, &port_promise, &server_promise); });
 
-    fiber::http::HttpServer *server = server_future.get();
-    ASSERT_NE(server, nullptr);
+    TestHttpServer server = server_future.get();
+    ASSERT_NE(server.server, nullptr);
     const std::uint16_t port = port_future.get();
     ASSERT_NE(port, 0);
 
@@ -1389,11 +1411,10 @@ TEST(ProxyExecutorTest, DoesNotPenalizeUpstreamForDownstreamRequestBodyLimit) {
             .port = port,
             .good_host_header = "127.0.0.1:" + std::to_string(port),
             .bad_host_header = "127.0.0.2:" + std::to_string(port),
-            .good_connection_key = fiber::http::Http1ConnectionGroupKey::from_ip(
-                    fiber::net::IpAddress::loopback_v4(), port, fiber::http::Http1ConnectionGroupKey::Scheme::Http),
-            .bad_connection_key =
-                    fiber::http::Http1ConnectionGroupKey::from_ip(fiber::net::IpAddress::v4({127, 0, 0, 2}), port,
-                                                                  fiber::http::Http1ConnectionGroupKey::Scheme::Http),
+            .good_connection_key = fiber::http::HttpConnectionGroupKey::from_ip(
+                    fiber::net::IpAddress::loopback_v4(), port, fiber::http::HttpConnectionGroupKey::Scheme::Http),
+            .bad_connection_key = fiber::http::HttpConnectionGroupKey::from_ip(
+                    fiber::net::IpAddress::v4({127, 0, 0, 2}), port, fiber::http::HttpConnectionGroupKey::Scheme::Http),
     };
     fiber::access_server::RouteConfigStore store({}, fiber::access_server::ProxyAddressSelectorFactory{
                                                              .context = &selector_state,
@@ -1428,11 +1449,10 @@ TEST(ProxyExecutorTest, DoesNotPenalizeUpstreamForDownstreamRequestBodyLimit) {
 
     std::promise<void> shutdown_promise;
     auto shutdown_future = shutdown_promise.get_future();
-    fiber::async::spawn(group.at(0), [&]() { return shutdown(&pool, server, &shutdown_promise); });
+    fiber::async::spawn(group.at(0), [&]() { return shutdown(&pool, &server, &shutdown_promise); });
     ASSERT_EQ(shutdown_future.wait_for(2s), std::future_status::ready);
     group.stop();
     group.join();
-    delete server;
 }
 
 TEST(ProxyExecutorTest, BridgesJavaCompatibleResponseHeadersAndBody) {
@@ -1458,14 +1478,14 @@ TEST(ProxyExecutorTest, BridgesJavaCompatibleResponseHeadersAndBody) {
                     },
     };
     std::promise<std::uint16_t> port_promise;
-    std::promise<fiber::http::HttpServer *> server_promise;
+    std::promise<TestHttpServer> server_promise;
     auto port_future = port_promise.get_future();
     auto server_future = server_promise.get_future();
     fiber::async::spawn(group.at(0),
                         [&]() { return start_server(&group.at(0), &upstream_state, &port_promise, &server_promise); });
 
-    fiber::http::HttpServer *server = server_future.get();
-    ASSERT_NE(server, nullptr);
+    TestHttpServer server = server_future.get();
+    ASSERT_NE(server.server, nullptr);
     const std::uint16_t port = port_future.get();
     ASSERT_NE(port, 0);
 
@@ -1502,11 +1522,10 @@ TEST(ProxyExecutorTest, BridgesJavaCompatibleResponseHeadersAndBody) {
 
     std::promise<void> shutdown_promise;
     auto shutdown_future = shutdown_promise.get_future();
-    fiber::async::spawn(group.at(0), [&]() { return shutdown(&pool, server, &shutdown_promise); });
+    fiber::async::spawn(group.at(0), [&]() { return shutdown(&pool, &server, &shutdown_promise); });
     ASSERT_EQ(shutdown_future.wait_for(2s), std::future_status::ready);
     group.stop();
     group.join();
-    delete server;
 }
 
 TEST(ProxyExecutorTest, FlushControlsCrossReadResponseBodyAggregation) {
@@ -1527,14 +1546,14 @@ TEST(ProxyExecutorTest, FlushControlsCrossReadResponseBodyAggregation) {
                     },
     };
     std::promise<std::uint16_t> port_promise;
-    std::promise<fiber::http::HttpServer *> server_promise;
+    std::promise<TestHttpServer> server_promise;
     auto port_future = port_promise.get_future();
     auto server_future = server_promise.get_future();
     fiber::async::spawn(group.at(0),
                         [&]() { return start_server(&group.at(0), &upstream_state, &port_promise, &server_promise); });
 
-    fiber::http::HttpServer *server = server_future.get();
-    ASSERT_NE(server, nullptr);
+    TestHttpServer server = server_future.get();
+    ASSERT_NE(server.server, nullptr);
     const std::uint16_t port = port_future.get();
     ASSERT_NE(port, 0);
 
@@ -1581,11 +1600,10 @@ TEST(ProxyExecutorTest, FlushControlsCrossReadResponseBodyAggregation) {
 
     std::promise<void> shutdown_promise;
     auto shutdown_future = shutdown_promise.get_future();
-    fiber::async::spawn(group.at(0), [&]() { return shutdown(&pool, server, &shutdown_promise); });
+    fiber::async::spawn(group.at(0), [&]() { return shutdown(&pool, &server, &shutdown_promise); });
     ASSERT_EQ(shutdown_future.wait_for(2s), std::future_status::ready);
     group.stop();
     group.join();
-    delete server;
 }
 
 TEST(ProxyExecutorTest, ForwardsFinalStatusAndHonorsNoBodyResponses) {
@@ -1596,14 +1614,14 @@ TEST(ProxyExecutorTest, ForwardsFinalStatusAndHonorsNoBodyResponses) {
 
     UpstreamState upstream_state;
     std::promise<std::uint16_t> port_promise;
-    std::promise<fiber::http::HttpServer *> server_promise;
+    std::promise<TestHttpServer> server_promise;
     auto port_future = port_promise.get_future();
     auto server_future = server_promise.get_future();
     fiber::async::spawn(group.at(0),
                         [&]() { return start_server(&group.at(0), &upstream_state, &port_promise, &server_promise); });
 
-    fiber::http::HttpServer *server = server_future.get();
-    ASSERT_NE(server, nullptr);
+    TestHttpServer server = server_future.get();
+    ASSERT_NE(server.server, nullptr);
     const std::uint16_t port = port_future.get();
     ASSERT_NE(port, 0);
 
@@ -1664,11 +1682,10 @@ TEST(ProxyExecutorTest, ForwardsFinalStatusAndHonorsNoBodyResponses) {
 
     std::promise<void> shutdown_promise;
     auto shutdown_future = shutdown_promise.get_future();
-    fiber::async::spawn(group.at(0), [&]() { return shutdown(&pool, server, &shutdown_promise); });
+    fiber::async::spawn(group.at(0), [&]() { return shutdown(&pool, &server, &shutdown_promise); });
     ASSERT_EQ(shutdown_future.wait_for(2s), std::future_status::ready);
     group.stop();
     group.join();
-    delete server;
 }
 
 TEST(ProxyExecutorTest, RejectsKnownOversizedResponseBeforeCommittingUpstreamStatus) {
@@ -1684,14 +1701,14 @@ TEST(ProxyExecutorTest, RejectsKnownOversizedResponseBeforeCommittingUpstreamSta
                     },
     };
     std::promise<std::uint16_t> port_promise;
-    std::promise<fiber::http::HttpServer *> server_promise;
+    std::promise<TestHttpServer> server_promise;
     auto port_future = port_promise.get_future();
     auto server_future = server_promise.get_future();
     fiber::async::spawn(group.at(0),
                         [&]() { return start_server(&group.at(0), &upstream_state, &port_promise, &server_promise); });
 
-    fiber::http::HttpServer *server = server_future.get();
-    ASSERT_NE(server, nullptr);
+    TestHttpServer server = server_future.get();
+    ASSERT_NE(server.server, nullptr);
     const std::uint16_t port = port_future.get();
     ASSERT_NE(port, 0);
 
@@ -1719,11 +1736,10 @@ TEST(ProxyExecutorTest, RejectsKnownOversizedResponseBeforeCommittingUpstreamSta
 
     std::promise<void> shutdown_promise;
     auto shutdown_future = shutdown_promise.get_future();
-    fiber::async::spawn(group.at(0), [&]() { return shutdown(&pool, server, &shutdown_promise); });
+    fiber::async::spawn(group.at(0), [&]() { return shutdown(&pool, &server, &shutdown_promise); });
     ASSERT_EQ(shutdown_future.wait_for(2s), std::future_status::ready);
     group.stop();
     group.join();
-    delete server;
 }
 
 TEST(ProxyExecutorTest, AbortsCommittedChunkedResponseWhenDynamicLimitIsExceeded) {
@@ -1740,14 +1756,14 @@ TEST(ProxyExecutorTest, AbortsCommittedChunkedResponseWhenDynamicLimitIsExceeded
                     },
     };
     std::promise<std::uint16_t> port_promise;
-    std::promise<fiber::http::HttpServer *> server_promise;
+    std::promise<TestHttpServer> server_promise;
     auto port_future = port_promise.get_future();
     auto server_future = server_promise.get_future();
     fiber::async::spawn(group.at(0),
                         [&]() { return start_server(&group.at(0), &upstream_state, &port_promise, &server_promise); });
 
-    fiber::http::HttpServer *server = server_future.get();
-    ASSERT_NE(server, nullptr);
+    TestHttpServer server = server_future.get();
+    ASSERT_NE(server.server, nullptr);
     const std::uint16_t port = port_future.get();
     ASSERT_NE(port, 0);
 
@@ -1774,11 +1790,10 @@ TEST(ProxyExecutorTest, AbortsCommittedChunkedResponseWhenDynamicLimitIsExceeded
 
     std::promise<void> shutdown_promise;
     auto shutdown_future = shutdown_promise.get_future();
-    fiber::async::spawn(group.at(0), [&]() { return shutdown(&pool, server, &shutdown_promise); });
+    fiber::async::spawn(group.at(0), [&]() { return shutdown(&pool, &server, &shutdown_promise); });
     ASSERT_EQ(shutdown_future.wait_for(2s), std::future_status::ready);
     group.stop();
     group.join();
-    delete server;
 }
 
 TEST(ProxyExecutorTest, AbortsDownstreamAfterAnUpstreamBodyEndsEarly) {
@@ -1795,14 +1810,14 @@ TEST(ProxyExecutorTest, AbortsDownstreamAfterAnUpstreamBodyEndsEarly) {
                     },
     };
     std::promise<std::uint16_t> port_promise;
-    std::promise<fiber::http::HttpServer *> server_promise;
+    std::promise<TestHttpServer> server_promise;
     auto port_future = port_promise.get_future();
     auto server_future = server_promise.get_future();
     fiber::async::spawn(group.at(0),
                         [&]() { return start_server(&group.at(0), &upstream_state, &port_promise, &server_promise); });
 
-    fiber::http::HttpServer *server = server_future.get();
-    ASSERT_NE(server, nullptr);
+    TestHttpServer server = server_future.get();
+    ASSERT_NE(server.server, nullptr);
     const std::uint16_t port = port_future.get();
     ASSERT_NE(port, 0);
 
@@ -1810,11 +1825,10 @@ TEST(ProxyExecutorTest, AbortsDownstreamAfterAnUpstreamBodyEndsEarly) {
             .port = port,
             .good_host_header = "127.0.0.1:" + std::to_string(port),
             .bad_host_header = "127.0.0.2:" + std::to_string(port),
-            .good_connection_key = fiber::http::Http1ConnectionGroupKey::from_ip(
-                    fiber::net::IpAddress::loopback_v4(), port, fiber::http::Http1ConnectionGroupKey::Scheme::Http),
-            .bad_connection_key =
-                    fiber::http::Http1ConnectionGroupKey::from_ip(fiber::net::IpAddress::v4({127, 0, 0, 2}), port,
-                                                                  fiber::http::Http1ConnectionGroupKey::Scheme::Http),
+            .good_connection_key = fiber::http::HttpConnectionGroupKey::from_ip(
+                    fiber::net::IpAddress::loopback_v4(), port, fiber::http::HttpConnectionGroupKey::Scheme::Http),
+            .bad_connection_key = fiber::http::HttpConnectionGroupKey::from_ip(
+                    fiber::net::IpAddress::v4({127, 0, 0, 2}), port, fiber::http::HttpConnectionGroupKey::Scheme::Http),
     };
     fiber::access_server::RouteConfigStore store({}, fiber::access_server::ProxyAddressSelectorFactory{
                                                              .context = &selector_state,
@@ -1850,11 +1864,10 @@ TEST(ProxyExecutorTest, AbortsDownstreamAfterAnUpstreamBodyEndsEarly) {
 
     std::promise<void> shutdown_promise;
     auto shutdown_future = shutdown_promise.get_future();
-    fiber::async::spawn(group.at(0), [&]() { return shutdown(&pool, server, &shutdown_promise); });
+    fiber::async::spawn(group.at(0), [&]() { return shutdown(&pool, &server, &shutdown_promise); });
     ASSERT_EQ(shutdown_future.wait_for(2s), std::future_status::ready);
     group.stop();
     group.join();
-    delete server;
 }
 
 TEST(ProxyExecutorTest, CancelsUpstreamWhenDownstreamClosesBeforeResponseHeaders) {
@@ -1879,14 +1892,14 @@ TEST(ProxyExecutorTest, CancelsUpstreamWhenDownstreamClosesBeforeResponseHeaders
                     },
     };
     std::promise<std::uint16_t> port_promise;
-    std::promise<fiber::http::HttpServer *> server_promise;
+    std::promise<TestHttpServer> server_promise;
     auto port_future = port_promise.get_future();
     auto server_future = server_promise.get_future();
     fiber::async::spawn(group.at(0),
                         [&]() { return start_server(&group.at(0), &upstream_state, &port_promise, &server_promise); });
 
-    fiber::http::HttpServer *server = server_future.get();
-    ASSERT_NE(server, nullptr);
+    TestHttpServer server = server_future.get();
+    ASSERT_NE(server.server, nullptr);
     const std::uint16_t port = port_future.get();
     ASSERT_NE(port, 0);
 
@@ -1903,13 +1916,12 @@ TEST(ProxyExecutorTest, CancelsUpstreamWhenDownstreamClosesBeforeResponseHeaders
     };
     fiber::access_server::ProxyExecutorOptions options;
     options.happy_eyeballs.connection_attempt_delay = 10ms;
-    fiber::access_server::ProxyExecutor executor(
-            pool, {},
-            fiber::access_server::ProxyDnsResolver{
-                    .context = &resolver,
-                    .resolve = resolve_proxy_addresses,
-            },
-            options);
+    fiber::access_server::ProxyExecutor executor(pool, {},
+                                                 fiber::access_server::ProxyDnsResolver{
+                                                         .context = &resolver,
+                                                         .resolve = resolve_proxy_addresses,
+                                                 },
+                                                 options);
     std::string output;
     std::promise<void> request_promise;
     std::promise<RecordingTransport *> transport_promise;
@@ -1940,20 +1952,17 @@ TEST(ProxyExecutorTest, CancelsUpstreamWhenDownstreamClosesBeforeResponseHeaders
     EXPECT_NE(metric_text->find("access_server_proxy_executions_total{result=\"canceled\"} 1"), std::string::npos);
     EXPECT_NE(metric_text->find("access_server_proxy_attempts_total{result=\"aborted\"} 1"), std::string::npos);
     EXPECT_NE(metric_text->find("access_server_proxy_attempts_inflight 0"), std::string::npos);
-    EXPECT_NE(metric_text->find("access_server_proxy_dns_resolutions_total{result=\"success\"} 1"),
-              std::string::npos);
+    EXPECT_NE(metric_text->find("access_server_proxy_dns_resolutions_total{result=\"success\"} 1"), std::string::npos);
     EXPECT_NE(metric_text->find("access_server_proxy_connect_candidates_total 2"), std::string::npos);
-    EXPECT_NE(metric_text->find("access_server_proxy_happy_eyeballs_total{result=\"success\"} 1"),
-              std::string::npos);
+    EXPECT_NE(metric_text->find("access_server_proxy_happy_eyeballs_total{result=\"success\"} 1"), std::string::npos);
     EXPECT_EQ(resolver.calls, 1U);
 
     std::promise<void> shutdown_promise;
     auto shutdown_future = shutdown_promise.get_future();
-    fiber::async::spawn(group.at(0), [&]() { return shutdown(&pool, server, &shutdown_promise); });
+    fiber::async::spawn(group.at(0), [&]() { return shutdown(&pool, &server, &shutdown_promise); });
     ASSERT_EQ(shutdown_future.wait_for(2s), std::future_status::ready);
     group.stop();
     group.join();
-    delete server;
 }
 
 TEST(ProxyExecutorTest, RelaysWebSocketUpgradeAndRawBytesInBothDirections) {
@@ -1974,14 +1983,14 @@ TEST(ProxyExecutorTest, RelaysWebSocketUpgradeAndRawBytesInBothDirections) {
                     },
     };
     std::promise<std::uint16_t> port_promise;
-    std::promise<fiber::http::HttpServer *> server_promise;
+    std::promise<TestHttpServer> server_promise;
     auto port_future = port_promise.get_future();
     auto server_future = server_promise.get_future();
     fiber::async::spawn(group.at(0),
                         [&]() { return start_server(&group.at(0), &upstream_state, &port_promise, &server_promise); });
 
-    fiber::http::HttpServer *server = server_future.get();
-    ASSERT_NE(server, nullptr);
+    TestHttpServer server = server_future.get();
+    ASSERT_NE(server.server, nullptr);
     const std::uint16_t port = port_future.get();
     ASSERT_NE(port, 0);
 
@@ -2041,11 +2050,10 @@ TEST(ProxyExecutorTest, RelaysWebSocketUpgradeAndRawBytesInBothDirections) {
 
     std::promise<void> shutdown_promise;
     auto shutdown_future = shutdown_promise.get_future();
-    fiber::async::spawn(group.at(0), [&]() { return shutdown(&pool, server, &shutdown_promise); });
+    fiber::async::spawn(group.at(0), [&]() { return shutdown(&pool, &server, &shutdown_promise); });
     ASSERT_EQ(shutdown_future.wait_for(2s), std::future_status::ready);
     group.stop();
     group.join();
-    delete server;
 }
 
 TEST(ProxyExecutorTest, AbortsUpgradeBeforeRenderingAResponseTemplateFailure) {
@@ -2064,14 +2072,14 @@ TEST(ProxyExecutorTest, AbortsUpgradeBeforeRenderingAResponseTemplateFailure) {
                     },
     };
     std::promise<std::uint16_t> port_promise;
-    std::promise<fiber::http::HttpServer *> server_promise;
+    std::promise<TestHttpServer> server_promise;
     auto port_future = port_promise.get_future();
     auto server_future = server_promise.get_future();
     fiber::async::spawn(group.at(0),
                         [&]() { return start_server(&group.at(0), &upstream_state, &port_promise, &server_promise); });
 
-    fiber::http::HttpServer *server = server_future.get();
-    ASSERT_NE(server, nullptr);
+    TestHttpServer server = server_future.get();
+    ASSERT_NE(server.server, nullptr);
     const std::uint16_t port = port_future.get();
     ASSERT_NE(port, 0);
 
@@ -2109,11 +2117,10 @@ TEST(ProxyExecutorTest, AbortsUpgradeBeforeRenderingAResponseTemplateFailure) {
 
     std::promise<void> shutdown_promise;
     auto shutdown_future = shutdown_promise.get_future();
-    fiber::async::spawn(group.at(0), [&]() { return shutdown(&pool, server, &shutdown_promise); });
+    fiber::async::spawn(group.at(0), [&]() { return shutdown(&pool, &server, &shutdown_promise); });
     ASSERT_EQ(shutdown_future.wait_for(2s), std::future_status::ready);
     group.stop();
     group.join();
-    delete server;
 }
 
 TEST(ProxyExecutorTest, AppliesConfiguredWebSocketTunnelTimeout) {
@@ -2132,14 +2139,14 @@ TEST(ProxyExecutorTest, AppliesConfiguredWebSocketTunnelTimeout) {
                     },
     };
     std::promise<std::uint16_t> port_promise;
-    std::promise<fiber::http::HttpServer *> server_promise;
+    std::promise<TestHttpServer> server_promise;
     auto port_future = port_promise.get_future();
     auto server_future = server_promise.get_future();
     fiber::async::spawn(group.at(0),
                         [&]() { return start_server(&group.at(0), &upstream_state, &port_promise, &server_promise); });
 
-    fiber::http::HttpServer *server = server_future.get();
-    ASSERT_NE(server, nullptr);
+    TestHttpServer server = server_future.get();
+    ASSERT_NE(server.server, nullptr);
     const std::uint16_t port = port_future.get();
     ASSERT_NE(port, 0);
 
@@ -2174,11 +2181,10 @@ TEST(ProxyExecutorTest, AppliesConfiguredWebSocketTunnelTimeout) {
 
     std::promise<void> shutdown_promise;
     auto shutdown_future = shutdown_promise.get_future();
-    fiber::async::spawn(group.at(0), [&]() { return shutdown(&pool, server, &shutdown_promise); });
+    fiber::async::spawn(group.at(0), [&]() { return shutdown(&pool, &server, &shutdown_promise); });
     ASSERT_EQ(shutdown_future.wait_for(2s), std::future_status::ready);
     group.stop();
     group.join();
-    delete server;
 }
 
 } // namespace

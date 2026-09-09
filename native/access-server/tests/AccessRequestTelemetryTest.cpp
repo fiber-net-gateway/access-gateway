@@ -195,7 +195,7 @@ fiber::async::DetachedTask run_component_request(fiber::event::EventLoop *loop,
         (void) sent;
         observability.finish(exchange, metadata, trace.trace_id());
     };
-    fiber::http::Http1Connection connection(nullptr, std::move(transport), std::move(handler), {});
+    fiber::http::Http1Connection connection(std::move(transport), handler, {});
     co_await connection.run();
     done->set_value();
 }

@@ -662,12 +662,12 @@ std::optional<AccessUpstreamInstance> compile_java_http_host(std::string_view va
         authority.append(std::to_string(port));
     }
     const auto scheme =
-            https ? http::Http1ConnectionGroupKey::Scheme::Https : http::Http1ConnectionGroupKey::Scheme::Http;
+            https ? http::HttpConnectionGroupKey::Scheme::Https : http::HttpConnectionGroupKey::Scheme::Http;
     net::IpAddress ip;
     if (net::IpAddress::parse(host, ip)) {
-        return AccessUpstreamInstance(http::Http1ConnectionGroupKey::from_ip(ip, port, scheme), std::move(authority));
+        return AccessUpstreamInstance(http::HttpConnectionGroupKey::from_ip(ip, port, scheme), std::move(authority));
     }
-    auto key = http::Http1ConnectionGroupKey::from_name(host, port, scheme);
+    auto key = http::HttpConnectionGroupKey::from_name(host, port, scheme);
     if (!key) {
         return std::nullopt;
     }

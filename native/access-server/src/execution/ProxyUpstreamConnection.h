@@ -5,6 +5,7 @@
 
 #include <fiber/async/Task.h>
 #include <fiber/common/IoError.h>
+#include <fiber/http/HttpClientTlsOptions.h>
 #include <fiber/http/StealableHttp1ConnectionPoolSet.h>
 #include <fiber/net/HappyEyeballs.h>
 #include <fiber/net/IpAddress.h>
@@ -12,6 +13,8 @@
 #include <chrono>
 #include <cstdint>
 #include <expected>
+#include <optional>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -26,6 +29,14 @@ class UpstreamTlsTransportProfile;
 [[nodiscard]] UpstreamTlsClientPolicyView
 effective_upstream_tls_client_policy(const UpstreamTlsClientPolicy &environment,
                                      const UpstreamTlsTransportProfile *profile) noexcept;
+
+// TLS options acquisition derives for dialing `key` under `tls_policy`; nullopt
+// for plaintext keys. Borrowed names in the result reference `tls_policy`
+// storage or `verify_name_storage` (the IP-identity fallback), so both must
+// outlive any connect() call made with the returned options.
+[[nodiscard]] std::optional<http::HttpClientTlsOptions> upstream_connection_tls(const http::HttpConnectionGroupKey &key,
+                                                                                UpstreamTlsClientPolicyView tls_policy,
+                                                                                std::string &verify_name_storage);
 
 struct ProxyDnsResolver {
     using Function = async::Task<common::IoResult<std::vector<net::IpAddress>>> (*)(void *context,
@@ -86,13 +97,13 @@ struct ProxyUpstreamConnection {
 
 [[nodiscard]] async::Task<std::expected<ProxyUpstreamConnection, ProxyConnectError>>
 acquire_proxy_upstream_connection(http::StealableHttp1ConnectionPoolSet &pool, ProxyDnsResolver dns_resolver,
-                                  const http::Http1ConnectionGroupKey &key, UpstreamTlsClientPolicyView tls_policy,
+                                  const http::HttpConnectionGroupKey &key, UpstreamTlsClientPolicyView tls_policy,
                                   std::chrono::milliseconds connect_timeout,
                                   ProxyHappyEyeballsPolicy happy_eyeballs = {}) noexcept;
 
 [[nodiscard]] inline async::Task<std::expected<ProxyUpstreamConnection, ProxyConnectError>>
 acquire_proxy_upstream_connection(http::StealableHttp1ConnectionPoolSet &pool, ProxyDnsResolver dns_resolver,
-                                  const http::Http1ConnectionGroupKey &key, const UpstreamTlsClientPolicy &tls_policy,
+                                  const http::HttpConnectionGroupKey &key, const UpstreamTlsClientPolicy &tls_policy,
                                   std::chrono::milliseconds connect_timeout,
                                   ProxyHappyEyeballsPolicy happy_eyeballs = {}) noexcept {
     return acquire_proxy_upstream_connection(pool, dns_resolver, key, upstream_tls_client_policy_view(tls_policy),

@@ -6,7 +6,7 @@
 
 #include <fiber/async/Task.h>
 #include <fiber/common/IoError.h>
-#include <fiber/http/Http1ConnectionGroupKey.h>
+#include <fiber/http/HttpConnectionGroupKey.h>
 
 #include <cstdint>
 #include <expected>
@@ -41,10 +41,10 @@ struct ProxyAddressReadyError {
 class AccessUpstreamInstance {
 public:
     AccessUpstreamInstance() noexcept = default;
-    AccessUpstreamInstance(http::Http1ConnectionGroupKey connection_key, std::string authority,
+    AccessUpstreamInstance(http::HttpConnectionGroupKey connection_key, std::string authority,
                            std::shared_ptr<AccessUpstreamCircuit> circuit = {});
 
-    [[nodiscard]] const http::Http1ConnectionGroupKey &connection_key() const noexcept;
+    [[nodiscard]] const http::HttpConnectionGroupKey &connection_key() const noexcept;
     [[nodiscard]] std::string_view authority() const noexcept;
     [[nodiscard]] const std::shared_ptr<AccessUpstreamCircuit> &circuit() const noexcept { return circuit_; }
     void set_circuit(std::shared_ptr<AccessUpstreamCircuit> circuit) noexcept { circuit_ = std::move(circuit); }
@@ -53,7 +53,7 @@ public:
 
 private:
     struct Data {
-        http::Http1ConnectionGroupKey connection_key;
+        http::HttpConnectionGroupKey connection_key;
         std::string authority;
     };
 
@@ -66,7 +66,7 @@ using AccessUpstreamSwrr = SmoothWeightedRoundRobin<AccessUpstreamInstance>;
 // The SWRR selection pins the selected address generation for as long as
 // connection_key and host_header are consumed by the request.
 struct ProxyUpstreamEndpoint {
-    const http::Http1ConnectionGroupKey *connection_key = nullptr;
+    const http::HttpConnectionGroupKey *connection_key = nullptr;
     std::string_view host_header;
     std::string_view provider_name;
     AccessUpstreamSwrr::Selection selection;

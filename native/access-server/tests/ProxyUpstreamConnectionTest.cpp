@@ -22,7 +22,7 @@
 #include <fiber/async/Spawn.h>
 #include <fiber/event/EventLoopGroup.h>
 #include <fiber/http/Http1ClientConnection.h>
-#include <fiber/http/Http1ConnectionGroupKey.h>
+#include <fiber/http/HttpConnectionGroupKey.h>
 #include <fiber/http/HttpTransport.h>
 #include <fiber/net/SocketAddress.h>
 #include <fiber/net/TcpListener.h>
@@ -249,7 +249,7 @@ fiber::async::DetachedTask run_tls_server(fiber::net::TcpListener *listener, fib
 }
 
 fiber::async::DetachedTask run_tls_client_scenario(fiber::http::StealableHttp1ConnectionPoolSet *pool,
-                                                   fiber::http::Http1ConnectionGroupKey key, ResolverState *resolver,
+                                                   fiber::http::HttpConnectionGroupKey key, ResolverState *resolver,
                                                    fiber::access_server::UpstreamTlsClientPolicyView policy,
                                                    std::promise<ConnectionScenarioResult> *promise) {
     ConnectionScenarioResult result;
@@ -262,9 +262,14 @@ fiber::async::DetachedTask run_tls_client_scenario(fiber::http::StealableHttp1Co
         result.observation = connected.error().observation;
     } else {
         result.observation = connected->observation;
-        const auto &tls = connected->connection->options().tls;
         result.first_hit = connected->lease.hit();
-        result.connected_ip = connected->connection->options().peer_addr.ip();
+        result.connected_ip = connected->connection->peer_addr().ip();
+        // The client connection no longer exposes its connect options, so the
+        // scenario reports the TLS parameters acquisition derives for this
+        // key/policy pair — the same inputs handshake outcomes are driven by.
+        std::string verify_name_storage;
+        const std::optional<fiber::http::HttpClientTlsOptions> tls =
+                fiber::access_server::upstream_connection_tls(key, policy, verify_name_storage);
         result.tls_enabled = tls.has_value();
         if (tls) {
             result.verify_peer = tls->security.verify_peer;
@@ -338,10 +343,10 @@ ConnectionScenarioResult run_tls_scenario(const std::string &certificate_path, c
     }
     auto key =
             use_ip_key
-                    ? fiber::http::Http1ConnectionGroupKey::from_ip(fiber::net::IpAddress::loopback_v4(), *port,
-                                                                    fiber::http::Http1ConnectionGroupKey::Scheme::Https)
-                    : fiber::http::Http1ConnectionGroupKey::from_name(
-                              host, *port, fiber::http::Http1ConnectionGroupKey::Scheme::Https);
+                    ? fiber::http::HttpConnectionGroupKey::from_ip(fiber::net::IpAddress::loopback_v4(), *port,
+                                                                   fiber::http::HttpConnectionGroupKey::Scheme::Https)
+                    : fiber::http::HttpConnectionGroupKey::from_name(
+                              host, *port, fiber::http::HttpConnectionGroupKey::Scheme::Https);
     if (!key) {
         listener.close();
         return ConnectionScenarioResult{.error = fiber::common::IoErr::Invalid};
@@ -367,7 +372,7 @@ ConnectionScenarioResult run_tls_scenario(const std::string &certificate_path, c
 }
 
 fiber::async::DetachedTask run_ip_scenario(fiber::http::StealableHttp1ConnectionPoolSet *pool,
-                                           fiber::http::Http1ConnectionGroupKey key, ResolverState *resolver,
+                                           fiber::http::HttpConnectionGroupKey key, ResolverState *resolver,
                                            std::promise<ConnectionScenarioResult> *promise,
                                            fiber::access_server::ProxyHappyEyeballsPolicy happy_eyeballs = {}) {
     ConnectionScenarioResult result;
@@ -383,7 +388,7 @@ fiber::async::DetachedTask run_ip_scenario(fiber::http::StealableHttp1Connection
     } else {
         result.observation = connected->observation;
         result.first_hit = connected->lease.hit();
-        result.connected_ip = connected->connection->options().peer_addr.ip();
+        result.connected_ip = connected->connection->peer_addr().ip();
         connected->lease.reset();
     }
     co_await pool->shutdown_async();
@@ -404,7 +409,7 @@ fiber::async::DetachedTask run_script_service_scenario(fiber::access_server::Acc
 }
 
 fiber::async::DetachedTask run_pool_hit_scenario(fiber::http::StealableHttp1ConnectionPoolSet *pool,
-                                                 fiber::http::Http1ConnectionGroupKey key, ResolverState *resolver,
+                                                 fiber::http::HttpConnectionGroupKey key, ResolverState *resolver,
                                                  std::promise<ConnectionScenarioResult> *promise) {
     ConnectionScenarioResult result;
     auto first = co_await fiber::access_server::acquire_proxy_upstream_connection(*pool, resolver_adapter(*resolver),
@@ -439,8 +444,8 @@ fiber::async::DetachedTask run_pool_hit_scenario(fiber::http::StealableHttp1Conn
 }
 
 fiber::async::DetachedTask run_pool_affinity_rotation_scenario(fiber::http::StealableHttp1ConnectionPoolSet *pool,
-                                                               fiber::http::Http1ConnectionGroupKey original_key,
-                                                               fiber::http::Http1ConnectionGroupKey rotated_key,
+                                                               fiber::http::HttpConnectionGroupKey original_key,
+                                                               fiber::http::HttpConnectionGroupKey rotated_key,
                                                                ResolverState *resolver,
                                                                std::promise<ConnectionScenarioResult> *promise) {
     ConnectionScenarioResult result;
@@ -486,7 +491,7 @@ fiber::async::DetachedTask run_pool_affinity_rotation_scenario(fiber::http::Stea
 }
 
 fiber::async::DetachedTask run_shutdown_scenario(fiber::http::StealableHttp1ConnectionPoolSet *pool,
-                                                 fiber::http::Http1ConnectionGroupKey key, ResolverState *resolver,
+                                                 fiber::http::HttpConnectionGroupKey key, ResolverState *resolver,
                                                  std::promise<ConnectionScenarioResult> *promise) {
     co_await pool->shutdown_async();
     ConnectionScenarioResult result;
@@ -502,7 +507,7 @@ fiber::async::DetachedTask run_shutdown_scenario(fiber::http::StealableHttp1Conn
 }
 
 fiber::async::DetachedTask run_cross_worker_acquire(fiber::http::StealableHttp1ConnectionPoolSet *pool,
-                                                    fiber::http::Http1ConnectionGroupKey key, ResolverState *resolver,
+                                                    fiber::http::HttpConnectionGroupKey key, ResolverState *resolver,
                                                     bool shutdown_pool,
                                                     std::promise<ConnectionScenarioResult> *promise) {
     ConnectionScenarioResult result;
@@ -532,8 +537,8 @@ ConnectionScenarioResult run_resolution_scenario(ResolverState *resolver) {
     if (!pool.init()) {
         return ConnectionScenarioResult{.error = fiber::common::IoErr::NoMem};
     }
-    auto key = fiber::http::Http1ConnectionGroupKey::from_name("upstream.example", 80,
-                                                               fiber::http::Http1ConnectionGroupKey::Scheme::Http);
+    auto key = fiber::http::HttpConnectionGroupKey::from_name("upstream.example", 80,
+                                                              fiber::http::HttpConnectionGroupKey::Scheme::Http);
     if (!key) {
         return ConnectionScenarioResult{.error = fiber::common::IoErr::Invalid};
     }
@@ -564,8 +569,8 @@ TEST(ProxyUpstreamConnectionTest, IpKeyBypassesDns) {
     fiber::async::spawn(group.at(0), [&]() {
         return run_ip_scenario(
                 &pool,
-                fiber::http::Http1ConnectionGroupKey::from_ip(fiber::net::IpAddress::loopback_v4(), *port,
-                                                              fiber::http::Http1ConnectionGroupKey::Scheme::Http),
+                fiber::http::HttpConnectionGroupKey::from_ip(fiber::net::IpAddress::loopback_v4(), *port,
+                                                             fiber::http::HttpConnectionGroupKey::Scheme::Http),
                 &resolver, &promise);
     });
 
@@ -620,8 +625,8 @@ TEST(ProxyUpstreamConnectionTest, NameKeyRacesResolvedAddressesUnderOnePoolLease
     ASSERT_TRUE(listener.bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), {}));
     auto port = bound_port(listener.fd());
     ASSERT_TRUE(port);
-    auto key = fiber::http::Http1ConnectionGroupKey::from_name("upstream.example", *port,
-                                                               fiber::http::Http1ConnectionGroupKey::Scheme::Http);
+    auto key = fiber::http::HttpConnectionGroupKey::from_name("upstream.example", *port,
+                                                              fiber::http::HttpConnectionGroupKey::Scheme::Http);
     ASSERT_TRUE(key);
 
     ResolverState resolver{
@@ -660,8 +665,8 @@ TEST(ProxyUpstreamConnectionTest, V6FirstFallsBackToV4LoopbackAndShutsDownPool) 
     ASSERT_TRUE(listener.bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), {}));
     auto port = bound_port(listener.fd());
     ASSERT_TRUE(port);
-    auto key = fiber::http::Http1ConnectionGroupKey::from_name("dual-stack.example", *port,
-                                                               fiber::http::Http1ConnectionGroupKey::Scheme::Http);
+    auto key = fiber::http::HttpConnectionGroupKey::from_name("dual-stack.example", *port,
+                                                              fiber::http::HttpConnectionGroupKey::Scheme::Http);
     ASSERT_TRUE(key);
 
     ResolverState resolver{
@@ -697,8 +702,8 @@ TEST(ProxyUpstreamConnectionTest, DisabledHappyEyeballsPreservesSerialAddressFal
     ASSERT_TRUE(listener.bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), {}));
     auto port = bound_port(listener.fd());
     ASSERT_TRUE(port);
-    auto key = fiber::http::Http1ConnectionGroupKey::from_name("upstream.example", *port,
-                                                               fiber::http::Http1ConnectionGroupKey::Scheme::Http);
+    auto key = fiber::http::HttpConnectionGroupKey::from_name("upstream.example", *port,
+                                                              fiber::http::HttpConnectionGroupKey::Scheme::Http);
     ASSERT_TRUE(key);
     ResolverState resolver{
             .addresses = {fiber::net::IpAddress::v4({127, 0, 0, 2}), fiber::net::IpAddress::loopback_v4()},
@@ -770,8 +775,8 @@ TEST(ProxyUpstreamConnectionTest, PoolHitBypassesDns) {
     ASSERT_TRUE(listener.bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), {}));
     auto port = bound_port(listener.fd());
     ASSERT_TRUE(port);
-    auto key = fiber::http::Http1ConnectionGroupKey::from_name("upstream.example", *port,
-                                                               fiber::http::Http1ConnectionGroupKey::Scheme::Http);
+    auto key = fiber::http::HttpConnectionGroupKey::from_name("upstream.example", *port,
+                                                              fiber::http::HttpConnectionGroupKey::Scheme::Http);
     ASSERT_TRUE(key);
 
     ResolverState resolver{
@@ -806,8 +811,8 @@ TEST(ProxyUpstreamConnectionTest, TlsProfileGenerationDoesNotReuseAnOldIdleLease
     ASSERT_TRUE(listener.bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), {}));
     auto port = bound_port(listener.fd());
     ASSERT_TRUE(port);
-    auto base_key = fiber::http::Http1ConnectionGroupKey::from_name("upstream.example", *port,
-                                                                    fiber::http::Http1ConnectionGroupKey::Scheme::Http);
+    auto base_key = fiber::http::HttpConnectionGroupKey::from_name("upstream.example", *port,
+                                                                   fiber::http::HttpConnectionGroupKey::Scheme::Http);
     ASSERT_TRUE(base_key);
 
     auto original_profile = fiber::access_server::compile_upstream_tls_transport_profile(
@@ -864,8 +869,8 @@ TEST(ProxyUpstreamConnectionTest, StealsAnIdleConnectionFromAnotherWorker) {
     ASSERT_TRUE(listener.bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), {}));
     auto port = bound_port(listener.fd());
     ASSERT_TRUE(port);
-    auto key = fiber::http::Http1ConnectionGroupKey::from_name("upstream.example", *port,
-                                                               fiber::http::Http1ConnectionGroupKey::Scheme::Http);
+    auto key = fiber::http::HttpConnectionGroupKey::from_name("upstream.example", *port,
+                                                              fiber::http::HttpConnectionGroupKey::Scheme::Http);
     ASSERT_TRUE(key);
 
     ResolverState resolver{
@@ -905,8 +910,8 @@ TEST(ProxyUpstreamConnectionTest, ReportsPoolShutdownBeforeDns) {
     fiber::event::EventLoopGroup group(1);
     fiber::http::StealableHttp1ConnectionPoolSet pool(group);
     ASSERT_TRUE(pool.init());
-    auto key = fiber::http::Http1ConnectionGroupKey::from_name("upstream.example", 80,
-                                                               fiber::http::Http1ConnectionGroupKey::Scheme::Http);
+    auto key = fiber::http::HttpConnectionGroupKey::from_name("upstream.example", 80,
+                                                              fiber::http::HttpConnectionGroupKey::Scheme::Http);
     ASSERT_TRUE(key);
 
     ResolverState resolver{

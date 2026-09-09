@@ -5,12 +5,14 @@
 #include "AccessActivationEndpoint.h"
 
 #include <fiber/async/Task.h>
+#include <fiber/async/WaitGroup.h>
 #include <fiber/common/IoError.h>
 #include <fiber/common/NonCopyable.h>
 #include <fiber/common/NonMovable.h>
 #include <fiber/event/EventLoop.h>
 #include <fiber/event/EventLoopGroup.h>
-#include <fiber/http/Http1Server.h>
+#include <fiber/http/Server.h>
+#include <fiber/http/endpoint/Http1Endpoint.h>
 #include <fiber/net/SocketAddress.h>
 #include <fiber/net/TcpListener.h>
 
@@ -35,7 +37,7 @@ public:
                                               const net::ListenOptions &options = {});
     async::DetachedTask serve();
     [[nodiscard]] async::Task<void> shutdown_and_wait() noexcept;
-    [[nodiscard]] int fd() const noexcept { return server_.fd(); }
+    [[nodiscard]] int fd() const noexcept { return endpoint_ ? endpoint_->listener_fd() : -1; }
 
 private:
     [[nodiscard]] async::Task<void> handle(http::HttpExchange &exchange) noexcept;
@@ -43,7 +45,10 @@ private:
     event::EventLoop *accept_loop_ = nullptr;
     AccessServerMetrics *metrics_ = nullptr;
     AccessActivationEndpoint activation_endpoint_;
-    http::Http1Server server_;
+    http::Server server_;
+    http::Http1Endpoint *endpoint_ = nullptr;
+    // One count per serve task spawned by serve(); drained by shutdown_and_wait().
+    async::WaitGroup serve_tasks_{};
     bool bound_ = false;
 };
 

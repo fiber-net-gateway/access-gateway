@@ -23,9 +23,11 @@
 #include <netinet/in.h>
 
 #include <fiber/async/Spawn.h>
+#include <fiber/async/WaitGroup.h>
 #include <fiber/event/EventLoopGroup.h>
-#include <fiber/http/HttpServer.h>
+#include <fiber/http/Server.h>
 #include <fiber/http/StealableHttp1ConnectionPoolSet.h>
+#include <fiber/http/endpoint/Http1Endpoint.h>
 #include <fiber/log/LogConfig.h>
 #include <fiber/log/LoggerManager.h>
 #include <fiber/net/IpAddress.h>
@@ -121,19 +123,6 @@ std::string consume_chain(fiber::mem::IoBufChain chain) {
     return result;
 }
 
-fiber::common::IoResult<std::uint16_t> bound_port(int fd) {
-    sockaddr_storage storage{};
-    socklen_t length = sizeof(storage);
-    if (::getsockname(fd, reinterpret_cast<sockaddr *>(&storage), &length) != 0) {
-        return std::unexpected(fiber::common::io_err_from_errno(errno));
-    }
-    fiber::net::SocketAddress address;
-    if (!fiber::net::SocketAddress::from_sockaddr(reinterpret_cast<sockaddr *>(&storage), length, address)) {
-        return std::unexpected(fiber::common::IoErr::NotSupported);
-    }
-    return address.port();
-}
-
 struct UpstreamState {
     std::atomic<std::uint64_t> requests{0};
     std::atomic<std::uint64_t> connections{0};
@@ -198,27 +187,47 @@ fiber::async::Task<void> serve_upstream(fiber::http::HttpExchange &exchange, Ups
     }
 }
 
+// A loopback HTTP/1 fixture server plus the bookkeeping needed to tear it down
+// safely: the fiber Server must outlive its serve() task, so shutdown() awaits
+// this WaitGroup before destroying it.
+struct TestHttpServer {
+    fiber::http::Server *server = nullptr;
+    std::unique_ptr<fiber::async::WaitGroup> serve_tasks = std::make_unique<fiber::async::WaitGroup>();
+};
+
+fiber::async::DetachedTask serve_fixture_server(fiber::http::Server *server, fiber::async::WaitGroup *serve_tasks) {
+    co_await server->serve();
+    serve_tasks->done();
+}
+
 fiber::async::DetachedTask start_server(fiber::event::EventLoop *loop, fiber::http::HttpHandler handler,
                                         std::promise<std::uint16_t> *port_promise,
-                                        std::promise<fiber::http::HttpServer *> *server_promise) {
-    auto *server = new (std::nothrow) fiber::http::HttpServer(*loop, std::move(handler));
+                                        std::promise<TestHttpServer> *server_promise) {
+    auto *server = new (std::nothrow) fiber::http::Server(*loop, fiber::http::HttpHandler{});
     if (server == nullptr) {
         port_promise->set_value(0);
-        server_promise->set_value(nullptr);
+        server_promise->set_value({});
         co_return;
     }
-    auto bound = server->bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), {});
-    const auto port =
-            bound ? bound_port(server->fd()) : fiber::common::IoResult<std::uint16_t>(std::unexpected(bound.error()));
-    if (!port) {
+    auto *endpoint = server->add_endpoint<fiber::http::Http1Endpoint>(fiber::http::Http1Endpoint::Options{
+            .address = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0),
+            .handler = std::move(handler),
+    });
+    auto started = endpoint != nullptr ? server->start()
+                                       : fiber::common::IoResult<void>(std::unexpected(fiber::common::IoErr::NoMem));
+    if (!started) {
         delete server;
         port_promise->set_value(0);
-        server_promise->set_value(nullptr);
+        server_promise->set_value({});
         co_return;
     }
-    port_promise->set_value(*port);
-    server_promise->set_value(server);
-    fiber::async::spawn(*loop, [server]() { return server->serve(); });
+    TestHttpServer running;
+    running.server = server;
+    running.serve_tasks->add();
+    fiber::async::WaitGroup *serve_tasks = running.serve_tasks.get();
+    fiber::async::spawn(*loop, [server, serve_tasks] { return serve_fixture_server(server, serve_tasks); });
+    port_promise->set_value(endpoint->local_addr().port());
+    server_promise->set_value(std::move(running));
 }
 
 fiber::access_server::ProjectConfig project_config(std::uint16_t port) {
@@ -396,11 +405,22 @@ WebSocketResult measure_websocket(std::uint16_t port, std::uint64_t sessions) {
     };
 }
 
-fiber::async::DetachedTask shutdown(fiber::http::StealableHttp1ConnectionPoolSet *pool,
-                                    fiber::http::HttpServer *gateway, fiber::http::HttpServer *upstream,
-                                    std::promise<void> *done) {
-    gateway->close();
-    upstream->close();
+fiber::async::DetachedTask shutdown(fiber::http::StealableHttp1ConnectionPoolSet *pool, TestHttpServer *gateway,
+                                    TestHttpServer *upstream, std::promise<void> *done) {
+    for (TestHttpServer *running: {gateway, upstream}) {
+        if (running != nullptr && running->server != nullptr) {
+            running->server->stop();
+        }
+    }
+    for (TestHttpServer *running: {gateway, upstream}) {
+        if (running == nullptr || running->server == nullptr) {
+            continue;
+        }
+        co_await running->server->stop_and_wait();
+        co_await running->serve_tasks->join();
+        delete running->server;
+        running->server = nullptr;
+    }
     co_await pool->shutdown_async();
     done->set_value();
 }
@@ -432,7 +452,7 @@ int main(int argc, char **argv) {
 
     UpstreamState upstream_state;
     std::promise<std::uint16_t> upstream_port_promise;
-    std::promise<fiber::http::HttpServer *> upstream_server_promise;
+    std::promise<TestHttpServer> upstream_server_promise;
     auto upstream_port = upstream_port_promise.get_future();
     auto upstream_server = upstream_server_promise.get_future();
     fiber::http::HttpHandler upstream_handler = [&upstream_state](fiber::http::HttpExchange &exchange) {
@@ -442,9 +462,9 @@ int main(int argc, char **argv) {
         return start_server(&group.at(0), std::move(upstream_handler), &upstream_port_promise,
                             &upstream_server_promise);
     });
-    fiber::http::HttpServer *upstream = upstream_server.get();
+    TestHttpServer upstream = upstream_server.get();
     const std::uint16_t upstream_bound_port = upstream_port.get();
-    if (upstream == nullptr || upstream_bound_port == 0) {
+    if (upstream.server == nullptr || upstream_bound_port == 0) {
         group.stop();
         group.join();
         std::fprintf(stderr, "failed to bind loopback upstream\n");
@@ -454,10 +474,12 @@ int main(int argc, char **argv) {
     fiber::access_server::RouteConfigStore store;
     auto published = store.apply("benchmark", project_config(upstream_bound_port));
     if (!published) {
-        upstream->close();
+        std::promise<void> fail_promise;
+        auto fail_done = fail_promise.get_future();
+        fiber::async::spawn(group.at(0), [&]() { return shutdown(&pool, nullptr, &upstream, &fail_promise); });
+        (void) fail_done.wait_for(10s);
         group.stop();
         group.join();
-        delete upstream;
         std::fprintf(stderr, "failed to compile proxy benchmark route\n");
         return 1;
     }
@@ -466,7 +488,7 @@ int main(int argc, char **argv) {
     fiber::access_server::ClientMetadataResolver metadata_resolver;
 
     std::promise<std::uint16_t> gateway_port_promise;
-    std::promise<fiber::http::HttpServer *> gateway_server_promise;
+    std::promise<TestHttpServer> gateway_server_promise;
     auto gateway_port = gateway_port_promise.get_future();
     auto gateway_server = gateway_server_promise.get_future();
     fiber::http::HttpHandler gateway_handler = [&](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
@@ -476,13 +498,15 @@ int main(int argc, char **argv) {
     fiber::async::spawn(group.at(0), [&]() {
         return start_server(&group.at(0), std::move(gateway_handler), &gateway_port_promise, &gateway_server_promise);
     });
-    fiber::http::HttpServer *gateway = gateway_server.get();
+    TestHttpServer gateway = gateway_server.get();
     const std::uint16_t gateway_bound_port = gateway_port.get();
-    if (gateway == nullptr || gateway_bound_port == 0) {
-        upstream->close();
+    if (gateway.server == nullptr || gateway_bound_port == 0) {
+        std::promise<void> fail_promise;
+        auto fail_done = fail_promise.get_future();
+        fiber::async::spawn(group.at(0), [&]() { return shutdown(&pool, nullptr, &upstream, &fail_promise); });
+        (void) fail_done.wait_for(10s);
         group.stop();
         group.join();
-        delete upstream;
         std::fprintf(stderr, "failed to bind loopback gateway\n");
         return 1;
     }
@@ -499,7 +523,7 @@ int main(int argc, char **argv) {
 
     std::promise<void> shutdown_promise;
     auto shutdown_done = shutdown_promise.get_future();
-    fiber::async::spawn(group.at(0), [&]() { return shutdown(&pool, gateway, upstream, &shutdown_promise); });
+    fiber::async::spawn(group.at(0), [&]() { return shutdown(&pool, &gateway, &upstream, &shutdown_promise); });
     const bool shutdown_completed = shutdown_done.wait_for(10s) == std::future_status::ready;
     group.stop();
     group.join();
