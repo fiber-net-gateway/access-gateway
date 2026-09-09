@@ -10,7 +10,11 @@ HTTP, JSON/script, Nacos, CAT, and Prometheus modules are consumed from the pinn
 historical application import revision.
 
 The current reusable Fiber dependency is pinned at
-`dfa5676c0a4e186767372ea5d2e1dd5573ba925a`. The reviewed update range from the previous pin is
+`dfa5676c0a4e186767372ea5d2e1dd5573ba925a`. The pinned revision carries repository-owned
+compatibility patches under `native/patches/` (see `native/patches/README.md`); currently one
+patch fixing HTTP/1 chunked bodies whose framing crosses transport read boundaries, with the
+regression test `ProxyExecutorTest.StreamsChunkedUpstreamWhoseFramingArrivesSeparatelyFromPayload`.
+The reviewed update range from the previous pin is
 `a1181674187afa71e55a919ad0fa258c6f7fb706..dfa5676c0a4e186767372ea5d2e1dd5573ba925a`.
 The complete reviewed range from the original import pin is
 `0fda7764bf94944aca4b674ab5ab311184703118..dfa5676c0a4e186767372ea5d2e1dd5573ba925a`.

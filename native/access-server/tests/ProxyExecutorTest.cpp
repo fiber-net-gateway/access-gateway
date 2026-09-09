@@ -1606,6 +1606,97 @@ TEST(ProxyExecutorTest, FlushControlsCrossReadResponseBodyAggregation) {
     group.join();
 }
 
+// A raw HTTP/1 upstream whose chunked framing deliberately crosses transport read
+// boundaries: the response headers arrive alone, the chunk-size line is split
+// mid-line, and the payload of the already-parsed chunk arrives only in a later
+// read. Regression guard for ClientHttp1Exchange::read_body returning an empty,
+// non-complete body (or failing the exchange) for chunked responses — the proxy
+// pipe treats both as protocol errors and aborts the downstream response.
+fiber::async::DetachedTask serve_split_framing_upstream(fiber::net::TcpListener *listener,
+                                                        std::promise<void> *done) noexcept {
+    auto accepted = co_await listener->accept();
+    if (!accepted) {
+        done->set_value();
+        co_return;
+    }
+    listener->close();
+    fiber::net::TcpStream stream(fiber::event::EventLoop::current(), accepted->release_fd(),
+                                 accepted->take_peer());
+
+    // Drain the request head so the proxy's upstream exchange moves to reading.
+    std::array<std::uint8_t, 4096> request_buf{};
+    (void) co_await stream.read(request_buf.data(), request_buf.size(), 5s);
+
+    const auto send = [&stream](std::string_view bytes) -> fiber::async::Task<fiber::common::IoResult<std::size_t>> {
+        co_return co_await stream.write(bytes.data(), bytes.size(), 5s);
+    };
+
+    (void) co_await send("HTTP/1.1 200 OK\r\n"
+                         "Content-Type: text/plain\r\n"
+                         "Transfer-Encoding: chunked\r\n"
+                         "\r\n");
+    co_await fiber::async::sleep(20ms);
+    (void) co_await send("2");
+    co_await fiber::async::sleep(20ms);
+    (void) co_await send("8\r\n");
+    co_await fiber::async::sleep(20ms);
+    (void) co_await send("0123456789ABCDEFGHIJ0123456789ABCDEFGHIJ");
+    co_await fiber::async::sleep(20ms);
+    (void) co_await send("\r\n0\r\n\r\n");
+    co_await fiber::async::sleep(50ms);
+    stream.close();
+    done->set_value();
+}
+
+TEST(ProxyExecutorTest, StreamsChunkedUpstreamWhoseFramingArrivesSeparatelyFromPayload) {
+    fiber::event::EventLoopGroup group(1);
+    fiber::http::StealableHttp1ConnectionPoolSet pool(group);
+    ASSERT_TRUE(pool.init());
+
+    fiber::net::TcpListener listener(group.at(0));
+    ASSERT_TRUE(listener.bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), {}));
+    auto port = bound_port(listener.fd());
+    ASSERT_TRUE(port);
+
+    std::promise<void> upstream_done_promise;
+    auto upstream_done = upstream_done_promise.get_future();
+
+    group.start();
+    fiber::async::spawn(group.at(0),
+                        [&]() { return serve_split_framing_upstream(&listener, &upstream_done_promise); });
+
+    auto config = project_config(*port);
+    fiber::access_server::RouteConfigStore store;
+    auto published = store.apply("orders", std::move(config));
+    ASSERT_TRUE(published) << published.error().message;
+
+    fiber::access_server::ProxyExecutor executor(pool);
+    std::string output;
+    std::promise<void> request_promise;
+    auto request_future = request_promise.get_future();
+    std::string request = "GET /proxy HTTP/1.1\r\n"
+                          "Host: api.example.com\r\n"
+                          "Connection: close\r\n\r\n";
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_downstream(&group.at(0), &store, executor.adapter(), std::move(request), &output, &request_promise);
+    });
+
+    ASSERT_EQ(request_future.wait_for(5s), std::future_status::ready);
+    EXPECT_NE(output.find("HTTP/1.1 200 OK\r\n"), std::string::npos) << output;
+    EXPECT_NE(output.find("0123456789ABCDEFGHIJ0123456789ABCDEFGHIJ"), std::string::npos) << output;
+
+    ASSERT_EQ(upstream_done.wait_for(5s), std::future_status::ready);
+    std::promise<void> shutdown_promise;
+    auto shutdown_future = shutdown_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
+        co_await pool.shutdown_async();
+        shutdown_promise.set_value();
+    });
+    ASSERT_EQ(shutdown_future.wait_for(2s), std::future_status::ready);
+    group.stop();
+    group.join();
+}
+
 TEST(ProxyExecutorTest, ForwardsFinalStatusAndHonorsNoBodyResponses) {
     fiber::event::EventLoopGroup group(1);
     fiber::http::StealableHttp1ConnectionPoolSet pool(group);
