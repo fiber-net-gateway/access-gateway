@@ -11,9 +11,11 @@ historical application import revision.
 
 The current reusable Fiber dependency is pinned at
 `dfa5676c0a4e186767372ea5d2e1dd5573ba925a`. The pinned revision carries repository-owned
-compatibility patches under `native/patches/` (see `native/patches/README.md`); currently one
-patch fixing HTTP/1 chunked bodies whose framing crosses transport read boundaries, with the
-regression test `ProxyExecutorTest.StreamsChunkedUpstreamWhoseFramingArrivesSeparatelyFromPayload`.
+compatibility patches under `native/patches/` (see `native/patches/README.md`); currently two:
+one fixing HTTP/1 chunked bodies whose framing crosses transport read boundaries (regression
+test `ProxyExecutorTest.StreamsChunkedUpstreamWhoseFramingArrivesSeparatelyFromPayload`), and
+one fixing the HTTP/3 terminal FIN strand in `QuicStreamSendQueue::encode_stream_frame`
+(regression test `QuicStreamSendQueueTest.FinOnlyFrameEncodesWhileBodyInflight`).
 The reviewed update range from the previous pin is
 `a1181674187afa71e55a919ad0fa258c6f7fb706..dfa5676c0a4e186767372ea5d2e1dd5573ba925a`.
 The complete reviewed range from the original import pin is

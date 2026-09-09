@@ -33,3 +33,23 @@ the rest, and update the revision check in `apply.sh`.
   Regression test: `ProxyExecutorTest.StreamsChunkedUpstreamWhoseFramingArrivesSeparatelyFromPayload`.
   Upstream contribution: pending (root-cause report handed off for
   `fiber-net-gateway/fiber-gateway-cpp`).
+
+- `0002-quic-h3-terminal-fin-strand.patch` — the terminal fin-only STREAM frame
+  of an HTTP/3 response was refused by `QuicStreamSendQueue::encode_stream_frame`
+  while body extents were still inflight (`buffered_bytes() > 0` includes
+  inflight), so it could only encode after the peer ACKed the body — and
+  nothing re-arms the outbound datagram build after that ACK on an otherwise
+  idle connection (ACK processing releases extents without re-queueing the
+  stream, and the keepalive timer bails when pending send work exists). The
+  FIN strands in `pending_frames`: the client receives the response head and
+  the full body but the stream never ends. Observed in production as proxied
+  no-Content-Length responses over a warm idle h3 connection taking 15s in the
+  browser (SPA timeout) while the server journal logs 8-12ms `result=success`;
+  reproduced with headless Chrome netlog (fin absent; QUIC session dies at the
+  29s idle timeout). Fix: a fin-only frame at `offset = final_size` is
+  RFC-legal regardless of inflight data (offsets are absolute, peers reassemble
+  out of order), so the guard now only defers while *ready* (unsent) data could
+  still carry the FIN instead.
+  Regression test: `QuicStreamSendQueueTest.FinOnlyFrameEncodesWhileBodyInflight`.
+  Upstream contribution: pending (root-cause report handed off for
+  `fiber-net-gateway/fiber-gateway-cpp`).
