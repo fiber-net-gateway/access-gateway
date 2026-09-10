@@ -17,6 +17,7 @@
 #include <fiber/http/ClientHttp1Types.h>
 #include <fiber/http/HttpBodySpec.h>
 #include <fiber/http/HttpHeaders.h>
+#include <fiber/http/HttpWebSocketProxy.h>
 
 namespace fiber::http {
 class HttpExchange;
@@ -60,7 +61,14 @@ public:
     [[nodiscard]] ProxyRequestPlanResult rebind_endpoint(const ProxyUpstreamEndpoint &endpoint) noexcept;
 
     [[nodiscard]] bool prepared() const noexcept { return prepared_; }
-    [[nodiscard]] bool websocket_upgrade() const noexcept { return websocket_upgrade_; }
+    // True for both downstream handshake styles: HTTP/1.1 Upgrade and the
+    // RFC 8441 / RFC 9220 extended CONNECT (HTTP/2 or HTTP/3 CONNECT with
+    // :protocol = websocket).
+    [[nodiscard]] bool websocket_upgrade() const noexcept { return websocket_handshake_.active(); }
+    [[nodiscard]] bool websocket_extended_connect() const noexcept { return websocket_handshake_.extended_connect(); }
+    [[nodiscard]] const http::proxy_core::WebSocketHandshake &websocket_handshake() const noexcept {
+        return websocket_handshake_;
+    }
     [[nodiscard]] std::int32_t websocket_timeout_millis() const noexcept { return websocket_timeout_millis_; }
     [[nodiscard]] const http::HttpBodySpec &body_spec() const noexcept { return body_spec_; }
     [[nodiscard]] bool request_end_stream() const noexcept { return request_end_stream_; }
@@ -68,19 +76,20 @@ public:
         return max_response_body_size_;
     }
     [[nodiscard]] http::HttpHeaders &headers() noexcept { return headers_; }
-    [[nodiscard]] http::Http1RequestHead request_head(http::HttpMethod method) const noexcept;
+    [[nodiscard]] http::Http1RequestHead request_head() const noexcept;
 
 private:
     std::string request_target_storage_;
     std::string_view request_target_;
     http::HttpHeaders headers_;
     std::vector<EvaluatedTemplate> evaluated_header_values_;
+    http::proxy_core::WebSocketHandshake websocket_handshake_{};
+    http::HttpMethod upstream_method_ = http::HttpMethod::Unknown;
     http::HttpBodySpec body_spec_{http::HttpBodySpec::None()};
     std::optional<std::uint64_t> max_response_body_size_;
     std::int32_t websocket_timeout_millis_ = 0;
     bool prepared_ = false;
     bool host_uses_selected_endpoint_ = true;
-    bool websocket_upgrade_ = false;
     bool request_end_stream_ = true;
 };
 

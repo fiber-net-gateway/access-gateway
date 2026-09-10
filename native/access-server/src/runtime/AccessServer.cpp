@@ -72,6 +72,11 @@ common::IoResult<void> AccessServer::bind(const net::SocketAddress &address, con
             .address = address,
             .listen = options,
             .tls = http_options_.tls,
+            // WebSocket over HTTP/2 (RFC 8441) arrives as an extended CONNECT,
+            // which peers may only send once ENABLE_CONNECT_PROTOCOL is
+            // advertised. Always on: routes still opt in per project through
+            // websocketTimeoutMillis.
+            .http2 = {.enable_connect_protocol = true},
             .http1 = make_http1_options(),
             .allow_http1 = true,
             .handler = [this](http::HttpExchange &exchange) { return worker_resources_.handle(exchange, true); },
@@ -84,6 +89,9 @@ common::IoResult<void> AccessServer::bind(const net::SocketAddress &address, con
                 .address = address,
                 .inherit_port_from = tls_endpoint_,
                 .tls = http_options_.tls,
+                // Same opt-in as the HTTP/2 endpoint, for WebSocket over
+                // HTTP/3 (RFC 9220).
+                .http3 = {.enable_connect_protocol = true},
                 .handler = [this](http::HttpExchange &exchange) { return worker_resources_.handle(exchange, true); },
         });
         if (http3_endpoint_ == nullptr) {

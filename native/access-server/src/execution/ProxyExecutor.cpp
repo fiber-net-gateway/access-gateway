@@ -404,7 +404,8 @@ bool parse_content_length(std::string_view value, std::size_t &output) noexcept 
 
 bool build_downstream_headers(http::HttpExchange &downstream, const CompiledProxyRoute &proxy,
                               const ProxyUpstreamEndpoint &endpoint, const http::Http1ResponseHead &upstream_head,
-                              std::span<const EvaluatedHeader> custom_headers, bool websocket_response,
+                              std::span<const EvaluatedHeader> custom_headers,
+                              const http::proxy_core::WebSocketHandshake &websocket_handshake, bool websocket_response,
                               const ClientMetadata &client_metadata, http::HttpHeaders &output) {
     for (const http::HttpHeaders::HeaderField &field: upstream_head.headers) {
         if (field.name_len == 0 || is_java_filtered_response_header(field.name_view()) ||
@@ -442,7 +443,11 @@ bool build_downstream_headers(http::HttpExchange &downstream, const CompiledProx
         }
     }
 
-    if (websocket_response) {
+    if (websocket_response && websocket_handshake.extended_connect()) {
+        // RFC 8441 / RFC 9220: the response to an extended CONNECT is a plain
+        // 2xx; connection-specific handshake fields must not be forwarded.
+        http::proxy_core::finalize_downstream_websocket_headers(output, websocket_handshake);
+    } else if (websocket_response) {
         const std::string_view upgrade = upstream_head.headers.get("Upgrade");
         if (!output.set("Connection", "Upgrade") || !output.set("Upgrade", upgrade)) {
             return false;
@@ -561,7 +566,7 @@ async::Task<Result<void>> UpstreamAttempt::run() noexcept {
         co_return proxy_failure_result(exchange_failure);
     }
 
-    const http::Http1RequestHead request_head = request_plan_.request_head(exchange_.method());
+    const http::Http1RequestHead request_head = request_plan_.request_head();
     auto sent_request_header = co_await upstream.send_header(request_head, request_plan_.request_end_stream());
     if (!sent_request_header) {
         const ProxyFailure send_failure = failure(
@@ -662,6 +667,20 @@ async::Task<Result<void>> UpstreamAttempt::run() noexcept {
     if (request_plan_.websocket_upgrade() && !websocket_response) {
         websocket_metrics_.rejected();
     }
+    // For an extended CONNECT the gateway generated the upstream key itself,
+    // so a 101 whose accept does not match is not this handshake.
+    if (websocket_response && request_plan_.websocket_extended_connect() &&
+        !http::proxy_core::valid_websocket_upgrade_response(*upstream_head, request_plan_.websocket_handshake())) {
+        websocket_metrics_.rejected();
+        report_selection(false);
+        (void) upstream.abort(common::IoErr::Invalid);
+        const Exception exception =
+                http_client_error(502, "WEBSOCKET_UPSTREAM_HANDSHAKE", "upstream websocket handshake is invalid");
+        telemetry_.record_proxy_failure(AccessProxyFailurePhase::SwitchWebSocket);
+        attempt_metrics_.failed();
+        provider_.call_error(exception, "websocket_accept", common::IoErr::Invalid);
+        co_return std::unexpected(Err::from_upstream_exception(exception));
+    }
 
     auto custom_headers = prepare_proxy_response_headers(proxy_.response_headers, input_.template_evaluator);
     if (!custom_headers) {
@@ -718,8 +737,9 @@ async::Task<Result<void>> UpstreamAttempt::run() noexcept {
     }
 
     http::HttpHeaders &response_headers = telemetry_.response_headers();
-    if (!build_downstream_headers(exchange_, proxy_, endpoint_, *upstream_head, *custom_headers, websocket_response,
-                                  telemetry_.client_metadata(), response_headers) ||
+    if (!build_downstream_headers(exchange_, proxy_, endpoint_, *upstream_head, *custom_headers,
+                                  request_plan_.websocket_handshake(), websocket_response, telemetry_.client_metadata(),
+                                  response_headers) ||
         !telemetry_.finalize_response_headers()) {
         (void) upstream.abort(common::IoErr::NoMem);
         telemetry_.record_proxy_failure(AccessProxyFailurePhase::BuildResponseHeaders);
@@ -734,8 +754,11 @@ async::Task<Result<void>> UpstreamAttempt::run() noexcept {
         auto sent_header = co_await telemetry_.response_writer().send_header(
                 {
                         .kind = http::OutgoingHeaderKind::Final,
-                        .status_code = 101,
-                        .reason = upstream_head->reason,
+                        // An extended CONNECT handshake completes with 2xx on
+                        // the same stream; HTTP/1.1 keeps the 101 Upgrade.
+                        .status_code = request_plan_.websocket_extended_connect() ? 200 : 101,
+                        .reason =
+                                request_plan_.websocket_extended_connect() ? std::string_view{} : upstream_head->reason,
                         .headers = &response_headers,
                         .body = http::HttpBodySpec::Stream(),
                         .connection_mode = http::ResponseConnectionMode::Auto,

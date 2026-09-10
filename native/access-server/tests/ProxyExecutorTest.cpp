@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstring>
 #include <future>
@@ -17,13 +18,18 @@
 #include <fiber/async/Sleep.h>
 #include <fiber/async/Spawn.h>
 #include <fiber/async/WaitGroup.h>
+#include <fiber/common/util/Base64.h>
 #include <fiber/event/EventLoopGroup.h>
+#include <fiber/http/ClientHttp2Exchange.h>
 #include <fiber/http/Http1Connection.h>
+#include <fiber/http/Http2ClientConnection.h>
 #include <fiber/http/Server.h>
 #include <fiber/http/endpoint/Http1Endpoint.h>
+#include <fiber/http/endpoint/Http2Endpoint.h>
 #include <fiber/net/SocketAddress.h>
 #include <fiber/net/TcpListener.h>
 #include <fiber/net/TcpStream.h>
+#include <openssl/sha.h>
 #include "HttpTransportStub.h"
 #include "execution/AccessRequestHandler.h"
 #include "execution/ProxyExecutor.h"
@@ -52,6 +58,7 @@ struct ObservedUpstreamRequest {
     std::string connection;
     std::string upgrade;
     std::string websocket_key;
+    std::string websocket_version;
     std::string trace_id;
     std::string parent_span_id;
     std::string span_id;
@@ -398,6 +405,16 @@ fiber::async::DetachedTask collect_access_metrics(fiber::access_server::AccessSe
     }
 }
 
+std::string websocket_accept(std::string_view key) {
+    std::string source(key);
+    source.append("258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
+    std::array<std::uint8_t, SHA_DIGEST_LENGTH> digest{};
+    if (SHA1(reinterpret_cast<const std::uint8_t *>(source.data()), source.size(), digest.data()) == nullptr) {
+        return {};
+    }
+    return fiber::util::base64_encode(digest.data(), digest.size());
+}
+
 fiber::async::Task<void> serve_upstream(fiber::http::HttpExchange &exchange, UpstreamState *state) {
     ObservedUpstreamRequest observed;
     observed.method = exchange.method();
@@ -414,6 +431,7 @@ fiber::async::Task<void> serve_upstream(fiber::http::HttpExchange &exchange, Ups
     observed.connection.assign(exchange.header("Connection"));
     observed.upgrade.assign(exchange.header("Upgrade"));
     observed.websocket_key.assign(exchange.header("Sec-WebSocket-Key"));
+    observed.websocket_version.assign(exchange.header("Sec-WebSocket-Version"));
     observed.trace_id.assign(exchange.header("HI-TRACE-ID"));
     observed.parent_span_id.assign(exchange.header("HI-SPAN-ID-PARENT"));
     observed.span_id.assign(exchange.header("HI-SPAN-ID"));
@@ -439,7 +457,7 @@ fiber::async::Task<void> serve_upstream(fiber::http::HttpExchange &exchange, Ups
         fiber::http::HttpHeaders headers(exchange.pool());
         headers.set("Connection", "Upgrade");
         headers.set("Upgrade", "websocket");
-        headers.set("Sec-WebSocket-Accept", "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
+        headers.set("Sec-WebSocket-Accept", websocket_accept(exchange.header("Sec-WebSocket-Key")));
         auto sent = co_await exchange.send_header({
                 .kind = fiber::http::OutgoingHeaderKind::Final,
                 .status_code = 101,
@@ -613,6 +631,167 @@ run_downstream(fiber::event::EventLoop *loop, const fiber::access_server::RouteC
     done->set_value();
 }
 
+// Serves the access handler over plaintext HTTP/2 with prior knowledge, so the
+// extended-CONNECT (RFC 8441) downstream path runs through the real
+// ServerHttp2Request parsing without needing TLS material.
+fiber::async::DetachedTask start_h2_downstream(fiber::event::EventLoop *loop,
+                                               const fiber::access_server::RouteConfigStore *store,
+                                               fiber::access_server::AccessProxyAdapter proxy_adapter,
+                                               fiber::access_server::AccessServerMetrics *metrics,
+                                               std::promise<std::uint16_t> *port_promise,
+                                               std::promise<TestHttpServer> *server_promise) {
+    fiber::http::HttpHandler handler = [store, proxy_adapter,
+                                        metrics](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+        fiber::access_server::ClientMetadataResolver client_metadata_resolver(
+                fiber::access_server::ClientMetadataResolverOptions{
+                        .mode = fiber::access_server::ClientMetadataMode::LegacyHeaders,
+                });
+        fiber::access_server::AccessRequestTelemetry telemetry(exchange, &metrics->worker(0), nullptr, nullptr,
+                                                               &client_metadata_resolver);
+        fiber::access_server::AccessRequestHandler request_handler(store->snapshot_provider(), {}, {}, proxy_adapter);
+        co_await request_handler.handle(exchange, telemetry);
+    };
+    auto *server = new (std::nothrow) fiber::http::Server(*loop, fiber::http::HttpHandler{});
+    if (!server) {
+        port_promise->set_value(0);
+        server_promise->set_value({});
+        co_return;
+    }
+    auto *endpoint = server->add_endpoint<fiber::http::Http2Endpoint>(fiber::http::Http2Endpoint::Options{
+            .address = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0),
+            .http2 = {.enable_connect_protocol = true},
+            .allow_http1 = false,
+            .handler = handler,
+    });
+    auto started = endpoint != nullptr ? server->start()
+                                       : fiber::common::IoResult<void>(std::unexpected(fiber::common::IoErr::NoMem));
+    if (!started) {
+        delete server;
+        port_promise->set_value(0);
+        server_promise->set_value({});
+        co_return;
+    }
+    TestHttpServer running;
+    running.server = server;
+    running.serve_tasks->add();
+    fiber::async::WaitGroup *serve_tasks = running.serve_tasks.get();
+    fiber::async::spawn(*loop, [server, serve_tasks] { return serve_fixture_server(server, serve_tasks); });
+    port_promise->set_value(endpoint->local_addr().port());
+    server_promise->set_value(std::move(running));
+}
+
+struct H2WebSocketClientResult {
+    fiber::common::IoErr error = fiber::common::IoErr::None;
+    bool extended_connect_enabled = false;
+    int status_code = 0;
+    std::string accept;
+    std::string connection;
+    std::string upgrade;
+    std::string body;
+};
+
+fiber::async::DetachedTask run_h2_websocket_client(fiber::event::EventLoop *loop, std::uint16_t port, bool websocket,
+                                                   bool end_stream_request,
+                                                   std::promise<H2WebSocketClientResult> *promise) {
+    H2WebSocketClientResult result;
+    auto connection = std::make_shared<fiber::http::Http2ClientConnection>(*loop);
+    auto connected =
+            co_await connection->connect(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port), 5s);
+    if (!connected) {
+        result.error = connected.error();
+        promise->set_value(std::move(result));
+        co_return;
+    }
+
+    struct RunState {
+        std::atomic_bool done{false};
+    };
+    auto run_state = std::make_shared<RunState>();
+    fiber::async::spawn(*loop, [connection, run_state]() -> fiber::async::DetachedTask {
+        (void) co_await connection->wait_closed();
+        run_state->done.store(true, std::memory_order_release);
+    });
+
+    fiber::mem::BufPool pool;
+    fiber::http::ClientHttp2Exchange exchange(*connection, pool);
+    for (int i = 0; i < 500; ++i) {
+        if (exchange.extended_connect_support() == fiber::http::Http2ExtendedConnectSupport::Enabled) {
+            result.extended_connect_enabled = true;
+            break;
+        }
+        co_await fiber::async::sleep(1ms);
+    }
+    if (!result.extended_connect_enabled) {
+        result.error = fiber::common::IoErr::NotSupported;
+    } else {
+        fiber::http::HttpHeaders headers(pool);
+        headers.set("Sec-WebSocket-Version", "13");
+        auto sent = co_await exchange.send_request_header(
+                {
+                        .method = fiber::http::HttpMethod::Connect,
+                        .scheme = "http",
+                        .authority = "api.example.com",
+                        .path = "/proxy",
+                        .protocol = websocket ? "websocket" : std::string_view{},
+                        .headers = &headers,
+                },
+                end_stream_request, 2s);
+        if (!sent) {
+            result.error = sent.error();
+        } else {
+            auto header = co_await exchange.read_header(2s);
+            if (!header) {
+                result.error = header.error();
+            } else {
+                result.status_code = (*header)->status_code;
+                result.accept.assign((*header)->headers.get("sec-websocket-accept"));
+                result.connection.assign((*header)->headers.get("connection"));
+                result.upgrade.assign((*header)->headers.get("upgrade"));
+
+                if (websocket && (*header)->status_code == 200) {
+                    static constexpr std::string_view kClientFrame = "client-frame";
+                    auto written =
+                            co_await exchange.write_all(reinterpret_cast<const std::uint8_t *>(kClientFrame.data()),
+                                                        kClientFrame.size(), false, 2s);
+                    if (!written) {
+                        result.error = written.error();
+                    } else {
+                        while (result.body.size() < std::string_view("server-frame").size()) {
+                            auto body = co_await exchange.read_body(64, 2s);
+                            if (!body) {
+                                result.error = body.error();
+                                break;
+                            }
+                            const bool complete = body->complete();
+                            result.body.append(consume_chain(std::move(*body)));
+                            if (complete) {
+                                break;
+                            }
+                        }
+                    }
+                } else {
+                    // No tunnel was established (plain proxy response).
+                    auto body = co_await read_body(exchange);
+                    if (!body) {
+                        result.error = body.error();
+                    } else {
+                        result.body = std::move(*body);
+                    }
+                }
+            }
+        }
+    }
+
+    if (exchange.valid()) {
+        (void) exchange.abort();
+    }
+    connection->shutdown();
+    for (int i = 0; i < 500 && !run_state->done.load(std::memory_order_acquire); ++i) {
+        co_await fiber::async::sleep(1ms);
+    }
+    promise->set_value(std::move(result));
+}
+
 fiber::async::Task<fiber::access_server::Result<void>>
 recorded_upstream_failure(void *, fiber::http::HttpExchange &, const fiber::access_server::CompiledProxyRoute &,
                           fiber::access_server::ProxyExecutionInput,
@@ -648,6 +827,24 @@ fiber::async::DetachedTask shutdown(fiber::http::StealableHttp1ConnectionPoolSet
     co_await running->serve_tasks->join();
     delete running->server;
     running->server = nullptr;
+    co_await pool->shutdown_async();
+    done->set_value();
+}
+
+// Two-server variant for the HTTP/2 downstream tests: stops the fixture
+// upstream and the h2 downstream server, then drains the pool exactly once.
+fiber::async::DetachedTask shutdown_pair(fiber::http::StealableHttp1ConnectionPoolSet *pool, TestHttpServer *upstream,
+                                         TestHttpServer *downstream, std::promise<void> *done) {
+    upstream->server->stop();
+    co_await upstream->server->stop_and_wait();
+    downstream->server->stop();
+    co_await downstream->server->stop_and_wait();
+    co_await upstream->serve_tasks->join();
+    delete upstream->server;
+    upstream->server = nullptr;
+    co_await downstream->serve_tasks->join();
+    delete downstream->server;
+    downstream->server = nullptr;
     co_await pool->shutdown_async();
     done->set_value();
 }
@@ -1620,8 +1817,7 @@ fiber::async::DetachedTask serve_split_framing_upstream(fiber::net::TcpListener 
         co_return;
     }
     listener->close();
-    fiber::net::TcpStream stream(fiber::event::EventLoop::current(), accepted->release_fd(),
-                                 accepted->take_peer());
+    fiber::net::TcpStream stream(fiber::event::EventLoop::current(), accepted->release_fd(), accepted->take_peer());
 
     // Drain the request head so the proxy's upstream exchange moves to reading.
     std::array<std::uint8_t, 4096> request_buf{};
@@ -1662,8 +1858,7 @@ TEST(ProxyExecutorTest, StreamsChunkedUpstreamWhoseFramingArrivesSeparatelyFromP
     auto upstream_done = upstream_done_promise.get_future();
 
     group.start();
-    fiber::async::spawn(group.at(0),
-                        [&]() { return serve_split_framing_upstream(&listener, &upstream_done_promise); });
+    fiber::async::spawn(group.at(0), [&]() { return serve_split_framing_upstream(&listener, &upstream_done_promise); });
 
     auto config = project_config(*port);
     fiber::access_server::RouteConfigStore store;
@@ -2110,7 +2305,7 @@ TEST(ProxyExecutorTest, RelaysWebSocketUpgradeAndRawBytesInBothDirections) {
     ASSERT_EQ(response_future.wait_for(2s), std::future_status::ready);
     ASSERT_EQ(request_future.wait_for(2s), std::future_status::ready);
     ASSERT_EQ(upstream_state.requests.size(), 1U);
-    EXPECT_EQ(upstream_state.requests[0].connection, "upgrade");
+    EXPECT_EQ(upstream_state.requests[0].connection, "Upgrade");
     EXPECT_EQ(upstream_state.requests[0].upgrade, "websocket");
     EXPECT_EQ(upstream_state.requests[0].websocket_key, "dGhlIHNhbXBsZSBub25jZQ==");
     EXPECT_EQ(upstream_state.websocket_client_data, "client-frame");
@@ -2142,6 +2337,193 @@ TEST(ProxyExecutorTest, RelaysWebSocketUpgradeAndRawBytesInBothDirections) {
     std::promise<void> shutdown_promise;
     auto shutdown_future = shutdown_promise.get_future();
     fiber::async::spawn(group.at(0), [&]() { return shutdown(&pool, &server, &shutdown_promise); });
+    ASSERT_EQ(shutdown_future.wait_for(2s), std::future_status::ready);
+    group.stop();
+    group.join();
+}
+
+TEST(ProxyExecutorTest, RelaysWebSocketExtendedConnectOverHttp2) {
+    fiber::event::EventLoopGroup group(1);
+    fiber::access_server::AccessServerMetrics metrics(group);
+    ASSERT_TRUE(metrics.valid());
+    fiber::http::StealableHttp1ConnectionPoolSet pool(group);
+    ASSERT_TRUE(pool.init());
+    group.start();
+
+    std::promise<void> response_promise;
+    auto response_future = response_promise.get_future();
+    UpstreamState upstream_state{
+            .response =
+                    {
+                            .websocket = true,
+                            .completion = &response_promise,
+                    },
+    };
+    std::promise<std::uint16_t> upstream_port_promise;
+    std::promise<TestHttpServer> upstream_server_promise;
+    auto upstream_port_future = upstream_port_promise.get_future();
+    auto upstream_server_future = upstream_server_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() {
+        return start_server(&group.at(0), &upstream_state, &upstream_port_promise, &upstream_server_promise);
+    });
+
+    TestHttpServer upstream_server = upstream_server_future.get();
+    ASSERT_NE(upstream_server.server, nullptr);
+    const std::uint16_t upstream_port = upstream_port_future.get();
+    ASSERT_NE(upstream_port, 0);
+
+    auto config = proxy_response_project_config(upstream_port);
+    (**config.routes->begin()).websocket_timeout_millis = 1000;
+    fiber::access_server::RouteConfigStore store;
+    auto published = store.apply("orders", std::move(config));
+    ASSERT_TRUE(published) << published.error().message;
+
+    fiber::access_server::ProxyExecutor executor(pool);
+    std::promise<std::uint16_t> downstream_port_promise;
+    std::promise<TestHttpServer> downstream_server_promise;
+    auto downstream_port_future = downstream_port_promise.get_future();
+    auto downstream_server_future = downstream_server_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() {
+        return start_h2_downstream(&group.at(0), &store, executor.adapter(), &metrics, &downstream_port_promise,
+                                   &downstream_server_promise);
+    });
+
+    TestHttpServer downstream_server = downstream_server_future.get();
+    ASSERT_NE(downstream_server.server, nullptr);
+    const std::uint16_t downstream_port = downstream_port_future.get();
+    ASSERT_NE(downstream_port, 0);
+
+    std::promise<H2WebSocketClientResult> client_promise;
+    auto client_future = client_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_h2_websocket_client(&group.at(0), downstream_port, true, false, &client_promise);
+    });
+
+    ASSERT_EQ(response_future.wait_for(2s), std::future_status::ready);
+    ASSERT_EQ(client_future.wait_for(5s), std::future_status::ready);
+    const H2WebSocketClientResult client = client_future.get();
+    EXPECT_EQ(client.error, fiber::common::IoErr::None);
+    EXPECT_TRUE(client.extended_connect_enabled);
+    EXPECT_EQ(client.status_code, 200);
+    // The extended-CONNECT response must not carry HTTP/1.1 handshake fields.
+    EXPECT_TRUE(client.accept.empty());
+    EXPECT_TRUE(client.connection.empty());
+    EXPECT_TRUE(client.upgrade.empty());
+    EXPECT_EQ(client.body, "server-frame");
+
+    ASSERT_EQ(upstream_state.requests.size(), 1U);
+    EXPECT_EQ(upstream_state.requests[0].method, fiber::http::HttpMethod::Get);
+    EXPECT_EQ(upstream_state.requests[0].target, "/proxy");
+    EXPECT_EQ(upstream_state.requests[0].connection, "Upgrade");
+    EXPECT_EQ(upstream_state.requests[0].upgrade, "websocket");
+    // The gateway generated the key itself (16 random bytes, base64 => 24 chars).
+    EXPECT_EQ(upstream_state.requests[0].websocket_key.size(), 24U);
+    EXPECT_EQ(upstream_state.requests[0].websocket_version, "13");
+    EXPECT_EQ(upstream_state.websocket_client_data, "client-frame");
+
+    std::promise<fiber::common::IoResult<std::string>> metrics_promise;
+    auto metrics_future = metrics_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() { return collect_access_metrics(&metrics, &metrics_promise); });
+    ASSERT_EQ(metrics_future.wait_for(2s), std::future_status::ready);
+    auto metric_text = metrics_future.get();
+    ASSERT_TRUE(metric_text);
+    EXPECT_NE(metric_text->find("access_server_proxy_executions_total{result=\"completed\"} 1"), std::string::npos);
+    EXPECT_NE(metric_text->find("access_server_websocket_handshakes_total{result=\"accepted\"} 1"), std::string::npos);
+    EXPECT_NE(metric_text->find("access_server_websocket_sessions_total{result=\"closed\"} 1"), std::string::npos);
+    EXPECT_NE(metric_text->find("access_server_websocket_sessions_inflight 0"), std::string::npos);
+
+    std::promise<void> shutdown_promise;
+    auto shutdown_future = shutdown_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() {
+        return shutdown_pair(&pool, &upstream_server, &downstream_server, &shutdown_promise);
+    });
+    ASSERT_EQ(shutdown_future.wait_for(2s), std::future_status::ready);
+    group.stop();
+    group.join();
+}
+
+TEST(ProxyExecutorTest, ExtendedConnectWithoutWebsocketTimeoutStaysAPlainProxy) {
+    fiber::event::EventLoopGroup group(1);
+    fiber::access_server::AccessServerMetrics metrics(group);
+    ASSERT_TRUE(metrics.valid());
+    fiber::http::StealableHttp1ConnectionPoolSet pool(group);
+    ASSERT_TRUE(pool.init());
+    group.start();
+
+    std::promise<void> response_promise;
+    auto response_future = response_promise.get_future();
+    UpstreamState upstream_state{
+            .response =
+                    {
+                            .completion = &response_promise,
+                    },
+    };
+    std::promise<std::uint16_t> upstream_port_promise;
+    std::promise<TestHttpServer> upstream_server_promise;
+    auto upstream_port_future = upstream_port_promise.get_future();
+    auto upstream_server_future = upstream_server_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() {
+        return start_server(&group.at(0), &upstream_state, &upstream_port_promise, &upstream_server_promise);
+    });
+
+    TestHttpServer upstream_server = upstream_server_future.get();
+    ASSERT_NE(upstream_server.server, nullptr);
+    const std::uint16_t upstream_port = upstream_port_future.get();
+    ASSERT_NE(upstream_port, 0);
+
+    // No websocket_timeout_millis: the route must not carry WebSocket sessions.
+    auto config = proxy_response_project_config(upstream_port);
+    fiber::access_server::RouteConfigStore store;
+    auto published = store.apply("orders", std::move(config));
+    ASSERT_TRUE(published) << published.error().message;
+
+    fiber::access_server::ProxyExecutor executor(pool);
+    std::promise<std::uint16_t> downstream_port_promise;
+    std::promise<TestHttpServer> downstream_server_promise;
+    auto downstream_port_future = downstream_port_promise.get_future();
+    auto downstream_server_future = downstream_server_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() {
+        return start_h2_downstream(&group.at(0), &store, executor.adapter(), &metrics, &downstream_port_promise,
+                                   &downstream_server_promise);
+    });
+
+    TestHttpServer downstream_server = downstream_server_future.get();
+    ASSERT_NE(downstream_server.server, nullptr);
+    const std::uint16_t downstream_port = downstream_port_future.get();
+    ASSERT_NE(downstream_port, 0);
+
+    std::promise<H2WebSocketClientResult> client_promise;
+    auto client_future = client_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_h2_websocket_client(&group.at(0), downstream_port, true, true, &client_promise);
+    });
+
+    ASSERT_EQ(response_future.wait_for(2s), std::future_status::ready);
+    ASSERT_EQ(client_future.wait_for(5s), std::future_status::ready);
+    const H2WebSocketClientResult client = client_future.get();
+    EXPECT_EQ(client.error, fiber::common::IoErr::None);
+    EXPECT_EQ(client.status_code, 201);
+    EXPECT_EQ(client.body, "upstream-1");
+
+    ASSERT_EQ(upstream_state.requests.size(), 1U);
+    EXPECT_EQ(upstream_state.requests[0].method, fiber::http::HttpMethod::Connect);
+    EXPECT_TRUE(upstream_state.requests[0].upgrade.empty());
+    EXPECT_TRUE(upstream_state.requests[0].websocket_key.empty());
+
+    std::promise<fiber::common::IoResult<std::string>> metrics_promise;
+    auto metrics_future = metrics_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() { return collect_access_metrics(&metrics, &metrics_promise); });
+    ASSERT_EQ(metrics_future.wait_for(2s), std::future_status::ready);
+    auto metric_text = metrics_future.get();
+    ASSERT_TRUE(metric_text);
+    EXPECT_NE(metric_text->find("access_server_websocket_handshakes_total{result=\"accepted\"} 0"), std::string::npos);
+    EXPECT_NE(metric_text->find("access_server_websocket_sessions_inflight 0"), std::string::npos);
+
+    std::promise<void> shutdown_promise;
+    auto shutdown_future = shutdown_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() {
+        return shutdown_pair(&pool, &upstream_server, &downstream_server, &shutdown_promise);
+    });
     ASSERT_EQ(shutdown_future.wait_for(2s), std::future_status::ready);
     group.stop();
     group.join();

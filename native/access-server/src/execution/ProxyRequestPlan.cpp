@@ -30,11 +30,15 @@ bool is_java_filtered_proxy_request_header(std::string_view name) noexcept {
     return is_header(name, "host") || is_java_filtered_response_header(name);
 }
 
-bool is_websocket_request(const http::HttpExchange &exchange, const CompiledProxyRoute &proxy) noexcept {
+// A route only carries WebSocket sessions when it configures a positive
+// websocketTimeoutMillis; without it both handshake styles are plain proxy
+// requests.
+http::proxy_core::WebSocketDownstream websocket_downstream(const http::HttpExchange &exchange,
+                                                           const CompiledProxyRoute &proxy) noexcept {
     if (!proxy.websocket_timeout_millis || *proxy.websocket_timeout_millis <= 0) {
-        return false;
+        return http::proxy_core::WebSocketDownstream::None;
     }
-    return is_header(exchange.header("Upgrade"), "websocket") && is_header(exchange.header("Connection"), "upgrade");
+    return http::proxy_core::detect_websocket_downstream(exchange);
 }
 
 std::string_view preserved_request_target(const http::HttpExchange &exchange, std::string &storage) {
@@ -104,17 +108,13 @@ Result<std::string_view> resolve_request_target(const http::HttpExchange &exchan
 Err request_head_build_error() noexcept { return Err::from_error(common::IoErr::NoMem); }
 
 Result<bool> build_request_headers(const ProxyUpstreamEndpoint &endpoint, const http::HttpExchange &exchange,
-                                   const CompiledProxyRoute &proxy, const ProxyExecutionInput &input, bool websocket,
+                                   const CompiledProxyRoute &proxy, const ProxyExecutionInput &input,
                                    const AccessRequestTelemetry &telemetry, http::HttpHeaders &headers,
                                    std::vector<EvaluatedTemplate> &evaluated_values) {
     if (!headers.set("Host", endpoint.host_header)) {
         return std::unexpected(request_head_build_error());
     }
     bool host_uses_selected_endpoint = true;
-
-    if (websocket && (!headers.set("Connection", "upgrade") || !headers.set("Upgrade", "websocket"))) {
-        return std::unexpected(request_head_build_error());
-    }
 
     for (const CompiledHeaderTemplates::EntryView header: proxy.proxy_headers) {
         auto value = evaluate_template(header.value(), input.template_evaluator);
@@ -200,12 +200,13 @@ normalize_proxy_response_body_limit(std::optional<std::int64_t> configured_limit
 
 ProxyRequestPlan::ProxyRequestPlan(mem::BufPool &pool, const http::HttpExchange &exchange,
                                    const CompiledProxyRoute &proxy) noexcept :
-    headers_(pool), websocket_upgrade_(is_websocket_request(exchange, proxy)) {
-    body_spec_ = select_proxy_request_body_spec(exchange.request_body_spec(),
-                                                !exchange.header("Content-Length").empty(), websocket_upgrade_);
+    headers_(pool), websocket_handshake_{.downstream = websocket_downstream(exchange, proxy)},
+    upstream_method_(websocket_handshake_.active() ? http::HttpMethod::Get : exchange.method()) {
+    body_spec_ = select_proxy_request_body_spec(
+            exchange.request_body_spec(), !exchange.header("Content-Length").empty(), websocket_handshake_.active());
     request_end_stream_ = body_spec_.is_none() || (body_spec_.is_content_length() && body_spec_.content_length() == 0);
     max_response_body_size_ = normalize_proxy_response_body_limit(proxy.max_response_body_size);
-    if (websocket_upgrade_ && proxy.websocket_timeout_millis) {
+    if (websocket_handshake_.active() && proxy.websocket_timeout_millis) {
         websocket_timeout_millis_ = *proxy.websocket_timeout_millis;
     }
 }
@@ -222,12 +223,17 @@ ProxyRequestPlanResult ProxyRequestPlan::prepare(const ProxyUpstreamEndpoint &en
     request_target_ = *resolved_target;
 
     evaluated_header_values_.reserve(proxy.proxy_headers.dynamic_size());
-    auto built_headers = build_request_headers(endpoint, exchange, proxy, input, websocket_upgrade_, telemetry,
-                                               headers_, evaluated_header_values_);
+    auto built_headers =
+            build_request_headers(endpoint, exchange, proxy, input, telemetry, headers_, evaluated_header_values_);
     if (!built_headers) {
         return std::unexpected(plan_error(ProxyRequestPlanErrorPhase::BuildHeaders, built_headers.error()));
     }
     host_uses_selected_endpoint_ = *built_headers;
+    if (websocket_handshake_.active() &&
+        (!http::proxy_core::prepare_websocket_handshake(websocket_handshake_) ||
+         !http::proxy_core::prepare_upstream_websocket_headers(exchange, websocket_handshake_, headers_))) {
+        return std::unexpected(plan_error(ProxyRequestPlanErrorPhase::BuildHeaders, request_head_build_error()));
+    }
     prepared_ = true;
     return {};
 }
@@ -240,10 +246,10 @@ ProxyRequestPlanResult ProxyRequestPlan::rebind_endpoint(const ProxyUpstreamEndp
     return {};
 }
 
-http::Http1RequestHead ProxyRequestPlan::request_head(http::HttpMethod method) const noexcept {
+http::Http1RequestHead ProxyRequestPlan::request_head() const noexcept {
     FIBER_ASSERT(prepared_);
     return http::Http1RequestHead{
-            .method = method,
+            .method = upstream_method_,
             .target = request_target_,
             .headers = &headers_,
             .body = body_spec_,
