@@ -676,6 +676,10 @@ listener。订阅暂态失败采用封顶指数退避，非法首值被记录为
 - 每次真实 upstream attempt 失败由对应 `Access.Provider` 记录 `CALL_ERROR`；最终错误返回
   handler 时使用 `Err::UpstreamException`，只标记根事务失败，不再重复记录
   `FiberException`。路由、模板、无可用地址和熔断等本地失败记录 `FiberException`；
+- `Access.Provider` 的 CAT status 只表示 upstream HTTP 流程是否完成：完整收到 upstream
+  响应（含 5xx 状态码，HTTP code 只进 data `status`）与 websocket 握手验证通过即完成且
+  置成功 `0`；连接、发送、读取、握手或取消等流程失败才置 `-1`。websocket 在 upstream
+  握手通过后即完成 provider，不再覆盖后续 tunnel 时长；
 - 原始错误之后若错误响应本身写入失败，独立记录 `ResponseError`，不覆盖也不重复原始
   `CALL_ERROR`/`FiberException`；
 - project、route、context cluster、稳定 `Exception.name` 和最终
@@ -683,6 +687,10 @@ listener。订阅暂态失败采用封顶指数退避，非法首值被记录为
   CAT 根事务 data 不再记录 `upstream`，改为记录客户端连接协议 `protocol=h1/h2/h3`；每次
   `Access.Provider` attempt 的 data 记录 `upstream`、`attempt`、连接复用与发往 upstream 的
   `uri=path?query`；
+- websocket 会话由根事务上的 `Access.WebSocket` event 记录，名称为 upstream provider；
+  data 记录 `downstream=h1_upgrade|extended_connect`、`result=closed|aborted` 与
+  `duration_us`。tunnel 正常结束时由 executor 记 `closed`；proxy coroutine 被销毁等
+  中断场景在请求收尾补记 `aborted`，event 必然先于根事务完成；
 - access log 的 `path` 只消费解析后的 path，不再记录包含原始 query 的 `unparsed_uri`；
   query allowlist 默认为空，内置及附加敏感 key 即使命中 allowlist 也固定替换为
   `[REDACTED]`。allowlist 对 form-decoded ASCII key 大小写敏感匹配，敏感判断不区分 ASCII

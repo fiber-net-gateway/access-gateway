@@ -164,6 +164,25 @@ struct CatFrameCapture {
         }
         return false;
     }
+
+    // NT1 records are binary: a varint length sits between the close status
+    // and the data blob, so '?' matches any single byte in the pattern.
+    [[nodiscard]] bool contains_pattern(std::string_view pattern, std::string_view second = {}) const {
+        std::lock_guard lock(mutex);
+        for (const auto &frame: frames) {
+            const bool contains_pattern =
+                    std::search(frame.begin(), frame.end(), pattern.begin(), pattern.end(),
+                                [](std::uint8_t byte, char expected) {
+                                    return expected == '?' || byte == static_cast<std::uint8_t>(expected);
+                                }) != frame.end();
+            const bool contains_second = second.empty() || std::search(frame.begin(), frame.end(), second.begin(),
+                                                                       second.end()) != frame.end();
+            if (contains_pattern && contains_second) {
+                return true;
+            }
+        }
+        return false;
+    }
 };
 
 class RecordingTransport final : public fiber::test::HttpTransportStub {
@@ -359,6 +378,17 @@ bool wait_for_cat_frame(const CatFrameCapture &capture, std::string_view first, 
         std::this_thread::sleep_for(1ms);
     }
     return capture.contains(first, second);
+}
+
+bool wait_for_cat_pattern(const CatFrameCapture &capture, std::string_view pattern, std::string_view second = {}) {
+    const auto deadline = std::chrono::steady_clock::now() + 2s;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (capture.contains_pattern(pattern, second)) {
+            return true;
+        }
+        std::this_thread::sleep_for(1ms);
+    }
+    return capture.contains_pattern(pattern, second);
 }
 
 std::string consume_chain(fiber::mem::IoBufChain chain) {
@@ -639,14 +669,15 @@ fiber::async::DetachedTask start_h2_downstream(fiber::event::EventLoop *loop,
                                                fiber::access_server::AccessProxyAdapter proxy_adapter,
                                                fiber::access_server::AccessServerMetrics *metrics,
                                                std::promise<std::uint16_t> *port_promise,
-                                               std::promise<TestHttpServer> *server_promise) {
-    fiber::http::HttpHandler handler = [store, proxy_adapter,
-                                        metrics](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+                                               std::promise<TestHttpServer> *server_promise,
+                                               fiber::cat::CatClient *cat_client = nullptr) {
+    fiber::http::HttpHandler handler = [store, proxy_adapter, metrics,
+                                        cat_client](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
         fiber::access_server::ClientMetadataResolver client_metadata_resolver(
                 fiber::access_server::ClientMetadataResolverOptions{
                         .mode = fiber::access_server::ClientMetadataMode::LegacyHeaders,
                 });
-        fiber::access_server::AccessRequestTelemetry telemetry(exchange, &metrics->worker(0), nullptr, nullptr,
+        fiber::access_server::AccessRequestTelemetry telemetry(exchange, &metrics->worker(0), cat_client, nullptr,
                                                                &client_metadata_resolver);
         fiber::access_server::AccessRequestHandler request_handler(store->snapshot_provider(), {}, {}, proxy_adapter);
         co_await request_handler.handle(exchange, telemetry);
@@ -1239,6 +1270,10 @@ TEST(ProxyExecutorTest, StreamsJavaCompatibleRequestsAndReusesTheUpstreamConnect
     EXPECT_TRUE(upstream_503_output.starts_with("HTTP/1.1 503 Service Unavailable\r\n"));
     const std::string root_success{'T', '\x01', '0'};
     EXPECT_TRUE(wait_for_cat_frame(cat_capture, "status=503", root_success));
+    // The upstream finished the HTTP exchange when it answered 503; the code
+    // stays in the data and the provider status remains a success.
+    const std::string provider_closed_success = std::string({'T', '\x01', '0', '?'}) + "upstream=";
+    EXPECT_TRUE(wait_for_cat_pattern(cat_capture, provider_closed_success, "&status=503"));
 
     auto failed_upstream_config = project_config(port);
     (**failed_upstream_config.routes->begin()).addresses = {
@@ -1262,6 +1297,10 @@ TEST(ProxyExecutorTest, StreamsJavaCompatibleRequestsAndReusesTheUpstreamConnect
     EXPECT_TRUE(upstream_failure_output.starts_with("HTTP/1.1 502 Bad Gateway\r\n"));
     const std::string root_error{'T', '\x05', 'E', 'R', 'R', 'O', 'R'};
     EXPECT_TRUE(wait_for_cat_frame(cat_capture, "CALL_ERROR", root_error));
+    // A connect failure is a genuine upstream flow failure: provider -1.
+    const std::string provider_closed_failed =
+            std::string({'T', '\x02', '-', '1', '?'}) + "upstream=127.0.0.2:" + std::to_string(port);
+    EXPECT_TRUE(wait_for_cat_pattern(cat_capture, provider_closed_failed, "CALL_ERROR"));
     EXPECT_TRUE(cat_capture.contains("CALL_ERROR", "HTTP_CLIENT_CONNECT_ERROR"));
     EXPECT_FALSE(cat_capture.contains("FiberException", "HTTP_CLIENT_CONNECT_ERROR"));
 
@@ -2285,6 +2324,48 @@ TEST(ProxyExecutorTest, RelaysWebSocketUpgradeAndRawBytesInBothDirections) {
     const std::uint16_t port = port_future.get();
     ASSERT_NE(port, 0);
 
+    fiber::net::TcpListener cat_collector(group.at(0));
+    ASSERT_TRUE(cat_collector.bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), {}));
+    auto cat_port = bound_port(cat_collector.fd());
+    ASSERT_TRUE(cat_port);
+    fiber::cat::CatClientConfigParams cat_params{
+            .app_key = "access-server-test",
+            .hostname = "test-host",
+            .ip = "127.0.0.1",
+            .thread_group_name = "test",
+            .thread_id = "0",
+            .thread_name = "worker",
+    };
+    cat_params.bootstrap_collectors.emplace_back(fiber::net::IpAddress::loopback_v4(), *cat_port);
+    auto cat_config = fiber::cat::CatClientConfig::create(std::move(cat_params));
+    ASSERT_TRUE(cat_config);
+    fiber::cat::CatClientOptions cat_options;
+    cat_options.enable_heartbeat = false;
+    cat_options.enable_system_stats = false;
+    cat_options.collector_connect_timeout = 10ms;
+    cat_options.collector_write_timeout = 10ms;
+    cat_options.reconnect_initial_delay = 10ms;
+    cat_options.reconnect_max_delay = 10ms;
+    cat_options.shutdown_drain_timeout = 20ms;
+    cat_options.aggregation_flush_interval = 10ms;
+    auto created_cat_client =
+            fiber::cat::CatClient::create(group.at(0), std::move(*cat_config), std::move(cat_options));
+    ASSERT_TRUE(created_cat_client);
+    std::unique_ptr<fiber::cat::CatClient> cat_client = std::move(*created_cat_client);
+    CatFrameCapture cat_capture;
+    std::promise<void> cat_capture_done_promise;
+    auto cat_capture_done = cat_capture_done_promise.get_future();
+    std::promise<bool> cat_started_promise;
+    auto cat_started = cat_started_promise.get_future();
+    fiber::async::spawn(group.at(0),
+                        [&]() { return collect_cat_frames(&cat_collector, &cat_capture, &cat_capture_done_promise); });
+    fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
+        cat_started_promise.set_value(cat_client->start().has_value());
+        co_return;
+    });
+    ASSERT_EQ(cat_started.wait_for(2s), std::future_status::ready);
+    ASSERT_TRUE(cat_started.get());
+
     auto config = proxy_response_project_config(port);
     (**config.routes->begin()).websocket_timeout_millis = 1000;
     fiber::access_server::RouteConfigStore store;
@@ -2304,7 +2385,7 @@ TEST(ProxyExecutorTest, RelaysWebSocketUpgradeAndRawBytesInBothDirections) {
                           "client-frame";
     fiber::async::spawn(group.at(0), [&]() {
         return run_downstream(&group.at(0), &store, executor.adapter(), std::move(request), &output, &request_promise,
-                              nullptr, false, nullptr, {}, {}, false, {}, nullptr, &metrics.worker(0));
+                              nullptr, false, cat_client.get(), {}, {}, false, {}, nullptr, &metrics.worker(0));
     });
 
     ASSERT_EQ(response_future.wait_for(2s), std::future_status::ready);
@@ -2339,10 +2420,26 @@ TEST(ProxyExecutorTest, RelaysWebSocketUpgradeAndRawBytesInBothDirections) {
     EXPECT_NE(metric_text->find("access_server_websocket_sessions_inflight 0"), std::string::npos);
     EXPECT_EQ(metric_text->find("api.example.com"), std::string::npos);
 
+    // The upstream finished its HTTP flow with the 101 handshake, so the
+    // provider transaction succeeds regardless of the tunnel that follows.
+    const std::string provider_closed_success = std::string({'T', '\x01', '0', '?'}) + "upstream=";
+    EXPECT_TRUE(wait_for_cat_pattern(cat_capture, provider_closed_success, "&status=101"));
+    EXPECT_TRUE(wait_for_cat_frame(cat_capture, "Access.WebSocket", "downstream=h1_upgrade"));
+    EXPECT_TRUE(wait_for_cat_frame(cat_capture, "Access.WebSocket", "&result=closed"));
+    EXPECT_TRUE(wait_for_cat_frame(cat_capture, "Access.WebSocket", "duration_us="));
+
     std::promise<void> shutdown_promise;
     auto shutdown_future = shutdown_promise.get_future();
     fiber::async::spawn(group.at(0), [&]() { return shutdown(&pool, &server, &shutdown_promise); });
     ASSERT_EQ(shutdown_future.wait_for(2s), std::future_status::ready);
+    std::promise<void> cat_shutdown_promise;
+    auto cat_shutdown = cat_shutdown_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
+        co_await cat_client->shutdown();
+        cat_shutdown_promise.set_value();
+    });
+    ASSERT_EQ(cat_shutdown.wait_for(2s), std::future_status::ready);
+    ASSERT_EQ(cat_capture_done.wait_for(2s), std::future_status::ready);
     group.stop();
     group.join();
 }
@@ -2377,6 +2474,48 @@ TEST(ProxyExecutorTest, RelaysWebSocketExtendedConnectOverHttp2) {
     const std::uint16_t upstream_port = upstream_port_future.get();
     ASSERT_NE(upstream_port, 0);
 
+    fiber::net::TcpListener cat_collector(group.at(0));
+    ASSERT_TRUE(cat_collector.bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), {}));
+    auto cat_port = bound_port(cat_collector.fd());
+    ASSERT_TRUE(cat_port);
+    fiber::cat::CatClientConfigParams cat_params{
+            .app_key = "access-server-test",
+            .hostname = "test-host",
+            .ip = "127.0.0.1",
+            .thread_group_name = "test",
+            .thread_id = "0",
+            .thread_name = "worker",
+    };
+    cat_params.bootstrap_collectors.emplace_back(fiber::net::IpAddress::loopback_v4(), *cat_port);
+    auto cat_config = fiber::cat::CatClientConfig::create(std::move(cat_params));
+    ASSERT_TRUE(cat_config);
+    fiber::cat::CatClientOptions cat_options;
+    cat_options.enable_heartbeat = false;
+    cat_options.enable_system_stats = false;
+    cat_options.collector_connect_timeout = 10ms;
+    cat_options.collector_write_timeout = 10ms;
+    cat_options.reconnect_initial_delay = 10ms;
+    cat_options.reconnect_max_delay = 10ms;
+    cat_options.shutdown_drain_timeout = 20ms;
+    cat_options.aggregation_flush_interval = 10ms;
+    auto created_cat_client =
+            fiber::cat::CatClient::create(group.at(0), std::move(*cat_config), std::move(cat_options));
+    ASSERT_TRUE(created_cat_client);
+    std::unique_ptr<fiber::cat::CatClient> cat_client = std::move(*created_cat_client);
+    CatFrameCapture cat_capture;
+    std::promise<void> cat_capture_done_promise;
+    auto cat_capture_done = cat_capture_done_promise.get_future();
+    std::promise<bool> cat_started_promise;
+    auto cat_started = cat_started_promise.get_future();
+    fiber::async::spawn(group.at(0),
+                        [&]() { return collect_cat_frames(&cat_collector, &cat_capture, &cat_capture_done_promise); });
+    fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
+        cat_started_promise.set_value(cat_client->start().has_value());
+        co_return;
+    });
+    ASSERT_EQ(cat_started.wait_for(2s), std::future_status::ready);
+    ASSERT_TRUE(cat_started.get());
+
     auto config = proxy_response_project_config(upstream_port);
     (**config.routes->begin()).websocket_timeout_millis = 1000;
     fiber::access_server::RouteConfigStore store;
@@ -2390,7 +2529,7 @@ TEST(ProxyExecutorTest, RelaysWebSocketExtendedConnectOverHttp2) {
     auto downstream_server_future = downstream_server_promise.get_future();
     fiber::async::spawn(group.at(0), [&]() {
         return start_h2_downstream(&group.at(0), &store, executor.adapter(), &metrics, &downstream_port_promise,
-                                   &downstream_server_promise);
+                                   &downstream_server_promise, cat_client.get());
     });
 
     TestHttpServer downstream_server = downstream_server_future.get();
@@ -2437,12 +2576,26 @@ TEST(ProxyExecutorTest, RelaysWebSocketExtendedConnectOverHttp2) {
     EXPECT_NE(metric_text->find("access_server_websocket_sessions_total{result=\"closed\"} 1"), std::string::npos);
     EXPECT_NE(metric_text->find("access_server_websocket_sessions_inflight 0"), std::string::npos);
 
+    EXPECT_TRUE(wait_for_cat_frame(cat_capture, "forwardingStatus=not_present", "protocol=h2"));
+    const std::string provider_closed_success = std::string({'T', '\x01', '0', '?'}) + "upstream=";
+    EXPECT_TRUE(wait_for_cat_pattern(cat_capture, provider_closed_success, "&status=101"));
+    EXPECT_TRUE(wait_for_cat_frame(cat_capture, "Access.WebSocket", "downstream=extended_connect"));
+    EXPECT_TRUE(wait_for_cat_frame(cat_capture, "Access.WebSocket", "&result=closed"));
+
     std::promise<void> shutdown_promise;
     auto shutdown_future = shutdown_promise.get_future();
     fiber::async::spawn(group.at(0), [&]() {
         return shutdown_pair(&pool, &upstream_server, &downstream_server, &shutdown_promise);
     });
     ASSERT_EQ(shutdown_future.wait_for(2s), std::future_status::ready);
+    std::promise<void> cat_shutdown_promise;
+    auto cat_shutdown = cat_shutdown_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
+        co_await cat_client->shutdown();
+        cat_shutdown_promise.set_value();
+    });
+    ASSERT_EQ(cat_shutdown.wait_for(2s), std::future_status::ready);
+    ASSERT_EQ(cat_capture_done.wait_for(2s), std::future_status::ready);
     group.stop();
     group.join();
 }

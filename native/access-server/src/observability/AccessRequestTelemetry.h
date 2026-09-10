@@ -93,6 +93,12 @@ public:
     [[nodiscard]] AccessProviderTransaction start_provider_transaction(std::string_view name) noexcept {
         return observability_.start_provider_transaction(name);
     }
+    void start_websocket_session(std::string_view name, bool extended_connect) noexcept {
+        observability_.start_websocket_session(name, extended_connect);
+    }
+    void finish_websocket_session(bool closed) noexcept {
+        observability_.finish_websocket_session(closed);
+    }
 
     [[nodiscard]] std::string_view trace_id() const noexcept { return trace_.trace_id(); }
     [[nodiscard]] std::string_view trace_parent() const noexcept { return trace_.trace_parent(); }

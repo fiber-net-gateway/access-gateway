@@ -98,7 +98,9 @@ void AccessProviderTransaction::complete(int status_code) noexcept {
         return;
     }
     add_integer(transaction_, "status", status_code);
-    (void) transaction_.complete(status_code < 500 ? cat::status::Success : cat::status::Fail);
+    // A finished upstream HTTP exchange is a provider success regardless of
+    // the status code; flow failures stay on the fail/CALL_ERROR paths.
+    (void) transaction_.complete(cat::status::Success);
 }
 
 void AccessProviderTransaction::cancel_pending() noexcept {
