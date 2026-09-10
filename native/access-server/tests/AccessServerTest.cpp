@@ -2,12 +2,15 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
+#include <cctype>
 #include <cerrno>
 #include <chrono>
 #include <cstring>
 #include <future>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -20,11 +23,20 @@
 #include <unistd.h>
 #include <zlib.h>
 
+#include <fiber/async/Sleep.h>
 #include <fiber/async/Spawn.h>
 #include <fiber/cat/CatClient.h>
 #include <fiber/cat/CatClientConfig.h>
+#include <fiber/common/util/Base64.h>
 #include <fiber/event/EventLoop.h>
 #include <fiber/event/EventLoopGroup.h>
+#include <fiber/http/ClientHttp2Exchange.h>
+#include <fiber/http/Http2ClientConnection.h>
+#include <fiber/http/HttpClientTlsOptions.h>
+#include <fiber/net/TlsCredential.h>
+#include <fiber/net/TlsPemSource.h>
+#include <fiber/net/TlsServerHandshakeConfig.h>
+#include <openssl/sha.h>
 
 #include "../src/observability/AccessRuntimeMetrics.h"
 #include "../src/runtime/AccessDnsService.h"
@@ -528,6 +540,400 @@ TEST(AccessServerTest, ServesPublishedSnapshotAndShutsDownWorkerResources) {
     EXPECT_EQ(access_logs.find("203.0.113.77"), std::string::npos);
     EXPECT_NE(access_logs.find("client_ip=\"127.0.0.1\" peer_ip=\"127.0.0.1\""), std::string::npos);
     EXPECT_NE(access_logs.find("forwarding_status=ignored_direct_mode"), std::string::npos);
+}
+
+// Self-signed localhost pair (same fixture material as the fiber endpoint
+// tests); test credentials only.
+const char kWsCertPem[] = R"(-----BEGIN CERTIFICATE-----
+MIIDCTCCAfGgAwIBAgIUEDCdxH6aX38+fEeFx3nlY3pJwdkwDQYJKoZIhvcNAQEL
+BQAwFDESMBAGA1UEAwwJbG9jYWxob3N0MB4XDTI2MDExNzEzMDcwNVoXDTI3MDEx
+NzEzMDcwNVowFDESMBAGA1UEAwwJbG9jYWxob3N0MIIBIjANBgkqhkiG9w0BAQEF
+AAOCAQ8AMIIBCgKCAQEA4+tN+7EU3WmwFfjE4bn720reQJkTnAOUOYXg9zejQ75q
+vHOpFxLU9z866mVpT7jVYAupmKfXrJ9U5Vd9znrWFzZt9rTdg+hISdujXjaEfEf+
+GQ+66xthO2tAF3c6XokoqRpJR0GVInJoWaHBpV0PcvRb9AhRfuk+ja3W1dfdHnE8
+LWutJCVK0HOWifIBGqpED3YMBNKZxFSKTCKLiqbxmnd6TT1fh8UI+AibEKhuJX4A
+m3enMonO1PHeSOUY1dfXpZfdRdnYgjiyVyEw7oQL11r6O2LJZMJsoW912uIUnYrs
+A4bDbMMfDgHe+PiyERCG62xydAlj1phGVlbGI/8HOQIDAQABo1MwUTAdBgNVHQ4E
+FgQUvM4+Ad+L+GYd6i4nZgRFaPkRo7UwHwYDVR0jBBgwFoAUvM4+Ad+L+GYd6i4n
+ZgRFaPkRo7UwDwYDVR0TAQH/BAUwAwEB/zANBgkqhkiG9w0BAQsFAAOCAQEAxo8i
+jbyceTsjxiMDoXd/OPtPCD2CcpWOUxMb4hdGk3pMK6xFq8c7bdMcn6oZMF7xpdHg
+jDTrfa8TlPITcG/34MtvPS3hq7klCPi948Z9wbtJWGfKAl3rHYK7PIIj3wNipTcQ
+IkfIlO/t6VKPSx1S9HQA6nCDOvCufOL54Mfz0vI9Y47c4O1TNtbJiiWUkP/pEjEw
+RMeULfoobqmMYTjbjQ8nKC25cQAmhQ0koOqJPquPtAHvaowqBT6jDLEL+8vR4Kfc
+9UqEtfRr0+7LgbcofOsseDFYMPBW2GdpPMJ2PMYsQtFMXRoomlhjdpIct6e3rRnd
+GiDzEZ0VwkYlJDwF4w==
+-----END CERTIFICATE-----
+)";
+
+const char kWwKeyPem[] = R"(-----BEGIN PRIVATE KEY-----
+MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQDj6037sRTdabAV
++MThufvbSt5AmROcA5Q5heD3N6NDvmq8c6kXEtT3PzrqZWlPuNVgC6mYp9esn1Tl
+V33OetYXNm32tN2D6EhJ26NeNoR8R/4ZD7rrG2E7a0AXdzpeiSipGklHQZUicmhZ
+ocGlXQ9y9Fv0CFF+6T6NrdbV190ecTwta60kJUrQc5aJ8gEaqkQPdgwE0pnEVIpM
+IouKpvGad3pNPV+HxQj4CJsQqG4lfgCbd6cyic7U8d5I5RjV19ell91F2diCOLJX
+ITDuhAvXWvo7Yslkwmyhb3Xa4hSdiuwDhsNswx8OAd74+LIREIbrbHJ0CWPWmEZW
+VsYj/wc5AgMBAAECggEAHomvmDKg1g3MHxWG46u0uCwu3T7lZrkACjkK7HTS9ke0
+K23f0Qyf5kTdkvxlgN4GEOlfHuoWNrXefSAc5iaFOvT7BNw09fCQhvzbxcrOM4y9
+2gPGiqvPelOjccFy26nK/eVcviRmZAgqPSA0PwDaCg/9phPbP4Lm87rAF0TmBqbq
+n5s+7MXf4iFTbRIec2zTikWfbUglhNmKr3eC/4+K+hk3TX95Wltvz6dGz+godV/L
+FilwLEa+e0cSTUA8FYzYtoEUiV7/8dl8VBIvQWtx8sRNNihCmnlYrJ3N8tw/hO6F
+PKpfoOo+L9uRJG4LGtAkM0Pqs9U9uN5v7F5HNMxO1QKBgQD61LhiF/ftPlTRFQm2
+CrnIN4PcQtIDRar/cuwgyq3F8AAfJ5PSYD/GvitaQYxa9Ya1IM3T7UPx6L3OmJl6
+updR3Mh/+6BtAYwSwoWLv0tHQ01xOe9pwML52JShVocVXQFE/UXNtuffuUpXVeWk
+miVen8SI4CHLeFU+6Dfcp0l3owKBgQDonbYbB9bRVzG0gbgdp2K1pxvMQizR8IkU
+GsYaT/LMooBpRBOHrane+9KCztkghjmTyDKEl7jwt65fvFl0ttkipq1ISTepV6Rt
+Cmdc5PnBc+ON49/6ivTGFAdU5CY3sE/7L6ngPqZq6bq8nBJ0NPcjpfEl2JfBeND8
+NisrSQEjcwKBgQDlcp1QLji/LtuLf0Eo41rbCd13KTDPiXVIw6m4vW6EuGyEE0In
+mZ/9f4xMvdVUh3C4U8+04z/aFFs8l18eY310hxBp8pXn4RhvOL3M/iowgCJhRuv4
+wzoYLsSXaX2cTz2QDFdEPOKTRv34Mj0le1Rf4Kp5wv1nESZ5qxceo3CTHQKBgFWb
+jSR/ixB57YIH53GKY6qEuJdAl2wgAOLUQ6n1WF71Qxr6gdGCGS1GMiAP7hqpK1F2
+8RiZGegFQXhcQfPRQzIcc1NSFtkMtyemF4o5fq0ycEGM5qY3M4QeZOBaIrKGAblo
+vjUX+XkJUb8OFUCNKZMGBCywfJEoXIklilegw3l/AoGBALtmVrX28WQ42DOYWdKD
+dmDMBg1+21d8wIWs4k5bu1LdlY8XqMnV9TAHwOwGcleK2uM3AfoLOho6HwFwdyhJ
+x20XBogOziImjh+cvWNpm951EC3oWHOFYPsMjX1mRCye88LQHwm3gQ8iCIOzPj+8
+RB6SahiCZEhAtLq/9Q/O1bL5
+-----END PRIVATE KEY-----
+)";
+
+std::string websocket_accept(std::string_view key) {
+    std::string source(key);
+    source.append("258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
+    std::array<std::uint8_t, SHA_DIGEST_LENGTH> digest{};
+    if (SHA1(reinterpret_cast<const std::uint8_t *>(source.data()), source.size(), digest.data()) == nullptr) {
+        return {};
+    }
+    return util::base64_encode(digest.data(), digest.size());
+}
+
+// Minimal blocking HTTP/1.1 WebSocket upstream: one connection, one upgraded
+// session, raw frames both ways.
+class WebSocketUpstreamFixture {
+public:
+    WebSocketUpstreamFixture() {
+        listen_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
+        if (listen_fd_ < 0) {
+            return;
+        }
+        sockaddr_in address{};
+        address.sin_family = AF_INET;
+        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        address.sin_port = 0;
+        if (::bind(listen_fd_, reinterpret_cast<sockaddr *>(&address), sizeof(address)) != 0 ||
+            ::listen(listen_fd_, 1) != 0) {
+            ::close(listen_fd_);
+            listen_fd_ = -1;
+            return;
+        }
+        sockaddr_in bound{};
+        socklen_t length = sizeof(bound);
+        if (::getsockname(listen_fd_, reinterpret_cast<sockaddr *>(&bound), &length) != 0) {
+            ::close(listen_fd_);
+            listen_fd_ = -1;
+            return;
+        }
+        port_ = ntohs(bound.sin_port);
+        thread_ = std::thread([this] { serve(); });
+    }
+
+    ~WebSocketUpstreamFixture() {
+        if (listen_fd_ >= 0) {
+            ::shutdown(listen_fd_, SHUT_RDWR);
+            ::close(listen_fd_);
+        }
+        if (thread_.joinable()) {
+            thread_.join();
+        }
+    }
+
+    [[nodiscard]] std::uint16_t port() const noexcept { return port_; }
+    [[nodiscard]] const std::string &observed_request() const noexcept { return observed_request_; }
+    [[nodiscard]] const std::string &client_data() const noexcept { return client_data_; }
+
+private:
+    void serve() {
+        const int fd = ::accept(listen_fd_, nullptr, nullptr);
+        if (fd < 0) {
+            return;
+        }
+        timeval timeout{.tv_sec = 2, .tv_usec = 0};
+        ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+
+        std::string request_text;
+        std::array<char, 4096> buffer{};
+        while (request_text.find("\r\n\r\n") == std::string::npos) {
+            const ssize_t size = ::recv(fd, buffer.data(), buffer.size(), 0);
+            if (size <= 0) {
+                ::close(fd);
+                return;
+            }
+            request_text.append(buffer.data(), static_cast<std::size_t>(size));
+        }
+        observed_request_ = request_text;
+
+        std::string key;
+        std::string lowercase_request = request_text;
+        std::transform(lowercase_request.begin(), lowercase_request.end(), lowercase_request.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        constexpr std::string_view kKeyPrefix = "sec-websocket-key:";
+        const std::size_t key_at = lowercase_request.find(kKeyPrefix);
+        if (key_at != std::string::npos) {
+            std::size_t begin = key_at + kKeyPrefix.size();
+            while (begin < request_text.size() && (request_text[begin] == ' ' || request_text[begin] == '\t')) {
+                ++begin;
+            }
+            const std::size_t end = request_text.find("\r\n", begin);
+            if (end != std::string::npos) {
+                key = request_text.substr(begin, end - begin);
+            }
+        }
+
+        std::string response("HTTP/1.1 101 Switching Protocols\r\n"
+                             "Connection: Upgrade\r\n"
+                             "Upgrade: websocket\r\n"
+                             "Sec-WebSocket-Accept: ");
+        response.append(websocket_accept(key));
+        response.append("\r\n\r\nserver-frame");
+        std::size_t sent = 0;
+        while (sent < response.size()) {
+            const ssize_t size = ::send(fd, response.data() + sent, response.size() - sent, 0);
+            if (size <= 0) {
+                ::close(fd);
+                return;
+            }
+            sent += static_cast<std::size_t>(size);
+        }
+
+        client_data_.reserve(64);
+        while (client_data_.size() < 12) {
+            const ssize_t size = ::recv(fd, buffer.data(), buffer.size(), 0);
+            if (size <= 0) {
+                break;
+            }
+            client_data_.append(buffer.data(), static_cast<std::size_t>(size));
+        }
+        ::shutdown(fd, SHUT_RDWR);
+        ::close(fd);
+    }
+
+    int listen_fd_ = -1;
+    std::uint16_t port_ = 0;
+    std::string observed_request_;
+    std::string client_data_;
+    std::thread thread_{};
+};
+
+struct H2WebSocketClientOutcome {
+    common::IoErr error = common::IoErr::None;
+    bool extended_connect_enabled = false;
+    int status_code = 0;
+    std::string accept;
+    std::string connection;
+    std::string upgrade;
+    std::string body;
+};
+
+async::DetachedTask run_h2_websocket_client(event::EventLoop &loop, std::uint16_t port,
+                                            std::promise<H2WebSocketClientOutcome> *promise) {
+    H2WebSocketClientOutcome outcome;
+    http::HttpClientTlsOptions tls;
+    tls.server_name = "localhost";
+
+    auto connection = std::make_shared<http::Http2ClientConnection>(loop);
+    auto connected = co_await connection->connect(net::SocketAddress(net::IpAddress::loopback_v4(), port), 5s, tls);
+    if (!connected) {
+        outcome.error = connected.error();
+        promise->set_value(std::move(outcome));
+        co_return;
+    }
+
+    struct RunState {
+        std::atomic_bool done{false};
+    };
+    auto run_state = std::make_shared<RunState>();
+    async::spawn(loop, [connection, run_state]() -> async::DetachedTask {
+        (void) co_await connection->wait_closed();
+        run_state->done.store(true, std::memory_order_release);
+    });
+
+    mem::BufPool pool;
+    http::ClientHttp2Exchange exchange(*connection, pool);
+    for (int i = 0; i < 500; ++i) {
+        if (exchange.extended_connect_support() == http::Http2ExtendedConnectSupport::Enabled) {
+            outcome.extended_connect_enabled = true;
+            break;
+        }
+        co_await async::sleep(1ms);
+    }
+    if (!outcome.extended_connect_enabled) {
+        outcome.error = common::IoErr::NotSupported;
+    } else {
+        http::HttpHeaders headers(pool);
+        headers.set("Sec-WebSocket-Version", "13");
+        auto sent = co_await exchange.send_request_header(
+                {
+                        .method = http::HttpMethod::Connect,
+                        .scheme = "https",
+                        .authority = "api.example.com",
+                        .path = "/ws",
+                        .protocol = "websocket",
+                        .headers = &headers,
+                },
+                false, 2s);
+        if (!sent) {
+            outcome.error = sent.error();
+        } else {
+            auto header = co_await exchange.read_header(2s);
+            if (!header) {
+                outcome.error = header.error();
+            } else {
+                outcome.status_code = (*header)->status_code;
+                outcome.accept.assign((*header)->headers.get("sec-websocket-accept"));
+                outcome.connection.assign((*header)->headers.get("connection"));
+                outcome.upgrade.assign((*header)->headers.get("upgrade"));
+
+                static constexpr std::string_view kClientFrame = "client-frame";
+                auto written = co_await exchange.write_all(reinterpret_cast<const std::uint8_t *>(kClientFrame.data()),
+                                                           kClientFrame.size(), false, 2s);
+                if (!written) {
+                    outcome.error = written.error();
+                } else {
+                    while (outcome.body.size() < std::string_view("server-frame").size()) {
+                        auto body = co_await exchange.read_body(64, 2s);
+                        if (!body) {
+                            outcome.error = body.error();
+                            break;
+                        }
+                        const bool complete = body->complete();
+                        while (mem::IoBuf *part = body->first_readable()) {
+                            outcome.body.append(reinterpret_cast<const char *>(part->readable_data()),
+                                                part->readable());
+                            body->consume_and_compact(part->readable());
+                        }
+                        if (complete) {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (exchange.valid()) {
+        (void) exchange.abort();
+    }
+    connection->shutdown();
+    for (int i = 0; i < 500 && !run_state->done.load(std::memory_order_acquire); ++i) {
+        co_await async::sleep(1ms);
+    }
+    promise->set_value(std::move(outcome));
+}
+
+TEST(AccessServerTest, ServesWebSocketExtendedConnectOverHttp2Tls) {
+    WebSocketUpstreamFixture upstream;
+    ASSERT_NE(upstream.port(), 0);
+
+    ProjectConfig config;
+    config.version = 1;
+    config.hosts = std::vector<HostConfigEntry>{
+            HostConfigEntry{
+                    .pattern = "api.example.com",
+                    .strategy = HostStrategyConfig{},
+            },
+    };
+    RouteConfig route;
+    route.path = "/ws";
+    route.addresses = {std::optional<std::string>("127.0.0.1:" + std::to_string(upstream.port()))};
+    route.timeout_millis = 2000;
+    route.websocket_timeout_millis = 1000;
+    config.routes = std::vector<std::optional<RouteConfig>>{std::move(route)};
+
+    RouteConfigStore store;
+    auto published = store.apply("orders", std::move(config));
+    ASSERT_TRUE(published) << published.error().message;
+
+    net::TlsCredentialOptions credential_options{};
+    credential_options.certificate_chain = net::TlsPemSource::from_content(kWsCertPem);
+    credential_options.private_key = net::TlsPemSource::from_content(kWwKeyPem);
+    auto credential = net::TlsCredential::create(credential_options);
+    ASSERT_TRUE(credential);
+    http::HttpServerTlsOptions tls{};
+    tls.configure_callback = &net::configure_tls_with_credential;
+    tls.configure_ctx = credential->get();
+
+    event::EventLoop accept_loop;
+    event::EventLoopGroup workers(1);
+    AccessServer server(accept_loop, workers, store, {},
+                        AccessServerOptions{
+                                .http_server = {.tls = tls},
+                        });
+    std::promise<std::uint16_t> port_promise;
+    auto port = port_promise.get_future();
+    std::promise<void> stopped_promise;
+    auto stopped = stopped_promise.get_future();
+    bool startup_ok = false;
+
+    workers.start();
+    async::spawn(accept_loop, [&]() -> async::DetachedTask {
+        auto initialized = co_await server.initialize();
+        if (!initialized) {
+            port_promise.set_value(0);
+            accept_loop.stop();
+            co_return;
+        }
+        auto bound = server.bind(net::SocketAddress(net::IpAddress::v4({127, 0, 0, 1}), 0));
+        if (!bound) {
+            port_promise.set_value(0);
+            co_await server.shutdown_and_wait();
+            accept_loop.stop();
+            co_return;
+        }
+        startup_ok = true;
+        port_promise.set_value(listener_port(server.fd()));
+        async::spawn([&server]() { return server.serve(); });
+    });
+
+    H2WebSocketClientOutcome client_outcome;
+    std::thread client([&]() {
+        const std::uint16_t bound_port = port.get();
+        if (bound_port != 0) {
+            std::promise<H2WebSocketClientOutcome> client_done;
+            auto client_future = client_done.get_future();
+            async::spawn(accept_loop, [&]() { return run_h2_websocket_client(accept_loop, bound_port, &client_done); });
+            client_outcome = client_future.get();
+        }
+        async::spawn(accept_loop, [&]() -> async::DetachedTask {
+            if (startup_ok) {
+                co_await server.shutdown_and_wait();
+            }
+            stopped_promise.set_value();
+            accept_loop.stop();
+        });
+    });
+
+    accept_loop.run();
+    client.join();
+    ASSERT_TRUE(startup_ok);
+    EXPECT_EQ(stopped.wait_for(2s), std::future_status::ready);
+    workers.stop();
+    workers.join();
+
+    // The TLS h2 listener must advertise SETTINGS_ENABLE_CONNECT_PROTOCOL
+    // (RFC 8441) and translate the extended CONNECT into an upstream upgrade.
+    EXPECT_EQ(client_outcome.error, common::IoErr::None);
+    EXPECT_TRUE(client_outcome.extended_connect_enabled);
+    EXPECT_EQ(client_outcome.status_code, 200);
+    EXPECT_TRUE(client_outcome.accept.empty());
+    EXPECT_TRUE(client_outcome.connection.empty());
+    EXPECT_TRUE(client_outcome.upgrade.empty());
+    EXPECT_EQ(client_outcome.body, "server-frame");
+
+    EXPECT_NE(upstream.observed_request().find("GET /ws HTTP/1.1\r\n"), std::string::npos);
+    EXPECT_NE(upstream.observed_request().find("Upgrade: websocket"), std::string::npos);
+    const std::size_t key_at = upstream.observed_request().find("Sec-WebSocket-Key: ");
+    ASSERT_NE(key_at, std::string::npos);
+    EXPECT_EQ(upstream.observed_request().substr(key_at + 18, 24).find("\r"), std::string::npos);
+    EXPECT_NE(upstream.observed_request().find("Sec-WebSocket-Version: 13"), std::string::npos);
+    EXPECT_EQ(upstream.client_data(), "client-frame");
 }
 
 TEST(AccessServerTest, InjectsNetworkEntryBeforeHostPolicyAndReplacesClientSuppliedEntry) {
