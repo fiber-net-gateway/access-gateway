@@ -1011,6 +1011,7 @@ async::Task<Result<void>> ProxyExecutor::execute_impl(http::HttpExchange &exchan
                 selected->provider_name.empty() ? selected->host_header : selected->provider_name;
         AccessProviderTransaction provider_transaction = telemetry.start_provider_transaction(provider_name);
         provider_transaction.add_upstream(selected->host_header, attempt + 1);
+        provider_transaction.add_uri(request_plan.request_head().target);
         ProxyAttemptMetricScope attempt_metrics(telemetry);
 
         auto connected = co_await acquire_proxy_upstream_connection(pool_, dns_resolver_, *connection_key, tls_policy,

@@ -1210,6 +1210,11 @@ TEST(ProxyExecutorTest, StreamsJavaCompatibleRequestsAndReusesTheUpstreamConnect
     EXPECT_TRUE(wait_for_cat_frame(cat_capture, "Access.Provider", "&reuse_count=1"));
     EXPECT_TRUE(wait_for_cat_frame(cat_capture, "Access.Provider", "RemoteCall"));
     EXPECT_TRUE(wait_for_cat_frame(cat_capture, "peerIp=0.0.0.0", "forwardingStatus=not_present"));
+    EXPECT_TRUE(wait_for_cat_frame(cat_capture, "forwardingStatus=not_present", "protocol=h1"));
+    EXPECT_TRUE(wait_for_cat_frame(cat_capture, "Access.Provider", "&uri=/items%20/%3F%23?item=1"));
+    EXPECT_TRUE(wait_for_cat_frame(cat_capture, "Access.Provider", "&uri=/items%20/%3F%23?item=2"));
+    // Root data uses the space separator; the provider's own data is '&'-joined.
+    EXPECT_FALSE(cat_capture.contains(" upstream="));
     EXPECT_FALSE(cat_capture.contains("connection_request_count="));
     EXPECT_FALSE(cat_capture.contains("connection_reuse_count="));
 

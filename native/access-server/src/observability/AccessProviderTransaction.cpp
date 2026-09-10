@@ -47,6 +47,13 @@ void AccessProviderTransaction::add_upstream(std::string_view upstream, std::siz
     add_integer(transaction_, "attempt", attempt);
 }
 
+void AccessProviderTransaction::add_uri(std::string_view uri) noexcept {
+    if (!valid() || uri.empty()) {
+        return;
+    }
+    (void) transaction_.add_data("uri", uri);
+}
+
 void AccessProviderTransaction::add_connection_reuse(std::uint64_t reuse_count) noexcept {
     if (!valid()) {
         return;

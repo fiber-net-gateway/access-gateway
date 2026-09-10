@@ -678,8 +678,11 @@ listener。订阅暂态失败采用封顶指数退避，非法首值被记录为
   `FiberException`。路由、模板、无可用地址和熔断等本地失败记录 `FiberException`；
 - 原始错误之后若错误响应本身写入失败，独立记录 `ResponseError`，不覆盖也不重复原始
   `CALL_ERROR`/`FiberException`；
-- project、route、context cluster、实际 upstream、稳定 `Exception.name` 和最终
-  response completion 同时进入 CAT 与 `access_server.access`；
+- project、route、context cluster、稳定 `Exception.name` 和最终
+  response completion 同时进入 CAT 与 `access_server.access`；实际 upstream 只进 access log，
+  CAT 根事务 data 不再记录 `upstream`，改为记录客户端连接协议 `protocol=h1/h2/h3`；每次
+  `Access.Provider` attempt 的 data 记录 `upstream`、`attempt`、连接复用与发往 upstream 的
+  `uri=path?query`；
 - access log 的 `path` 只消费解析后的 path，不再记录包含原始 query 的 `unparsed_uri`；
   query allowlist 默认为空，内置及附加敏感 key 即使命中 allowlist 也固定替换为
   `[REDACTED]`。allowlist 对 form-decoded ASCII key 大小写敏感匹配，敏感判断不区分 ASCII
