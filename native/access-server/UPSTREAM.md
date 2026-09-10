@@ -10,16 +10,16 @@ HTTP, JSON/script, Nacos, CAT, and Prometheus modules are consumed from the pinn
 historical application import revision.
 
 The current reusable Fiber dependency is pinned at
-`dfa5676c0a4e186767372ea5d2e1dd5573ba925a`. The pinned revision carries repository-owned
-compatibility patches under `native/patches/` (see `native/patches/README.md`); currently two:
-one fixing HTTP/1 chunked bodies whose framing crosses transport read boundaries (regression
-test `ProxyExecutorTest.StreamsChunkedUpstreamWhoseFramingArrivesSeparatelyFromPayload`), and
-one fixing the HTTP/3 terminal FIN strand in `QuicStreamSendQueue::encode_stream_frame`
-(regression test `QuicStreamSendQueueTest.FinOnlyFrameEncodesWhileBodyInflight`).
+`e9a804053b14c206ed4a4fcd3b89e9a6789387a2`. The pinned revision carries no repository-owned
+compatibility patches: the four defects that previously required patches under `native/patches/`
+are fixed inside this reviewed range (see `native/patches/README.md` for the retired-patch map).
+The repository-owned regression
+`ProxyExecutorTest.StreamsChunkedUpstreamWhoseFramingArrivesSeparatelyFromPayload` still guards
+the HTTP/1 chunked split-framing fix from the application side.
 The reviewed update range from the previous pin is
-`a1181674187afa71e55a919ad0fa258c6f7fb706..dfa5676c0a4e186767372ea5d2e1dd5573ba925a`.
+`dfa5676c0a4e186767372ea5d2e1dd5573ba925a..e9a804053b14c206ed4a4fcd3b89e9a6789387a2`.
 The complete reviewed range from the original import pin is
-`0fda7764bf94944aca4b674ab5ab311184703118..dfa5676c0a4e186767372ea5d2e1dd5573ba925a`.
+`0fda7764bf94944aca4b674ab5ab311184703118..e9a804053b14c206ed4a4fcd3b89e9a6789387a2`.
 It removes the obsolete upstream `apps/access-server`, adds Nacos hostname and bounded service
 status APIs, system resolver/multi-nameserver support, client TLS identities and HTTP/1 pool
 affinity, a cancellable Happy Eyeballs connector, and a reusable public HTTP gzip response writer
@@ -58,8 +58,20 @@ HTTP/2 server connections are sharded into per-loop workers with keepalive colla
 `read_timeout` and idle h2 server connections retired. Access-server was adapted to the rewritten
 server lifecycle, per-call connect parameters, and renames in the same change (runtime listener
 staging via `http::Server` + typed endpoints, proxy upstream dialing, and test/benchmark fixtures);
-no wire contract changes were required. No application source was synchronized back from upstream
-as part of this dependency update; the historical import revision above remains unchanged.
+no wire contract changes were required. The latest reviewed delta (from pin
+`dfa5676c0a4e186767372ea5d2e1dd5573ba925a`) lands the four defects formerly patched under
+`native/patches/` directly upstream with their root-cause reports and Fiber-side regression
+tests: HTTP/1 chunked bodies whose framing spans transport reads (`09dd0ef`), the HTTP/3
+terminal FIN stranded behind inflight body extents — including a superset that re-queues
+stranded send work on stream ACKs and keepalive backlog (`3ccecc4`) — the HTTP/2 terminal-only
+body write not consuming the borrowed chain's completion marker (`d968408`), and QUIC awaiter
+resumes made retraction-safe against hard coroutine destruction by moving them to the
+cancellable local defer queue (`1e30624`). The delta also scopes the h2 drain test's options
+and adds an all-protocol benchmark retest. Access-server needed no source adaptation for this
+update: every change is either internal to the pinned modules or additive
+(`ChunkedBodyParser::payload_remaining`). No application source was synchronized back from
+upstream as part of this dependency update; the historical import revision above remains
+unchanged.
 
 The import preserves upstream source, tests, fixtures, documentation, scripts, and the example
 environment file. Repository-integration changes replace upstream-relative test-support includes,
