@@ -66,6 +66,21 @@ bool has_inbound_context(const cat::MessageTraceContext &context) noexcept {
     return !context.message_id.empty() || !context.root_message_id.empty() || !context.parent_message_id.empty();
 }
 
+// Wire protocol of the client connection, not the extended CONNECT :protocol.
+std::string_view client_protocol_name(http::HttpVersion version) noexcept {
+    switch (version) {
+        case http::HttpVersion::HTTP_1_0:
+        case http::HttpVersion::HTTP_1_1:
+            return "h1";
+        case http::HttpVersion::HTTP_2_0:
+            return "h2";
+        case http::HttpVersion::HTTP_3_0:
+            return "h3";
+        default:
+            return {};
+    }
+}
+
 cat::MessageTraceContext read_trace_context(const http::HttpHeaders &headers) noexcept {
     return {
             .message_id = headers.get(kSpanIdLowcaseHeader, kSpanIdHeaderHash),
@@ -122,6 +137,7 @@ RequestObservability::RequestObservability(http::HttpExchange &exchange, AccessS
     add_root_data("method", exchange.method_view());
     add_root_data("host", exchange.header("Host"));
     add_root_data("path", exchange.uri().path);
+    add_root_data("protocol", client_protocol_name(exchange.version()));
     add_root_data("content_type", exchange.header("Content-Type"));
     const std::string peer_ip = client_metadata.peer_address.to_string();
     const std::string client_ip =
@@ -387,8 +403,8 @@ void RequestObservability::mark_io_error(ScriptExecutionContext &execution, comm
 
 void RequestObservability::set_upstream(ScriptExecutionContext &execution,
                                         const ProxyUpstreamEndpoint &endpoint) noexcept {
+    // Access-log field only; the upstream belongs to the provider transaction.
     upstream_ = execution.copy_to_request_pool(endpoint.host_header);
-    add_root_data("upstream", endpoint.host_header);
 }
 
 AccessProviderTransaction RequestObservability::start_provider_transaction(std::string_view name) noexcept {

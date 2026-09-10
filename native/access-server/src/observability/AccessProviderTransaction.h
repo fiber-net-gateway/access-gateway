@@ -28,6 +28,7 @@ public:
     [[nodiscard]] bool valid() const noexcept;
 
     void add_upstream(std::string_view upstream, std::size_t attempt) noexcept;
+    void add_uri(std::string_view uri) noexcept;
     void add_connection_reuse(std::uint64_t reuse_count) noexcept;
     void fail(std::string_view phase, common::IoErr error) noexcept;
     void call_error(const Exception &exception, std::string_view phase, common::IoErr error) noexcept;
