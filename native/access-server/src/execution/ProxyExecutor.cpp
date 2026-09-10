@@ -681,6 +681,12 @@ async::Task<Result<void>> UpstreamAttempt::run() noexcept {
         provider_.call_error(exception, "websocket_accept", common::IoErr::Invalid);
         co_return std::unexpected(Err::from_upstream_exception(exception));
     }
+    if (websocket_response) {
+        // The upstream finished its HTTP flow with the validated upgrade; the
+        // tunnel session is recorded as an Access.WebSocket event, so a later
+        // tunnel abort must not mark this provider transaction failed.
+        provider_.complete(upstream_head->status_code);
+    }
 
     auto custom_headers = prepare_proxy_response_headers(proxy_.response_headers, input_.template_evaluator);
     if (!custom_headers) {
@@ -775,11 +781,14 @@ async::Task<Result<void>> UpstreamAttempt::run() noexcept {
         }
 
         websocket_metrics_.accepted();
+        telemetry_.start_websocket_session(
+                endpoint_.provider_name.empty() ? endpoint_.host_header : endpoint_.provider_name,
+                request_plan_.websocket_extended_connect());
         const std::chrono::milliseconds websocket_timeout(request_plan_.websocket_timeout_millis());
         co_await http::proxy_core::relay_websocket_tunnel(exchange_, upstream, websocket_timeout, websocket_timeout);
         websocket_metrics_.closed();
+        telemetry_.finish_websocket_session(true);
         attempt_metrics_.completed();
-        provider_.complete(upstream_head->status_code);
         co_return Result<void>{};
     }
 

@@ -47,6 +47,14 @@ const AccessLogPolicy &default_access_log_policy() noexcept {
     return policy;
 }
 
+std::string_view integer_text(char *buffer, std::size_t capacity, std::int64_t value) noexcept {
+    const auto converted = std::to_chars(buffer, buffer + capacity, value);
+    if (converted.ec != std::errc{}) {
+        return {};
+    }
+    return std::string_view(buffer, static_cast<std::size_t>(converted.ptr - buffer));
+}
+
 std::uint32_t next_access_log_sample() noexcept {
     static thread_local std::uint64_t sequence = []() noexcept {
         const event::EventLoop &loop = event::EventLoop::current();
@@ -184,6 +192,11 @@ void RequestObservability::finish(http::HttpExchange &exchange, const ClientMeta
     add_root_data("status", status_text);
     if (response.terminal_error != common::IoErr::None) {
         add_root_data("io_error", common::io_err_name(response.terminal_error));
+    }
+    // A tunnel still open when the request ends was aborted by a destroyed
+    // proxy coroutine; the event must complete before the root transaction.
+    if (websocket_event_.valid()) {
+        finish_websocket_session(false);
     }
     if (root_.valid()) {
         const bool success = !execution_failed_ && response.completed && response.terminal_error == common::IoErr::None;
@@ -416,6 +429,35 @@ AccessProviderTransaction RequestObservability::start_provider_transaction(std::
         return {};
     }
     return AccessProviderTransaction(std::move(*transaction));
+}
+
+void RequestObservability::start_websocket_session(std::string_view name, bool extended_connect) noexcept {
+    if (!root_.valid() || websocket_event_.valid()) {
+        return;
+    }
+    auto event = root_.start_event("Access.WebSocket", name);
+    if (!event) {
+        return;
+    }
+    websocket_event_ = std::move(*event);
+    websocket_started_ = event::EventLoop::current().now();
+    (void) websocket_event_.add_data("downstream", extended_connect ? "extended_connect" : "h1_upgrade");
+}
+
+void RequestObservability::finish_websocket_session(bool closed) noexcept {
+    if (!websocket_event_.valid()) {
+        return;
+    }
+    const auto finished = event::EventLoop::current().now();
+    const auto duration = std::chrono::duration_cast<std::chrono::microseconds>(finished - websocket_started_);
+    std::array<char, std::numeric_limits<std::int64_t>::digits10 + 3> duration_buffer{};
+    const std::string_view duration_text =
+            integer_text(duration_buffer.data(), duration_buffer.size(), std::max<std::int64_t>(duration.count(), 0));
+    (void) websocket_event_.add_data("result", closed ? "closed" : "aborted");
+    if (!duration_text.empty()) {
+        (void) websocket_event_.add_data("duration_us", duration_text);
+    }
+    (void) websocket_event_.complete(closed ? cat::status::Success : cat::status::Error);
 }
 
 void RequestObservability::add_root_data(std::string_view key, std::string_view value) noexcept {

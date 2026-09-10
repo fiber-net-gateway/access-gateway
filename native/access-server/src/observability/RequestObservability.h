@@ -64,6 +64,8 @@ public:
     void mark_io_error(ScriptExecutionContext &execution, common::IoErr error) noexcept;
     void set_upstream(ScriptExecutionContext &execution, const ProxyUpstreamEndpoint &endpoint) noexcept;
     [[nodiscard]] AccessProviderTransaction start_provider_transaction(std::string_view name) noexcept;
+    void start_websocket_session(std::string_view name, bool extended_connect) noexcept;
+    void finish_websocket_session(bool closed) noexcept;
 
     [[nodiscard]] cat::Transaction &root_transaction() noexcept { return root_; }
 
@@ -76,6 +78,8 @@ private:
     const AccessLogPolicy *access_log_policy_ = nullptr;
     std::chrono::steady_clock::time_point started_{};
     cat::Transaction root_;
+    cat::Event websocket_event_;
+    std::chrono::steady_clock::time_point websocket_started_{};
     std::string_view project_;
     std::string_view route_;
     std::string_view cluster_;
