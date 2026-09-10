@@ -17,7 +17,14 @@ AccessWorkerResources::AccessWorkerResources(event::EventLoopGroup &workers, con
                                              AccessWorkerResourcesOptions options) :
     workers_(&workers), client_metadata_resolver_(std::move(options.client_metadata)),
     access_log_policy_(std::move(options.access_log)), dns_(std::move(options.dns), options.dns_resolver_factory),
-    pool_(workers),
+    // Idle-cache bounds are per worker shard: each event loop keeps up to 200
+    // idle upstream connections per group and 20000 total for reuse, so the
+    // process-wide idle ceiling scales with the worker count.
+    pool_(workers,
+          http::StealableHttp1ConnectionPoolSet::Options{
+                  .max_idle_per_group = 200,
+                  .max_idle_total = 20000,
+          }),
     script_http_services_(pool_, dns_.adapter(), options.executor.upstream_tls, options.executor.happy_eyeballs),
     executor_(pool_, cluster_matcher, dns_.adapter(), std::move(options.executor)),
     handler_(config_store.snapshot_provider(), options.script_adapter,
