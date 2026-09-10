@@ -1,0 +1,1326 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "links": [
+    {
+      "asDropdown": false,
+      "icon": "external link",
+      "includeVars": false,
+      "keepTime": true,
+      "tags": [],
+      "targetBlank": false,
+      "title": "Request handling view →",
+      "tooltip": "access-server 请求处理 (流量 / 延迟 / 代理 / WebSocket)",
+      "type": "dashboard",
+      "url": "/d/access-server-requests"
+    }
+  ],
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Config readiness",
+      "description": "路由配置整体就绪状态。access_server_config_readiness{state=\"ready\"}",
+      "datasource": { "type": "prometheus", "uid": "prometheus-2" },
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "1": { "text": "Ready", "color": "green", "index": 0 },
+                "0": { "text": "Not ready", "color": "red", "index": 1 }
+              }
+            }
+          ],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "expr": "max(access_server_config_readiness{state=\"ready\",instance=~\"$instance\"})",
+          "legendFormat": "readiness",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Nacos RPC",
+      "description": "全部 Nacos 服务(config_service + naming_service)RPC 是否可用,任一不可用即显示 Unavailable。",
+      "datasource": { "type": "prometheus", "uid": "prometheus-2" },
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "1": { "text": "Available", "color": "green", "index": 0 },
+                "0": { "text": "Unavailable", "color": "red", "index": 1 }
+              }
+            }
+          ],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "expr": "min(access_server_nacos_rpc_available{instance=~\"$instance\"})",
+          "legendFormat": "rpc",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "DNS resolver",
+      "description": "HTTP worker DNS 解析器是否就绪。access_server_dns_resolver_state{state=\"ready\"}",
+      "datasource": { "type": "prometheus", "uid": "prometheus-2" },
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "1": { "text": "Ready", "color": "green", "index": 0 },
+                "0": { "text": "Not ready", "color": "red", "index": 1 }
+              }
+            }
+          ],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "expr": "max(access_server_dns_resolver_state{state=\"ready\",instance=~\"$instance\"})",
+          "legendFormat": "dns",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "CAT client",
+      "description": "CAT 客户端生命周期是否为 running。access_server_cat_state{state=\"running\"}",
+      "datasource": { "type": "prometheus", "uid": "prometheus-2" },
+      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "1": { "text": "Running", "color": "green", "index": 0 },
+                "0": { "text": "Not running", "color": "red", "index": 1 }
+              }
+            }
+          ],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "expr": "max(access_server_cat_state{state=\"running\",instance=~\"$instance\"})",
+          "legendFormat": "cat",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Log queue",
+      "description": "异步日志队列是否仍在接收记录。access_server_log_queue_accepting",
+      "datasource": { "type": "prometheus", "uid": "prometheus-2" },
+      "gridPos": { "h": 4, "w": 4, "x": 16, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "1": { "text": "Accepting", "color": "green", "index": 0 },
+                "0": { "text": "Rejected", "color": "red", "index": 1 }
+              }
+            }
+          ],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "expr": "min(access_server_log_queue_accepting{instance=~\"$instance\"})",
+          "legendFormat": "log queue",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "TLS retired age",
+      "description": "最老待回收 TLS 证书快照的滞留时间(hazard 未清理的泄漏信号)。access_server_tls_certificate_oldest_retired_age_seconds",
+      "datasource": { "type": "prometheus", "uid": "prometheus-2" },
+      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 60 },
+              { "color": "red", "value": 600 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "expr": "max(access_server_tls_certificate_oldest_retired_age_seconds{instance=~\"$instance\"})",
+          "legendFormat": "oldest retired",
+          "refId": "A"
+        }
+      ]
+    },
+    { "id": 100, "type": "row", "title": "Configuration & route snapshot", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 4 }, "panels": [] },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Config update events",
+      "description": "配置更新事件速率(仅显示速率 >0 的序列)。resource=project_list / project_route。access_server_config_updates_total",
+      "datasource": { "type": "prometheus", "uid": "prometheus-2" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 5 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": { "drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 2, "fillOpacity": 0, "spanNulls": true, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "expr": "sum by (resource, result) (rate(access_server_config_updates_total{instance=~\"$instance\"}[$__rate_interval])) > 0",
+          "legendFormat": "{{resource}} · {{result}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Projects by sync state",
+      "description": "项目同步计数:desired / subscribed / synchronized / retrying / processing / ready_to_publish / rejected。",
+      "datasource": { "type": "prometheus", "uid": "prometheus-2" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 5 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "line", "lineInterpolation": "stepAfter", "lineWidth": 2, "fillOpacity": 0, "spanNulls": true, "showPoints": "never" }
+        },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "rejected" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }] },
+          { "matcher": { "id": "byName", "options": "retrying" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "yellow" } }] },
+          { "matcher": { "id": "byName", "options": "synchronized" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } }] }
+        ]
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "expr": "sum by (state) (access_server_config_projects{instance=~\"$instance\"})",
+          "legendFormat": "{{state}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Config stage avg duration",
+      "description": "有界配置阶段平均耗时:project_compile / service_ready / global_build / publish。",
+      "datasource": { "type": "prometheus", "uid": "prometheus-2" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 5 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "custom": { "drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 2, "fillOpacity": 0, "spanNulls": true, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "expr": "sum by (stage) (rate(access_server_config_stage_duration_nanoseconds_total{instance=~\"$instance\"}[$__rate_interval])) / clamp_min(sum by (stage) (rate(access_server_config_stage_duration_observations_total{instance=~\"$instance\"}[$__rate_interval])), 1) / 1000000",
+          "legendFormat": "{{stage}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Route snapshot generation",
+      "description": "本地路由快照发布代数(每次成功发布 +1)。",
+      "datasource": { "type": "prometheus", "uid": "prometheus-2" },
+      "gridPos": { "h": 8, "w": 6, "x": 0, "y": 13 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "line", "lineInterpolation": "stepAfter", "lineWidth": 2, "fillOpacity": 0, "spanNulls": true, "showPoints": "auto" }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "expr": "max by (instance) (access_server_route_snapshot_generation{instance=~\"$instance\"})",
+          "legendFormat": "{{instance}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "Route snapshot age",
+      "description": "当前活动快照自发布以来的秒数。",
+      "datasource": { "type": "prometheus", "uid": "prometheus-2" },
+      "gridPos": { "h": 8, "w": 6, "x": 6, "y": 13 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 2, "fillOpacity": 0, "spanNulls": true, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "expr": "max by (instance) (access_server_route_snapshot_age_seconds{instance=~\"$instance\"})",
+          "legendFormat": "{{instance}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 15,
+      "type": "timeseries",
+      "title": "Snapshot resources",
+      "description": "活动全局快照内的资源数:project / host / route / compiled_program。",
+      "datasource": { "type": "prometheus", "uid": "prometheus-2" },
+      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 13 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "line", "lineInterpolation": "stepAfter", "lineWidth": 2, "fillOpacity": 0, "spanNulls": true, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "expr": "sum by (resource) (access_server_route_snapshot_resources{instance=~\"$instance\"})",
+          "legendFormat": "{{resource}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 16,
+      "type": "timeseries",
+      "title": "Snapshot retained bytes",
+      "description": "Project 快照估算保留字节与静态响应字节。",
+      "datasource": { "type": "prometheus", "uid": "prometheus-2" },
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 13 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": { "drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 2, "fillOpacity": 10, "spanNulls": true, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "expr": "sum(access_server_route_snapshot_estimated_bytes{instance=~\"$instance\"})",
+          "legendFormat": "estimated",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(access_server_route_snapshot_static_response_bytes{instance=~\"$instance\"})",
+          "legendFormat": "static responses",
+          "refId": "B"
+        }
+      ]
+    },
+    { "id": 101, "type": "row", "title": "Nacos & service discovery", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 21 }, "panels": [] },
+    {
+      "id": 17,
+      "type": "timeseries",
+      "title": "Nacos transport phase (ready flag)",
+      "description": "传输层是否处于 ready(0/1)。access_server_nacos_transport_phase{phase=\"ready\"}",
+      "datasource": { "type": "prometheus", "uid": "prometheus-2" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 22 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "max": 1,
+          "custom": { "drawStyle": "line", "lineInterpolation": "stepAfter", "lineWidth": 2, "fillOpacity": 10, "spanNulls": true, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "expr": "max by (instance, component) (access_server_nacos_transport_phase{phase=\"ready\",instance=~\"$instance\"})",
+          "legendFormat": "{{instance}} · {{component}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 18,
+      "type": "timeseries",
+      "title": "Nacos transport failure",
+      "description": "当前失败类别(仅在有失败时出现序列):transport / grpc_status / protocol / server / authentication_unavailable 等。",
+      "datasource": { "type": "prometheus", "uid": "prometheus-2" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 22 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "line", "lineInterpolation": "stepAfter", "lineWidth": 2, "fillOpacity": 10, "spanNulls": true, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "expr": "access_server_nacos_transport_failure{category!=\"none\",instance=~\"$instance\"} == 1",
+          "legendFormat": "{{instance}} · {{component}} · {{category}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 19,
+      "type": "timeseries",
+      "title": "Nacos connection events",
+      "description": "连接事件速率:ready / disconnect / reconnect_attempt。",
+      "datasource": { "type": "prometheus", "uid": "prometheus-2" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 22 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": { "drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 2, "fillOpacity": 0, "spanNulls": true, "showPoints": "never" }
+        },
+        "overrides": [
+          { "matcher": { "id": "byRegexp", "options": ".*disconnect.*" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "yellow" } }] },
+          { "matcher": { "id": "byRegexp", "options": ".*reconnect_attempt.*" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }] }
+        ]
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "expr": "sum by (component, event) (rate(access_server_nacos_connection_events_total{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "{{component}} · {{event}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "type": "timeseries",
+      "title": "Nacos subscriptions by state",
+      "description": "config_service / naming_service 的订阅聚合状态:active / pending / registered / synchronized。",
+      "datasource": { "type": "prometheus", "uid": "prometheus-2" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 30 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "line", "lineInterpolation": "stepAfter", "lineWidth": 2, "fillOpacity": 0, "spanNulls": true, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "expr": "sum by (component, state) (access_server_nacos_subscriptions{instance=~\"$instance\"})",
+          "legendFormat": "{{component}} · {{state}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "Nacos registrations by state",
+      "description": "NamingService 注册聚合状态:active / pending / registered。",
+      "datasource": { "type": "prometheus", "uid": "prometheus-2" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 30 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "line", "lineInterpolation": "stepAfter", "lineWidth": 2, "fillOpacity": 0, "spanNulls": true, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "expr": "sum by (state) (access_server_nacos_registrations{instance=~\"$instance\"})",
+          "legendFormat": "{{state}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 22,
+      "type": "timeseries",
+      "title": "Discovery resources",
+      "description": "服务发现活动资源:ready_service / selectable_endpoint / logical_cluster / selector_lease。",
+      "datasource": { "type": "prometheus", "uid": "prometheus-2" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 30 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "line", "lineInterpolation": "stepAfter", "lineWidth": 2, "fillOpacity": 0, "spanNulls": true, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "expr": "sum by (resource) (access_server_discovery_resources{instance=~\"$instance\"})",
+          "legendFormat": "{{resource}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 23,
+      "type": "timeseries",
+      "title": "Discovery events",
+      "description": "服务发现生命周期事件速率(仅显示速率 >0 的序列)。",
+      "datasource": { "type": "prometheus", "uid": "prometheus-2" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 38 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": { "drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 2, "fillOpacity": 0, "spanNulls": true, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "expr": "sum by (operation, result) (rate(access_server_discovery_events_total{instance=~\"$instance\"}[$__rate_interval])) > 0",
+          "legendFormat": "{{operation}} · {{result}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 24,
+      "type": "timeseries",
+      "title": "Component lifecycle (running flag)",
+      "description": "client / config_service / naming_service 组件是否处于 running。",
+      "datasource": { "type": "prometheus", "uid": "prometheus-2" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 38 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "max": 1,
+          "custom": { "drawStyle": "line", "lineInterpolation": "stepAfter", "lineWidth": 2, "fillOpacity": 10, "spanNulls": true, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "expr": "max by (instance, component) (access_server_nacos_component_lifecycle{state=\"running\",instance=~\"$instance\"})",
+          "legendFormat": "{{instance}} · {{component}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 25,
+      "type": "timeseries",
+      "title": "Nacos RPC available by component",
+      "description": "config_service / naming_service 的 RPC 可用性(0/1)。",
+      "datasource": { "type": "prometheus", "uid": "prometheus-2" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 38 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "max": 1,
+          "custom": { "drawStyle": "line", "lineInterpolation": "stepAfter", "lineWidth": 2, "fillOpacity": 10, "spanNulls": true, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "expr": "max by (instance, component) (access_server_nacos_rpc_available{instance=~\"$instance\"})",
+          "legendFormat": "{{instance}} · {{component}}",
+          "refId": "A"
+        }
+      ]
+    },
+    { "id": 102, "type": "row", "title": "TLS certificates", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 46 }, "panels": [] },
+    {
+      "id": 26,
+      "type": "timeseries",
+      "title": "Certificate rotations (1h)",
+      "description": "最近 1 小时发布的 TLS 证书轮换次数。",
+      "datasource": { "type": "prometheus", "uid": "prometheus-2" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 47 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "bars", "lineWidth": 1, "fillOpacity": 70, "spanNulls": false, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "expr": "sum by (instance) (increase(access_server_tls_certificate_rotations_total{instance=~\"$instance\"}[1h]))",
+          "legendFormat": "{{instance}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 27,
+      "type": "timeseries",
+      "title": "Reclaimed snapshots by trigger (1h)",
+      "description": "按触发源(publish / hazard_clear / shutdown)统计的回收扫描与已回收快照数。",
+      "datasource": { "type": "prometheus", "uid": "prometheus-2" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 47 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "bars", "lineWidth": 1, "fillOpacity": 70, "spanNulls": false, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "expr": "sum by (trigger) (increase(access_server_tls_certificate_reclaim_runs_total{instance=~\"$instance\"}[1h]))",
+          "legendFormat": "runs · {{trigger}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (trigger) (increase(access_server_tls_certificate_reclaimed_snapshots_total{instance=~\"$instance\"}[1h]))",
+          "legendFormat": "reclaimed · {{trigger}}",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 28,
+      "type": "timeseries",
+      "title": "Retired snapshots & retention",
+      "description": "待 hazard 释放的快照数,以及最老滞留年龄与历史最长保留时间。",
+      "datasource": { "type": "prometheus", "uid": "prometheus-2" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 47 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 2, "fillOpacity": 0, "spanNulls": true, "showPoints": "never" }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "retired snapshots" },
+            "properties": [
+              { "id": "unit", "value": "short" },
+              { "id": "custom.axisPlacement", "value": "right" }
+            ]
+          }
+        ]
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "expr": "sum(access_server_tls_certificate_retired_snapshots{instance=~\"$instance\"})",
+          "legendFormat": "retired snapshots",
+          "refId": "A"
+        },
+        {
+          "expr": "max(access_server_tls_certificate_oldest_retired_age_seconds{instance=~\"$instance\"})",
+          "legendFormat": "oldest retired age",
+          "refId": "B"
+        },
+        {
+          "expr": "max(access_server_tls_certificate_max_retention_seconds{instance=~\"$instance\"})",
+          "legendFormat": "max retention",
+          "refId": "C"
+        }
+      ]
+    },
+    { "id": 103, "type": "row", "title": "DNS resolver", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 55 }, "panels": [] },
+    {
+      "id": 29,
+      "type": "timeseries",
+      "title": "DNS resolver ready flag",
+      "description": "HTTP worker 解析器生命周期是否 ready(0/1)。",
+      "datasource": { "type": "prometheus", "uid": "prometheus-2" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 56 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "max": 1,
+          "custom": { "drawStyle": "line", "lineInterpolation": "stepAfter", "lineWidth": 2, "fillOpacity": 10, "spanNulls": true, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "expr": "max by (instance) (access_server_dns_resolver_state{state=\"ready\",instance=~\"$instance\"})",
+          "legendFormat": "{{instance}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 30,
+      "type": "timeseries",
+      "title": "Resolvers active / nameservers",
+      "description": "活跃的 loop 亲和解析器数与配置的上游 nameserver 数。",
+      "datasource": { "type": "prometheus", "uid": "prometheus-2" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 56 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "line", "lineInterpolation": "stepAfter", "lineWidth": 2, "fillOpacity": 0, "spanNulls": true, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "expr": "max by (instance) (access_server_dns_resolvers_active{instance=~\"$instance\"})",
+          "legendFormat": "active · {{instance}}",
+          "refId": "A"
+        },
+        {
+          "expr": "max by (instance) (access_server_dns_nameservers{instance=~\"$instance\"})",
+          "legendFormat": "nameservers · {{instance}}",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 31,
+      "type": "timeseries",
+      "title": "DNS initializations (1h)",
+      "description": "解析器栈初始化结果。频繁 failure 说明 resolv.conf / DNS 配置有问题。",
+      "datasource": { "type": "prometheus", "uid": "prometheus-2" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 56 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "bars", "lineWidth": 1, "fillOpacity": 70, "spanNulls": false, "showPoints": "never" }
+        },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "failure" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }] },
+          { "matcher": { "id": "byName", "options": "success" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } }] }
+        ]
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "expr": "sum by (result) (increase(access_server_dns_initializations_total{instance=~\"$instance\"}[1h]))",
+          "legendFormat": "{{result}}",
+          "refId": "A"
+        }
+      ]
+    },
+    { "id": 104, "type": "row", "title": "Logging", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 64 }, "panels": [] },
+    {
+      "id": 32,
+      "type": "timeseries",
+      "title": "Async log queue depth",
+      "description": "当前排队记录数与历史峰值。",
+      "datasource": { "type": "prometheus", "uid": "prometheus-2" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 65 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 2, "fillOpacity": 10, "spanNulls": true, "showPoints": "never" }
+        },
+        "overrides": [
+          { "matcher": { "id": "byRegexp", "options": "peak.*" }, "properties": [{ "id": "custom.lineStyle", "value": { "dash": [10, 10], "fill": "dash" } }] }
+        ]
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "expr": "max by (instance) (access_server_log_queue_records{instance=~\"$instance\"})",
+          "legendFormat": "current · {{instance}}",
+          "refId": "A"
+        },
+        {
+          "expr": "max by (instance) (access_server_log_queue_peak_records{instance=~\"$instance\"})",
+          "legendFormat": "peak · {{instance}}",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 33,
+      "type": "timeseries",
+      "title": "Async log queue bytes",
+      "description": "当前排队字节与历史峰值。",
+      "datasource": { "type": "prometheus", "uid": "prometheus-2" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 65 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": { "drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 2, "fillOpacity": 10, "spanNulls": true, "showPoints": "never" }
+        },
+        "overrides": [
+          { "matcher": { "id": "byRegexp", "options": "peak.*" }, "properties": [{ "id": "custom.lineStyle", "value": { "dash": [10, 10], "fill": "dash" } }] }
+        ]
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "expr": "max by (instance) (access_server_log_queue_bytes{instance=~\"$instance\"})",
+          "legendFormat": "current · {{instance}}",
+          "refId": "A"
+        },
+        {
+          "expr": "max by (instance) (access_server_log_queue_peak_bytes{instance=~\"$instance\"})",
+          "legendFormat": "peak · {{instance}}",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 34,
+      "type": "timeseries",
+      "title": "Log losses",
+      "description": "队列丢弃(queue_full / allocation / formatting)、appender 操作失败、appender 丢弃记录。正常应全部为 0。",
+      "datasource": { "type": "prometheus", "uid": "prometheus-2" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 65 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": { "drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 2, "fillOpacity": 0, "spanNulls": true, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "expr": "sum by (reason) (rate(access_server_log_queue_failures_total{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "queue · {{reason}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (operation) (rate(access_server_log_appender_failures_total{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "appender · {{operation}}",
+          "refId": "B"
+        },
+        {
+          "expr": "sum(rate(access_server_log_appender_records_total{result=\"dropped\",instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "appender · dropped",
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "id": 35,
+      "type": "timeseries",
+      "title": "Log appender throughput",
+      "description": "主 appender 写盘字节速率。",
+      "datasource": { "type": "prometheus", "uid": "prometheus-2" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 73 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "custom": { "drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 2, "fillOpacity": 10, "spanNulls": true, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "expr": "sum by (instance) (rate(access_server_log_appender_written_bytes_total{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "{{instance}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 36,
+      "type": "timeseries",
+      "title": "Log appender records by result",
+      "description": "主 appender 记录结果:written / dropped。",
+      "datasource": { "type": "prometheus", "uid": "prometheus-2" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 73 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": { "drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 2, "fillOpacity": 0, "spanNulls": true, "showPoints": "never" }
+        },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "written" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } }] },
+          { "matcher": { "id": "byName", "options": "dropped" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }] }
+        ]
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "expr": "sum by (result) (rate(access_server_log_appender_records_total{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "{{result}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 37,
+      "type": "timeseries",
+      "title": "Log queue accepting / metrics available",
+      "description": "队列是否接收(1/0)以及 logger+appender 指标是否可用(1/0)。",
+      "datasource": { "type": "prometheus", "uid": "prometheus-2" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 73 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "max": 1,
+          "custom": { "drawStyle": "line", "lineInterpolation": "stepAfter", "lineWidth": 2, "fillOpacity": 10, "spanNulls": true, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "expr": "min by (instance) (access_server_log_queue_accepting{instance=~\"$instance\"})",
+          "legendFormat": "accepting · {{instance}}",
+          "refId": "A"
+        },
+        {
+          "expr": "min by (instance) (access_server_log_metrics_available{instance=~\"$instance\"})",
+          "legendFormat": "metrics available · {{instance}}",
+          "refId": "B"
+        }
+      ]
+    },
+    { "id": 105, "type": "row", "title": "CAT telemetry", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 81 }, "panels": [] },
+    {
+      "id": 38,
+      "type": "timeseries",
+      "title": "CAT messages by result",
+      "description": "CAT 消息提交与投递:submitted / sent。",
+      "datasource": { "type": "prometheus", "uid": "prometheus-2" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 82 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": { "drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 2, "fillOpacity": 0, "spanNulls": true, "showPoints": "never" }
+        },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "sent" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } }] },
+          { "matcher": { "id": "byName", "options": "submitted" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "blue" } }] }
+        ]
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "expr": "sum by (result) (rate(access_server_cat_messages_total{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "{{result}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 39,
+      "type": "timeseries",
+      "title": "CAT dropped events",
+      "description": "CAT 丢弃事件速率(仅显示速率 >0 的序列):queue_full / encode / aggregate_* / heartbeat_* 等。",
+      "datasource": { "type": "prometheus", "uid": "prometheus-2" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 82 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": { "drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 2, "fillOpacity": 0, "spanNulls": true, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "expr": "sum by (reason) (rate(access_server_cat_dropped_events_total{instance=~\"$instance\"}[$__rate_interval])) > 0",
+          "legendFormat": "{{reason}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 40,
+      "type": "timeseries",
+      "title": "CAT sent bytes",
+      "description": "已投递到 collector 的字节速率。",
+      "datasource": { "type": "prometheus", "uid": "prometheus-2" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 82 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "custom": { "drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 2, "fillOpacity": 10, "spanNulls": true, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "expr": "sum by (instance) (rate(access_server_cat_sent_bytes_total{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "{{instance}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 41,
+      "type": "timeseries",
+      "title": "CAT queue messages by kind",
+      "description": "占用队列预算的消息数:all / system。",
+      "datasource": { "type": "prometheus", "uid": "prometheus-2" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 90 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 2, "fillOpacity": 10, "spanNulls": true, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "expr": "max by (instance, kind) (access_server_cat_queue_messages{instance=~\"$instance\"})",
+          "legendFormat": "{{instance}} · {{kind}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 42,
+      "type": "timeseries",
+      "title": "CAT queue bytes by kind",
+      "description": "占用队列预算的字节数:all / system。",
+      "datasource": { "type": "prometheus", "uid": "prometheus-2" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 90 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": { "drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 2, "fillOpacity": 10, "spanNulls": true, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "expr": "max by (instance, kind) (access_server_cat_queue_bytes{instance=~\"$instance\"})",
+          "legendFormat": "{{instance}} · {{kind}}",
+          "refId": "A"
+        }
+      ]
+    },
+    { "id": 106, "type": "row", "title": "Process", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 98 }, "panels": [] },
+    {
+      "id": 43,
+      "type": "timeseries",
+      "title": "Process CPU (cores)",
+      "description": "进程 CPU 占用(核数),含用户 + 内核时间:rate(access_server_process_cpu_seconds_total)。",
+      "datasource": { "type": "prometheus", "uid": "prometheus-2" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 99 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": { "drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 2, "fillOpacity": 10, "spanNulls": true, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "expr": "rate(access_server_process_cpu_seconds_total{instance=~\"$instance\"}[$__rate_interval])",
+          "legendFormat": "{{instance}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 44,
+      "type": "timeseries",
+      "title": "Process memory",
+      "description": "进程内存:常驻(RSS)与虚拟(VSZ)字节,来自 /proc/self/status。",
+      "datasource": { "type": "prometheus", "uid": "prometheus-2" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 99 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "min": 0,
+          "custom": { "drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 2, "fillOpacity": 10, "spanNulls": true, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "expr": "max by (instance) (access_server_process_resident_memory_bytes{instance=~\"$instance\"})",
+          "legendFormat": "{{instance}} · resident",
+          "refId": "A"
+        },
+        {
+          "expr": "max by (instance) (access_server_process_virtual_memory_bytes{instance=~\"$instance\"})",
+          "legendFormat": "{{instance}} · virtual",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 45,
+      "type": "timeseries",
+      "title": "Process threads",
+      "description": "进程线程数(/proc/self/stat num_threads)。",
+      "datasource": { "type": "prometheus", "uid": "prometheus-2" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 99 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": { "drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 2, "fillOpacity": 10, "spanNulls": true, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "expr": "max by (instance) (access_server_process_threads{instance=~\"$instance\"})",
+          "legendFormat": "{{instance}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 46,
+      "type": "timeseries",
+      "title": "Process open FDs vs limit",
+      "description": "进程打开的文件描述符数与 RLIMIT_NOFILE 上限;接近上限通常意味着连接泄漏。",
+      "datasource": { "type": "prometheus", "uid": "prometheus-2" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 107 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": { "drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 2, "fillOpacity": 10, "spanNulls": true, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "expr": "max by (instance) (access_server_process_open_fds{instance=~\"$instance\"})",
+          "legendFormat": "{{instance}} · open",
+          "refId": "A"
+        },
+        {
+          "expr": "max by (instance) (access_server_process_max_fds{instance=~\"$instance\"})",
+          "legendFormat": "{{instance}} · limit",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 47,
+      "type": "timeseries",
+      "title": "Process uptime",
+      "description": "进程已运行时长:time() − access_server_process_start_time_seconds。",
+      "datasource": { "type": "prometheus", "uid": "prometheus-2" },
+      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 107 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "custom": { "drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 2, "fillOpacity": 10, "spanNulls": true, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "expr": "time() - max by (instance) (access_server_process_start_time_seconds{instance=~\"$instance\"})",
+          "legendFormat": "{{instance}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 48,
+      "type": "stat",
+      "title": "Process metrics",
+      "description": "进程资源指标是否可用(/proc 读取成功)。",
+      "datasource": { "type": "prometheus", "uid": "prometheus-2" },
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 107 },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "1": { "text": "Available", "color": "green", "index": 0 },
+                "0": { "text": "Unavailable", "color": "red", "index": 1 }
+              }
+            }
+          ],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "expr": "max(access_server_process_metrics_available{instance=~\"$instance\"})",
+          "legendFormat": "process metrics",
+          "refId": "A"
+        }
+      ]
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["access-gateway", "access-server"],
+  "templating": {
+    "list": [
+      {
+        "current": { "selected": true, "text": ["All"], "value": ["$__all"] },
+        "datasource": { "type": "prometheus", "uid": "prometheus-2" },
+        "definition": "label_values(access_server_requests_total, instance)",
+        "hide": 0,
+        "includeAll": true,
+        "allValue": ".*",
+        "label": "Instance",
+        "multi": true,
+        "name": "instance",
+        "options": [],
+        "query": {
+          "query": "label_values(access_server_requests_total, instance)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": { "from": "now-3h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Access Server · Runtime Health",
+  "uid": "access-server-runtime",
+  "version": 1,
+  "weekStart": ""
+}
