@@ -9,7 +9,7 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 submodule="${repo_root}/third_party/fiber-gateway-cpp"
-pinned="e9a804053b14c206ed4a4fcd3b89e9a6789387a2"
+pinned="7e6930fc6b432c9f5575d969d14d249a2587dc0d"
 
 cd "${submodule}"
 rev="$(git rev-parse HEAD)"
