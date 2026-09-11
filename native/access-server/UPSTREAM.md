@@ -10,16 +10,16 @@ HTTP, JSON/script, Nacos, CAT, and Prometheus modules are consumed from the pinn
 historical application import revision.
 
 The current reusable Fiber dependency is pinned at
-`7e6930fc6b432c9f5575d969d14d249a2587dc0d`. The pinned revision carries no repository-owned
+`7da6926ee410fcd6ccdd9b50c44c5638cbc61eb8`. The pinned revision carries no repository-owned
 compatibility patches: the four defects that previously required patches under `native/patches/`
 are fixed inside this reviewed range (see `native/patches/README.md` for the retired-patch map).
 The repository-owned regression
 `ProxyExecutorTest.StreamsChunkedUpstreamWhoseFramingArrivesSeparatelyFromPayload` still guards
 the HTTP/1 chunked split-framing fix from the application side.
 The reviewed update range from the previous pin is
-`e9a804053b14c206ed4a4fcd3b89e9a6789387a2..7e6930fc6b432c9f5575d969d14d249a2587dc0d`.
+`7e6930fc6b432c9f5575d969d14d249a2587dc0d..7da6926ee410fcd6ccdd9b50c44c5638cbc61eb8`.
 The complete reviewed range from the original import pin is
-`0fda7764bf94944aca4b674ab5ab311184703118..7e6930fc6b432c9f5575d969d14d249a2587dc0d`.
+`0fda7764bf94944aca4b674ab5ab311184703118..7da6926ee410fcd6ccdd9b50c44c5638cbc61eb8`.
 It removes the obsolete upstream `apps/access-server`, adds Nacos hostname and bounded service
 status APIs, system resolver/multi-nameserver support, client TLS identities and HTTP/1 pool
 affinity, a cancellable Happy Eyeballs connector, and a reusable public HTTP gzip response writer
@@ -98,7 +98,13 @@ test harness (detached pool handlers and the idle h2 client close watcher are aw
 teardown) and records the drain use-after-free and an ASan sweep in its defect-report docs.
 Access-server needed no source adaptation for this update: every change is internal to the
 pinned modules or additive, and the only public-header addition it does not yet configure is
-the default-off idle retirement option. No application source was synchronized back from
+the default-off idle retirement option. The latest reviewed delta (from pin
+`7e6930fc6b432c9f5575d969d14d249a2587dc0d`) flips that default on:
+`Http3ServerOptions::idle_connection_timeout` now defaults to 70 seconds, so sessions sitting
+with no request running are retired with a GOAWAY out of the box (zero still disables it),
+matching the HTTP/2 endpoint's idle retirement. Access-server stages its HTTP/3 endpoint
+without configuring the option, so idle HTTP/3 sessions are retired after 70 seconds by
+default; no source adaptation was needed. No application source was synchronized back from
 upstream as part of this dependency update; the historical import revision above remains
 unchanged.
 

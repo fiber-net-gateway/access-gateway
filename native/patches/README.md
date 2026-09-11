@@ -1,7 +1,7 @@
 # Native compatibility patches
 
 Temporary, narrowly scoped patches applied on top of the pinned
-`third_party/fiber-gateway-cpp` submodule revision (`7e6930fc6b432c9f5575d969d14d249a2587dc0d`,
+`third_party/fiber-gateway-cpp` submodule revision (`7da6926ee410fcd6ccdd9b50c44c5638cbc61eb8`,
 see `native/access-server/UPSTREAM.md`). Each patch exists because the pinned
 revision contains a defect that blocks this product, the fix belongs upstream,
 and waiting for a pin update is not acceptable.
