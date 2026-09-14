@@ -5,6 +5,7 @@
 
 #include <bit>
 #include <charconv>
+#include <expected>
 #include <limits>
 #include <unordered_set>
 #include <utility>
@@ -622,9 +623,14 @@ std::optional<std::int32_t> parse_java_port(std::string_view value) noexcept {
     return port;
 }
 
-std::optional<AccessUpstreamInstance> compile_java_http_host(std::string_view value) {
+enum class JavaHttpHostError : std::uint8_t {
+    Invalid,
+    HttpsAddressLiteral,
+};
+
+std::expected<AccessUpstreamInstance, JavaHttpHostError> compile_java_http_host(std::string_view value) {
     if (value.empty()) {
-        return std::nullopt;
+        return std::unexpected(JavaHttpHostError::Invalid);
     }
     std::string_view host = value;
     std::string_view scheme_name;
@@ -639,20 +645,20 @@ std::optional<AccessUpstreamInstance> compile_java_http_host(std::string_view va
     if (colon > 0 && colon != std::string_view::npos) {
         const auto port = parse_java_port(host.substr(colon + 1));
         if (!port) {
-            return std::nullopt;
+            return std::unexpected(JavaHttpHostError::Invalid);
         }
         configured_port = *port;
         host = host.substr(0, colon);
     }
     if (host.empty()) {
-        return std::nullopt;
+        return std::unexpected(JavaHttpHostError::Invalid);
     }
 
     const bool https = scheme_name.empty() ? configured_port == 443 : ascii_iequals(scheme_name, "https");
     const std::uint16_t default_port = https ? 443 : 80;
     const std::int64_t real_port = configured_port <= 0 ? default_port : configured_port;
     if (real_port > std::numeric_limits<std::uint16_t>::max()) {
-        return std::nullopt;
+        return std::unexpected(JavaHttpHostError::Invalid);
     }
 
     const std::uint16_t port = static_cast<std::uint16_t>(real_port);
@@ -664,12 +670,14 @@ std::optional<AccessUpstreamInstance> compile_java_http_host(std::string_view va
     const auto scheme =
             https ? http::HttpConnectionGroupKey::Scheme::Https : http::HttpConnectionGroupKey::Scheme::Http;
     net::IpAddress ip;
-    if (net::IpAddress::parse(host, ip)) {
-        return AccessUpstreamInstance(http::HttpConnectionGroupKey::from_ip(ip, port, scheme), std::move(authority));
+    if (https && net::IpAddress::parse(host, ip)) {
+        // SNI cannot carry an address literal (RFC 6066 §3), so an HTTPS
+        // upstream must be named; there is no address-literal TLS identity.
+        return std::unexpected(JavaHttpHostError::HttpsAddressLiteral);
     }
-    auto key = http::HttpConnectionGroupKey::from_name(host, port, scheme);
+    auto key = http::HttpConnectionGroupKey::make(host, port, scheme);
     if (!key) {
-        return std::nullopt;
+        return std::unexpected(JavaHttpHostError::Invalid);
     }
     return AccessUpstreamInstance(std::move(*key), std::move(authority));
 }
@@ -878,10 +886,14 @@ std::expected<CompiledRoute, AccessConfigError> compile_route(const RouteConfig 
             std::vector<AccessUpstreamInstance> addresses;
             addresses.reserve(source.addresses.size());
             for (const std::optional<std::string> &address: source.addresses) {
-                auto compiled_address = address ? compile_java_http_host(*address) : std::nullopt;
+                auto compiled_address =
+                        address ? compile_java_http_host(*address) : std::unexpected(JavaHttpHostError::Invalid);
                 if (!compiled_address) {
-                    return std::unexpected(route_error(AccessConfigErrorCode::InvalidField, route_index, "addresses",
-                                                       "invalid HTTP host"));
+                    return std::unexpected(
+                            route_error(AccessConfigErrorCode::InvalidField, route_index, "addresses",
+                                        compiled_address.error() == JavaHttpHostError::HttpsAddressLiteral
+                                                ? "HTTPS upstreams must use a hostname, not an address literal"
+                                                : "invalid HTTP host"));
                 }
                 addresses.push_back(std::move(*compiled_address));
             }

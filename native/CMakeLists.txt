@@ -77,16 +77,8 @@ endif()
 add_subdirectory("${ACCESS_GATEWAY_FIBER_SOURCE_DIR}"
     "${CMAKE_BINARY_DIR}/fiber-gateway-cpp")
 
-# Fiber pins and populates zlib but deliberately leaves it out of its target
-# graph until an in-tree consumer needs gzip. Reuse that exact source checkout
-# for the repository-owned access-server instead of resolving a system or
-# second downloaded copy.
-set(ZLIB_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-set(SKIP_INSTALL_ALL ON CACHE BOOL "" FORCE)
-if (NOT TARGET zlibstatic)
-    add_subdirectory("${FIBER_ZLIB_SOURCE_DIR}"
-        "${CMAKE_BINARY_DIR}/zlib-runtime" EXCLUDE_FROM_ALL)
-endif()
+# Fiber carries the zlib 1.3.2 deflate core in-tree (compiled into fiber_lib and the optional
+# fiber_http_compression target); no external or downloaded zlib is part of the build anymore.
 
 # Fiber detects IPO inside its subdirectory. Promote the target result into this directory so the
 # repository-owned application and test targets use compatible compile and link settings.

@@ -3,11 +3,12 @@
 #include <fiber/http/Http1ClientConnection.h>
 #include <fiber/http/HttpConnectionGroupKey.h>
 #include <fiber/http_script/HttpTarget.h>
-#include <fiber/net/IpAddress.h>
 
 #include <cstdint>
 #include <new>
 #include <optional>
+#include <string>
+#include <string_view>
 #include <utility>
 
 namespace fiber::access_server {
@@ -15,13 +16,16 @@ namespace {
 
 class AccessHttpUpstreamConnection final : public http_script::HttpUpstreamConnection {
 public:
-    explicit AccessHttpUpstreamConnection(ProxyUpstreamConnection connection) noexcept :
-        connection_(std::move(connection)) {}
+    AccessHttpUpstreamConnection(ProxyUpstreamConnection connection, std::string host_header) noexcept :
+        connection_(std::move(connection)), host_header_(std::move(host_header)) {}
 
     [[nodiscard]] http::Http1ClientConnection &connection() noexcept override { return *connection_.connection; }
 
+    [[nodiscard]] std::string_view host_header() const noexcept override { return host_header_; }
+
 private:
     ProxyUpstreamConnection connection_;
+    std::string host_header_;
 };
 
 std::optional<http::HttpConnectionGroupKey> connection_key(const http_script::HttpTargetSpec &target) noexcept {
@@ -31,11 +35,30 @@ std::optional<http::HttpConnectionGroupKey> connection_key(const http_script::Ht
     const std::uint16_t port = target.port != 0 ? target.port : static_cast<std::uint16_t>(target.tls ? 443 : 80);
     const auto scheme =
             target.tls ? http::HttpConnectionGroupKey::Scheme::Https : http::HttpConnectionGroupKey::Scheme::Http;
-    net::IpAddress ip;
-    if (net::IpAddress::parse(target.name, ip)) {
-        return http::HttpConnectionGroupKey::from_ip(ip, port, scheme);
+    // An https URL target must carry a name; an address literal is rejected here
+    // (and earlier, at script compile time) because SNI cannot carry a literal.
+    return http::HttpConnectionGroupKey::make(target.name, port, scheme);
+}
+
+// `host[:port]` for a URL target, mirroring what a client puts in Host: IPv6
+// literals are bracketed and the scheme's default port is omitted.
+std::string url_target_authority(const http_script::HttpTargetSpec &target) {
+    const bool v6_literal = target.name.find(':') != std::string::npos;
+    std::string authority;
+    authority.reserve(target.name.size() + 8);
+    if (v6_literal) {
+        authority.push_back('[');
     }
-    return http::HttpConnectionGroupKey::from_name(target.name, port, scheme);
+    authority.append(target.name);
+    if (v6_literal) {
+        authority.push_back(']');
+    }
+    const std::uint16_t default_port = target.tls ? 443 : 80;
+    if (target.port != 0 && target.port != default_port) {
+        authority.push_back(':');
+        authority.append(std::to_string(target.port));
+    }
+    return authority;
 }
 
 } // namespace
@@ -59,7 +82,7 @@ AccessHttpScriptServices::acquire(const http_script::HttpTargetSpec &target,
     if (!acquired) {
         co_return std::unexpected(acquired.error().io_error);
     }
-    auto *holder = new (std::nothrow) AccessHttpUpstreamConnection(std::move(*acquired));
+    auto *holder = new (std::nothrow) AccessHttpUpstreamConnection(std::move(*acquired), url_target_authority(target));
     if (!holder) {
         co_return std::unexpected(common::IoErr::NoMem);
     }

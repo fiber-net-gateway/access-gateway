@@ -13,8 +13,6 @@
 #include <string>
 #include <string_view>
 
-#include <fiber/http/HttpConnectionGroupKey.h>
-
 namespace fiber::net {
 class TlsCredential;
 class TrustStore;
@@ -25,6 +23,13 @@ namespace fiber::access_server {
 // Connection-bound route TLS settings. The compiled trust store is owned by
 // the same immutable route snapshot that owns this profile, so a request which
 // pins an old snapshot can still finish while a newer generation is published.
+//
+// Pool grouping note: profiles no longer partition the upstream connection
+// pool. HttpConnectionGroupKey dropped its affinity discriminator, so two
+// published generations of a profile over the same host:port share one pool
+// group while the old snapshot drains; an idle connection dialed under the old
+// effective TLS parameters may be reused by a request pinned to the new
+// generation (self-healing as keepalive connections retire).
 class UpstreamTlsTransportProfile final {
 public:
     UpstreamTlsTransportProfile(UpstreamTlsTransportProfile &&other) noexcept;
@@ -35,15 +40,12 @@ public:
     UpstreamTlsTransportProfile &operator=(const UpstreamTlsTransportProfile &) = default;
 
     [[nodiscard]] std::uint64_t generation() const noexcept { return generation_; }
-    [[nodiscard]] std::uint64_t pool_affinity() const noexcept { return pool_affinity_; }
     [[nodiscard]] UpstreamTlsVerificationMode verification() const noexcept { return verification_; }
     [[nodiscard]] const net::TrustStore *trust_store() const noexcept { return trust_store_.get(); }
     [[nodiscard]] std::string_view server_name() const noexcept { return server_name_; }
     [[nodiscard]] std::string_view verify_name() const noexcept { return verify_name_; }
     [[nodiscard]] std::string_view client_identity_ref() const noexcept { return client_identity_ref_; }
     [[nodiscard]] const net::TlsCredential *client_credential() const noexcept;
-    [[nodiscard]] std::optional<http::HttpConnectionGroupKey>
-    connection_key(const http::HttpConnectionGroupKey &base) const noexcept;
 
 private:
     friend std::expected<UpstreamTlsTransportProfile, AccessConfigError>
@@ -60,7 +62,6 @@ private:
     std::string verify_name_;
     std::string client_identity_ref_;
     std::uint64_t generation_ = 0;
-    std::uint64_t pool_affinity_ = 0;
     UpstreamTlsVerificationMode verification_ = UpstreamTlsVerificationMode::Inherit;
 };
 

@@ -20,6 +20,7 @@ struct EventDescription {
 constexpr std::array<EventDescription, static_cast<std::size_t>(AccessDiscoveryMetricEvent::Count)> kEvents{
         EventDescription{"update", "success", "changed"},
         EventDescription{"update", "ignored", "unchanged"},
+        EventDescription{"update", "ignored", "invalid_upstream"},
         EventDescription{"retire", "retired", "released"},
         EventDescription{"retire", "retired", "subscription_closed"},
         EventDescription{"retire", "retired", "shutdown"},

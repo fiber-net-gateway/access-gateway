@@ -58,12 +58,12 @@ bool identifiable_tls_failure(const http::HttpConnectionGroupKey &key, UpstreamT
 
 // TLS settings for dialing `key`. Every name the result borrows must outlive the
 // connect() call it is passed to: the policy views reference caller-owned
-// storage, and the IP-identity fallback renders into `verify_name_storage`,
-// which lives in the caller's coroutine frame. Exported so tests can assert the
-// exact TLS parameters acquisition derives for a key/policy pair.
+// storage. An HTTPS group key always carries a named host (literal hosts are
+// unrepresentable), which becomes the SNI name unless the policy overrides it.
+// Exported so tests can assert the exact TLS parameters acquisition derives for
+// a key/policy pair.
 std::optional<http::HttpClientTlsOptions> upstream_connection_tls(const http::HttpConnectionGroupKey &key,
-                                                                  UpstreamTlsClientPolicyView tls_policy,
-                                                                  std::string &verify_name_storage) {
+                                                                  UpstreamTlsClientPolicyView tls_policy) {
     if (key.scheme() != http::HttpConnectionGroupKey::Scheme::Https) {
         return std::nullopt;
     }
@@ -73,16 +73,11 @@ std::optional<http::HttpClientTlsOptions> upstream_connection_tls(const http::Ht
     tls.security.trust_store = tls_policy.trust_store;
     if (!tls_policy.server_name.empty()) {
         tls.server_name = tls_policy.server_name;
-    } else if (key.is_name()) {
-        tls.server_name = key.host_name();
+    } else {
+        tls.server_name = key.host();
     }
     if (!tls_policy.verify_name.empty()) {
         tls.verify_name = tls_policy.verify_name;
-    } else if (key.is_ip() && tls.security.verify_peer && tls_policy.server_name.empty()) {
-        // IP literals are authenticated as IP identities without emitting an
-        // IP-valued SNI extension.
-        verify_name_storage = key.ip_address().to_string();
-        tls.verify_name = verify_name_storage;
     }
     tls.security.credential = tls_policy.client_credential;
     return tls;
@@ -122,15 +117,16 @@ acquire_proxy_upstream_connection(http::StealableHttp1ConnectionPoolSet &pool, P
 
     std::vector<net::IpAddress> resolved;
     std::span<const net::IpAddress> addresses;
-    if (key.is_ip()) {
-        addresses = std::span(&key.ip_address(), 1);
+    if (key.has_ip()) {
+        // A literal host or an explicitly pinned dial address: no resolution needed.
+        addresses = std::span(&key.ip(), 1);
     } else {
         if (!dns_resolver.resolve) {
             ++output.observation.dns_unavailable;
             co_return std::unexpected(error(ProxyConnectErrorCode::Resolve, "upstream DNS resolver is unavailable",
                                             common::IoErr::NotFound, std::move(output.observation)));
         }
-        auto result = co_await dns_resolver.resolve(dns_resolver.context, key.host_name());
+        auto result = co_await dns_resolver.resolve(dns_resolver.context, key.host());
         if (!result) {
             ++output.observation.dns_failure;
             co_return std::unexpected(error(ProxyConnectErrorCode::Resolve, "upstream DNS resolution failed",
@@ -152,8 +148,7 @@ acquire_proxy_upstream_connection(http::StealableHttp1ConnectionPoolSet &pool, P
     output.observation.connect_candidates = static_cast<std::uint16_t>(
             std::min<std::size_t>(addresses.size(), std::numeric_limits<std::uint16_t>::max()));
 
-    std::string verify_name_storage;
-    const std::optional<http::HttpClientTlsOptions> tls = upstream_connection_tls(key, tls_policy, verify_name_storage);
+    const std::optional<http::HttpClientTlsOptions> tls = upstream_connection_tls(key, tls_policy);
 
     if (happy_eyeballs.enabled && addresses.size() > 1) {
         if (addresses.size() > net::kHappyEyeballsMaxAddresses) {

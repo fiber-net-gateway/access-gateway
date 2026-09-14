@@ -94,6 +94,7 @@ struct AccessNacosTransportStatus {
 enum class AccessDiscoveryMetricEvent : std::uint8_t {
     ServiceUpdateChanged,
     ServiceUpdateUnchanged,
+    SnapshotInvalidUpstream,
     ServiceRetiredReleased,
     ServiceRetiredSubscriptionClosed,
     ServiceRetiredShutdown,

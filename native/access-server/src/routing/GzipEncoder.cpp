@@ -1,28 +1,29 @@
 #include "GzipEncoder.h"
 
-#include <algorithm>
-#include <array>
 #include <cstddef>
-#include <limits>
+#include <cstdint>
+#include <memory>
+#include <span>
+#include <vector>
 
-#include <zlib.h>
+#include <fiber/common/IoError.h>
+#include <fiber/common/mem/BufPool.h>
+#include <fiber/compression/GzipEncoder.h>
 
 namespace fiber::access_server {
 namespace {
 
 constexpr std::size_t kOutputChunkBytes = 16U << 10U;
 
-GzipEncodeError gzip_error(int code) noexcept {
-    return code == Z_MEM_ERROR ? GzipEncodeError::NoMemory : GzipEncodeError::CompressionFailed;
+GzipEncodeError gzip_error(common::IoErr error) noexcept {
+    return error == common::IoErr::NoMem ? GzipEncodeError::NoMemory : GzipEncodeError::CompressionFailed;
 }
 
-void append_output(std::string &output, const std::array<unsigned char, kOutputChunkBytes> &buffer,
-                   const z_stream &stream) {
-    const std::size_t produced = buffer.size() - stream.avail_out;
-    if (produced != 0) {
-        output.append(reinterpret_cast<const char *>(buffer.data()), produced);
-    }
-}
+struct EncoderDeleter {
+    void operator()(compression::GzipEncoder *encoder) const noexcept { std::destroy_at(encoder); }
+};
+
+using OwnedEncoder = std::unique_ptr<compression::GzipEncoder, EncoderDeleter>;
 
 } // namespace
 
@@ -31,57 +32,41 @@ GzipEncodeResult gzip_encode(std::string_view input, int level) {
         return std::unexpected(GzipEncodeError::InvalidLevel);
     }
 
-    z_stream stream{};
-    int result = deflateInit2(&stream, level, Z_DEFLATED, MAX_WBITS + 16, 8, Z_DEFAULT_STRATEGY);
-    if (result != Z_OK) {
-        return std::unexpected(gzip_error(result));
+    // Publication-time helper, not a hot path: a private pool backs the
+    // encoder's single state allocation and is released with it.
+    mem::BufPool pool;
+    auto created = compression::GzipEncoder::create(pool, compression::GzipEncoderOptions{level});
+    if (!created) {
+        return std::unexpected(gzip_error(created.error()));
     }
-
-    gz_header header{};
-    header.os = 255;
-    result = deflateSetHeader(&stream, &header);
-    if (result != Z_OK) {
-        (void) deflateEnd(&stream);
-        return std::unexpected(gzip_error(result));
-    }
+    const OwnedEncoder encoder{*created};
 
     std::string output;
-    std::array<unsigned char, kOutputChunkBytes> buffer{};
+    std::vector<std::uint8_t> buffer(kOutputChunkBytes);
+    const auto output_space = [&buffer]() noexcept { return std::span<std::uint8_t>(buffer.data(), buffer.size()); };
+
     std::size_t consumed = 0;
     while (consumed < input.size()) {
-        const std::size_t remaining = input.size() - consumed;
-        const std::size_t chunk = std::min<std::size_t>(remaining, std::numeric_limits<uInt>::max());
-        stream.next_in = reinterpret_cast<Bytef *>(const_cast<char *>(input.data() + consumed));
-        stream.avail_in = static_cast<uInt>(chunk);
-        while (stream.avail_in != 0) {
-            stream.next_out = buffer.data();
-            stream.avail_out = static_cast<uInt>(buffer.size());
-            result = deflate(&stream, Z_NO_FLUSH);
-            if (result != Z_OK) {
-                (void) deflateEnd(&stream);
-                return std::unexpected(gzip_error(result));
-            }
-            append_output(output, buffer, stream);
+        const std::span<const std::uint8_t> pending{reinterpret_cast<const std::uint8_t *>(input.data()) + consumed,
+                                                    input.size() - consumed};
+        const auto step = encoder->write(pending, output_space());
+        if (!step) {
+            return std::unexpected(gzip_error(step.error()));
         }
-        consumed += chunk;
+        output.append(reinterpret_cast<const char *>(buffer.data()), step->written);
+        consumed += step->consumed;
     }
 
-    do {
-        stream.next_out = buffer.data();
-        stream.avail_out = static_cast<uInt>(buffer.size());
-        result = deflate(&stream, Z_FINISH);
-        if (result != Z_OK && result != Z_STREAM_END) {
-            (void) deflateEnd(&stream);
-            return std::unexpected(gzip_error(result));
+    for (;;) {
+        const auto step = encoder->finish(output_space());
+        if (!step) {
+            return std::unexpected(gzip_error(step.error()));
         }
-        append_output(output, buffer, stream);
-    } while (result != Z_STREAM_END);
-
-    result = deflateEnd(&stream);
-    if (result != Z_OK) {
-        return std::unexpected(gzip_error(result));
+        output.append(reinterpret_cast<const char *>(buffer.data()), step->written);
+        if (step->status == compression::EncodeStatus::Finished) {
+            return output;
+        }
     }
-    return output;
 }
 
 } // namespace fiber::access_server

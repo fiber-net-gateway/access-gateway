@@ -664,13 +664,11 @@ run_downstream(fiber::event::EventLoop *loop, const fiber::access_server::RouteC
 // Serves the access handler over plaintext HTTP/2 with prior knowledge, so the
 // extended-CONNECT (RFC 8441) downstream path runs through the real
 // ServerHttp2Request parsing without needing TLS material.
-fiber::async::DetachedTask start_h2_downstream(fiber::event::EventLoop *loop,
-                                               const fiber::access_server::RouteConfigStore *store,
-                                               fiber::access_server::AccessProxyAdapter proxy_adapter,
-                                               fiber::access_server::AccessServerMetrics *metrics,
-                                               std::promise<std::uint16_t> *port_promise,
-                                               std::promise<TestHttpServer> *server_promise,
-                                               fiber::cat::CatClient *cat_client = nullptr) {
+fiber::async::DetachedTask
+start_h2_downstream(fiber::event::EventLoop *loop, const fiber::access_server::RouteConfigStore *store,
+                    fiber::access_server::AccessProxyAdapter proxy_adapter,
+                    fiber::access_server::AccessServerMetrics *metrics, std::promise<std::uint16_t> *port_promise,
+                    std::promise<TestHttpServer> *server_promise, fiber::cat::CatClient *cat_client = nullptr) {
     fiber::http::HttpHandler handler = [store, proxy_adapter, metrics,
                                         cat_client](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
         fiber::access_server::ClientMetadataResolver client_metadata_resolver(
@@ -1039,8 +1037,10 @@ TEST(ProxyExecutorTest, ReturnsStableRedactedTlsErrorForTrustStoreFailure) {
     ASSERT_TRUE(pool.init());
 
     auto config = project_config(443);
+    // A named https upstream: the missing trust store is detected before any
+    // DNS resolution or dial, so no resolver is needed for this failure path.
     (**config.routes->begin()).addresses = {
-            std::optional<std::string>("https://127.0.0.1:443"),
+            std::optional<std::string>("https://tls-upstream.example:443"),
     };
     fiber::access_server::RouteConfigStore store;
     auto published = store.apply("orders", std::move(config));
@@ -1419,9 +1419,9 @@ TEST(ProxyExecutorTest, RetriesAServiceSelectionBeforeSendingRequestHeaders) {
             .port = port,
             .good_host_header = "127.0.0.1:" + std::to_string(port),
             .bad_host_header = "127.0.0.2:" + std::to_string(port),
-            .good_connection_key = fiber::http::HttpConnectionGroupKey::from_ip(
-                    fiber::net::IpAddress::loopback_v4(), port, fiber::http::HttpConnectionGroupKey::Scheme::Http),
-            .bad_connection_key = fiber::http::HttpConnectionGroupKey::from_name(
+            .good_connection_key = fiber::http::HttpConnectionGroupKey::make(
+                    "127.0.0.1", port, fiber::http::HttpConnectionGroupKey::Scheme::Http),
+            .bad_connection_key = fiber::http::HttpConnectionGroupKey::make(
                     "unreachable.example", port, fiber::http::HttpConnectionGroupKey::Scheme::Http),
     };
     fiber::access_server::AccessScriptCompiler scripts;
@@ -1571,12 +1571,10 @@ TEST(ProxyExecutorTest, StopsBeforeConnectionAcquisitionWhenRequestHeadPreparati
             .port = kUnusedPort,
             .good_host_header = "127.0.0.1:1",
             .bad_host_header = "127.0.0.2:1",
-            .good_connection_key =
-                    fiber::http::HttpConnectionGroupKey::from_ip(fiber::net::IpAddress::loopback_v4(), kUnusedPort,
-                                                                 fiber::http::HttpConnectionGroupKey::Scheme::Http),
-            .bad_connection_key =
-                    fiber::http::HttpConnectionGroupKey::from_ip(fiber::net::IpAddress::v4({127, 0, 0, 2}), kUnusedPort,
-                                                                 fiber::http::HttpConnectionGroupKey::Scheme::Http),
+            .good_connection_key = fiber::http::HttpConnectionGroupKey::make(
+                    "127.0.0.1", kUnusedPort, fiber::http::HttpConnectionGroupKey::Scheme::Http),
+            .bad_connection_key = fiber::http::HttpConnectionGroupKey::make(
+                    "127.0.0.2", kUnusedPort, fiber::http::HttpConnectionGroupKey::Scheme::Http),
     };
     fiber::access_server::AccessScriptCompiler scripts;
     fiber::access_server::RouteConfigStore store(scripts.adapter(),
@@ -1652,10 +1650,10 @@ TEST(ProxyExecutorTest, DoesNotPenalizeUpstreamForDownstreamRequestBodyLimit) {
             .port = port,
             .good_host_header = "127.0.0.1:" + std::to_string(port),
             .bad_host_header = "127.0.0.2:" + std::to_string(port),
-            .good_connection_key = fiber::http::HttpConnectionGroupKey::from_ip(
-                    fiber::net::IpAddress::loopback_v4(), port, fiber::http::HttpConnectionGroupKey::Scheme::Http),
-            .bad_connection_key = fiber::http::HttpConnectionGroupKey::from_ip(
-                    fiber::net::IpAddress::v4({127, 0, 0, 2}), port, fiber::http::HttpConnectionGroupKey::Scheme::Http),
+            .good_connection_key = fiber::http::HttpConnectionGroupKey::make(
+                    "127.0.0.1", port, fiber::http::HttpConnectionGroupKey::Scheme::Http),
+            .bad_connection_key = fiber::http::HttpConnectionGroupKey::make(
+                    "127.0.0.2", port, fiber::http::HttpConnectionGroupKey::Scheme::Http),
     };
     fiber::access_server::RouteConfigStore store({}, fiber::access_server::ProxyAddressSelectorFactory{
                                                              .context = &selector_state,
@@ -2155,10 +2153,10 @@ TEST(ProxyExecutorTest, AbortsDownstreamAfterAnUpstreamBodyEndsEarly) {
             .port = port,
             .good_host_header = "127.0.0.1:" + std::to_string(port),
             .bad_host_header = "127.0.0.2:" + std::to_string(port),
-            .good_connection_key = fiber::http::HttpConnectionGroupKey::from_ip(
-                    fiber::net::IpAddress::loopback_v4(), port, fiber::http::HttpConnectionGroupKey::Scheme::Http),
-            .bad_connection_key = fiber::http::HttpConnectionGroupKey::from_ip(
-                    fiber::net::IpAddress::v4({127, 0, 0, 2}), port, fiber::http::HttpConnectionGroupKey::Scheme::Http),
+            .good_connection_key = fiber::http::HttpConnectionGroupKey::make(
+                    "127.0.0.1", port, fiber::http::HttpConnectionGroupKey::Scheme::Http),
+            .bad_connection_key = fiber::http::HttpConnectionGroupKey::make(
+                    "127.0.0.2", port, fiber::http::HttpConnectionGroupKey::Scheme::Http),
     };
     fiber::access_server::RouteConfigStore store({}, fiber::access_server::ProxyAddressSelectorFactory{
                                                              .context = &selector_state,

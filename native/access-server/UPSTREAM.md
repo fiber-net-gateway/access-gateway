@@ -10,16 +10,16 @@ HTTP, JSON/script, Nacos, CAT, and Prometheus modules are consumed from the pinn
 historical application import revision.
 
 The current reusable Fiber dependency is pinned at
-`7da6926ee410fcd6ccdd9b50c44c5638cbc61eb8`. The pinned revision carries no repository-owned
+`0c56be5fc9e9e106a45b219e49739fedfbaf31b1`. The pinned revision carries no repository-owned
 compatibility patches: the four defects that previously required patches under `native/patches/`
 are fixed inside this reviewed range (see `native/patches/README.md` for the retired-patch map).
 The repository-owned regression
 `ProxyExecutorTest.StreamsChunkedUpstreamWhoseFramingArrivesSeparatelyFromPayload` still guards
 the HTTP/1 chunked split-framing fix from the application side.
 The reviewed update range from the previous pin is
-`7e6930fc6b432c9f5575d969d14d249a2587dc0d..7da6926ee410fcd6ccdd9b50c44c5638cbc61eb8`.
+`7da6926ee410fcd6ccdd9b50c44c5638cbc61eb8..0c56be5fc9e9e106a45b219e49739fedfbaf31b1`.
 The complete reviewed range from the original import pin is
-`0fda7764bf94944aca4b674ab5ab311184703118..7da6926ee410fcd6ccdd9b50c44c5638cbc61eb8`.
+`0fda7764bf94944aca4b674ab5ab311184703118..0c56be5fc9e9e106a45b219e49739fedfbaf31b1`.
 It removes the obsolete upstream `apps/access-server`, adds Nacos hostname and bounded service
 status APIs, system resolver/multi-nameserver support, client TLS identities and HTTP/1 pool
 affinity, a cancellable Happy Eyeballs connector, and a reusable public HTTP gzip response writer
@@ -104,7 +104,32 @@ the default-off idle retirement option. The latest reviewed delta (from pin
 with no request running are retired with a GOAWAY out of the box (zero still disables it),
 matching the HTTP/2 endpoint's idle retirement. Access-server stages its HTTP/3 endpoint
 without configuring the option, so idle HTTP/3 sessions are retired after 70 seconds by
-default; no source adaptation was needed. No application source was synchronized back from
+default; no source adaptation was needed. The latest reviewed delta (from pin
+`7da6926ee410fcd6ccdd9b50c44c5638cbc61eb8`) rewrites `HttpConnectionGroupKey` around a single
+`make(host, port, scheme, optional pinned IP)` factory — `from_name`/`from_ip`/`HostKind` are
+gone, and an IP literal combined with Https is rejected because SNI cannot carry a literal
+(RFC 6066 §3). Access-server adapted in three product decisions: static https upstreams that
+resolve to an address literal are now rejected at compile time ("HTTPS upstreams must use a
+hostname, not an address literal"), Nacos instances registered as a 443 address literal dial
+pinned under the sanitized service name as SNI (instances with no DNS-valid TLS name are
+skipped and counted by the new `invalid_upstream` discovery event), and script URL targets
+build the key from the URL host. The delta also removes
+`HttpConnectionPoolAffinity`/`UpstreamTlsTransportProfile` pool isolation: connections are now
+pooled under the base key, so during the window where a pool still holds leases created under
+an older TLS profile generation, requests may reuse a connection negotiated with the previous
+TLS parameters. The window is bounded by pool draining and self-heals on the next dial; an
+upstream follow-up is planned to restore a discriminator. zlib 1.3.2's deflate core moves
+in-tree (`src/compression/`, compiled into `fiber_lib`, with the streaming
+`fiber/compression/GzipEncoder.h` public header), removing
+`fiber_prepare_zlib_target()`/`FIBER_ZLIB_SOURCE_DIR`/`ZLIB::ZLIBSTATIC`; repository gzip
+encoding now uses the streaming encoder and tests verify round-trips through the
+`FiberZlibReference` reference objects. `http_script::HttpUpstreamConnection` gains a
+`host_header()` pure virtual that access-server implements with the URL-target authority.
+The remaining delta items are internal to the pinned modules: persistent epoll in
+edge-triggered mode, nginx-style posted-next continuation scheduling, TLS record padding
+across nodes, HTTP/1 header timeouts counted from the first byte, idle upstream connections
+closed by the peer dropped from the pool, and the QUIC endpoint error-teardown lifecycle. No
+application source was synchronized back from
 upstream as part of this dependency update; the historical import revision above remains
 unchanged.
 

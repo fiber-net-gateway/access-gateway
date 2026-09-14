@@ -1,12 +1,8 @@
 #include "UpstreamTlsTransportProfile.h"
 
-#include <algorithm>
-#include <array>
 #include <memory>
 #include <string>
 #include <utility>
-
-#include <openssl/sha.h>
 
 #include <fiber/net/IpAddress.h>
 #include <fiber/net/TrustStore.h>
@@ -93,60 +89,6 @@ std::string ascii_lower(std::string_view value) {
     return result;
 }
 
-void append_u64(std::string &output, std::uint64_t value) {
-    for (int shift = 56; shift >= 0; shift -= 8) {
-        output.push_back(static_cast<char>((value >> shift) & 0xffU));
-    }
-}
-
-void append_field(std::string &output, std::string_view value) {
-    append_u64(output, value.size());
-    output.append(value);
-}
-
-std::uint64_t profile_affinity(const RouteUpstreamTlsConfig &config) {
-    const std::string_view ca_pem = config.ca_pem ? std::string_view(*config.ca_pem) : std::string_view{};
-    const std::string_view server_name =
-            config.server_name ? std::string_view(*config.server_name) : std::string_view{};
-    const std::string_view verify_name =
-            config.verify_name ? std::string_view(*config.verify_name) : std::string_view{};
-    std::string canonical;
-    canonical.reserve(40 + ca_pem.size() + server_name.size() + verify_name.size());
-    canonical.append("access-server-upstream-tls-v1", 29);
-    append_u64(canonical, config.generation);
-    canonical.push_back(static_cast<char>(config.verification));
-    append_field(canonical, ca_pem);
-    append_field(canonical, server_name);
-    append_field(canonical, verify_name);
-
-    std::array<std::uint8_t, SHA256_DIGEST_LENGTH> digest{};
-    SHA256(reinterpret_cast<const std::uint8_t *>(canonical.data()), canonical.size(), digest.data());
-    std::uint64_t affinity = 0;
-    for (std::size_t i = 0; i < sizeof(affinity); ++i) {
-        affinity = (affinity << 8U) | digest[i];
-    }
-    return affinity == 0 ? 1 : affinity;
-}
-
-std::uint64_t identity_affinity(std::uint64_t transport_affinity,
-                                const UpstreamTlsClientIdentityDigest &identity_digest) noexcept {
-    std::array<std::uint8_t, sizeof(transport_affinity) + 32 + 8> canonical{};
-    constexpr std::array<std::uint8_t, 8> prefix{'m', 't', 'l', 's', '-', 'v', '1', 0};
-    std::copy(prefix.begin(), prefix.end(), canonical.begin());
-    for (std::size_t index = 0; index < sizeof(transport_affinity); ++index) {
-        canonical[prefix.size() + index] =
-                static_cast<std::uint8_t>(transport_affinity >> ((sizeof(transport_affinity) - index - 1U) * 8U));
-    }
-    std::copy(identity_digest.begin(), identity_digest.end(), canonical.begin() + prefix.size() + 8U);
-    std::array<std::uint8_t, SHA256_DIGEST_LENGTH> digest{};
-    SHA256(canonical.data(), canonical.size(), digest.data());
-    std::uint64_t affinity = 0;
-    for (std::size_t index = 0; index < sizeof(affinity); ++index) {
-        affinity = (affinity << 8U) | digest[index];
-    }
-    return affinity == 0 ? 1 : affinity;
-}
-
 std::expected<std::shared_ptr<const net::TrustStore>, AccessConfigError>
 make_trust_store(UpstreamTlsVerificationMode verification, std::string_view ca_pem, std::size_t route_index) {
     if (verification == UpstreamTlsVerificationMode::Inherit ||
@@ -177,15 +119,6 @@ UpstreamTlsTransportProfile::~UpstreamTlsTransportProfile() = default;
 
 const net::TlsCredential *UpstreamTlsTransportProfile::client_credential() const noexcept {
     return client_identity_ ? &client_identity_->credential() : nullptr;
-}
-
-std::optional<http::HttpConnectionGroupKey>
-UpstreamTlsTransportProfile::connection_key(const http::HttpConnectionGroupKey &base) const noexcept {
-    const http::HttpConnectionPoolAffinity affinity(pool_affinity_);
-    if (base.is_ip()) {
-        return http::HttpConnectionGroupKey::from_ip(base.ip_address(), base.port(), base.scheme(), affinity);
-    }
-    return http::HttpConnectionGroupKey::from_name(base.host_name(), base.port(), base.scheme(), affinity);
 }
 
 std::expected<UpstreamTlsTransportProfile, AccessConfigError>
@@ -223,7 +156,6 @@ compile_upstream_tls_transport_profile(const RouteUpstreamTlsConfig &config, std
     UpstreamTlsTransportProfile result;
     result.generation_ = config.generation;
     result.verification_ = config.verification;
-    result.pool_affinity_ = profile_affinity(config);
     if (config.server_name) {
         result.server_name_ = *config.server_name;
     }
@@ -258,7 +190,6 @@ std::expected<void, AccessConfigError> bind_upstream_tls_client_identity(Upstrea
                                              "client_identity_ref",
                                              "referenced upstream TLS client identity is unavailable"));
     }
-    profile.pool_affinity_ = identity_affinity(profile.pool_affinity_, identity->digest());
     profile.client_identity_ = std::move(identity);
     return {};
 }

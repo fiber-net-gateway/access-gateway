@@ -31,8 +31,7 @@ access_server_add_component(access_server_config
     "${CMAKE_CURRENT_LIST_DIR}/src/routing/UpstreamTlsClientIdentity.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/routing/UpstreamTlsTransportProfile.cpp")
 target_link_libraries(access_server_config
-    PUBLIC fiber_lib
-    PRIVATE zlibstatic)
+    PUBLIC fiber_lib)
 add_library(access_server::config ALIAS access_server_config)
 
 access_server_add_component(access_server_validation
@@ -299,11 +298,16 @@ if (FIBER_BUILD_TESTS AND (GTest_FOUND OR TARGET GTest::gtest_main))
     target_sources(fiber_access_server_tests PRIVATE
         "${CMAKE_CURRENT_LIST_DIR}/tests/SubscriptionLifecycleTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/TlsCertificateConfigTest.cpp")
+    # Differential gzip oracle for the tests: the version-controlled zlib 1.3.2
+    # reference objects Fiber ships under tests/support. Idempotent; Fiber's own
+    # test wiring may already have created the target.
+    include("${ACCESS_GATEWAY_FIBER_SOURCE_DIR}/cmake/FiberZlibReference.cmake")
+    fiber_add_zlib_reference()
     target_link_libraries(fiber_access_server_tests PRIVATE
         access_server_runtime
         access_server_validation
         GTest::gtest_main
-        zlibstatic)
+        fiber_zlib_reference_objects)
     target_include_directories(fiber_access_server_tests PRIVATE
         "${ACCESS_GATEWAY_FIBER_SOURCE_DIR}/tests")
     target_compile_definitions(fiber_access_server_tests PRIVATE
