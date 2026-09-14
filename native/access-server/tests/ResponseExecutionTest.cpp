@@ -9,13 +9,13 @@
 
 #include <fiber/common/mem/BufPool.h>
 #include <fiber/http/HttpHeaders.h>
-#include <zlib.h>
 #include "execution/AccessResult.h"
 #include "execution/ErrorResponder.h"
 #include "execution/ProxyResponsePlan.h"
 #include "execution/ResponsePlan.h"
 #include "execution/TemplateEvaluator.h"
 #include "routing/GzipEncoder.h"
+#include "support/ZlibReference.h"
 
 namespace {
 
@@ -100,31 +100,11 @@ CompiledHeaderTemplates compiled_headers(std::vector<CompiledTemplateEntry> entr
 }
 
 std::optional<std::string> gunzip(std::string_view input) {
-    z_stream stream{};
-    if (inflateInit2(&stream, MAX_WBITS + 16) != Z_OK) {
+    const fiber::test::ZlibReferenceResult result = fiber::test::zlib_reference_gunzip(input);
+    if (!result.ok || !result.stream_end) {
         return std::nullopt;
     }
-
-    stream.next_in = reinterpret_cast<Bytef *>(const_cast<char *>(input.data()));
-    stream.avail_in = static_cast<uInt>(input.size());
-    std::array<unsigned char, 4096> buffer{};
-    std::string output;
-    int result = Z_OK;
-    do {
-        stream.next_out = buffer.data();
-        stream.avail_out = static_cast<uInt>(buffer.size());
-        result = inflate(&stream, Z_NO_FLUSH);
-        if (result != Z_OK && result != Z_STREAM_END) {
-            (void) inflateEnd(&stream);
-            return std::nullopt;
-        }
-        output.append(reinterpret_cast<const char *>(buffer.data()), buffer.size() - stream.avail_out);
-    } while (result != Z_STREAM_END);
-
-    if (inflateEnd(&stream) != Z_OK) {
-        return std::nullopt;
-    }
-    return output;
+    return std::move(result.output);
 }
 
 std::string_view find_header(const fiber::access_server::PreparedResponse &response, std::string_view name) {
@@ -306,7 +286,8 @@ TEST(GzipEncoderTest, ProducesDeterministicRoundTrippableRfc1952Bytes) {
     ASSERT_GE(first->size(), 10U);
     EXPECT_EQ(static_cast<unsigned char>((*first)[0]), 0x1fU);
     EXPECT_EQ(static_cast<unsigned char>((*first)[1]), 0x8bU);
-    EXPECT_EQ(static_cast<unsigned char>((*first)[9]), 0xffU);
+    // The in-tree zlib core follows zlib's OS_CODE (RFC 1952: 3 = Unix).
+    EXPECT_EQ(static_cast<unsigned char>((*first)[9]), 0x03U);
     EXPECT_EQ(gunzip(*first), body);
     EXPECT_FALSE(gzip_encode(body, 0));
     EXPECT_FALSE(gzip_encode(body, 10));

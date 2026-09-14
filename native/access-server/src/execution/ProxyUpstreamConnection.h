@@ -32,11 +32,9 @@ effective_upstream_tls_client_policy(const UpstreamTlsClientPolicy &environment,
 
 // TLS options acquisition derives for dialing `key` under `tls_policy`; nullopt
 // for plaintext keys. Borrowed names in the result reference `tls_policy`
-// storage or `verify_name_storage` (the IP-identity fallback), so both must
-// outlive any connect() call made with the returned options.
+// storage, so it must outlive any connect() call made with the returned options.
 [[nodiscard]] std::optional<http::HttpClientTlsOptions> upstream_connection_tls(const http::HttpConnectionGroupKey &key,
-                                                                                UpstreamTlsClientPolicyView tls_policy,
-                                                                                std::string &verify_name_storage);
+                                                                                UpstreamTlsClientPolicyView tls_policy);
 
 struct ProxyDnsResolver {
     using Function = async::Task<common::IoResult<std::vector<net::IpAddress>>> (*)(void *context,

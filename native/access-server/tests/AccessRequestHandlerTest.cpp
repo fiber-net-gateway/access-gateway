@@ -14,8 +14,6 @@
 #include <utility>
 #include <vector>
 
-#include <zlib.h>
-
 #include <fiber/async/Spawn.h>
 #include <fiber/async/Watch.h>
 #include <fiber/event/EventLoopGroup.h>
@@ -28,6 +26,7 @@
 #include "routing/AccessScriptCompiler.h"
 #include "runtime/AccessScriptRuntime.h"
 #include "runtime/RouteConfigStore.h"
+#include "support/ZlibReference.h"
 
 namespace {
 
@@ -283,29 +282,11 @@ std::optional<std::string> decode_chunked_body(std::string_view response) {
 }
 
 std::optional<std::string> gunzip_body(std::string_view compressed) {
-    z_stream stream{};
-    if (inflateInit2(&stream, MAX_WBITS + 16) != Z_OK) {
+    const fiber::test::ZlibReferenceResult result = fiber::test::zlib_reference_gunzip(compressed);
+    if (!result.ok || !result.stream_end) {
         return std::nullopt;
     }
-    stream.next_in = reinterpret_cast<Bytef *>(const_cast<char *>(compressed.data()));
-    stream.avail_in = static_cast<uInt>(compressed.size());
-    std::array<unsigned char, 4096> buffer{};
-    std::string output;
-    int result = Z_OK;
-    do {
-        stream.next_out = buffer.data();
-        stream.avail_out = static_cast<uInt>(buffer.size());
-        result = inflate(&stream, Z_NO_FLUSH);
-        if (result != Z_OK && result != Z_STREAM_END) {
-            (void) inflateEnd(&stream);
-            return std::nullopt;
-        }
-        output.append(reinterpret_cast<const char *>(buffer.data()), buffer.size() - stream.avail_out);
-    } while (result != Z_STREAM_END);
-    if (inflateEnd(&stream) != Z_OK) {
-        return std::nullopt;
-    }
-    return output;
+    return std::move(result.output);
 }
 
 HostConfigEntry host(std::string pattern, HostStrategyConfig strategy = {}) {

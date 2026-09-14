@@ -128,10 +128,7 @@ std::string selected_host(const fiber::access_server::ProxyUpstreamEndpoint &end
     if (endpoint.connection_key == nullptr) {
         return {};
     }
-    if (endpoint.connection_key->is_ip()) {
-        return endpoint.connection_key->ip_address().to_string();
-    }
-    return std::string(endpoint.connection_key->host_name());
+    return std::string(endpoint.connection_key->host());
 }
 
 fiber::nacos::Instance service_instance(std::string ip, std::string cluster = "sh-default", double weight = 1.0) {
@@ -217,6 +214,82 @@ TEST(AccessServiceStateTest, PublishesAndRetiresImmutableClusterDirectory) {
             EXPECT_EQ(retired.error(), fiber::access_server::SwrrSelectError::NoConfiguredInstance);
         }
 
+        completed = true;
+        loop.stop();
+        co_return;
+    });
+
+    loop.run();
+    EXPECT_TRUE(completed);
+}
+
+TEST(AccessServiceStateTest, PinsAddressLiteralHttpsInstancesUnderTheServiceName) {
+    fiber::event::EventLoop loop;
+    fiber::access_server::AccessServiceState state;
+    state.initialize({}, "sh");
+    bool completed = false;
+
+    fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
+        // Port 443 makes the endpoint HTTPS; the registered address is a literal,
+        // so the key must dial it pinned under the service's TLS name.
+        fiber::nacos::Instance tls_instance{
+                .ip = "10.0.0.5",
+                .port = 443,
+                .cluster_name = "sh-default",
+        };
+        const auto snapshot = service_snapshot("tls", {std::move(tls_instance)});
+        state.update(*snapshot);
+        auto selected = state.select("default", {});
+        EXPECT_TRUE(selected);
+        if (selected) {
+            // Port 443 is the scheme default, so the authority omits the port suffix.
+            EXPECT_EQ(selected->instance().authority(), "10.0.0.5");
+            const auto &key = selected->instance().connection_key();
+            EXPECT_EQ(key.scheme(), fiber::http::HttpConnectionGroupKey::Scheme::Https);
+            EXPECT_EQ(key.host(), "orders");
+            EXPECT_TRUE(key.has_ip());
+            EXPECT_EQ(key.ip().to_string(), "10.0.0.5");
+            EXPECT_EQ(key.port(), 443);
+        }
+
+        // A group-qualified snapshot name is sanitized to its service part.
+        fiber::nacos::Instance grouped_instance{
+                .ip = "10.0.0.6",
+                .port = 443,
+                .cluster_name = "sh-default",
+        };
+        const auto grouped = fiber::tests::make_service_info(fiber::tests::ServiceInfoTestData{
+                .name = "DEFAULT_GROUP@@billing",
+                .hosts = {std::move(grouped_instance)},
+        });
+        state.update(*grouped);
+        auto grouped_selected = state.select("default", {});
+        EXPECT_TRUE(grouped_selected);
+        if (grouped_selected) {
+            const auto &key = grouped_selected->instance().connection_key();
+            EXPECT_EQ(key.scheme(), fiber::http::HttpConnectionGroupKey::Scheme::Https);
+            EXPECT_EQ(key.host(), "billing");
+            EXPECT_TRUE(key.has_ip());
+        }
+
+        // No DNS-valid TLS name available: the instance is skipped entirely.
+        fiber::nacos::Instance unnameable_instance{
+                .ip = "10.0.0.7",
+                .port = 443,
+                .cluster_name = "sh-default",
+        };
+        const auto unnameable = fiber::tests::make_service_info(fiber::tests::ServiceInfoTestData{
+                .name = "under_score",
+                .hosts = {std::move(unnameable_instance)},
+        });
+        state.update(*unnameable);
+        auto skipped = state.select("default", {});
+        EXPECT_FALSE(skipped);
+        if (!skipped) {
+            EXPECT_EQ(skipped.error(), fiber::access_server::SwrrSelectError::NoConfiguredInstance);
+        }
+
+        state.retire(fiber::nacos::ServiceRetireReason::Released);
         completed = true;
         loop.stop();
         co_return;
@@ -530,7 +603,7 @@ TEST(AccessServiceDiscoveryTest, WaitsBeforePublishAndPinsDiscoveryGeneration) {
             EXPECT_EQ(stable->host_header, "10.0.0.1:8080");
             EXPECT_NE(stable->connection_key, nullptr);
             if (stable->connection_key) {
-                EXPECT_TRUE(stable->connection_key->is_ip());
+                EXPECT_TRUE(stable->connection_key->has_ip());
             }
             stable->report(false);
             const std::uint64_t excluded = stable->selection_token;
@@ -583,7 +656,8 @@ TEST(AccessServiceDiscoveryTest, WaitsBeforePublishAndPinsDiscoveryGeneration) {
             EXPECT_EQ(hostname->host_header, "orders.internal");
             EXPECT_NE(hostname->connection_key, nullptr);
             if (hostname->connection_key) {
-                EXPECT_TRUE(hostname->connection_key->is_name());
+                EXPECT_FALSE(hostname->connection_key->has_ip());
+                EXPECT_EQ(hostname->connection_key->host(), "orders.internal");
                 EXPECT_EQ(hostname->connection_key->scheme(), fiber::http::HttpConnectionGroupKey::Scheme::Https);
             }
             if (stable) {

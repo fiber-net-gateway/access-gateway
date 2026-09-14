@@ -424,7 +424,6 @@ TEST(ProjectRouteSnapshotTest, CompilesStaticAddressesWithJavaHttpHostRules) {
     route.addresses = {
             std::optional<std::string>("http://127.0.0.1:8080"),
             std::optional<std::string>("backend:-2147483648"),
-            std::optional<std::string>(":80"),
             std::optional<std::string>("backend:443"),
     };
 
@@ -433,29 +432,49 @@ TEST(ProjectRouteSnapshotTest, CompilesStaticAddressesWithJavaHttpHostRules) {
     ASSERT_TRUE(snapshot.routes()[0].proxy);
     ASSERT_TRUE(snapshot.routes()[0].proxy->address_selector);
     EXPECT_TRUE(snapshot.routes()[0].proxy->address_selector->service_name().empty());
-    const auto addresses = select_addresses(*snapshot.routes()[0].proxy->address_selector, 4);
-    ASSERT_EQ(addresses.size(), 4U);
+    const auto addresses = select_addresses(*snapshot.routes()[0].proxy->address_selector, 3);
+    ASSERT_EQ(addresses.size(), 3U);
     using ConnectionKey = fiber::http::HttpConnectionGroupKey;
     EXPECT_EQ(addresses[0].connection_key().scheme(), ConnectionKey::Scheme::Http);
-    EXPECT_TRUE(addresses[0].connection_key().is_ip());
-    EXPECT_EQ(addresses[0].connection_key().ip_address().to_string(), "127.0.0.1");
+    EXPECT_TRUE(addresses[0].connection_key().has_ip());
+    EXPECT_EQ(addresses[0].connection_key().host(), "127.0.0.1");
+    EXPECT_EQ(addresses[0].connection_key().ip().to_string(), "127.0.0.1");
     EXPECT_EQ(addresses[0].connection_key().port(), 8080);
     EXPECT_EQ(addresses[0].authority(), "127.0.0.1:8080");
     EXPECT_EQ(addresses[1].connection_key().scheme(), ConnectionKey::Scheme::Http);
-    EXPECT_TRUE(addresses[1].connection_key().is_name());
-    EXPECT_EQ(addresses[1].connection_key().host_name(), "backend");
+    EXPECT_FALSE(addresses[1].connection_key().has_ip());
+    EXPECT_EQ(addresses[1].connection_key().host(), "backend");
     EXPECT_EQ(addresses[1].connection_key().port(), 80);
     EXPECT_EQ(addresses[1].authority(), "backend");
-    EXPECT_EQ(addresses[2].connection_key().host_name(), ":80");
-    EXPECT_EQ(addresses[2].authority(), ":80");
-    EXPECT_EQ(addresses[3].connection_key().scheme(), ConnectionKey::Scheme::Https);
-    EXPECT_EQ(addresses[3].connection_key().port(), 443);
-    EXPECT_EQ(addresses[3].authority(), "backend");
+    EXPECT_EQ(addresses[2].connection_key().scheme(), ConnectionKey::Scheme::Https);
+    EXPECT_FALSE(addresses[2].connection_key().has_ip());
+    EXPECT_EQ(addresses[2].connection_key().host(), "backend");
+    EXPECT_EQ(addresses[2].connection_key().port(), 443);
+    EXPECT_EQ(addresses[2].authority(), "backend");
 
     RouteConfig invalid = proxy_route("/address", "");
     invalid.addresses = {std::optional<std::string>("backend:2147483648")};
     auto rejected = compile_project_config("demo", project_with_routes({std::move(invalid)}));
     EXPECT_FALSE(rejected);
+    EXPECT_EQ(rejected.error().message, "invalid HTTP host");
+
+    // A host with no name before the port is not a representable upstream.
+    RouteConfig nameless = proxy_route("/address", "");
+    nameless.addresses = {std::optional<std::string>(":80")};
+    auto nameless_rejected = compile_project_config("demo", project_with_routes({std::move(nameless)}));
+    EXPECT_FALSE(nameless_rejected);
+    EXPECT_EQ(nameless_rejected.error().message, "invalid HTTP host");
+
+    // HTTPS upstreams must be named: SNI cannot carry an address literal.
+    for (const std::string_view https_literal: {"https://127.0.0.1", "https://10.0.0.9:8443", "10.0.0.9:443"}) {
+        RouteConfig literal = proxy_route("/address", "");
+        literal.addresses = {std::optional<std::string>(https_literal)};
+        auto literal_rejected = compile_project_config("demo", project_with_routes({std::move(literal)}));
+        EXPECT_FALSE(literal_rejected) << https_literal;
+        if (!literal_rejected) {
+            EXPECT_EQ(literal_rejected.error().message, "HTTPS upstreams must use a hostname, not an address literal");
+        }
+    }
 
     RouteConfig oversized = proxy_route("/address", "");
     oversized.addresses = {std::optional<std::string>("backend:70000")};
@@ -463,7 +482,7 @@ TEST(ProjectRouteSnapshotTest, CompilesStaticAddressesWithJavaHttpHostRules) {
     EXPECT_FALSE(oversized_rejected);
 }
 
-TEST(ProjectRouteSnapshotTest, CompilesImmutableUpstreamTlsProfileAndPoolAffinity) {
+TEST(ProjectRouteSnapshotTest, CompilesImmutableUpstreamTlsProfile) {
     RouteConfig route = proxy_route("/secure");
     route.upstream_tls = fiber::access_server::RouteUpstreamTlsConfig{
             .generation = 11,
@@ -483,27 +502,15 @@ TEST(ProjectRouteSnapshotTest, CompilesImmutableUpstreamTlsProfileAndPoolAffinit
     EXPECT_EQ(first_profile.server_name(), "sni.example.com");
     EXPECT_EQ(first_profile.verify_name(), "identity.example.com");
     EXPECT_TRUE(first_profile.trust_store());
-    EXPECT_NE(first_profile.pool_affinity(), 0U);
-
-    auto base = fiber::http::HttpConnectionGroupKey::from_name("upstream.example.com", 443,
-                                                               fiber::http::HttpConnectionGroupKey::Scheme::Https);
-    ASSERT_TRUE(base);
-    auto profiled = first_profile.connection_key(*base);
-    ASSERT_TRUE(profiled);
-    EXPECT_NE(*profiled, *base);
-    EXPECT_EQ(profiled->pool_affinity().value(), first_profile.pool_affinity());
 
     auto same = compile_project_config("demo", project_with_routes({route}));
     const auto &same_profile = *require_snapshot(same).routes()[0].proxy->upstream_tls;
-    EXPECT_EQ(same_profile.pool_affinity(), first_profile.pool_affinity());
+    EXPECT_EQ(same_profile.generation(), first_profile.generation());
 
     route.upstream_tls->generation = 12;
     auto rotated = compile_project_config("demo", project_with_routes({std::move(route)}));
     const auto &rotated_profile = *require_snapshot(rotated).routes()[0].proxy->upstream_tls;
-    EXPECT_NE(rotated_profile.pool_affinity(), first_profile.pool_affinity());
-    auto rotated_key = rotated_profile.connection_key(*base);
-    ASSERT_TRUE(rotated_key);
-    EXPECT_NE(*rotated_key, *profiled);
+    EXPECT_NE(rotated_profile.generation(), first_profile.generation());
 }
 
 TEST(ProjectRouteSnapshotTest, RejectsInvalidUpstreamTlsProfilesBeforeSnapshotPublication) {
@@ -549,7 +556,6 @@ TEST(ProjectRouteSnapshotTest, BindsClientIdentityWithoutRetainingPemInRouteConf
     ASSERT_TRUE(*compiled);
     ProjectRouteSnapshot &snapshot = **compiled;
     const auto &unbound = *snapshot.routes()[0].proxy->upstream_tls;
-    const std::uint64_t transport_affinity = unbound.pool_affinity();
     EXPECT_FALSE(unbound.client_credential());
 
     auto missing = fiber::access_server::bind_project_tls_client_identities(snapshot, {});
@@ -571,7 +577,6 @@ TEST(ProjectRouteSnapshotTest, BindsClientIdentityWithoutRetainingPemInRouteConf
     ASSERT_TRUE(bound) << bound.error().message;
     const auto &profile = *snapshot.routes()[0].proxy->upstream_tls;
     EXPECT_TRUE(profile.client_credential());
-    EXPECT_NE(profile.pool_affinity(), transport_affinity);
 
     identity->reset();
     resolver.identity.reset();

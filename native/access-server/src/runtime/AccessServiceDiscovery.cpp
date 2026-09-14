@@ -77,15 +77,14 @@ int compare_ip(const net::IpAddress &left, const net::IpAddress &right) noexcept
 
 int compare_connection_key(const http::HttpConnectionGroupKey &left,
                            const http::HttpConnectionGroupKey &right) noexcept {
-    if (left.host_kind() != right.host_kind()) {
-        return left.host_kind() < right.host_kind() ? -1 : 1;
+    if (left.host() != right.host()) {
+        return left.host() < right.host() ? -1 : 1;
     }
-    if (left.is_name()) {
-        if (left.host_name() != right.host_name()) {
-            return left.host_name() < right.host_name() ? -1 : 1;
-        }
-    } else {
-        const int compared = compare_ip(left.ip_address(), right.ip_address());
+    if (left.has_ip() != right.has_ip()) {
+        return left.has_ip() ? 1 : -1;
+    }
+    if (left.has_ip()) {
+        const int compared = compare_ip(left.ip(), right.ip());
         if (compared != 0) {
             return compared;
         }
@@ -115,6 +114,49 @@ bool same_definition(const AccessEndpointDefinition &left, const AccessEndpointD
     return compare_identity(left, right) == 0 && left.instance_id == right.instance_id &&
            left.logical_cluster == right.logical_cluster && left.endpoint.instance == right.endpoint.instance &&
            left.endpoint.weight == right.endpoint.weight && left.preferred == right.preferred;
+}
+
+// A TLS upstream needs a named host: SNI cannot carry an address literal
+// (RFC 6066 §3). Candidates are the instance's service name and the snapshot
+// name, each with a Nacos "group@@service" prefix stripped.
+bool valid_tls_host(std::string_view host) noexcept {
+    if (host.empty() || host.size() > 255 || host.front() == '.' || host.back() == '.') {
+        return false;
+    }
+    std::size_t label = 0;
+    for (const char ch: host) {
+        if (ch == '.') {
+            if (label == 0 || label > 63) {
+                return false;
+            }
+            label = 0;
+            continue;
+        }
+        ++label;
+        const bool allowed = (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '-';
+        if (!allowed) {
+            return false;
+        }
+    }
+    return label != 0 && label <= 63;
+}
+
+std::string_view tls_host_candidate(std::string_view candidate) noexcept {
+    const std::size_t separator = candidate.rfind("@@");
+    if (separator != std::string_view::npos) {
+        candidate = candidate.substr(separator + 2);
+    }
+    return valid_tls_host(candidate) ? candidate : std::string_view{};
+}
+
+// The name an address-literal HTTPS instance is pinned under: the first
+// DNS-valid service name among the instance and snapshot names, else empty.
+std::string_view snapshot_tls_host(const nacos::ServiceInstance &instance,
+                                   const nacos::ServiceInfo &snapshot) noexcept {
+    if (const std::string_view host = tls_host_candidate(instance.service_name); !host.empty()) {
+        return host;
+    }
+    return tls_host_candidate(snapshot.name);
 }
 
 bool same_definitions(const std::vector<AccessEndpointDefinition> &left,
@@ -196,10 +238,21 @@ public:
             const bool parsed_ip = net::IpAddress::parse(instance.ip, ip);
             const auto scheme = instance.port == 443 ? http::HttpConnectionGroupKey::Scheme::Https
                                                      : http::HttpConnectionGroupKey::Scheme::Http;
-            std::optional<http::HttpConnectionGroupKey> connection_key =
-                    parsed_ip ? std::optional(http::HttpConnectionGroupKey::from_ip(ip, instance.port, scheme))
-                              : http::HttpConnectionGroupKey::from_name(instance.ip, instance.port, scheme);
+            std::optional<http::HttpConnectionGroupKey> connection_key;
+            if (parsed_ip && scheme == http::HttpConnectionGroupKey::Scheme::Https) {
+                // An address literal cannot carry SNI: pin the instance address under the
+                // service's TLS name so the dialed address stays the registered one.
+                const std::string_view tls_host = snapshot_tls_host(instance, snapshot);
+                if (tls_host.empty()) {
+                    metrics_observer_.record_event(AccessDiscoveryMetricEvent::SnapshotInvalidUpstream);
+                    continue;
+                }
+                connection_key = http::HttpConnectionGroupKey::make(tls_host, instance.port, scheme, ip);
+            } else {
+                connection_key = http::HttpConnectionGroupKey::make(instance.ip, instance.port, scheme);
+            }
             if (!connection_key) {
+                metrics_observer_.record_event(AccessDiscoveryMetricEvent::SnapshotInvalidUpstream);
                 continue;
             }
             const std::size_t separator = instance.cluster_name.find('-');

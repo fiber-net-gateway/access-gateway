@@ -115,7 +115,6 @@ TEST(RouteConfigStoreTest, RetainsOldIdentityAndSnapshotWhenRotationDependencyIs
     ASSERT_TRUE(store.commit(std::move(*ready_v1)));
     auto old_pin = store.pin();
     const auto &old_profile = *old_pin->projects()[0]->routes()[0].proxy->upstream_tls;
-    const std::uint64_t old_affinity = old_profile.pool_affinity();
     EXPECT_TRUE(old_profile.client_credential());
 
     auto v2 = project_config(2, "secure.example.com", "/");
@@ -138,7 +137,8 @@ TEST(RouteConfigStoreTest, RetainsOldIdentityAndSnapshotWhenRotationDependencyIs
     ASSERT_TRUE(ready_v2);
     ASSERT_TRUE(store.commit(std::move(*ready_v2)));
     const auto &new_profile = *store.pin()->projects()[0]->routes()[0].proxy->upstream_tls;
-    EXPECT_NE(new_profile.pool_affinity(), old_affinity);
+    EXPECT_TRUE(new_profile.client_credential());
+    EXPECT_NE(new_profile.generation(), old_profile.generation());
     EXPECT_FALSE(first_weak.expired());
     old_pin.reset();
     EXPECT_TRUE(first_weak.expired());
