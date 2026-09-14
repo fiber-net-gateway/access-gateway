@@ -48,9 +48,17 @@ bool verified_tls(UpstreamTlsClientPolicyView policy) noexcept {
     return policy.verification != UpstreamTlsVerificationMode::LegacyInsecure;
 }
 
+// A pinned HTTPS dial (a literal address, or a discovered instance dialed by
+// its registered address) carries no name context to authenticate the peer
+// with: the handshake sends no SNI and skips peer verification entirely,
+// matching the Java gateway. The client certificate (mTLS) still applies.
+bool pinned_ip_tls(const http::HttpConnectionGroupKey &key) noexcept {
+    return key.scheme() == http::HttpConnectionGroupKey::Scheme::Https && key.has_ip();
+}
+
 bool identifiable_tls_failure(const http::HttpConnectionGroupKey &key, UpstreamTlsClientPolicyView policy,
                               common::IoErr io_error) noexcept {
-    return key.scheme() == http::HttpConnectionGroupKey::Scheme::Https && verified_tls(policy) &&
+    return key.scheme() == http::HttpConnectionGroupKey::Scheme::Https && verified_tls(policy) && !pinned_ip_tls(key) &&
            (io_error == common::IoErr::Invalid || io_error == common::IoErr::NotSupported);
 }
 
@@ -58,14 +66,19 @@ bool identifiable_tls_failure(const http::HttpConnectionGroupKey &key, UpstreamT
 
 // TLS settings for dialing `key`. Every name the result borrows must outlive the
 // connect() call it is passed to: the policy views reference caller-owned
-// storage. An HTTPS group key always carries a named host (literal hosts are
-// unrepresentable), which becomes the SNI name unless the policy overrides it.
-// Exported so tests can assert the exact TLS parameters acquisition derives for
-// a key/policy pair.
+// storage. A named HTTPS host becomes the SNI name unless the policy overrides
+// it; a pinned HTTPS dial sends no SNI and does not verify the peer. Exported
+// so tests can assert the exact TLS parameters acquisition derives for a
+// key/policy pair.
 std::optional<http::HttpClientTlsOptions> upstream_connection_tls(const http::HttpConnectionGroupKey &key,
                                                                   UpstreamTlsClientPolicyView tls_policy) {
     if (key.scheme() != http::HttpConnectionGroupKey::Scheme::Https) {
         return std::nullopt;
+    }
+    if (pinned_ip_tls(key)) {
+        http::HttpClientTlsOptions tls;
+        tls.security.credential = tls_policy.client_credential;
+        return tls;
     }
     http::HttpClientTlsOptions tls;
     tls.security.verify_peer = verified_tls(tls_policy);
@@ -89,8 +102,8 @@ acquire_proxy_upstream_connection(http::StealableHttp1ConnectionPoolSet &pool, P
                                   std::chrono::milliseconds connect_timeout,
                                   ProxyHappyEyeballsPolicy happy_eyeballs) noexcept {
     ProxyUpstreamConnection output;
-    if (key.scheme() == http::HttpConnectionGroupKey::Scheme::Https && verified_tls(tls_policy) &&
-        !tls_policy.trust_store) {
+    if (key.scheme() == http::HttpConnectionGroupKey::Scheme::Https && !pinned_ip_tls(key) &&
+        verified_tls(tls_policy) && !tls_policy.trust_store) {
         // Fail closed: a verified policy without a materialized trust store is a TLS
         // configuration failure (e.g. an unreadable CA file), never a reason to dial
         // unverified. Report a stable redacted error like a handshake failure.

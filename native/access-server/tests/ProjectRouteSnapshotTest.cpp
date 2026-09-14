@@ -465,15 +465,34 @@ TEST(ProjectRouteSnapshotTest, CompilesStaticAddressesWithJavaHttpHostRules) {
     EXPECT_FALSE(nameless_rejected);
     EXPECT_EQ(nameless_rejected.error().message, "invalid HTTP host");
 
-    // HTTPS upstreams must be named: SNI cannot carry an address literal.
-    for (const std::string_view https_literal: {"https://127.0.0.1", "https://10.0.0.9:8443", "10.0.0.9:443"}) {
-        RouteConfig literal = proxy_route("/address", "");
-        literal.addresses = {std::optional<std::string>(https_literal)};
-        auto literal_rejected = compile_project_config("demo", project_with_routes({std::move(literal)}));
-        EXPECT_FALSE(literal_rejected) << https_literal;
-        if (!literal_rejected) {
-            EXPECT_EQ(literal_rejected.error().message, "HTTPS upstreams must use a hostname, not an address literal");
-        }
+    // HTTPS address literals are pinned dials: the key carries a synthetic
+    // DNS-shaped name plus the literal address, and the dial sends no SNI and
+    // skips peer verification (upstream_connection_tls).
+    struct LiteralCase {
+        std::string_view address;
+        std::uint16_t port;
+        std::string_view synthetic_host;
+        std::string_view ip;
+        std::string_view authority;
+    };
+    for (const LiteralCase &literal:
+         {LiteralCase{"https://127.0.0.1", 443, "127-0-0-1.443.ip.invalid", "127.0.0.1", "127.0.0.1"},
+          LiteralCase{"https://10.0.0.9:8443", 8443, "10-0-0-9.8443.ip.invalid", "10.0.0.9", "10.0.0.9:8443"},
+          LiteralCase{"10.0.0.9:443", 443, "10-0-0-9.443.ip.invalid", "10.0.0.9", "10.0.0.9"}}) {
+        RouteConfig pinned = proxy_route("/address", "");
+        pinned.addresses = {std::optional<std::string>(literal.address)};
+        auto compiled = compile_project_config("demo", project_with_routes({std::move(pinned)}));
+        const ProjectRouteSnapshot &pinned_snapshot = require_snapshot(compiled);
+        ASSERT_TRUE(pinned_snapshot.routes()[0].proxy);
+        ASSERT_TRUE(pinned_snapshot.routes()[0].proxy->address_selector);
+        const auto selected = select_addresses(*pinned_snapshot.routes()[0].proxy->address_selector, 1);
+        ASSERT_EQ(selected.size(), 1U);
+        EXPECT_EQ(selected[0].connection_key().scheme(), ConnectionKey::Scheme::Https);
+        EXPECT_TRUE(selected[0].connection_key().has_ip());
+        EXPECT_EQ(selected[0].connection_key().host(), literal.synthetic_host);
+        EXPECT_EQ(selected[0].connection_key().ip().to_string(), literal.ip);
+        EXPECT_EQ(selected[0].connection_key().port(), literal.port);
+        EXPECT_EQ(selected[0].authority(), literal.authority);
     }
 
     RouteConfig oversized = proxy_route("/address", "");

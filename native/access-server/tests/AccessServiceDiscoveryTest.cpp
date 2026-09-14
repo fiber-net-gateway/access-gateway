@@ -231,7 +231,8 @@ TEST(AccessServiceStateTest, PinsAddressLiteralHttpsInstancesUnderTheServiceName
 
     fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
         // Port 443 makes the endpoint HTTPS; the registered address is a literal,
-        // so the key must dial it pinned under the service's TLS name.
+        // so the key dials it pinned under the service name — pool grouping only:
+        // the pinned HTTPS dial sends no SNI and skips peer verification.
         fiber::nacos::Instance tls_instance{
                 .ip = "10.0.0.5",
                 .port = 443,

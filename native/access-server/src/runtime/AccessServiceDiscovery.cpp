@@ -151,6 +151,8 @@ std::string_view tls_host_candidate(std::string_view candidate) noexcept {
 
 // The name an address-literal HTTPS instance is pinned under: the first
 // DNS-valid service name among the instance and snapshot names, else empty.
+// The name identifies the connection-pool group only — the pinned HTTPS dial
+// sends no SNI and skips peer verification (see upstream_connection_tls).
 std::string_view snapshot_tls_host(const nacos::ServiceInstance &instance,
                                    const nacos::ServiceInfo &snapshot) noexcept {
     if (const std::string_view host = tls_host_candidate(instance.service_name); !host.empty()) {
@@ -240,8 +242,10 @@ public:
                                                      : http::HttpConnectionGroupKey::Scheme::Http;
             std::optional<http::HttpConnectionGroupKey> connection_key;
             if (parsed_ip && scheme == http::HttpConnectionGroupKey::Scheme::Https) {
-                // An address literal cannot carry SNI: pin the instance address under the
-                // service's TLS name so the dialed address stays the registered one.
+                // An address literal cannot carry SNI: pin the instance address
+                // under the service name (pool grouping only — no SNI, no peer
+                // verification on the pinned dial) so the dialed address stays
+                // the registered one.
                 const std::string_view tls_host = snapshot_tls_host(instance, snapshot);
                 if (tls_host.empty()) {
                     metrics_observer_.record_event(AccessDiscoveryMetricEvent::SnapshotInvalidUpstream);

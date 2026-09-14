@@ -338,8 +338,9 @@ ConnectionScenarioResult run_tls_scenario(const std::string &certificate_path, c
         client_trust_store = std::move(*trust_store);
         policy.trust_store = client_trust_store.get();
     }
-    // use_ip_key pins the loopback address under the target name: same dial target
-    // as the retired address-literal HTTPS key, but with a proper SNI name.
+    // use_ip_key pins the loopback address under the target name: same key shape
+    // an address-literal HTTPS upstream or a discovered 443 instance compiles
+    // to (pinned dial — no SNI, no peer verification).
     auto key = fiber::http::HttpConnectionGroupKey::make(
             host, *port, fiber::http::HttpConnectionGroupKey::Scheme::Https,
             use_ip_key ? std::optional(fiber::net::IpAddress::loopback_v4()) : std::nullopt);
@@ -1036,7 +1037,7 @@ TEST(ProxyUpstreamConnectionTest, SystemCaRejectsPrivateCertificateAuthorityAsTl
     EXPECT_EQ(result.observation.tls_failure, 1U);
 }
 
-TEST(ProxyUpstreamConnectionTest, VerifiedPinnedAddressRejectsNameMissingFromCertificate) {
+TEST(ProxyUpstreamConnectionTest, PinnedIpHttpsDialSkipsSniAndPeerVerification) {
     const auto &chain = trusted_test_tls_chain();
     ASSERT_TRUE(chain);
     fiber::test::QuicTestTlsFile certificate("access-upstream-ip-cert", chain->server_certificate_pem);
@@ -1044,19 +1045,24 @@ TEST(ProxyUpstreamConnectionTest, VerifiedPinnedAddressRejectsNameMissingFromCer
     ASSERT_TRUE(certificate.valid());
     ASSERT_TRUE(private_key.valid());
 
-    // The pinned dial address skips resolution entirely; the certificate only
-    // covers "localhost", so verifying the pinned group's name must fail.
+    // A pinned HTTPS dial carries no name context to authenticate the peer
+    // with: even a verifying policy sends no SNI and skips peer verification
+    // (Java-gateway parity), so a certificate covering only "localhost"
+    // still completes the handshake under an unrelated group name.
     const ConnectionScenarioResult result =
             run_tls_scenario(certificate.path(), private_key.path(), "endpoint.example.com",
                              {
                                      .verification = fiber::access_server::UpstreamTlsVerificationMode::CustomCa,
                              },
                              true, {}, chain->ca_certificate_pem);
-    EXPECT_EQ(result.error_code, fiber::access_server::ProxyConnectErrorCode::Tls);
-    EXPECT_EQ(result.error, fiber::common::IoErr::Invalid);
+    EXPECT_EQ(result.error, fiber::common::IoErr::None);
     EXPECT_EQ(result.resolver_calls, 0U);
     EXPECT_EQ(result.observation.dns_success, 0U);
-    EXPECT_EQ(result.observation.tls_failure, 1U);
+    EXPECT_EQ(result.observation.tls_failure, 0U);
+    EXPECT_TRUE(result.tls_enabled);
+    EXPECT_FALSE(result.verify_peer);
+    EXPECT_TRUE(result.server_name.empty());
+    EXPECT_TRUE(result.verify_name.empty());
 }
 
 } // namespace

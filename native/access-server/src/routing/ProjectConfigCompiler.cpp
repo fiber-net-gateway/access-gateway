@@ -625,8 +625,25 @@ std::optional<std::int32_t> parse_java_port(std::string_view value) noexcept {
 
 enum class JavaHttpHostError : std::uint8_t {
     Invalid,
-    HttpsAddressLiteral,
 };
+
+// Group-key host for an HTTPS address literal: a synthetic DNS-shaped name
+// (RFC 2606 reserves `.invalid`) standing in for the literal, with the real
+// address pinned into the key. The name never becomes an SNI value — pinned
+// HTTPS dials send no SNI and skip peer verification (see
+// upstream_connection_tls) — it only identifies the connection-pool group.
+std::string pinned_address_host(const net::IpAddress &ip, std::uint16_t port) {
+    std::string host = ip.to_string();
+    for (char &ch: host) {
+        if (ch == '.') {
+            ch = '-';
+        }
+    }
+    host.push_back('.');
+    host.append(std::to_string(port));
+    host.append(".ip.invalid");
+    return host;
+}
 
 std::expected<AccessUpstreamInstance, JavaHttpHostError> compile_java_http_host(std::string_view value) {
     if (value.empty()) {
@@ -670,12 +687,16 @@ std::expected<AccessUpstreamInstance, JavaHttpHostError> compile_java_http_host(
     const auto scheme =
             https ? http::HttpConnectionGroupKey::Scheme::Https : http::HttpConnectionGroupKey::Scheme::Http;
     net::IpAddress ip;
-    if (https && net::IpAddress::parse(host, ip)) {
-        // SNI cannot carry an address literal (RFC 6066 §3), so an HTTPS
-        // upstream must be named; there is no address-literal TLS identity.
-        return std::unexpected(JavaHttpHostError::HttpsAddressLiteral);
+    const bool parsed_ip = net::IpAddress::parse(host, ip);
+    std::optional<http::HttpConnectionGroupKey> key;
+    if (https && parsed_ip) {
+        // SNI cannot carry an address literal (RFC 6066 §3). A literal HTTPS
+        // upstream dials the address pinned under a synthetic name with no SNI
+        // and no peer verification, matching the Java gateway.
+        key = http::HttpConnectionGroupKey::make(pinned_address_host(ip, port), port, scheme, ip);
+    } else {
+        key = http::HttpConnectionGroupKey::make(host, port, scheme);
     }
-    auto key = http::HttpConnectionGroupKey::make(host, port, scheme);
     if (!key) {
         return std::unexpected(JavaHttpHostError::Invalid);
     }
@@ -889,11 +910,8 @@ std::expected<CompiledRoute, AccessConfigError> compile_route(const RouteConfig 
                 auto compiled_address =
                         address ? compile_java_http_host(*address) : std::unexpected(JavaHttpHostError::Invalid);
                 if (!compiled_address) {
-                    return std::unexpected(
-                            route_error(AccessConfigErrorCode::InvalidField, route_index, "addresses",
-                                        compiled_address.error() == JavaHttpHostError::HttpsAddressLiteral
-                                                ? "HTTPS upstreams must use a hostname, not an address literal"
-                                                : "invalid HTTP host"));
+                    return std::unexpected(route_error(AccessConfigErrorCode::InvalidField, route_index, "addresses",
+                                                       "invalid HTTP host"));
                 }
                 addresses.push_back(std::move(*compiled_address));
             }

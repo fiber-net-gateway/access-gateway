@@ -109,11 +109,15 @@ default; no source adaptation was needed. The latest reviewed delta (from pin
 `make(host, port, scheme, optional pinned IP)` factory — `from_name`/`from_ip`/`HostKind` are
 gone, and an IP literal combined with Https is rejected because SNI cannot carry a literal
 (RFC 6066 §3). Access-server adapted in three product decisions: static https upstreams that
-resolve to an address literal are now rejected at compile time ("HTTPS upstreams must use a
-hostname, not an address literal"), Nacos instances registered as a 443 address literal dial
-pinned under the sanitized service name as SNI (instances with no DNS-valid TLS name are
-skipped and counted by the new `invalid_upstream` discovery event), and script URL targets
-build the key from the URL host. The delta also removes
+resolve to an address literal compile to a pinned dial under a synthetic DNS-shaped name
+(`<ip-with-dashes>.<port>.ip.invalid`, RFC 2606 reserved TLD) with the literal address pinned
+into the key; Nacos instances registered as a 443 address literal dial pinned under the
+sanitized service name (instances with no DNS-valid name are skipped and counted by the new
+`invalid_upstream` discovery event); and script URL targets build the key from the URL host.
+A pinned HTTPS dial (either form) carries no name context to authenticate the peer with, so
+the handshake sends no SNI and skips peer verification — Java-gateway parity, recorded here as
+an accepted security trade-off (named https upstreams keep their verification modes:
+default LEGACY_INSECURE, optional SYSTEM_CA/CUSTOM_CA). The delta also removes
 `HttpConnectionPoolAffinity`/`UpstreamTlsTransportProfile` pool isolation: connections are now
 pooled under the base key, so during the window where a pool still holds leases created under
 an older TLS profile generation, requests may reuse a connection negotiated with the previous
