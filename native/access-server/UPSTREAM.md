@@ -10,16 +10,16 @@ HTTP, JSON/script, Nacos, CAT, and Prometheus modules are consumed from the pinn
 historical application import revision.
 
 The current reusable Fiber dependency is pinned at
-`0c56be5fc9e9e106a45b219e49739fedfbaf31b1`. The pinned revision carries no repository-owned
+`054b36878671ea77ec84ec2fd1fc790cb9b09623`. The pinned revision carries no repository-owned
 compatibility patches: the four defects that previously required patches under `native/patches/`
 are fixed inside this reviewed range (see `native/patches/README.md` for the retired-patch map).
 The repository-owned regression
 `ProxyExecutorTest.StreamsChunkedUpstreamWhoseFramingArrivesSeparatelyFromPayload` still guards
 the HTTP/1 chunked split-framing fix from the application side.
 The reviewed update range from the previous pin is
-`7da6926ee410fcd6ccdd9b50c44c5638cbc61eb8..0c56be5fc9e9e106a45b219e49739fedfbaf31b1`.
+`0c56be5fc9e9e106a45b219e49739fedfbaf31b1..054b36878671ea77ec84ec2fd1fc790cb9b09623`.
 The complete reviewed range from the original import pin is
-`0fda7764bf94944aca4b674ab5ab311184703118..0c56be5fc9e9e106a45b219e49739fedfbaf31b1`.
+`0fda7764bf94944aca4b674ab5ab311184703118..054b36878671ea77ec84ec2fd1fc790cb9b09623`.
 It removes the obsolete upstream `apps/access-server`, adds Nacos hostname and bounded service
 status APIs, system resolver/multi-nameserver support, client TLS identities and HTTP/1 pool
 affinity, a cancellable Happy Eyeballs connector, and a reusable public HTTP gzip response writer
@@ -132,7 +132,32 @@ encoding now uses the streaming encoder and tests verify round-trips through the
 The remaining delta items are internal to the pinned modules: persistent epoll in
 edge-triggered mode, nginx-style posted-next continuation scheduling, TLS record padding
 across nodes, HTTP/1 header timeouts counted from the first byte, idle upstream connections
-closed by the peer dropped from the pool, and the QUIC endpoint error-teardown lifecycle. No
+closed by the peer dropped from the pool, and the QUIC endpoint error-teardown lifecycle. The
+latest reviewed delta (from pin `0c56be5fc9e9e106a45b219e49739fedfbaf31b1`) implements the
+Efd/RWFd single-loop fd-ownership refactor (`feature/efd_rwfd_refactor.md`): a fd is operated by
+exactly one current event loop at any moment, readiness subscriptions fire only on
+`Unknown/Blocked → Ready` transitions, RWFd `read`/`write` lambdas always execute and record the
+I/O result instead of being readiness-gated, and EventLoop's stop-notification subsystem
+(`StopEntry`, `register_stop`/`unregister_stop`) is removed in favor of the close-before-stop
+fd-ownership contract — `AcceptFd::close()` defers the waiter wake through a DeferEntry owned by
+the awaiter, arming paths refuse a stopping loop with `Canceled`, and the post-stop poller check
+asserts no fd remains registered. Loop handover becomes an explicit public protocol:
+`TcpStream`/`TlsTcpStream`/`HttpTransport`/`Http1ClientConnection` gain
+`detach_for_handover()`/`adopt_loop()` plus `read_ready()`/`write_ready()` and idle
+state observation, and the HTTP/1 pool's cross-thread remote return moves from per-entry
+`NotifyEntry` posts to a steal-journey state object carried by the returned lease.
+`HttpExchange::ResponseChannelClosedAwaiter` is re-derived from the shared `WaitAwaiter` (its
+`completed()` query is gone); since `WaitAwaiter::complete()` settles `completed()` at the io
+fire instant while the resume is only queued, `when_any` could observe two completed
+alternatives at resume time — the delta's follow-up fix `518a7ee` relaxes the winner scan to
+the lowest completed index (matching `find_ready`'s arm-time order), which aborts the
+WebSocket-over-H2 relay tests otherwise. Access-server adapted in one place:
+`ProxyExecutor::execute` now orders the relay task ahead of the channel-closed watch in its
+`when_any`, because the lowest-index tie-break must let a finished relay (which closes the
+response channel in the same stack) be recorded `Completed` instead of `Canceled`; a lone
+channel close still records `Canceled`. The range also moves the poller event batch and its
+dispatch cursor into `Poller` (`Poller::wait` takes only a deadline, `dispatch()` consumes the
+batch; a Fiber-internal breaking change — access-server does not use the Poller API). No
 application source was synchronized back from
 upstream as part of this dependency update; the historical import revision above remains
 unchanged.

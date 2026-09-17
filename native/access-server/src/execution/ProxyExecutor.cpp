@@ -914,17 +914,22 @@ async::Task<Result<void>> ProxyExecutor::execute(http::HttpExchange &exchange, c
         co_return Result<void>{};
     }
 
+    // The relay task is the first alternative on purpose: when_any breaks a
+    // same-turn tie (a relay finishing closes the response channel in the same
+    // stack) in favor of the lower index, so a completed relay is recorded as
+    // Completed instead of Canceled. The channel-closed awaiter alone still
+    // wins a real client abort.
     auto completed =
-            co_await async::when_any([&exchange]() { return exchange.wait_response_channel_closed(); },
-                                     [&]() { return execute_impl(exchange, proxy, input, telemetry).select(); });
-    if (completed.is<1>()) {
-        auto result = std::move(completed).get<1>();
+            co_await async::when_any([&]() { return execute_impl(exchange, proxy, input, telemetry).select(); },
+                                     [&exchange]() { return exchange.wait_response_channel_closed(); });
+    if (completed.is<0>()) {
+        auto result = std::move(completed).get<0>();
         telemetry.record_proxy_execution(result ? AccessProxyExecutionResult::Completed
                                                 : AccessProxyExecutionResult::Failed);
         co_return result;
     }
 
-    auto closed = std::move(completed).get<0>();
+    auto closed = std::move(completed).get<1>();
     if (!closed && !exchange.response_channel_closed()) {
         telemetry.record_proxy_execution(AccessProxyExecutionResult::Failed);
         co_return std::unexpected(Err::from_error(closed.error()));
