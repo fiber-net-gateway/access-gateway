@@ -359,8 +359,7 @@ struct DeferredServiceSelectorFactory {
 
 TEST(AccessConfigWatcherTest, ReconcilesProjectsAndRetainsLastValidSnapshots) {
     fiber::event::EventLoop loop;
-    fiber::event::EventLoopGroup compiler_group(1);
-    fiber::access_server::AccessConfigCompiler compiler(compiler_group.at(0));
+    fiber::access_server::AccessConfigCompiler compiler(loop);
     FakeConfigService service;
     fiber::access_server::RouteConfigStore store;
     fiber::access_server::AccessConfigMetrics config_metrics(loop);
@@ -380,8 +379,6 @@ TEST(AccessConfigWatcherTest, ReconcilesProjectsAndRetainsLastValidSnapshots) {
     fiber::access_server::AccessConfigWatcher watcher(loop, compiler, service, store, {}, observer,
                                                       config_metrics.observer(), activation_capture.observer());
     bool completed = false;
-
-    compiler_group.start();
 
     fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
         auto readiness = watcher.subscribe_readiness();
@@ -529,8 +526,6 @@ TEST(AccessConfigWatcherTest, ReconcilesProjectsAndRetainsLastValidSnapshots) {
     });
 
     loop.run();
-    compiler_group.stop();
-    compiler_group.join();
     EXPECT_TRUE(completed);
     EXPECT_EQ(watcher.state(), fiber::access_server::AccessConfigWatcherState::Stopped);
     std::string metrics;
@@ -584,8 +579,7 @@ TEST(AccessConfigWatcherTest, ReconcilesProjectsAndRetainsLastValidSnapshots) {
 
 TEST(AccessConfigWatcherTest, RejectsMissingInitialProjectListWithoutPublishingSnapshot) {
     fiber::event::EventLoop loop;
-    fiber::event::EventLoopGroup compiler_group(1);
-    fiber::access_server::AccessConfigCompiler compiler(compiler_group.at(0));
+    fiber::access_server::AccessConfigCompiler compiler(loop);
     FakeConfigService service;
     fiber::access_server::RouteConfigStore store;
     fiber::access_server::AccessConfigWatcher watcher(loop, compiler, service, store);
@@ -617,14 +611,12 @@ TEST(AccessConfigWatcherTest, RejectsMissingInitialProjectListWithoutPublishingS
 
 TEST(AccessConfigWatcherTest, RejectsInvalidInitialRouteWithoutWaitingForOtherProjects) {
     fiber::event::EventLoop loop;
-    fiber::event::EventLoopGroup compiler_group(1);
-    fiber::access_server::AccessConfigCompiler compiler(compiler_group.at(0));
+    fiber::access_server::AccessConfigCompiler compiler(loop);
     FakeConfigService service;
     fiber::access_server::RouteConfigStore store;
     fiber::access_server::AccessConfigWatcher watcher(loop, compiler, service, store);
     bool completed = false;
 
-    compiler_group.start();
     fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
         auto readiness = watcher.subscribe_readiness();
         auto snapshot = readiness.current();
@@ -646,23 +638,19 @@ TEST(AccessConfigWatcherTest, RejectsInvalidInitialRouteWithoutWaitingForOtherPr
         loop.stop();
     });
     loop.run();
-    compiler_group.stop();
-    compiler_group.join();
     EXPECT_TRUE(completed);
 }
 
 TEST(AccessConfigWatcherTest, RetriesLatestCandidateAfterTlsIdentityPublication) {
     constexpr std::string_view identity_id = "123e4567-e89b-42d3-a456-426614174000";
     fiber::event::EventLoop loop;
-    fiber::event::EventLoopGroup compiler_group(1);
-    fiber::access_server::AccessConfigCompiler compiler(compiler_group.at(0));
+    fiber::access_server::AccessConfigCompiler compiler(loop);
     FakeConfigService service;
     WatcherTlsIdentityResolverState identity_resolver;
     fiber::access_server::RouteConfigStore store;
     store.set_tls_client_identity_resolver(identity_resolver.adapter());
     fiber::access_server::AccessConfigWatcher watcher(loop, compiler, service, store);
     bool completed = false;
-    compiler_group.start();
 
     fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
         auto readiness = watcher.subscribe_readiness();
@@ -711,15 +699,12 @@ TEST(AccessConfigWatcherTest, RetriesLatestCandidateAfterTlsIdentityPublication)
     });
 
     loop.run();
-    compiler_group.stop();
-    compiler_group.join();
     EXPECT_TRUE(completed);
 }
 
 TEST(AccessConfigWatcherTest, InitialBatchRejectsHostConflictsWithoutPublishingPartialSnapshot) {
     fiber::event::EventLoop loop;
-    fiber::event::EventLoopGroup compiler_group(1);
-    fiber::access_server::AccessConfigCompiler compiler(compiler_group.at(0));
+    fiber::access_server::AccessConfigCompiler compiler(loop);
     FakeConfigService service;
     fiber::access_server::RouteConfigStore store;
     std::size_t observer_updates = 0;
@@ -733,7 +718,6 @@ TEST(AccessConfigWatcherTest, InitialBatchRejectsHostConflictsWithoutPublishingP
     fiber::access_server::AccessConfigWatcher watcher(loop, compiler, service, store, {}, observer);
     bool completed = false;
 
-    compiler_group.start();
     fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
         auto readiness = watcher.subscribe_readiness();
         auto snapshot = readiness.current();
@@ -776,15 +760,12 @@ TEST(AccessConfigWatcherTest, InitialBatchRejectsHostConflictsWithoutPublishingP
     });
 
     loop.run();
-    compiler_group.stop();
-    compiler_group.join();
     EXPECT_TRUE(completed);
 }
 
 TEST(AccessConfigWatcherTest, InitialBatchRejectsUnloadOnlySnapshotWithoutPublishing) {
     fiber::event::EventLoop loop;
-    fiber::event::EventLoopGroup compiler_group(1);
-    fiber::access_server::AccessConfigCompiler compiler(compiler_group.at(0));
+    fiber::access_server::AccessConfigCompiler compiler(loop);
     FakeConfigService service;
     fiber::access_server::RouteConfigStore store;
     std::size_t observer_updates = 0;
@@ -798,7 +779,6 @@ TEST(AccessConfigWatcherTest, InitialBatchRejectsUnloadOnlySnapshotWithoutPublis
     fiber::access_server::AccessConfigWatcher watcher(loop, compiler, service, store, {}, observer);
     bool completed = false;
 
-    compiler_group.start();
     fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
         auto readiness = watcher.subscribe_readiness();
         auto snapshot = readiness.current();
@@ -820,15 +800,12 @@ TEST(AccessConfigWatcherTest, InitialBatchRejectsUnloadOnlySnapshotWithoutPublis
         loop.stop();
     });
     loop.run();
-    compiler_group.stop();
-    compiler_group.join();
     EXPECT_TRUE(completed);
 }
 
 TEST(AccessConfigWatcherTest, InitialBatchDropsReplacedAndRemovedStagedCandidates) {
     fiber::event::EventLoop loop;
-    fiber::event::EventLoopGroup compiler_group(1);
-    fiber::access_server::AccessConfigCompiler compiler(compiler_group.at(0));
+    fiber::access_server::AccessConfigCompiler compiler(loop);
     FakeConfigService service;
     fiber::access_server::RouteConfigStore store;
     std::size_t observer_updates = 0;
@@ -842,7 +819,6 @@ TEST(AccessConfigWatcherTest, InitialBatchDropsReplacedAndRemovedStagedCandidate
     fiber::access_server::AccessConfigWatcher watcher(loop, compiler, service, store, {}, observer);
     bool completed = false;
 
-    compiler_group.start();
     fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
         auto readiness = watcher.subscribe_readiness();
         auto snapshot = readiness.current();
@@ -885,15 +861,12 @@ TEST(AccessConfigWatcherTest, InitialBatchDropsReplacedAndRemovedStagedCandidate
     });
 
     loop.run();
-    compiler_group.stop();
-    compiler_group.join();
     EXPECT_TRUE(completed);
 }
 
 TEST(AccessConfigWatcherTest, InitialBatchWaitsForCurrentServiceReadinessAcrossArrivalOrders) {
     fiber::event::EventLoop loop;
-    fiber::event::EventLoopGroup compiler_group(1);
-    fiber::access_server::AccessConfigCompiler compiler(compiler_group.at(0));
+    fiber::access_server::AccessConfigCompiler compiler(loop);
     FakeConfigService service;
     DeferredServiceSelectorFactory selector_factory;
     fiber::access_server::RouteConfigStore store({}, selector_factory.adapter());
@@ -909,7 +882,7 @@ TEST(AccessConfigWatcherTest, InitialBatchWaitsForCurrentServiceReadinessAcrossA
     bool completed = false;
 
     service.prime("ploto.unified-access.route.cached", route_config(1, "cached.example.com", "cached"), "cached-v1");
-    compiler_group.start();
+
     fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
         auto readiness = watcher.subscribe_readiness();
         auto snapshot = readiness.current();
@@ -984,52 +957,58 @@ TEST(AccessConfigWatcherTest, InitialBatchWaitsForCurrentServiceReadinessAcrossA
     });
 
     loop.run();
-    compiler_group.stop();
-    compiler_group.join();
     EXPECT_TRUE(completed);
 }
 
-TEST(AccessConfigWatcherTest, KeepsOwnerLoopResponsiveAndCoalescesQueuedGenerations) {
+TEST(AccessConfigWatcherTest, CompilesEachGenerationInlineAndPublishesLatestState) {
     fiber::event::EventLoop loop;
-    fiber::event::EventLoopGroup compiler_group(1);
-    fiber::access_server::AccessConfigCompiler compiler(compiler_group.at(0));
+    fiber::access_server::AccessConfigCompiler compiler(loop);
     FakeConfigService service;
     fiber::access_server::RouteConfigStore store;
     fiber::access_server::AccessConfigWatcher watcher(loop, compiler, service, store);
-    bool owner_progressed = false;
-    bool compiler_started = false;
     bool completed = false;
 
     fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
         auto readiness = watcher.subscribe_readiness();
-        auto snapshot = readiness.current();
         EXPECT_TRUE(watcher.start());
         service.push(fiber::access_server::kProjectListDataId, "orders");
         service.push("ploto.unified-access.route.orders", route_config(1, "v1.example.com", "orders"), "v1");
-        service.push("ploto.unified-access.route.orders", route_config(2, "v2.example.com", "orders"), "v2");
-        service.push("ploto.unified-access.route.orders", conditional_route_config(3, "v3.example.com", "orders"),
-                     "v3");
 
-        const auto queued = watcher.project_status("orders");
-        EXPECT_TRUE(queued);
-        if (queued) {
-            EXPECT_EQ(queued->config_state, fiber::access_server::AccessProjectConfigState::Processing);
-            EXPECT_EQ(queued->generation, 3u);
-            EXPECT_EQ(queued->observed_md5, "v3");
-        }
-        EXPECT_FALSE(store.current_version("orders"));
-        owner_progressed = true;
-
-        compiler_group.start();
-        compiler_started = true;
-        co_await wait_for_readiness(readiness, snapshot, fiber::access_server::AccessConfigReadinessState::Ready);
-
-        const auto published = watcher.project_status("orders");
+        // Compilation is inline on this loop: each notification settles
+        // synchronously instead of coalescing behind a compiler thread.
+        auto published = watcher.project_status("orders");
         EXPECT_TRUE(published);
         if (published) {
             EXPECT_EQ(published->config_state, fiber::access_server::AccessProjectConfigState::Accepted);
-            EXPECT_EQ(published->observed_version, 3);
-            EXPECT_EQ(published->published_generation, 3u);
+            EXPECT_EQ(published->generation, 1u);
+            EXPECT_EQ(published->observed_md5, "v1");
+            EXPECT_EQ(published->observed_version, 1);
+            EXPECT_EQ(published->published_generation, 1u);
+        }
+        EXPECT_EQ(store.current_version("orders"), 1);
+        EXPECT_EQ(watcher.successful_updates(), 1u);
+
+        service.push("ploto.unified-access.route.orders", route_config(2, "v2.example.com", "orders"), "v2");
+        EXPECT_EQ(store.current_version("orders"), 2);
+        EXPECT_TRUE(store.pin()->match_host("v2.example.com"));
+        EXPECT_FALSE(store.pin()->match_host("v1.example.com"));
+
+        service.push("ploto.unified-access.route.orders", conditional_route_config(3, "v3.example.com", "orders"),
+                     "v3");
+
+        const auto latest = watcher.project_status("orders");
+        EXPECT_TRUE(latest);
+        if (latest) {
+            EXPECT_EQ(latest->config_state, fiber::access_server::AccessProjectConfigState::Accepted);
+            EXPECT_EQ(latest->generation, 3u);
+            EXPECT_EQ(latest->observed_md5, "v3");
+            EXPECT_EQ(latest->observed_version, 3);
+            EXPECT_EQ(latest->published_generation, 3u);
+        }
+        auto snapshot = readiness.current();
+        EXPECT_TRUE(snapshot.value);
+        if (snapshot.value) {
+            EXPECT_EQ(snapshot.value->state, fiber::access_server::AccessConfigReadinessState::Ready);
         }
         EXPECT_EQ(store.current_version("orders"), 3);
         EXPECT_TRUE(store.pin()->match_host("v3.example.com"));
@@ -1039,7 +1018,7 @@ TEST(AccessConfigWatcherTest, KeepsOwnerLoopResponsiveAndCoalescesQueuedGenerati
         if (!store.pin()->projects().empty()) {
             EXPECT_EQ(store.pin()->projects().front()->compiled_program_count(), 1u);
         }
-        EXPECT_EQ(watcher.successful_updates(), 1u);
+        EXPECT_EQ(watcher.successful_updates(), 3u);
         EXPECT_EQ(watcher.failed_updates(), 0u);
 
         co_await watcher.shutdown();
@@ -1048,24 +1027,17 @@ TEST(AccessConfigWatcherTest, KeepsOwnerLoopResponsiveAndCoalescesQueuedGenerati
     });
 
     loop.run();
-    if (compiler_started) {
-        compiler_group.stop();
-        compiler_group.join();
-    }
-    EXPECT_TRUE(owner_progressed);
     EXPECT_TRUE(completed);
 }
 
-TEST(AccessConfigWatcherTest, ClosedProjectSubscriptionCancelsStaleCompileAndRecoversAfterReconcile) {
+TEST(AccessConfigWatcherTest, AppliesCandidateBeforeClosedSubscriptionAndRecoversAfterReconcile) {
     fiber::event::EventLoop loop;
-    fiber::event::EventLoopGroup compiler_group(1);
-    fiber::access_server::AccessConfigCompiler compiler(compiler_group.at(0));
+    fiber::access_server::AccessConfigCompiler compiler(loop);
     FakeConfigService service;
     fiber::access_server::RouteConfigStore store;
     auto seeded = store.apply("orders", stored_route_config(1, "v1.example.com", "orders"));
     ASSERT_TRUE(seeded);
     fiber::access_server::AccessConfigWatcher watcher(loop, compiler, service, store);
-    bool compiler_started = false;
     bool completed = false;
 
     fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
@@ -1074,14 +1046,20 @@ TEST(AccessConfigWatcherTest, ClosedProjectSubscriptionCancelsStaleCompileAndRec
         service.push(fiber::access_server::kProjectListDataId, "orders");
         service.push("ploto.unified-access.route.orders", route_config(2, "v2.example.com", "orders"), "v2");
 
+        // The candidate compiles inline, so v2 is published before the
+        // subscription closes; the closed subscription keeps the last
+        // published snapshot loaded (failure-old-snapshot semantics).
         auto status = watcher.project_status("orders");
         EXPECT_TRUE(status);
         if (status) {
             EXPECT_EQ(status->subscription_state, fiber::access_server::AccessProjectSubscriptionState::Subscribed);
-            EXPECT_EQ(status->config_state, fiber::access_server::AccessProjectConfigState::Processing);
+            EXPECT_EQ(status->config_state, fiber::access_server::AccessProjectConfigState::Accepted);
             EXPECT_EQ(status->generation, 1U);
             EXPECT_EQ(status->observed_md5, "v2");
+            EXPECT_EQ(status->observed_version, 2);
+            EXPECT_EQ(status->published_generation, 1U);
         }
+        EXPECT_EQ(store.current_version("orders"), 2);
 
         service.close("ploto.unified-access.route.orders");
 
@@ -1115,9 +1093,9 @@ TEST(AccessConfigWatcherTest, ClosedProjectSubscriptionCancelsStaleCompileAndRec
 
         co_await yield_updates();
         EXPECT_EQ(service.subscribe_attempts("ploto.unified-access.route.orders"), 1U);
-        EXPECT_EQ(store.current_version("orders"), 1);
-        EXPECT_TRUE(store.pin()->match_host("v1.example.com"));
-        EXPECT_FALSE(store.pin()->match_host("v2.example.com"));
+        EXPECT_EQ(store.current_version("orders"), 2);
+        EXPECT_TRUE(store.pin()->match_host("v2.example.com"));
+        EXPECT_FALSE(store.pin()->match_host("v1.example.com"));
 
         service.prime("ploto.unified-access.route.orders", route_config(3, "v3.example.com", "orders"), "v3");
         service.push_not_found(fiber::access_server::kProjectListDataId);
@@ -1125,18 +1103,19 @@ TEST(AccessConfigWatcherTest, ClosedProjectSubscriptionCancelsStaleCompileAndRec
         EXPECT_FALSE(store.current_version("orders"));
         service.push(fiber::access_server::kProjectListDataId, "orders");
 
+        // The replayed candidate settles synchronously on re-subscribe.
         status = watcher.project_status("orders");
         EXPECT_TRUE(status);
         if (status) {
             EXPECT_EQ(status->subscription_state, fiber::access_server::AccessProjectSubscriptionState::Subscribed);
-            EXPECT_EQ(status->config_state, fiber::access_server::AccessProjectConfigState::Processing);
+            EXPECT_EQ(status->config_state, fiber::access_server::AccessProjectConfigState::Accepted);
             EXPECT_EQ(status->generation, 1U);
             EXPECT_EQ(status->observed_md5, "v3");
+            EXPECT_EQ(status->observed_version, 3);
+            EXPECT_EQ(status->published_generation, 1U);
         }
         EXPECT_EQ(service.subscribe_attempts("ploto.unified-access.route.orders"), 2U);
 
-        compiler_group.start();
-        compiler_started = true;
         co_await wait_for_readiness(readiness, snapshot, fiber::access_server::AccessConfigReadinessState::Ready);
 
         status = watcher.project_status("orders");
@@ -1151,7 +1130,7 @@ TEST(AccessConfigWatcherTest, ClosedProjectSubscriptionCancelsStaleCompileAndRec
         EXPECT_FALSE(store.pin()->match_host("v1.example.com"));
         EXPECT_FALSE(store.pin()->match_host("v2.example.com"));
         EXPECT_TRUE(store.pin()->match_host("v3.example.com"));
-        EXPECT_EQ(watcher.successful_updates(), 2U);
+        EXPECT_EQ(watcher.successful_updates(), 3U);
         EXPECT_EQ(watcher.failed_updates(), 1U);
 
         co_await watcher.shutdown();
@@ -1160,17 +1139,12 @@ TEST(AccessConfigWatcherTest, ClosedProjectSubscriptionCancelsStaleCompileAndRec
     });
 
     loop.run();
-    if (compiler_started) {
-        compiler_group.stop();
-        compiler_group.join();
-    }
     EXPECT_TRUE(completed);
 }
 
 TEST(AccessConfigWatcherTest, RetriesTransientProjectSubscriptionsAndReportsTypedReadiness) {
     fiber::event::EventLoop loop;
-    fiber::event::EventLoopGroup compiler_group(1);
-    fiber::access_server::AccessConfigCompiler compiler(compiler_group.at(0));
+    fiber::access_server::AccessConfigCompiler compiler(loop);
     FakeConfigService service;
     service.fail_subscriptions("ploto.unified-access.route.b", 2,
                                fiber::nacos::ConfigServiceError{
@@ -1185,8 +1159,6 @@ TEST(AccessConfigWatcherTest, RetriesTransientProjectSubscriptionsAndReportsType
     options.subscription_retry_max_delay = 0ms;
     fiber::access_server::AccessConfigWatcher watcher(loop, compiler, service, store, options);
     bool completed = false;
-
-    compiler_group.start();
 
     fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
         auto readiness = watcher.subscribe_readiness();
@@ -1287,15 +1259,12 @@ TEST(AccessConfigWatcherTest, RetriesTransientProjectSubscriptionsAndReportsType
     });
 
     loop.run();
-    compiler_group.stop();
-    compiler_group.join();
     EXPECT_TRUE(completed);
 }
 
 TEST(AccessConfigWatcherTest, ShutdownWinsAgainstQueuedConfigCallbacks) {
     fiber::event::EventLoop loop;
-    fiber::event::EventLoopGroup compiler_group(1);
-    fiber::access_server::AccessConfigCompiler compiler(compiler_group.at(0));
+    fiber::access_server::AccessConfigCompiler compiler(loop);
     FakeConfigService service;
     service.fail_subscriptions("ploto.unified-access.route.c", 100,
                                fiber::nacos::ConfigServiceError{
@@ -1309,8 +1278,6 @@ TEST(AccessConfigWatcherTest, ShutdownWinsAgainstQueuedConfigCallbacks) {
     options.subscription_retry_max_delay = 1h;
     fiber::access_server::AccessConfigWatcher watcher(loop, compiler, service, store, options);
     bool completed = false;
-
-    compiler_group.start();
 
     fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
         EXPECT_TRUE(watcher.start());
@@ -1330,8 +1297,6 @@ TEST(AccessConfigWatcherTest, ShutdownWinsAgainstQueuedConfigCallbacks) {
     });
 
     loop.run();
-    compiler_group.stop();
-    compiler_group.join();
     EXPECT_TRUE(completed);
 }
 

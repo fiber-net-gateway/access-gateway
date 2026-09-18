@@ -270,45 +270,37 @@ Validator 的 `--describe-config-limits` 输出 strict schema version 1 JSON。s
 和运行时引用同一份 native 限制，避免控制面接受数据面必然拒绝的内容。具体 schema version 1
 数值和 snapshot 估算边界见上面的独立限制文档。
 
-### 5.4 L-04：配置编译移出 Nacos owner loop
+### 5.4 L-04：配置编译线程模型（2026-09 反转为 nacos loop 内联）
 
-**归属：本项目。初始实现不需要 Fiber 改动。**
+**归属：本项目。不需要 Fiber 改动。**
 
-**实施状态：已解决（2026-08-17）。** runtime 现在使用独立单线程 compiler EventLoop。
-Project route 的 JSON、关系、脚本/模板、CIDR/address、matcher 和静态 gzip，以及 TLS 的 JSON、PEM/SAN、
-TCP/QUIC context 和 bootstrap identity 准备都在该 loop 完成；动态 response writer 则在请求 owner loop
-装配。Nacos loop
-只检查原始字节上限、推进 generation、绑定 owner-loop-only NamingService lease、等待
-service ready 并发布完整候选。
+**实施状态：2026-08-17 曾采用独立单线程 compiler EventLoop；2026-09 依据生产实测反转为
+nacos owner loop 内联编译（当前模型）。** Project route 与 TLS 的全部编译在 Nacos owner loop
+上同步完成，compiler 线程与两套跨线程 job 协议删除（线程 9→8）。
 
-Project 队列对每个当前项目只保留 latest `ConfigData` shared pointer，实际投递任务为 1，
-总待处理项目受 L-03 的 1024 项目上限约束；TLS 使用 1 active + 1 latest pending。旧任务
-通过 cancel flag 和回投后的 generation 双重检查失效。shutdown 会先关闭订阅、取消候选并
-异步等待全部回执，再允许 compiler group 停止。完整线程、队列和生命周期契约见
+反转依据（172.28.2.111 生产实例，19.5 小时，367 项目）：
+
+- 371 次项目编译共 26.3 ms、最大单次 1.53 ms，与 Nacos 心跳摘除阈值 ~15 s 相差三个数量级——
+  专线程换来的“owner loop 不被阻塞”在此量级下没有可测收益；
+- 初始批次最坏情况 1024 项目 × ~71 µs ≈ 73 ms 同步工作，距摘除阈值仍有 ≥9× 余量；
+- 灰度规则解析本就在 nacos loop 内联，先例成立；
+- 跨线程协议（cancel flag、回投后 generation 双重检查、no-throw 分配失败路径、latest-only
+  队列合并）的复杂度成为纯开销。
+
+内联模型下每条配置通知同步编译一次并当场终态化（无队列、无合并）。same-version skip、
+MissingDependency 重放（TLS 发布成功后 force 编译有界重试）、以及编译入口处的
+Running/项目身份/订阅状态门控全部保留。编译耗时 >50 ms 记
+`project_compile_slow`/`tls_compile_slow` WARN（`access_server.config` logger），病态快照在生产
+可观测；`project_compile` stage 指标继续记录每次编译。完整线程模型、终态语义与生命周期契约见
 [`config-compilation.md`](config-compilation.md)。
 
-改造前，项目回调在 Nacos loop 上完成 JSON decode、关系校验、脚本和模板编译、
-CIDR/address 编译以及静态 gzip；动态 gzip 不在该 loop 执行，而是在请求 owner loop 通过共享 writer
-流式处理；TLS watcher 也会在 owner loop 上解析 PEM 和创建 TLS
-context。大配置或复杂脚本会延迟同一 loop 上的其他配置和 NamingService 工作。
-
-采用的执行模型是：
-
-```text
-Nacos owner loop
-  -> 检查原始字节上限并记录 generation
-  -> compiler worker 纯 decode/validate/compile
-  -> 回到 Nacos loop 检查 generation
-  -> 获取 service lease 并等待 ready
-  -> 原子发布
-```
-
-脚本 compiler 在 compiler loop 内拥有独立、长生命周期的 `AccessScriptCompiler`；OpenSSL
-context 也只在该 worker 构造。队列容量、取消和“新 generation 替换旧任务”均由 watcher
-显式管理。
-
-若未来需要通用 CPU work executor，可单独贡献到 Fiber；本项不应因等待通用抽象而阻塞
-本项目的专用实现。
+历史模型（2026-08-17，已被反转取代，可参考 git 历史）：专用 compiler EventLoop 承担
+JSON/关系/脚本/模板/CIDR/address/matcher/静态 gzip 与 TLS PEM/SAN/context/bootstrap 编译；
+Project 队列每项目 latest-only（1 in-flight + 1 pending），TLS 1 active + 1 latest pending；
+旧任务通过 cancel flag 与回投 generation 双重检查失效。该模型针对的“大配置或复杂脚本延迟同
+loop 上其他配置与 NamingService 工作”的风险在实测规模下不成立；若未来配置规模或编译成本
+显著增长（监控 `project_compile` 指标与 slow WARN），应重新评估并优先考虑通用 Fiber CPU
+executor（单独贡献上游），而非恢复本项目的专用线程协议。
 
 ### 5.5 L-05：配置发布 typestate
 
@@ -507,7 +499,7 @@ route 级能力现已通过 native-only `upstream_tls` 对象接入。对象要�
 `server_name` 和独立 DNS/IP `verify_name`。对象缺失/null 时继续使用进程默认和 affinity `0`，
 不改变既有 wire。
 
-custom CA 不接受任意文件路径：候选在 compiler loop 上完成 PEM/trust 校验并写入只读 sealed memfd，
+custom CA 不接受任意文件路径：候选在 nacos owner loop 上完成 PEM/trust 校验并写入只读 sealed memfd，
 不可变 Project snapshot 持有其生命周期。`generation` 与所有连接级字段/CA 内容共同生成稳定非零
 affinity，同一 profile 同时用于重建 `Http1ConnectionGroupKey` 和生成 `TlsOptions`。因此新旧
 generation、本地 pool 命中和跨 worker steal 都不会跨 profile 复用；旧请求 pin 的 snapshot 仍可
@@ -1099,14 +1091,14 @@ metrics、activation、CAT 和关闭行为。
 - 幂等 stop、owner-loop handle close 和析构时无活动订阅的不变量。
 
 资源职责没有进入公共 lifecycle：`AccessConfigWatcher` 继续独占两级订阅图、project reconcile、
-compile queue、initial batch、service readiness、route publish、typed readiness、metrics 和 activation
-evidence；Gray 继续负责兼容 decode 与 per-worker snapshot；TLS 继续负责 coalesced off-loop compile、
-证书 prepare/commit、bootstrap readiness 和 processing watch。三个 watcher 的公开 state、失败类型、
+内联 compile/generation、initial batch、service readiness、route publish、typed readiness、metrics 和
+activation evidence；Gray 继续负责兼容 decode 与 per-worker snapshot；TLS 继续负责 owner-loop 内联
+compile、证书 prepare/commit、bootstrap readiness 和 processing watch。三个 watcher 的公开 state、失败类型、
 计数器和 API 不变，没有形成继承树。
 
 行为也保持原契约：Gray/TLS 意外关闭仍是 terminal `Failed`，project-list 关闭仍发布
 `Unavailable`，仅 project route 的暂态首次订阅错误按原配置 retry，永久错误仍为 `Failed`；项目删除、
-新值和 shutdown 都推进 generation，从而取消旧 retry/compile/service-ready 结果。每个 project 原有的
+新值和 shutdown 都推进 generation，从而取消旧 retry/service-ready 结果并使未开始的编译失效。每个 project 原有的
 revision watch 被 lifecycle 直接替换，没有叠加；只有 project-list、gray 和 TLS 三个 control-plane
 根订阅各新增一个 watch shared state。
 
@@ -1373,8 +1365,9 @@ access-server -> runtime -> execution -> observability -> config
 
 为消除原有的反向依赖，本次同时完成三个窄接口调整：
 
-1. 从 `AccessScriptRuntime` 提取有状态的 `AccessScriptCompiler`。compiler loop 和 validator
-   直接持有 compiler；请求 runtime 只剩无状态执行 adapter，不再初始化第二套编译 library；
+1. 从 `AccessScriptRuntime` 提取有状态的 `AccessScriptCompiler`。`AccessConfigCompiler`（2026-09
+   起在 nacos owner loop 上运行）和 validator 直接持有 compiler；请求 runtime 只剩无状态执行
+   adapter，不再初始化第二套编译 library；
 2. 从 `GrayMatchStore` 提取纯 `GrayMatchCompiler`。validator 的严格字段校验与 runtime 的
    Java 兼容发布继续不同，但两者共享同一个 bounded CIDR/ratio compiled model；
 3. handler 不再包含 `RouteConfigStore`/Nacos 头，而是消费两个指针大小、trivially-copyable
@@ -1428,12 +1421,13 @@ worker 完成资源创建后注入失败，验证首次 init fail closed、同�
 shutdown 和重复 shutdown 完成；既有测试继续证明 shutdown 不阻塞 control loop，且 worker group
 必须在释放完成前保持可服务。
 
-Project route 订阅竞态子项也已补齐：测试先保留一个已发布的 v1 快照，将 v2 编译确定性地挂起在
-尚未启动的 compiler EventLoop，然后注入非预期 `Closed`。测试验证关闭会推进 generation、取消
-编译、进入不可重试的 `Failed`、保持 readiness 为 synchronizing，并继续保留 v1；随后通过
-project-list 显式删除/重加和同步缓存回放恢复到新 entry。compiler 启动后旧 v2 completion 与新
-v3 job 依次返回，最终只有 v3 可以发布，从 watcher 集成层覆盖 subscription closed、stale
-generation、旧快照保留和显式 reconcile 恢复的组合边界。
+Project route 订阅竞态子项也已补齐：测试先保留一个已发布的 v1 快照，推送 v2（内联编译立即提交为
+Accepted 并落库），然后注入非预期 `Closed`。测试验证关闭会推进 generation、进入不可重试的
+`Failed`、保持 readiness 为 synchronizing，并继续保留 v2；随后通过 project-list 显式删除/重加和
+同步缓存回放恢复到新 entry，重放 v3 并最终只有 v3 可以发布，从 watcher 集成层覆盖 subscription
+closed、旧快照保留和显式 reconcile 恢复的组合边界。2026-09 编译内联化之前，该测试靠把 v2 编译
+挂起在尚未启动的 compiler EventLoop 上注入竞态并验证跨线程取消；内联后取消窗口不复存在，测试
+改为验证同步提交后的关闭与恢复路径。
 
 初始配置到达顺序子项现在使用可确定性门控的 service selector 覆盖三种顺序：service-ready 和
 route 均早于 project-list 的同步缓存回放、project-list 早于 route，以及 route 早于

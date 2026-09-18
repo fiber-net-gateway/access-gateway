@@ -145,8 +145,9 @@ rendered by this metric domain.
 | `project_route` | `failure` | `service_ready`     | NamingService readiness failed               |
 | `project_route` | `failure` | `publish`           | Global snapshot construction failed          |
 
-Retries count each failed subscription attempt. Stale compiler results and candidates canceled by
-a newer generation are not update outcomes and do not increment a series.
+Retries count each failed subscription attempt. Compilation is inline on the owner loop, so a
+candidate superseded by a newer generation before its compile starts never produces an update
+outcome and does not increment a series.
 
 ## Readiness and snapshot metrics
 

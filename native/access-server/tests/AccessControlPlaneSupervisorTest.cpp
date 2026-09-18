@@ -376,11 +376,9 @@ TEST_P(AccessControlPlaneSupervisorFailureTest, RollsBackOnlyAttemptedResourcesI
 
     fiber::event::EventLoop coordinator_loop;
     fiber::event::EventLoopGroup nacos_group(1);
-    fiber::event::EventLoopGroup compiler_group(1);
     fiber::event::EventLoopGroup cat_group(1);
     fiber::event::EventLoopGroup http_workers(1);
     nacos_group.start();
-    compiler_group.start();
     cat_group.start();
     http_workers.start();
 
@@ -397,8 +395,8 @@ TEST_P(AccessControlPlaneSupervisorFailureTest, RollsBackOnlyAttemptedResourcesI
         options.tls_enabled = test.point == FailurePoint::TlsWatcher || test.point == FailurePoint::AccessWatcher ||
                               test.point == FailurePoint::SynchronousTlsClosedReplay;
 
-        AccessControlPlaneSupervisor supervisor(coordinator_loop, nacos_group.at(0), compiler_group.at(0),
-                                                cat_group.at(0), http_workers, std::move(options),
+        AccessControlPlaneSupervisor supervisor(coordinator_loop, nacos_group.at(0), cat_group.at(0), http_workers,
+                                                std::move(options),
                                                 AccessControlPlaneDependencies{
                                                         .config_service = std::move(config_service),
                                                         .naming_service = std::move(naming_service),
@@ -431,8 +429,6 @@ TEST_P(AccessControlPlaneSupervisorFailureTest, RollsBackOnlyAttemptedResourcesI
     http_workers.join();
     cat_group.stop();
     cat_group.join();
-    compiler_group.stop();
-    compiler_group.join();
     nacos_group.stop();
     nacos_group.join();
 

@@ -1,14 +1,21 @@
 #include "TlsCertificateWatcher.h"
 
-#include <atomic>
-#include <memory>
-#include <new>
+#include "../observability/AccessServerLogCategories.h"
+
+#include <chrono>
 #include <utility>
 
 #include <fiber/common/Assert.h>
+#include <fiber/log/Log.h>
 
 namespace fiber::access_server {
 namespace {
+
+DEFINE_LOGGER(LOG_CONFIG, kAccessServerConfigLogger);
+
+// TLS snapshot compilation runs inline on the nacos loop; past this threshold
+// it is worth a warning because it delays other loop work.
+constexpr std::chrono::milliseconds kTlsCompileWarnThreshold{50};
 
 std::string_view watcher_state_name(TlsCertificateWatcherState state) noexcept {
     switch (state) {
@@ -66,27 +73,15 @@ nacos::ConfigServiceError subscription_closed_error() {
 
 } // namespace
 
-struct TlsCertificateWatcher::CompileJob final : public common::NonCopyable, public common::NonMovable {
-    TlsCertificateWatcher *owner = nullptr;
-    std::shared_ptr<const nacos::ConfigData> data;
-    TlsCertificateVersionState published_state;
-    std::optional<CompiledTlsCertificateConfigResult> result;
-    std::atomic<bool> canceled{false};
-    std::uint64_t generation = 0;
-    bool quic_enabled = false;
-    bool prepare_bootstrap = false;
-    bool force_compile = false;
-    event::EventLoop::NotifyEntry compile_entry;
-    event::EventLoop::NotifyEntry completion_entry;
-};
-
 TlsCertificateWatcher::TlsCertificateWatcher(event::EventLoop &loop, AccessConfigCompiler &compiler,
                                              nacos::ConfigService &config_service, TlsCertificateStore &store,
                                              TlsCertificateWatcherOptions options,
                                              AccessTlsActivationEvidenceObserver observer) :
     loop_(&loop), compiler_(&compiler), config_service_(&config_service), store_(&store), options_(std::move(options)),
     observer_(observer), subscription_(loop) {
-    FIBER_ASSERT(loop_ != &compiler_->loop());
+    // TLS snapshots compile inline on this loop; the compiler must be bound to
+    // it so its loop-ownership assertions hold.
+    FIBER_ASSERT(loop_ == &compiler_->loop());
     readiness_publisher_ = readiness_.acquire_publisher();
     FIBER_ASSERT(readiness_publisher_.has_value());
     processing_publisher_ = processing_.acquire_publisher();
@@ -97,9 +92,6 @@ TlsCertificateWatcher::~TlsCertificateWatcher() noexcept {
     FIBER_ASSERT(state_ == TlsCertificateWatcherState::Created || state_ == TlsCertificateWatcherState::Stopped);
     FIBER_ASSERT(!starting_subscription_);
     FIBER_ASSERT(!startup_replay_data_);
-    FIBER_ASSERT(!pending_compile_data_);
-    FIBER_ASSERT(active_compile_job_ == nullptr);
-    FIBER_ASSERT(compile_tasks_.empty());
 }
 
 std::expected<void, nacos::ConfigServiceError> TlsCertificateWatcher::start() {
@@ -149,8 +141,6 @@ async::Task<void> TlsCertificateWatcher::shutdown() noexcept {
     }
     state_ = TlsCertificateWatcherState::Stopping;
     subscription_.stop();
-    cancel_compile();
-    co_await compile_tasks_.join();
     publish_processing(false);
     state_ = TlsCertificateWatcherState::Stopped;
     publish_evidence();
@@ -166,9 +156,11 @@ void TlsCertificateWatcher::on_notify(void *context,
                 owner.startup_replay_data_.reset();
                 return;
             }
-            owner.cancel_compile();
             owner.state_ = TlsCertificateWatcherState::Failed;
             ++owner.failed_updates_;
+            LOG(LOG_CONFIG, WARN) << "tls_subscription_failed"
+                                  << " code=subscription_closed"
+                                  << " md5=\"" << owner.observed_md5_ << "\"";
             if (owner.candidate_status_ == AccessActivationCandidateStatus::Processing) {
                 owner.candidate_status_ = AccessActivationCandidateStatus::Rejected;
             }
@@ -208,7 +200,6 @@ void TlsCertificateWatcher::apply(std::shared_ptr<const nacos::ConfigData> data)
     if (initial_rejected_) {
         return;
     }
-    cancel_compile();
     observed_md5_ = std::string(data->md5);
     observed_at_unix_millis_ = access_activation_unix_millis(*loop_);
     candidate_status_ = AccessActivationCandidateStatus::Processing;
@@ -232,96 +223,48 @@ void TlsCertificateWatcher::apply(std::shared_ptr<const nacos::ConfigData> data)
                                                });
         return;
     }
-    enqueue_compile(std::move(data));
+    compile_tls_inline(std::move(data));
 }
 
-void TlsCertificateWatcher::enqueue_compile(std::shared_ptr<const nacos::ConfigData> data, bool force_compile) {
+void TlsCertificateWatcher::compile_tls_inline(std::shared_ptr<const nacos::ConfigData> data, bool force_compile) {
     FIBER_ASSERT(loop_->in_loop());
     FIBER_ASSERT(data);
-    pending_compile_data_ = std::move(data);
-    pending_force_compile_ = force_compile;
+    // Compiles synchronously on this (nacos) loop — no cross-loop job
+    // protocol. One bounded re-pass covers the corner where the compiler
+    // skipped a not-newer snapshot that is no longer confirmably the loaded
+    // one: force_compile makes the skip branch unreachable on the second
+    // pass. The processing Watch only ever observes terminal values here —
+    // waiters are resumed between loop turns, never mid-stack.
     publish_processing(true);
-    if (active_compile_job_) {
-        active_compile_job_->canceled.store(true, std::memory_order_release);
-        return;
-    }
-    dispatch_compile();
-}
-
-void TlsCertificateWatcher::dispatch_compile() {
-    FIBER_ASSERT(loop_->in_loop());
-    if (state_ != TlsCertificateWatcherState::Running || active_compile_job_ || !pending_compile_data_) {
-        return;
-    }
-    auto data = std::exchange(pending_compile_data_, {});
-    const bool force_compile = std::exchange(pending_force_compile_, false);
-    auto *job = new (std::nothrow) CompileJob();
-    if (!job) {
-        report_failure(std::string(data->md5), TlsCertificateConfigError{
-                                                       .code = TlsCertificateConfigErrorCode::InvalidField,
-                                                       .field = "compiler",
-                                                       .message = "failed to allocate TLS compilation job",
-                                               });
-        publish_processing(false);
-        return;
-    }
-    job->owner = this;
-    job->data = std::move(data);
-    job->published_state = store_->version_state();
-    job->generation = subscription_.generation();
-    job->quic_enabled = store_->quic_enabled();
-    job->prepare_bootstrap = !store_->bootstrap_identity();
-    job->force_compile = force_compile;
-    active_compile_job_ = job;
-    compile_tasks_.add();
-    compiler_->loop().post<CompileJob, &CompileJob::compile_entry, &run_compile>(*job);
-}
-
-void TlsCertificateWatcher::run_compile(CompileJob *job) noexcept {
-    FIBER_ASSERT(job);
-    TlsCertificateWatcher &owner = *job->owner;
-    FIBER_ASSERT(owner.compiler_->loop().in_loop());
-    if (!job->canceled.load(std::memory_order_acquire)) {
-        CompiledTlsCertificateConfigResult result =
-                owner.compiler_->compile_tls(job->data->content, job->published_state, job->quic_enabled,
-                                             job->prepare_bootstrap, job->force_compile);
-        if (!job->canceled.load(std::memory_order_acquire)) {
-            job->result.emplace(std::move(result));
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        if (state_ != TlsCertificateWatcherState::Running) {
+            break;
         }
+        const TlsCertificateVersionState version_state = store_->version_state();
+        const bool quic_enabled = store_->quic_enabled();
+        const bool prepare_bootstrap = !store_->bootstrap_identity();
+        const auto started = std::chrono::steady_clock::now();
+        CompiledTlsCertificateConfigResult result =
+                compiler_->compile_tls(data->content, version_state, quic_enabled, prepare_bootstrap, force_compile);
+        const auto duration =
+                std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started);
+        if (duration > kTlsCompileWarnThreshold) {
+            LOG(LOG_CONFIG, WARN) << "tls_compile_slow"
+                                  << " duration_ms="
+                                  << std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
+        }
+        if (result && result->compilation_skipped && result->version &&
+            !store_->classify(*result->version, result->content_digest)) {
+            // Skipped snapshot that is not confirmably the loaded one;
+            // recompile once with the skip bypassed. The classify outcome is
+            // recomputed by apply_result for the status mapping.
+            force_compile = true;
+            continue;
+        }
+        apply_result(data, std::move(result));
+        break;
     }
-    owner.loop_->post<CompileJob, &CompileJob::completion_entry, &complete_compile>(*job);
-}
-
-void TlsCertificateWatcher::complete_compile(CompileJob *job) noexcept {
-    FIBER_ASSERT(job);
-    std::unique_ptr<CompileJob> owned(job);
-    TlsCertificateWatcher &owner = *job->owner;
-    FIBER_ASSERT(owner.loop_->in_loop());
-    FIBER_ASSERT(owner.active_compile_job_ == job);
-    owner.active_compile_job_ = nullptr;
-    const bool current = owner.state_ == TlsCertificateWatcherState::Running &&
-                         owner.subscription_.is_current(job->generation) &&
-                         !job->canceled.load(std::memory_order_acquire) && job->result;
-    if (current) {
-        owner.apply_result(*job);
-    }
-    owner.compile_tasks_.done();
-    owner.dispatch_compile();
-    if (!owner.active_compile_job_ && !owner.pending_compile_data_) {
-        owner.publish_processing(false);
-    }
-}
-
-void TlsCertificateWatcher::cancel_compile() noexcept {
-    FIBER_ASSERT(loop_->in_loop());
-    if (active_compile_job_) {
-        active_compile_job_->canceled.store(true, std::memory_order_release);
-    }
-    pending_compile_data_.reset();
-    pending_force_compile_ = false;
-    if (!active_compile_job_) {
-        publish_processing(false);
-    }
+    publish_processing(false);
 }
 
 void TlsCertificateWatcher::publish_processing(bool processing) {
@@ -336,6 +279,9 @@ void TlsCertificateWatcher::publish_processing(bool processing) {
 void TlsCertificateWatcher::report_failure(std::string md5, TlsCertificateConfigError error) {
     ++failed_updates_;
     candidate_status_ = AccessActivationCandidateStatus::Rejected;
+    LOG(LOG_CONFIG, WARN) << "tls_config_failed" << " md5=\"" << md5 << "\""
+                          << " code=" << error_code_name(error.code) << " field=\"" << error.field << "\""
+                          << " offset=" << error.offset << " error=\"" << error.message << "\"";
     last_failure_ = TlsCertificateWatcherFailure{
             .stage = "compile",
             .code = std::string(error_code_name(error.code)),
@@ -351,12 +297,12 @@ void TlsCertificateWatcher::report_failure(std::string md5, TlsCertificateConfig
     publish_evidence();
 }
 
-void TlsCertificateWatcher::apply_result(CompileJob &job) {
+void TlsCertificateWatcher::apply_result(const std::shared_ptr<const nacos::ConfigData> &data,
+                                         CompiledTlsCertificateConfigResult result) {
     FIBER_ASSERT(loop_->in_loop());
-    FIBER_ASSERT(job.result);
-    CompiledTlsCertificateConfigResult result = std::move(*job.result);
+    FIBER_ASSERT(data);
     if (!result) {
-        report_failure(std::string(job.data->md5), std::move(result.error()));
+        report_failure(std::string(data->md5), std::move(result.error()));
         return;
     }
     if (!result->version) {
@@ -366,22 +312,22 @@ void TlsCertificateWatcher::apply_result(CompileJob &job) {
     }
 
     if (result->compilation_skipped) {
+        // Reached only when the skipped snapshot is confirmably the loaded
+        // one; the no-longer-loaded replay is handled by
+        // compile_tls_inline's bounded re-pass.
         TlsCertificateClassification classified = store_->classify(*result->version, result->content_digest);
-        if (!classified) {
-            enqueue_compile(job.data, true);
-            return;
-        }
+        FIBER_ASSERT(classified);
         if (!*classified) {
-            report_failure(std::string(job.data->md5), std::move(classified->error()));
+            report_failure(std::string(data->md5), std::move(classified->error()));
             return;
         }
         if (**classified == TlsCertificateUpdateStatus::Published) {
             ++successful_updates_;
-            active_md5_ = std::string(job.data->md5);
+            active_md5_ = std::string(data->md5);
             active_at_unix_millis_ = access_activation_unix_millis(*loop_);
             readiness_publisher_->publish(TlsCertificateReadiness::Ready);
         } else if (**classified == TlsCertificateUpdateStatus::VersionUnchanged) {
-            active_md5_ = std::string(job.data->md5);
+            active_md5_ = std::string(data->md5);
             active_at_unix_millis_ = access_activation_unix_millis(*loop_);
         }
         candidate_status_ = AccessActivationCandidateStatus::Accepted;
@@ -389,21 +335,21 @@ void TlsCertificateWatcher::apply_result(CompileJob &job) {
         return;
     }
     if (!result->prepared) {
-        report_failure(std::string(job.data->md5), TlsCertificateConfigError{
-                                                           .code = TlsCertificateConfigErrorCode::InvalidField,
-                                                           .field = "compiler",
-                                                           .message = "TLS compiler returned no prepared snapshot",
-                                                   });
+        report_failure(std::string(data->md5), TlsCertificateConfigError{
+                                                       .code = TlsCertificateConfigErrorCode::InvalidField,
+                                                       .field = "compiler",
+                                                       .message = "TLS compiler returned no prepared snapshot",
+                                               });
         return;
     }
     auto updated = store_->commit(std::move(*result->prepared));
     if (!updated) {
-        report_failure(std::string(job.data->md5), std::move(updated.error()));
+        report_failure(std::string(data->md5), std::move(updated.error()));
         return;
     }
     if (*updated == TlsCertificateUpdateStatus::Published) {
         ++successful_updates_;
-        active_md5_ = std::string(job.data->md5);
+        active_md5_ = std::string(data->md5);
         active_at_unix_millis_ = access_activation_unix_millis(*loop_);
         readiness_publisher_->publish(TlsCertificateReadiness::Ready);
     }

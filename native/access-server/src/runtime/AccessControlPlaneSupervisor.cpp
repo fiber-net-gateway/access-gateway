@@ -53,8 +53,7 @@ void retry_missing_tls_identities(void *context) noexcept {
 } // namespace
 
 AccessControlPlaneSupervisor::AccessControlPlaneSupervisor(event::EventLoop &coordinator_loop,
-                                                           event::EventLoop &nacos_loop,
-                                                           event::EventLoop &compiler_loop, event::EventLoop &cat_loop,
+                                                           event::EventLoop &nacos_loop, event::EventLoop &cat_loop,
                                                            event::EventLoopGroup &http_workers,
                                                            AccessControlPlaneOptions options,
                                                            AccessControlPlaneDependencies dependencies) noexcept :
@@ -64,7 +63,7 @@ AccessControlPlaneSupervisor::AccessControlPlaneSupervisor(event::EventLoop &coo
     naming_service_(std::move(dependencies.naming_service)),
     instance_registration_(nacos_loop, *naming_service_, std::move(options.instance_registration)),
     cat_lifecycle_(dependencies.cat_lifecycle), nacos_lifecycle_(dependencies.nacos_lifecycle),
-    config_compiler_(compiler_loop), runtime_metrics_(nacos_loop, options.process_metrics),
+    config_compiler_(nacos_loop), runtime_metrics_(nacos_loop, options.process_metrics),
     nacos_status_monitor_(nacos_loop, *config_service_, *naming_service_, runtime_metrics_.discovery().observer()),
     activation_evidence_(nacos_loop, activation_identity(options.activation_endpoint)), gray_store_(http_workers),
     service_discovery_(nacos_loop, *naming_service_,
@@ -112,14 +111,10 @@ AccessControlPlaneSupervisor::AccessControlPlaneSupervisor(event::EventLoop &coo
         };
     }
     FIBER_ASSERT(coordinator_loop_ != nacos_loop_);
-    FIBER_ASSERT(coordinator_loop_ != &compiler_loop);
     FIBER_ASSERT(coordinator_loop_ != cat_loop_);
-    FIBER_ASSERT(nacos_loop_ != &compiler_loop);
     FIBER_ASSERT(nacos_loop_ != cat_loop_);
-    FIBER_ASSERT(&compiler_loop != cat_loop_);
     for (std::size_t i = 0; i < http_workers.size(); ++i) {
         FIBER_ASSERT(&http_workers.at(i) != nacos_loop_);
-        FIBER_ASSERT(&http_workers.at(i) != &compiler_loop);
         FIBER_ASSERT(&http_workers.at(i) != coordinator_loop_);
         FIBER_ASSERT(&http_workers.at(i) != cat_loop_);
     }

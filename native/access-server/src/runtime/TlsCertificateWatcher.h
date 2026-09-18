@@ -13,7 +13,6 @@
 #include <string>
 
 #include <fiber/async/Task.h>
-#include <fiber/async/WaitGroup.h>
 #include <fiber/async/Watch.h>
 #include <fiber/common/NonCopyable.h>
 #include <fiber/common/NonMovable.h>
@@ -71,19 +70,16 @@ public:
     }
 
 private:
-    struct CompileJob;
-
     static void on_notify(void *context, const nacos::SubscriptionResult<nacos::ConfigData> &result) noexcept;
-    static void run_compile(CompileJob *job) noexcept;
-    static void complete_compile(CompileJob *job) noexcept;
     void apply(std::shared_ptr<const nacos::ConfigData> data);
-    void enqueue_compile(std::shared_ptr<const nacos::ConfigData> data, bool force_compile = false);
-    void dispatch_compile();
-    void cancel_compile() noexcept;
+    // Compiles the snapshot synchronously on this (nacos) loop and applies the
+    // outcome. force_compile bypasses the published-version skip so a replayed
+    // snapshot that is no longer loaded still recompiles.
+    void compile_tls_inline(std::shared_ptr<const nacos::ConfigData> data, bool force_compile = false);
     void publish_processing(bool processing);
     void publish_evidence() const noexcept;
     void report_failure(std::string md5, TlsCertificateConfigError error);
-    void apply_result(CompileJob &job);
+    void apply_result(const std::shared_ptr<const nacos::ConfigData> &data, CompiledTlsCertificateConfigResult result);
 
     event::EventLoop *loop_ = nullptr;
     AccessConfigCompiler *compiler_ = nullptr;
@@ -94,13 +90,10 @@ private:
     SubscriptionLifecycle subscription_;
     std::optional<TlsCertificateWatcherFailure> last_failure_;
     std::shared_ptr<const nacos::ConfigData> startup_replay_data_;
-    std::shared_ptr<const nacos::ConfigData> pending_compile_data_;
-    CompileJob *active_compile_job_ = nullptr;
     async::Watch<TlsCertificateReadiness> readiness_{TlsCertificateReadiness::Awaiting};
     std::optional<async::Watch<TlsCertificateReadiness>::Publisher> readiness_publisher_;
     async::Watch<bool> processing_{false};
     std::optional<async::Watch<bool>::Publisher> processing_publisher_;
-    async::WaitGroup compile_tasks_;
     TlsCertificateWatcherState state_ = TlsCertificateWatcherState::Created;
     AccessActivationCandidateStatus candidate_status_ = AccessActivationCandidateStatus::Awaiting;
     std::string observed_md5_;
@@ -108,7 +101,6 @@ private:
     std::int64_t observed_at_unix_millis_ = 0;
     std::int64_t active_at_unix_millis_ = 0;
     bool starting_subscription_ = false;
-    bool pending_force_compile_ = false;
     bool published_processing_ = false;
     bool initial_rejected_ = false;
     std::uint64_t successful_updates_ = 0;
