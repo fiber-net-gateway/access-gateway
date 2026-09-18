@@ -2,8 +2,10 @@
 
 #include "../execution/AccessResult.h"
 
+#include <algorithm>
 #include <array>
 #include <charconv>
+#include <chrono>
 #include <limits>
 
 #include <fiber/cat/Status.h>
@@ -59,6 +61,22 @@ void AccessProviderTransaction::add_connection_reuse(std::uint64_t reuse_count) 
         return;
     }
     add_integer(transaction_, "reuse_count", reuse_count);
+}
+
+void AccessProviderTransaction::add_request_body(std::uint64_t bytes, std::chrono::microseconds duration) noexcept {
+    if (!valid()) {
+        return;
+    }
+    add_integer(transaction_, "req_body_bytes", bytes);
+    add_integer(transaction_, "req_body_us", std::max<std::int64_t>(duration.count(), 0));
+}
+
+void AccessProviderTransaction::add_response_body(std::uint64_t bytes, std::chrono::microseconds duration) noexcept {
+    if (!valid()) {
+        return;
+    }
+    add_integer(transaction_, "resp_body_bytes", bytes);
+    add_integer(transaction_, "resp_body_us", std::max<std::int64_t>(duration.count(), 0));
 }
 
 void AccessProviderTransaction::fail(std::string_view phase, common::IoErr error) noexcept {

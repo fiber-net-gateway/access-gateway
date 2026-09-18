@@ -391,6 +391,19 @@ bool wait_for_cat_pattern(const CatFrameCapture &capture, std::string_view patte
     return capture.contains_pattern(pattern, second);
 }
 
+// Matches a closed provider transaction record: 'T', the length-prefixed
+// close status, the data-size varint, then the data blob starting at
+// "upstream=". The varint grows from one byte to two once the data crosses
+// 127 bytes — which the body-transfer fields did — so both widths are tried.
+bool wait_for_provider_closed(const CatFrameCapture &capture, std::string_view close_status, std::string_view second) {
+    std::string prefix;
+    prefix.push_back('T');
+    prefix.push_back(static_cast<char>(close_status.size()));
+    prefix.append(close_status);
+    return wait_for_cat_pattern(capture, prefix + "?upstream=", second) ||
+           wait_for_cat_pattern(capture, prefix + "??upstream=", second);
+}
+
 std::string consume_chain(fiber::mem::IoBufChain chain) {
     std::string result;
     while (fiber::mem::IoBuf *part = chain.first_readable()) {
@@ -1244,6 +1257,8 @@ TEST(ProxyExecutorTest, StreamsJavaCompatibleRequestsAndReusesTheUpstreamConnect
     EXPECT_TRUE(wait_for_cat_frame(cat_capture, "forwardingStatus=not_present", "protocol=h1"));
     EXPECT_TRUE(wait_for_cat_frame(cat_capture, "Access.Provider", "&uri=/items%20/%3F%23?item=1"));
     EXPECT_TRUE(wait_for_cat_frame(cat_capture, "Access.Provider", "&uri=/items%20/%3F%23?item=2"));
+    EXPECT_TRUE(wait_for_cat_frame(cat_capture, "Access.Provider", "&req_body_bytes=5&req_body_us="));
+    EXPECT_TRUE(wait_for_cat_frame(cat_capture, "Access.Provider", "&resp_body_bytes=10&resp_body_us="));
     // Root data uses the space separator; the provider's own data is '&'-joined.
     EXPECT_FALSE(cat_capture.contains(" upstream="));
     EXPECT_FALSE(cat_capture.contains("connection_request_count="));
@@ -1272,8 +1287,12 @@ TEST(ProxyExecutorTest, StreamsJavaCompatibleRequestsAndReusesTheUpstreamConnect
     EXPECT_TRUE(wait_for_cat_frame(cat_capture, "status=503", root_success));
     // The upstream finished the HTTP exchange when it answered 503; the code
     // stays in the data and the provider status remains a success.
-    const std::string provider_closed_success = std::string({'T', '\x01', '0', '?'}) + "upstream=";
-    EXPECT_TRUE(wait_for_cat_pattern(cat_capture, provider_closed_success, "&status=503"));
+    EXPECT_TRUE(wait_for_provider_closed(cat_capture, "0", "&status=503"));
+    // The body-less GET still drains the empty request-body marker, so it
+    // records zero bytes with a nonzero duration; the 503 body ("upstream-
+    // unavailable", 20 bytes) still counts as a piped response body.
+    EXPECT_TRUE(wait_for_cat_frame(cat_capture, "Access.Provider", "&req_body_bytes=0&req_body_us="));
+    EXPECT_TRUE(wait_for_cat_frame(cat_capture, "Access.Provider", "&resp_body_bytes=20&resp_body_us="));
 
     auto failed_upstream_config = project_config(port);
     (**failed_upstream_config.routes->begin()).addresses = {
@@ -2420,8 +2439,7 @@ TEST(ProxyExecutorTest, RelaysWebSocketUpgradeAndRawBytesInBothDirections) {
 
     // The upstream finished its HTTP flow with the 101 handshake, so the
     // provider transaction succeeds regardless of the tunnel that follows.
-    const std::string provider_closed_success = std::string({'T', '\x01', '0', '?'}) + "upstream=";
-    EXPECT_TRUE(wait_for_cat_pattern(cat_capture, provider_closed_success, "&status=101"));
+    EXPECT_TRUE(wait_for_provider_closed(cat_capture, "0", "&status=101"));
     EXPECT_TRUE(wait_for_cat_frame(cat_capture, "Access.WebSocket", "downstream=h1_upgrade"));
     EXPECT_TRUE(wait_for_cat_frame(cat_capture, "Access.WebSocket", "&result=closed"));
     EXPECT_TRUE(wait_for_cat_frame(cat_capture, "Access.WebSocket", "duration_us="));
@@ -2575,8 +2593,7 @@ TEST(ProxyExecutorTest, RelaysWebSocketExtendedConnectOverHttp2) {
     EXPECT_NE(metric_text->find("access_server_websocket_sessions_inflight 0"), std::string::npos);
 
     EXPECT_TRUE(wait_for_cat_frame(cat_capture, "forwardingStatus=not_present", "protocol=h2"));
-    const std::string provider_closed_success = std::string({'T', '\x01', '0', '?'}) + "upstream=";
-    EXPECT_TRUE(wait_for_cat_pattern(cat_capture, provider_closed_success, "&status=101"));
+    EXPECT_TRUE(wait_for_provider_closed(cat_capture, "0", "&status=101"));
     EXPECT_TRUE(wait_for_cat_frame(cat_capture, "Access.WebSocket", "downstream=extended_connect"));
     EXPECT_TRUE(wait_for_cat_frame(cat_capture, "Access.WebSocket", "&result=closed"));
 
