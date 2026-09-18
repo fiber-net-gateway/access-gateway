@@ -44,12 +44,12 @@ ASAN/UBSAN 集合包含 93 个测试，覆盖：
 - 多地址连接、pool lease、HTTP proxy、WebSocket、下游取消和 client metadata 解析。
 - worker-sharded service selection、共享 endpoint circuit、权重分布和 canonical fallback。
 
-TSAN 集合包含 34 个测试，集中检查：
+TSAN 集合包含 37 个测试，集中检查：
 
 - 配置和发现指标的 coherent snapshot 读取；
 - service directory owner 发布与 worker 并发选择、单 half-open probe 和跨 worker circuit 状态；
 - route/TLS snapshot 发布、pin 和回收；
-- compiler/owner EventLoop 交接、Nacos status watch、启动回滚和 shutdown。
+- route/TLS 内联编译与 owner-loop 发布、Nacos status watch、启动回滚和 shutdown。
 
 ## 2. 外部 rnacos 故障注入设计
 

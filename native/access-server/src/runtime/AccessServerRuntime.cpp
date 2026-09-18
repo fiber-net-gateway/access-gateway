@@ -12,12 +12,11 @@
 namespace fiber::access_server {
 
 std::expected<std::unique_ptr<AccessServerRuntime>, AccessServerRuntimeError>
-AccessServerRuntime::create(event::EventLoop &accept_loop, event::EventLoop &nacos_loop,
-                            event::EventLoop &compiler_loop, event::EventLoop &cat_loop,
+AccessServerRuntime::create(event::EventLoop &accept_loop, event::EventLoop &nacos_loop, event::EventLoop &cat_loop,
                             event::EventLoopGroup &http_workers, const AccessServerConfig &config,
                             const net::ListenOptions &listen_options, AccessProcessMetricsSources process_metrics) {
-    auto components = AccessRuntimeFactory::create(accept_loop, nacos_loop, compiler_loop, cat_loop, http_workers,
-                                                   config, listen_options, process_metrics);
+    auto components = AccessRuntimeFactory::create(accept_loop, nacos_loop, cat_loop, http_workers, config,
+                                                   listen_options, process_metrics);
     if (!components) {
         return std::unexpected(std::move(components.error()));
     }

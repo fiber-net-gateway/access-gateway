@@ -23,8 +23,8 @@ class AccessDataPlaneService;
 class AccessServerRuntime final : public common::NonCopyable, public common::NonMovable {
 public:
     [[nodiscard]] static std::expected<std::unique_ptr<AccessServerRuntime>, AccessServerRuntimeError>
-    create(event::EventLoop &accept_loop, event::EventLoop &nacos_loop, event::EventLoop &compiler_loop,
-           event::EventLoop &cat_loop, event::EventLoopGroup &http_workers, const AccessServerConfig &config,
+    create(event::EventLoop &accept_loop, event::EventLoop &nacos_loop, event::EventLoop &cat_loop,
+           event::EventLoopGroup &http_workers, const AccessServerConfig &config,
            const net::ListenOptions &listen_options = {}, AccessProcessMetricsSources process_metrics = {});
 
     ~AccessServerRuntime() noexcept;

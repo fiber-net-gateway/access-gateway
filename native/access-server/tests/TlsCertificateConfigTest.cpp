@@ -659,19 +659,16 @@ TEST(TlsCertificateStoreTest, KeepsSelectedIdentityAliveWhenRotationInterleavesW
     EXPECT_EQ(status, std::future_status::ready);
 }
 
-TEST(TlsCertificateWatcherTest, CompilesOffLoopAndCoalescesLatestSnapshot) {
+TEST(TlsCertificateWatcherTest, CompilesInlineAndPublishesLatestSnapshot) {
     auto [certificate_pem, private_key_pem] = make_test_identity();
     const std::string version_three = tls_snapshot(3, certificate_pem, private_key_pem);
     event::EventLoop owner_loop;
-    event::EventLoopGroup compiler_group(1);
     event::EventLoopGroup http_workers(1);
-    AccessConfigCompiler compiler(compiler_group.at(0));
+    AccessConfigCompiler compiler(owner_loop);
     FakeTlsConfigService service;
     TlsCertificateStore store(owner_loop, http_workers, false);
     AccessActivationEvidenceStore activation_evidence(owner_loop, AccessActivationEvidenceIdentity{});
     TlsCertificateWatcher watcher(owner_loop, compiler, service, store, {}, activation_evidence.tls_observer());
-    bool owner_progressed = false;
-    bool compiler_started = false;
     bool completed = false;
 
     async::spawn(owner_loop, [&]() -> async::DetachedTask {
@@ -684,18 +681,15 @@ TEST(TlsCertificateWatcherTest, CompilesOffLoopAndCoalescesLatestSnapshot) {
         service.push(tls_snapshot(1, certificate_pem, private_key_pem), "v1");
         service.push(tls_snapshot(2, certificate_pem, private_key_pem), "v2");
         service.push(version_three, "v3");
+
+        // Compilation is inline on this loop: each snapshot settles
+        // synchronously, so processing is already false again and the latest
+        // snapshot is the published one.
         processing_snapshot = processing.current();
         EXPECT_TRUE(processing_snapshot.value);
         if (processing_snapshot.value) {
-            EXPECT_TRUE(*processing_snapshot.value);
+            EXPECT_FALSE(*processing_snapshot.value);
         }
-        EXPECT_EQ(store.version(), 0u);
-        EXPECT_EQ(watcher.successful_updates(), 0u);
-        owner_progressed = true;
-
-        compiler_group.start();
-        compiler_started = true;
-        co_await wait_for_bool(processing, processing_snapshot, false);
         readiness_snapshot = readiness.current();
         EXPECT_TRUE(readiness_snapshot.value);
         if (readiness_snapshot.value) {
@@ -703,7 +697,7 @@ TEST(TlsCertificateWatcherTest, CompilesOffLoopAndCoalescesLatestSnapshot) {
         }
         EXPECT_EQ(store.version(), 3u);
         EXPECT_EQ(store.certificate_count(), 1u);
-        EXPECT_EQ(watcher.successful_updates(), 1u);
+        EXPECT_EQ(watcher.successful_updates(), 3u);
         EXPECT_EQ(watcher.failed_updates(), 0u);
         EXPECT_EQ(activation_evidence.pin()->tls.resource.active_md5, "v3");
         EXPECT_EQ(activation_evidence.pin()->tls.version, 3U);
@@ -711,7 +705,7 @@ TEST(TlsCertificateWatcherTest, CompilesOffLoopAndCoalescesLatestSnapshot) {
 
         service.push(version_three, "same");
         co_await wait_for_bool(processing, processing_snapshot, false);
-        EXPECT_EQ(watcher.successful_updates(), 1u);
+        EXPECT_EQ(watcher.successful_updates(), 3u);
         EXPECT_EQ(watcher.failed_updates(), 0u);
 
         service.push(version_three + "\n", "conflict");
@@ -762,20 +756,14 @@ TEST(TlsCertificateWatcherTest, CompilesOffLoopAndCoalescesLatestSnapshot) {
     });
 
     owner_loop.run();
-    if (compiler_started) {
-        compiler_group.stop();
-        compiler_group.join();
-    }
-    EXPECT_TRUE(owner_progressed);
     EXPECT_TRUE(completed);
 }
 
 TEST(TlsCertificateWatcherTest, KeepsInitialRejectionLatchedAfterLaterValidSnapshot) {
     auto [certificate_pem, private_key_pem] = make_test_identity();
     event::EventLoop owner_loop;
-    event::EventLoopGroup compiler_group(1);
     event::EventLoopGroup http_workers(1);
-    AccessConfigCompiler compiler(compiler_group.at(0));
+    AccessConfigCompiler compiler(owner_loop);
     FakeTlsConfigService service;
     TlsCertificateStore store(owner_loop, http_workers, false);
     TlsCertificateWatcher watcher(owner_loop, compiler, service, store);
@@ -810,17 +798,15 @@ TEST(TlsCertificateWatcherTest, KeepsInitialRejectionLatchedAfterLaterValidSnaps
     EXPECT_TRUE(completed);
 }
 
-TEST(TlsCertificateWatcherTest, RejectsProcessingCandidateWhenSubscriptionCloses) {
+TEST(TlsCertificateWatcherTest, ClosedSubscriptionAfterPublishedCandidateKeepsFailureEvidence) {
     auto [certificate_pem, private_key_pem] = make_test_identity();
     event::EventLoop owner_loop;
-    event::EventLoopGroup compiler_group(1);
     event::EventLoopGroup http_workers(1);
-    AccessConfigCompiler compiler(compiler_group.at(0));
+    AccessConfigCompiler compiler(owner_loop);
     FakeTlsConfigService service;
     TlsCertificateStore store(owner_loop, http_workers, false);
     AccessActivationEvidenceStore activation_evidence(owner_loop, AccessActivationEvidenceIdentity{});
     TlsCertificateWatcher watcher(owner_loop, compiler, service, store, {}, activation_evidence.tls_observer());
-    bool compiler_started = false;
     bool completed = false;
 
     async::spawn(owner_loop, [&]() -> async::DetachedTask {
@@ -829,34 +815,33 @@ TEST(TlsCertificateWatcherTest, RejectsProcessingCandidateWhenSubscriptionCloses
         auto processing_snapshot = processing.current();
         EXPECT_TRUE(watcher.start());
 
+        // The snapshot compiles inline and is published before the
+        // subscription closes; processing is never left true across loop
+        // turns.
         service.push(tls_snapshot(1, certificate_pem, private_key_pem), "closing");
         processing_snapshot = processing.current();
         EXPECT_TRUE(processing_snapshot.value);
         if (processing_snapshot.value) {
-            EXPECT_TRUE(*processing_snapshot.value);
+            EXPECT_FALSE(*processing_snapshot.value);
         }
-        EXPECT_EQ(activation_evidence.pin()->tls.resource.candidate_status,
-                  AccessActivationCandidateStatus::Processing);
+        EXPECT_EQ(watcher.successful_updates(), 1u);
+        EXPECT_EQ(store.version(), 1u);
+        EXPECT_EQ(activation_evidence.pin()->tls.resource.candidate_status, AccessActivationCandidateStatus::Accepted);
 
         service.close();
         EXPECT_EQ(watcher.state(), TlsCertificateWatcherState::Failed);
         const auto failed_readiness = readiness.current();
         EXPECT_TRUE(failed_readiness.value);
         if (failed_readiness.value) {
-            EXPECT_EQ(*failed_readiness.value, TlsCertificateReadiness::Failed);
+            EXPECT_EQ(*failed_readiness.value, TlsCertificateReadiness::Ready);
         }
-        EXPECT_EQ(activation_evidence.pin()->tls.resource.candidate_status, AccessActivationCandidateStatus::Rejected);
-
-        compiler_group.start();
-        compiler_started = true;
-        co_await wait_for_bool(processing, processing_snapshot, false);
         const auto settled_evidence = activation_evidence.pin();
-        EXPECT_EQ(settled_evidence->tls.resource.candidate_status, AccessActivationCandidateStatus::Rejected);
+        EXPECT_EQ(settled_evidence->tls.resource.candidate_status, AccessActivationCandidateStatus::Accepted);
         EXPECT_TRUE(settled_evidence->tls.resource.failure);
         if (settled_evidence->tls.resource.failure) {
             EXPECT_EQ(settled_evidence->tls.resource.failure->code, "subscription_closed");
         }
-        EXPECT_EQ(store.version(), 0U);
+        EXPECT_EQ(store.version(), 1u);
 
         co_await watcher.shutdown();
         co_await store.shutdown();
@@ -865,10 +850,6 @@ TEST(TlsCertificateWatcherTest, RejectsProcessingCandidateWhenSubscriptionCloses
     });
 
     owner_loop.run();
-    if (compiler_started) {
-        compiler_group.stop();
-        compiler_group.join();
-    }
     EXPECT_TRUE(completed);
 }
 

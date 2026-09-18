@@ -15,8 +15,7 @@ namespace fiber::access_server {
 #endif
 
 std::expected<AccessRuntimeComponents, AccessServerRuntimeError>
-AccessRuntimeFactory::create(event::EventLoop &accept_loop, event::EventLoop &nacos_loop,
-                             event::EventLoop &compiler_loop, event::EventLoop &cat_loop,
+AccessRuntimeFactory::create(event::EventLoop &accept_loop, event::EventLoop &nacos_loop, event::EventLoop &cat_loop,
                              event::EventLoopGroup &http_workers, const AccessServerConfig &config,
                              const net::ListenOptions &listen_options, AccessProcessMetricsSources process_metrics) {
     // The deployment entry network is what makes X-Entry server-authoritative
@@ -78,7 +77,7 @@ AccessRuntimeFactory::create(event::EventLoop &accept_loop, event::EventLoop &na
             nacos::NamingMetadataEntry{.key = "g", .value = config.watcher_options().project_list_data_id},
     };
     auto control_plane = std::unique_ptr<AccessControlPlaneSupervisor>(new (std::nothrow) AccessControlPlaneSupervisor(
-            accept_loop, nacos_loop, compiler_loop, cat_loop, http_workers,
+            accept_loop, nacos_loop, cat_loop, http_workers,
             AccessControlPlaneOptions{
                     .initial_config_timeout = config.initial_config_timeout(),
                     .activation_endpoint = config.activation_endpoint_options(),

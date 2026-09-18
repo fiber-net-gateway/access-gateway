@@ -1,12 +1,11 @@
 #include "AccessConfigWatcher.h"
 
 #include "../config/AccessConfigCodec.h"
+#include "../observability/AccessServerLogCategories.h"
 
 #include <algorithm>
-#include <atomic>
 #include <chrono>
 #include <limits>
-#include <new>
 #include <set>
 #include <string_view>
 #include <unordered_set>
@@ -18,9 +17,17 @@
 #include <fiber/async/TaskSelect.h>
 #include <fiber/async/WhenAny.h>
 #include <fiber/common/Assert.h>
+#include <fiber/log/Log.h>
 
 namespace fiber::access_server {
 namespace {
+
+DEFINE_LOGGER(LOG_CONFIG, kAccessServerConfigLogger);
+
+// Project compilation runs inline on the nacos loop. Past this threshold a
+// compile is worth a warning: it delays subscription heartbeats and other
+// loop work (Nacos evicts silent subscribers after ~15s).
+constexpr std::chrono::milliseconds kProjectCompileWarnThreshold{50};
 
 std::string_view watcher_state_name(AccessConfigWatcherState state) noexcept {
     switch (state) {
@@ -195,28 +202,9 @@ struct AccessConfigWatcher::ProjectEntry final : public common::NonCopyable, pub
     std::int64_t observed_at_unix_millis = 0;
     std::int64_t active_at_unix_millis = 0;
     std::uint64_t published_generation = 0;
-    std::shared_ptr<const nacos::ConfigData> pending_compile_data;
     std::shared_ptr<const nacos::ConfigData> retry_identity_data;
     std::unique_ptr<InitialProjectUpdate> initial_update;
-    ProjectCompileJob *active_compile_job = nullptr;
     bool synchronized = false;
-    bool compile_queued = false;
-    bool pending_force_compile = false;
-};
-
-struct AccessConfigWatcher::ProjectCompileJob final : public common::NonCopyable, public common::NonMovable {
-    AccessConfigWatcher *owner = nullptr;
-    std::shared_ptr<ProjectEntry> entry;
-    std::shared_ptr<const nacos::ConfigData> data;
-    std::optional<std::int32_t> published_version;
-    std::optional<CompiledProjectConfigResult> result;
-    std::atomic<bool> canceled{false};
-    std::chrono::nanoseconds compile_duration{};
-    std::uint64_t generation = 0;
-    bool force_compile = false;
-    bool compile_observed = false;
-    event::EventLoop::NotifyEntry compile_entry;
-    event::EventLoop::NotifyEntry completion_entry;
 };
 
 AccessConfigWatcher::AccessConfigWatcher(event::EventLoop &loop, AccessConfigCompiler &compiler,
@@ -226,7 +214,9 @@ AccessConfigWatcher::AccessConfigWatcher(event::EventLoop &loop, AccessConfigCom
                                          AccessRouteActivationEvidenceObserver activation_observer) :
     loop_(&loop), compiler_(&compiler), config_service_(&config_service), store_(&store), options_(std::move(options)),
     observer_(observer), metrics_observer_(metrics_observer), activation_observer_(activation_observer) {
-    FIBER_ASSERT(loop_ != &compiler_->loop());
+    // Route candidates compile inline on this loop; the compiler must be bound
+    // to it so its loop-ownership assertions hold.
+    FIBER_ASSERT(loop_ == &compiler_->loop());
     readiness_publisher_ = readiness_.acquire_publisher();
     FIBER_ASSERT(readiness_publisher_.has_value());
 }
@@ -235,8 +225,6 @@ AccessConfigWatcher::~AccessConfigWatcher() noexcept {
     FIBER_ASSERT(state_ == AccessConfigWatcherState::Created || state_ == AccessConfigWatcherState::Stopped);
     FIBER_ASSERT(project_list_ == nullptr);
     FIBER_ASSERT(projects_.empty());
-    FIBER_ASSERT(compile_queue_.empty());
-    FIBER_ASSERT(active_compiler_jobs_ == 0);
     FIBER_ASSERT(background_tasks_.empty());
 }
 
@@ -297,11 +285,8 @@ async::Task<void> AccessConfigWatcher::shutdown() noexcept {
         (void) project;
         entry->initial_update.reset();
         entry->subscription.stop();
-        cancel_project_compile(entry);
     }
-    compile_queue_.clear();
     co_await background_tasks_.join();
-    FIBER_ASSERT(active_compiler_jobs_ == 0);
     initial_batch_active_ = false;
     projects_.clear();
     project_list_.reset();
@@ -342,7 +327,6 @@ void AccessConfigWatcher::project_notify(void *context,
     std::shared_ptr<ProjectEntry> hold = found->second;
     if (result.kind == nacos::ResultKind::Closed) {
         hold->initial_update.reset();
-        owner.cancel_project_compile(hold);
         hold->synchronized = false;
         owner.handle_subscription_failure(
                 hold, owner.options_.project_route_data_id_prefix + hold->project,
@@ -425,7 +409,6 @@ void AccessConfigWatcher::apply_project(const std::shared_ptr<ProjectEntry> &ent
     entry->retry_identity_data.reset();
     entry->initial_update.reset();
     (void) entry->subscription.observe_value();
-    cancel_project_compile(entry);
     entry->observed_md5 = std::string(data->md5);
     entry->observed_version.reset();
     entry->observed_at_unix_millis = access_activation_unix_millis(*loop_);
@@ -467,147 +450,62 @@ void AccessConfigWatcher::apply_project(const std::shared_ptr<ProjectEntry> &ent
         settle_project(entry, AccessProjectConfigState::Rejected);
         return;
     }
-    enqueue_project_compile(entry, std::move(data));
+    compile_project_inline(entry, std::move(data));
 }
 
-void AccessConfigWatcher::enqueue_project_compile(const std::shared_ptr<ProjectEntry> &entry,
-                                                  std::shared_ptr<const nacos::ConfigData> data, bool force_compile) {
+void AccessConfigWatcher::compile_project_inline(const std::shared_ptr<ProjectEntry> &entry,
+                                                 std::shared_ptr<const nacos::ConfigData> data, bool force_compile) {
     FIBER_ASSERT(loop_->in_loop());
     FIBER_ASSERT(entry);
     FIBER_ASSERT(data);
-    entry->pending_compile_data = std::move(data);
-    entry->pending_force_compile = force_compile;
-    if (entry->active_compile_job) {
-        entry->active_compile_job->canceled.store(true, std::memory_order_release);
-        return;
-    }
-    if (!entry->compile_queued) {
-        entry->compile_queued = true;
-        compile_queue_.push_back(entry);
-    }
-    dispatch_project_compile();
-}
-
-void AccessConfigWatcher::dispatch_project_compile() {
-    FIBER_ASSERT(loop_->in_loop());
-    if (state_ != AccessConfigWatcherState::Running || active_compiler_jobs_ != 0) {
-        return;
-    }
-    while (!compile_queue_.empty()) {
-        std::shared_ptr<ProjectEntry> entry = std::move(compile_queue_.front());
-        compile_queue_.pop_front();
-        entry->compile_queued = false;
+    // Compiles synchronously on this (nacos) loop — no cross-loop job
+    // protocol. One bounded re-pass covers the corner where the compiler
+    // skipped a same-version candidate whose snapshot is no longer the loaded
+    // one: force_compile makes the skip branch unreachable on the second
+    // pass, so the loop runs at most twice. Unreachable in practice because
+    // replay callers already pass force_compile.
+    for (int attempt = 0; attempt < 2; ++attempt) {
         const auto found = projects_.find(entry->project);
-        if (found == projects_.end() || found->second.get() != entry.get() ||
-            entry->subscription.state() == SubscriptionLifecycleState::Stopped || !entry->pending_compile_data) {
-            entry->pending_compile_data.reset();
-            entry->pending_force_compile = false;
-            continue;
+        if (state_ != AccessConfigWatcherState::Running || found == projects_.end() ||
+            found->second.get() != entry.get() || entry->subscription.state() == SubscriptionLifecycleState::Stopped) {
+            return;
         }
-
-        auto data = std::exchange(entry->pending_compile_data, {});
-        const bool force_compile = std::exchange(entry->pending_force_compile, false);
-        auto *job = new (std::nothrow) ProjectCompileJob();
-        if (!job) {
-            report_failure(entry, AccessConfigWatcherFailureStage::Compile,
-                           options_.project_route_data_id_prefix + entry->project, std::string(data->md5),
-                           common::IoErr::NoMem,
-                           AccessConfigError{
-                                   .code = AccessConfigErrorCode::InvalidCombination,
-                                   .field = "compiler",
-                                   .message = "failed to allocate project compilation job",
-                           });
-            settle_project(entry, AccessProjectConfigState::Rejected);
-            continue;
-        }
-        job->owner = this;
-        job->entry = entry;
-        job->data = std::move(data);
-        job->published_version = store_->current_version(entry->project);
-        job->generation = entry->subscription.generation();
-        job->force_compile = force_compile;
-        entry->active_compile_job = job;
-        ++active_compiler_jobs_;
-        background_tasks_.add();
-        compiler_->loop().post<ProjectCompileJob, &ProjectCompileJob::compile_entry, &run_project_compile>(*job);
-        return;
-    }
-}
-
-void AccessConfigWatcher::run_project_compile(ProjectCompileJob *job) noexcept {
-    FIBER_ASSERT(job);
-    AccessConfigWatcher &owner = *job->owner;
-    FIBER_ASSERT(owner.compiler_->loop().in_loop());
-    if (!job->canceled.load(std::memory_order_acquire)) {
+        const std::uint64_t generation = entry->subscription.generation();
+        const std::optional<std::int32_t> published_version = store_->current_version(entry->project);
         const auto started = std::chrono::steady_clock::now();
-        CompiledProjectConfigResult result = owner.compiler_->compile_project(
-                job->entry->project, job->data->content, job->published_version, job->force_compile);
-        job->compile_duration =
+        CompiledProjectConfigResult result =
+                compiler_->compile_project(entry->project, data->content, published_version, force_compile);
+        const auto duration =
                 std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started);
-        job->compile_observed = true;
-        if (!job->canceled.load(std::memory_order_acquire)) {
-            job->result.emplace(std::move(result));
+        observe_metric_duration(AccessConfigMetricStage::ProjectCompile, duration);
+        if (duration > kProjectCompileWarnThreshold) {
+            LOG(LOG_CONFIG, WARN) << "project_compile_slow"
+                                  << " project=\"" << entry->project << "\""
+                                  << " duration_ms="
+                                  << std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
         }
-    }
-    owner.loop_->post<ProjectCompileJob, &ProjectCompileJob::completion_entry, &complete_project_compile>(*job);
-}
-
-void AccessConfigWatcher::complete_project_compile(ProjectCompileJob *job) noexcept {
-    FIBER_ASSERT(job);
-    std::unique_ptr<ProjectCompileJob> owned(job);
-    AccessConfigWatcher &owner = *job->owner;
-    FIBER_ASSERT(owner.loop_->in_loop());
-    std::shared_ptr<ProjectEntry> entry = job->entry;
-    FIBER_ASSERT(entry->active_compile_job == job);
-    entry->active_compile_job = nullptr;
-    FIBER_ASSERT(owner.active_compiler_jobs_ == 1);
-    --owner.active_compiler_jobs_;
-    if (job->compile_observed) {
-        owner.observe_metric_duration(AccessConfigMetricStage::ProjectCompile, job->compile_duration);
-    }
-
-    const auto found = owner.projects_.find(entry->project);
-    const bool current = owner.state_ == AccessConfigWatcherState::Running && found != owner.projects_.end() &&
-                         found->second.get() == entry.get() && entry->subscription.is_current(job->generation);
-    if (current && !job->canceled.load(std::memory_order_acquire) && job->result) {
-        owner.apply_compiled_project(*job);
-    }
-    if (owner.state_ == AccessConfigWatcherState::Running && entry->pending_compile_data && !entry->compile_queued &&
-        found != owner.projects_.end() && found->second.get() == entry.get()) {
-        entry->compile_queued = true;
-        owner.compile_queue_.push_back(entry);
-    }
-    owner.background_tasks_.done();
-    owner.dispatch_project_compile();
-}
-
-void AccessConfigWatcher::cancel_project_compile(const std::shared_ptr<ProjectEntry> &entry) noexcept {
-    FIBER_ASSERT(loop_->in_loop());
-    if (entry->active_compile_job) {
-        entry->active_compile_job->canceled.store(true, std::memory_order_release);
-    }
-    entry->pending_compile_data.reset();
-    entry->pending_force_compile = false;
-    if (!entry->compile_queued) {
+        if (result && result->compilation_skipped &&
+            (!result->version || store_->current_version(entry->project) != result->version)) {
+            force_compile = true;
+            continue;
+        }
+        apply_compiled_project(entry, data, generation, std::move(result));
         return;
     }
-    compile_queue_.erase(std::remove_if(compile_queue_.begin(), compile_queue_.end(),
-                                        [&](const auto &candidate) { return candidate.get() == entry.get(); }),
-                         compile_queue_.end());
-    entry->compile_queued = false;
 }
 
-void AccessConfigWatcher::apply_compiled_project(ProjectCompileJob &job) {
+void AccessConfigWatcher::apply_compiled_project(const std::shared_ptr<ProjectEntry> &entry,
+                                                 const std::shared_ptr<const nacos::ConfigData> &data,
+                                                 std::uint64_t generation, CompiledProjectConfigResult result) {
     FIBER_ASSERT(loop_->in_loop());
-    FIBER_ASSERT(job.result);
-    std::shared_ptr<ProjectEntry> entry = job.entry;
-    CompiledProjectConfigResult result = std::move(*job.result);
+    FIBER_ASSERT(entry);
+    FIBER_ASSERT(data);
     if (!result) {
         entry->observed_version = result.error().observed_version;
         const AccessConfigWatcherFailureStage stage = result.error().stage == AccessProjectCompileFailureStage::Decode
                                                               ? AccessConfigWatcherFailureStage::Decode
                                                               : AccessConfigWatcherFailureStage::Compile;
-        report_failure(entry, stage, options_.project_route_data_id_prefix + entry->project, std::string(job.data->md5),
+        report_failure(entry, stage, options_.project_route_data_id_prefix + entry->project, std::string(data->md5),
                        common::IoErr::Invalid, std::move(result.error().error));
         settle_project(entry, AccessProjectConfigState::Rejected);
         return;
@@ -615,30 +513,30 @@ void AccessConfigWatcher::apply_compiled_project(ProjectCompileJob &job) {
 
     entry->observed_version = result->version;
     if (result->compilation_skipped) {
-        if (result->version && store_->current_version(entry->project) == result->version) {
-            observe_metric_event(AccessConfigMetricEvent::ProjectRouteVersionUnchanged);
-            settle_project(entry, AccessProjectConfigState::Accepted);
-        } else {
-            enqueue_project_compile(entry, job.data, true);
-        }
+        // Reached only when the skipped version is still the loaded one; the
+        // no-longer-loaded replay is handled by compile_project_inline's
+        // bounded re-pass.
+        FIBER_ASSERT(result->version && store_->current_version(entry->project) == result->version);
+        observe_metric_event(AccessConfigMetricEvent::ProjectRouteVersionUnchanged);
+        settle_project(entry, AccessProjectConfigState::Accepted);
         return;
     }
     auto prepared = store_->prepare_compiled(entry->project, result->version, std::move(result->snapshot));
     if (!prepared) {
         if (prepared.error().code == AccessConfigErrorCode::MissingDependency) {
-            entry->retry_identity_data = job.data;
+            entry->retry_identity_data = data;
         } else {
             entry->retry_identity_data.reset();
         }
         report_failure(entry, AccessConfigWatcherFailureStage::Compile,
-                       options_.project_route_data_id_prefix + entry->project, std::string(job.data->md5),
+                       options_.project_route_data_id_prefix + entry->project, std::string(data->md5),
                        common::IoErr::Invalid, std::move(prepared.error()));
         settle_project(entry, AccessProjectConfigState::Rejected);
         return;
     }
     entry->retry_identity_data.reset();
-    apply_prepared_project(entry, std::move(*prepared), job.generation, entry->subscription.revision_version(),
-                           options_.project_route_data_id_prefix + entry->project, std::string(job.data->md5));
+    apply_prepared_project(entry, std::move(*prepared), generation, entry->subscription.revision_version(),
+                           options_.project_route_data_id_prefix + entry->project, std::string(data->md5));
 }
 
 void AccessConfigWatcher::apply_prepared_project(const std::shared_ptr<ProjectEntry> &entry,
@@ -711,6 +609,10 @@ void AccessConfigWatcher::commit_ready_project(const std::shared_ptr<ProjectEntr
 
 void AccessConfigWatcher::commit_initial_batch_if_ready() {
     FIBER_ASSERT(loop_->in_loop());
+    // Load-bearing now that compilation is inline: settle/commit paths called
+    // from inside reconcile_projects or a nested compile reach here
+    // re-entrantly; only the outermost, non-deferred invocation may commit
+    // the batch.
     if (!initial_batch_active_ || defer_readiness_updates_ || unavailable_failure_ ||
         state_ != AccessConfigWatcherState::Running) {
         return;
@@ -956,7 +858,6 @@ void AccessConfigWatcher::remove_project(std::string_view project) {
     projects_.erase(iterator);
     retiring->initial_update.reset();
     retiring->subscription.stop();
-    cancel_project_compile(retiring);
 
     if (initial_batch_active_) {
         publish_readiness();
@@ -980,7 +881,6 @@ void AccessConfigWatcher::subscribe_project(const std::shared_ptr<ProjectEntry> 
         return;
     }
 
-    cancel_project_compile(entry);
     entry->config_state = AccessProjectConfigState::AwaitingValue;
     entry->synchronized = false;
     entry->observed_md5.clear();
@@ -1018,7 +918,6 @@ void AccessConfigWatcher::handle_subscription_failure(const std::shared_ptr<Proj
                    });
 
     entry->initial_update.reset();
-    cancel_project_compile(entry);
     entry->synchronized = false;
     entry->config_state = AccessProjectConfigState::AwaitingValue;
     if (state_ != AccessConfigWatcherState::Running ||
@@ -1032,6 +931,12 @@ void AccessConfigWatcher::handle_subscription_failure(const std::shared_ptr<Proj
             .maximum_delay = options_.subscription_retry_max_delay,
     });
     if (!retry) {
+        // Permanent subscription failure (closed subscription or non-retryable
+        // error). Transient retry rounds stay unlogged to bound noise during
+        // Nacos outages; they remain visible via retrying readiness counts.
+        LOG(LOG_CONFIG, WARN) << "project_subscription_failed" << " project=\"" << entry->project << "\""
+                              << " io_error=" << common::io_err_name(io_error) << " error=\""
+                              << entry->last_failure->error.message << "\"";
         publish_readiness();
         return;
     }
@@ -1074,7 +979,7 @@ void AccessConfigWatcher::retry_missing_tls_identities() {
         entry->config_state = AccessProjectConfigState::Processing;
         entry->synchronized = false;
         entry->last_failure.reset();
-        enqueue_project_compile(entry, entry->retry_identity_data, true);
+        compile_project_inline(entry, entry->retry_identity_data, true);
     }
     publish_readiness();
 }
@@ -1115,6 +1020,9 @@ std::optional<AccessProjectConfigStatus> AccessConfigWatcher::project_status(std
 
 void AccessConfigWatcher::publish_readiness() {
     FIBER_ASSERT(loop_->in_loop());
+    // Load-bearing now that compilation is inline: intermediate readiness
+    // states would otherwise be observable from nested calls inside
+    // reconcile_projects / commit_initial_batch_if_ready stacks.
     if (defer_readiness_updates_) {
         return;
     }
@@ -1337,6 +1245,25 @@ void AccessConfigWatcher::report_failure(const std::shared_ptr<ProjectEntry> &en
         entry->last_failure = failure;
     }
     last_failure_ = std::move(failure);
+    if (entry == nullptr) {
+        // Project-list failures are terminal for the root subscription and rare.
+        LOG(LOG_CONFIG, WARN) << "project_list_failed" << " data_id=\"" << last_failure_->data_id << "\""
+                              << " stage=" << failure_stage_name(stage) << " field=\"" << last_failure_->error.field
+                              << "\""
+                              << " offset=" << last_failure_->error.offset << " error=\""
+                              << last_failure_->error.message << "\"";
+    } else if (stage != AccessConfigWatcherFailureStage::Subscription) {
+        // Transient per-project subscription failures retry with backoff and only
+        // log when they turn permanent (handle_subscription_failure); every other
+        // stage settles the candidate terminally.
+        LOG(LOG_CONFIG, WARN) << "project_config_failed" << " project=\"" << entry->project << "\""
+                              << " data_id=\"" << last_failure_->data_id << "\""
+                              << " md5=\"" << last_failure_->md5 << "\""
+                              << " stage=" << failure_stage_name(stage) << " field=\"" << last_failure_->error.field
+                              << "\""
+                              << " offset=" << last_failure_->error.offset << " error=\""
+                              << last_failure_->error.message << "\"";
+    }
 }
 
 } // namespace fiber::access_server

@@ -23,8 +23,8 @@ struct AccessRuntimeComponents {
 class AccessRuntimeFactory final {
 public:
     [[nodiscard]] static std::expected<AccessRuntimeComponents, AccessServerRuntimeError>
-    create(event::EventLoop &accept_loop, event::EventLoop &nacos_loop, event::EventLoop &compiler_loop,
-           event::EventLoop &cat_loop, event::EventLoopGroup &http_workers, const AccessServerConfig &config,
+    create(event::EventLoop &accept_loop, event::EventLoop &nacos_loop, event::EventLoop &cat_loop,
+           event::EventLoopGroup &http_workers, const AccessServerConfig &config,
            const net::ListenOptions &listen_options, AccessProcessMetricsSources process_metrics);
 };
 

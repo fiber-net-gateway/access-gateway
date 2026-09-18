@@ -75,8 +75,8 @@ struct AccessControlPlaneOptions {
 class AccessControlPlaneSupervisor final : public common::NonCopyable, public common::NonMovable {
 public:
     AccessControlPlaneSupervisor(event::EventLoop &coordinator_loop, event::EventLoop &nacos_loop,
-                                 event::EventLoop &compiler_loop, event::EventLoop &cat_loop,
-                                 event::EventLoopGroup &http_workers, AccessControlPlaneOptions options,
+                                 event::EventLoop &cat_loop, event::EventLoopGroup &http_workers,
+                                 AccessControlPlaneOptions options,
                                  AccessControlPlaneDependencies dependencies) noexcept;
     ~AccessControlPlaneSupervisor() noexcept;
 

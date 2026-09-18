@@ -213,7 +213,7 @@ route/program/bytes 上限，并对累加使用 checked addition。
 
 - compiler：wire normalization、semantic validation、route type compiler、template/script
   compiler、budget checker、snapshot assembler；
-- watcher：subscription graph/reconcile、compile queue/generation、service-ready、readiness/
+- watcher：subscription graph/reconcile、inline compile/generation、service-ready、readiness/
   evidence；
 - supervisor：保留生命周期 owner，内部只下沉 typed context 和 factory。
 

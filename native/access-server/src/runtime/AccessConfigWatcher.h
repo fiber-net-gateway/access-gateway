@@ -10,7 +10,6 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
-#include <deque>
 #include <expected>
 #include <map>
 #include <memory>
@@ -162,21 +161,21 @@ public:
 private:
     struct ProjectListEntry;
     struct ProjectEntry;
-    struct ProjectCompileJob;
     struct InitialProjectUpdate;
 
     static void project_list_notify(void *context, const nacos::SubscriptionResult<nacos::ConfigData> &result) noexcept;
     static void project_notify(void *context, const nacos::SubscriptionResult<nacos::ConfigData> &result) noexcept;
-    static void run_project_compile(ProjectCompileJob *job) noexcept;
-    static void complete_project_compile(ProjectCompileJob *job) noexcept;
 
     void apply_project_list(const nacos::ConfigData &data);
     void apply_project(const std::shared_ptr<ProjectEntry> &entry, std::shared_ptr<const nacos::ConfigData> data);
-    void enqueue_project_compile(const std::shared_ptr<ProjectEntry> &entry,
-                                 std::shared_ptr<const nacos::ConfigData> data, bool force_compile = false);
-    void dispatch_project_compile();
-    void cancel_project_compile(const std::shared_ptr<ProjectEntry> &entry) noexcept;
-    void apply_compiled_project(ProjectCompileJob &job);
+    // Compiles the candidate synchronously on the owner loop and applies the
+    // outcome. force_compile bypasses the published-version skip so a replayed
+    // candidate whose snapshot is no longer loaded still recompiles.
+    void compile_project_inline(const std::shared_ptr<ProjectEntry> &entry,
+                                std::shared_ptr<const nacos::ConfigData> data, bool force_compile = false);
+    void apply_compiled_project(const std::shared_ptr<ProjectEntry> &entry,
+                                const std::shared_ptr<const nacos::ConfigData> &data, std::uint64_t generation,
+                                CompiledProjectConfigResult result);
     void apply_prepared_project(const std::shared_ptr<ProjectEntry> &entry, PreparedProjectUpdate prepared,
                                 std::uint64_t generation, std::uint64_t revision_version, std::string data_id,
                                 std::string md5);
@@ -218,7 +217,6 @@ private:
     AccessRouteActivationEvidenceObserver activation_observer_;
     std::unique_ptr<ProjectListEntry> project_list_;
     std::map<std::string, std::shared_ptr<ProjectEntry>, std::less<>> projects_;
-    std::deque<std::shared_ptr<ProjectEntry>> compile_queue_;
     std::optional<AccessConfigWatcherFailure> last_failure_;
     std::optional<AccessConfigWatcherFailure> unavailable_failure_;
     std::optional<AccessConfigWatcherFailure> project_list_failure_;
@@ -238,7 +236,6 @@ private:
     std::int64_t project_list_active_at_unix_millis_ = 0;
     std::uint64_t snapshot_generation_ = 0;
     std::int64_t snapshot_published_at_unix_millis_ = 0;
-    std::size_t active_compiler_jobs_ = 0;
     std::uint64_t successful_updates_ = 0;
     std::uint64_t failed_updates_ = 0;
 };

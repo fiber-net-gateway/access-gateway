@@ -29,7 +29,7 @@ struct ScriptCompilerAdapter {
 using ProjectSnapshotResult = std::expected<std::optional<ProjectRouteSnapshot>, AccessConfigError>;
 
 // Pure, synchronous ProjectConfig -> ProjectRouteSnapshot compiler. It owns no
-// runtime publication or Nacos state and may run on the dedicated compiler loop.
+// runtime publication or Nacos state and compiles inline on the Nacos owner loop.
 class ProjectConfigCompiler final {
 public:
     explicit ProjectConfigCompiler(ScriptCompilerAdapter script_compiler = {},

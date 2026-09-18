@@ -345,8 +345,8 @@ python3 native/access-server/scripts/sync_test_nacos.py \
 - `docs/migration-plan.md`：范围边界、C++ 模块划分、工作包和阶段门槛；
 - `docs/compatibility-contract.md`：配置字段、热更新和 HTTP 请求执行的 Java 契约；
 - `docs/config-resource-limits.md`：Project List、route、gray 的版本化资源上限和失败保旧语义；
-- `docs/config-compilation.md`：route/TLS 专用 compiler loop、generation 合并、owner-loop
-  发布和有序关闭契约；
+- `docs/config-compilation.md`：route/TLS 在 nacos owner loop 的内联编译、每通知终态语义、
+  owner-loop 发布和有序关闭契约；
 - `docs/config-publication-typestate.md`：Project 候选从 Prepared 到 Ready 再到 commit 的
   move-only 类型状态、取消和兼容语义；
 - `docs/bounded-metrics.md`：请求、配置、Nacos/发现、TLS、proxy/DNS/pool/WebSocket、异步日志

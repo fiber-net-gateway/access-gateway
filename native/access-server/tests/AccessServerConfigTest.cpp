@@ -184,10 +184,8 @@ TEST(AccessServerRuntimeTest, RejectsMissingNetworkEntryBeforeEventLoopsStart) {
     event::EventLoop accept_loop;
     event::EventLoopGroup http_workers(1);
     event::EventLoopGroup nacos_group(1);
-    event::EventLoopGroup compiler_group(1);
     event::EventLoopGroup cat_group(1);
-    auto runtime = AccessServerRuntime::create(accept_loop, nacos_group.at(0), compiler_group.at(0), cat_group.at(0),
-                                               http_workers, *config);
+    auto runtime = AccessServerRuntime::create(accept_loop, nacos_group.at(0), cat_group.at(0), http_workers, *config);
 
     ASSERT_FALSE(runtime);
     EXPECT_EQ(runtime.error().code, AccessServerRuntimeErrorCode::ValidateNetworkEntry);
@@ -206,10 +204,8 @@ TEST(AccessServerRuntimeTest, RejectsMissingSystemResolverConfigBeforeEventLoops
     event::EventLoop accept_loop;
     event::EventLoopGroup http_workers(1);
     event::EventLoopGroup nacos_group(1);
-    event::EventLoopGroup compiler_group(1);
     event::EventLoopGroup cat_group(1);
-    auto runtime = AccessServerRuntime::create(accept_loop, nacos_group.at(0), compiler_group.at(0), cat_group.at(0),
-                                               http_workers, *config);
+    auto runtime = AccessServerRuntime::create(accept_loop, nacos_group.at(0), cat_group.at(0), http_workers, *config);
 
     ASSERT_FALSE(runtime);
     EXPECT_EQ(runtime.error().code, AccessServerRuntimeErrorCode::LoadDnsConfiguration);
@@ -423,10 +419,8 @@ TEST(AccessServerRuntimeTest, RejectsInvalidUpstreamTrustStoreBeforeEventLoopsSt
     event::EventLoop accept_loop;
     event::EventLoopGroup http_workers(1);
     event::EventLoopGroup nacos_group(1);
-    event::EventLoopGroup compiler_group(1);
     event::EventLoopGroup cat_group(1);
-    auto runtime = AccessServerRuntime::create(accept_loop, nacos_group.at(0), compiler_group.at(0), cat_group.at(0),
-                                               http_workers, *config);
+    auto runtime = AccessServerRuntime::create(accept_loop, nacos_group.at(0), cat_group.at(0), http_workers, *config);
 
     ASSERT_FALSE(runtime);
     EXPECT_EQ(runtime.error().code, AccessServerRuntimeErrorCode::InitializeUpstreamTls);

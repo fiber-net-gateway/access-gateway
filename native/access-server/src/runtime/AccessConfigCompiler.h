@@ -45,9 +45,9 @@ struct CompiledTlsCertificateConfig {
 
 using CompiledTlsCertificateConfigResult = std::expected<CompiledTlsCertificateConfig, TlsCertificateConfigError>;
 
-// CPU-only configuration compiler. Every method is compiler-loop-only and may
-// allocate or perform bounded local CPU work, but never accesses Nacos or
-// runtime publication state.
+// CPU-only configuration compiler. Every method is nacos-loop-only and may
+// allocate or perform bounded local CPU work, but never accesses Nacos beyond
+// the passed-in payloads or runtime publication state.
 class AccessConfigCompiler final : public common::NonCopyable, public common::NonMovable {
 public:
     explicit AccessConfigCompiler(event::EventLoop &loop) noexcept : loop_(&loop) {}

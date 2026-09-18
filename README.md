@@ -348,7 +348,7 @@ in English and Simplified Chinese:
 - [Fixed workspace and secure listener design](docs/fixed-workspace-and-secure-listener-design.md)
 - [Access Server guide](native/access-server/README.md)
 - [Compatibility contract](native/access-server/docs/compatibility-contract.md)
-- [Configuration compiler thread model](native/access-server/docs/config-compilation.md)
+- [Configuration compilation model](native/access-server/docs/config-compilation.md)
 - [Project publication typestate](native/access-server/docs/config-publication-typestate.md)
 - [Bounded access-server metrics](native/access-server/docs/bounded-metrics.md)
 - [Migration plan](native/access-server/docs/migration-plan.md)

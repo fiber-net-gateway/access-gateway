@@ -21,8 +21,8 @@ rnacos ConfigData
 ```
 
 `ProjectConfig` is the decoded compatibility model. `CompiledProjectConfig` is produced by the
-concrete `ProjectConfigCompiler` on the compiler EventLoop and contains a complete Project candidate
-without owner-loop service leases.
+concrete `ProjectConfigCompiler` inline on the Nacos owner loop and contains a complete Project
+candidate without owner-loop service leases.
 `RouteConfigStore::prepare_compiled()` binds those leases on the Nacos owner loop and returns a
 `PreparedProjectUpdate`. For a new-version candidate that could be published, it first verifies
 that the compiled snapshot's embedded Project and version match the requested update. Empty and
