@@ -1,6 +1,7 @@
 #ifndef FIBER_ACCESS_SERVER_ACCESS_PROVIDER_TRANSACTION_H
 #define FIBER_ACCESS_SERVER_ACCESS_PROVIDER_TRANSACTION_H
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <string_view>
@@ -30,6 +31,11 @@ public:
     void add_upstream(std::string_view upstream, std::size_t attempt) noexcept;
     void add_uri(std::string_view uri) noexcept;
     void add_connection_reuse(std::uint64_t reuse_count) noexcept;
+    // Body-transfer accounting: bytes pulled in for the phase and the wall time
+    // its forwarding took. Recorded before completion only — data added after
+    // the transaction completes is dropped by the CAT client.
+    void add_request_body(std::uint64_t bytes, std::chrono::microseconds duration) noexcept;
+    void add_response_body(std::uint64_t bytes, std::chrono::microseconds duration) noexcept;
     void fail(std::string_view phase, common::IoErr error) noexcept;
     void call_error(const Exception &exception, std::string_view phase, common::IoErr error) noexcept;
     void complete(int status_code) noexcept;

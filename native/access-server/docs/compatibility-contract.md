@@ -686,7 +686,11 @@ listener。订阅暂态失败采用封顶指数退避，非法首值被记录为
   response completion 同时进入 CAT 与 `access_server.access`；实际 upstream 只进 access log，
   CAT 根事务 data 不再记录 `upstream`，改为记录客户端连接协议 `protocol=h1/h2/h3`；每次
   `Access.Provider` attempt 的 data 记录 `upstream`、`attempt`、连接复用与发往 upstream 的
-  `uri=path?query`；
+  `uri=path?query`；请求/响应 body 传输记录 `req_body_bytes`/`req_body_us` 与
+  `resp_body_bytes`/`resp_body_us`（网关入站侧累计字节数与该转发段的墙钟时长，µs）。无 body 时字节
+  记 0（请求侧仍需排空空 body 结束标记，可能耗少量时间；响应侧为 0/0）；传输失败或取消也记录已
+  传输进度；字段须在事务 complete 前写入（之后 CAT client 丢弃新增 data）；websocket 隧道不计响应
+  body 字段（tunnel 由 `Access.WebSocket` 覆盖）；
 - websocket 会话由根事务上的 `Access.WebSocket` event 记录，名称为 upstream provider；
   data 记录 `downstream=h1_upgrade|extended_connect`、`result=closed|aborted` 与
   `duration_us`。tunnel 正常结束时由 executor 记 `closed`；proxy coroutine 被销毁等

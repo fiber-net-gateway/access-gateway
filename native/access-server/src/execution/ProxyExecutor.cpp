@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <array>
 #include <charconv>
+#include <chrono>
 #include <limits>
 #include <optional>
 #include <string>
@@ -468,6 +469,33 @@ bool response_limit_exceeded(const std::optional<std::uint64_t> &limit, std::siz
     return limit && *limit > 0 && size > *limit;
 }
 
+// Body-transfer stats flush into the provider transaction when the forwarding
+// scope ends — including failure co_returns and coroutine cancellation — so a
+// partial transfer still reports how far it got. Data added after the
+// transaction completes is dropped by the CAT client, so request-side stats
+// must flush before the attempt reaches any terminal provider call; the
+// request-body scope always does because its block ends well before completion.
+class RequestBodyStatsScope final {
+public:
+    RequestBodyStatsScope(AccessProviderTransaction &provider, const std::size_t &received) noexcept :
+        provider_(provider), received_(received), started_(std::chrono::steady_clock::now()) {}
+
+    RequestBodyStatsScope(const RequestBodyStatsScope &) = delete;
+    RequestBodyStatsScope &operator=(const RequestBodyStatsScope &) = delete;
+    RequestBodyStatsScope(RequestBodyStatsScope &&) = delete;
+    RequestBodyStatsScope &operator=(RequestBodyStatsScope &&) = delete;
+
+    ~RequestBodyStatsScope() noexcept {
+        provider_.add_request_body(received_, std::chrono::duration_cast<std::chrono::microseconds>(
+                                                      std::chrono::steady_clock::now() - started_));
+    }
+
+private:
+    AccessProviderTransaction &provider_;
+    const std::size_t &received_;
+    std::chrono::steady_clock::time_point started_;
+};
+
 class ProxyResponseBodyReader {
 public:
     ProxyResponseBodyReader(http::ClientHttp1Exchange &upstream,
@@ -497,12 +525,45 @@ public:
     common::IoResult<void> abort(common::IoErr reason) noexcept { return upstream_.abort(reason); }
 
     [[nodiscard]] bool limit_exceeded() const noexcept { return response_limit_exceeded_; }
+    [[nodiscard]] std::size_t received_body() const noexcept { return received_body_; }
 
 private:
     http::ClientHttp1Exchange &upstream_;
     std::optional<std::uint64_t> max_response_body_size_;
     std::size_t received_body_ = 0;
     bool response_limit_exceeded_ = false;
+};
+
+// Same flush-on-scope-end contract as RequestBodyStatsScope, but the piped
+// response body spans the rest of the attempt, so record() must be called
+// before complete()/fail() and the destructor only covers cancellation while
+// the pipe is still running.
+class ResponseBodyStatsScope final {
+public:
+    ResponseBodyStatsScope(AccessProviderTransaction &provider, ProxyResponseBodyReader &reader) noexcept :
+        provider_(provider), reader_(reader), started_(std::chrono::steady_clock::now()) {}
+
+    ResponseBodyStatsScope(const ResponseBodyStatsScope &) = delete;
+    ResponseBodyStatsScope &operator=(const ResponseBodyStatsScope &) = delete;
+    ResponseBodyStatsScope(ResponseBodyStatsScope &&) = delete;
+    ResponseBodyStatsScope &operator=(ResponseBodyStatsScope &&) = delete;
+
+    ~ResponseBodyStatsScope() noexcept { record(); }
+
+    void record() noexcept {
+        if (recorded_) {
+            return;
+        }
+        recorded_ = true;
+        provider_.add_response_body(reader_.received_body(), std::chrono::duration_cast<std::chrono::microseconds>(
+                                                                     std::chrono::steady_clock::now() - started_));
+    }
+
+private:
+    AccessProviderTransaction &provider_;
+    ProxyResponseBodyReader &reader_;
+    std::chrono::steady_clock::time_point started_;
+    bool recorded_ = false;
 };
 
 // Keep the connected attempt in this translation unit: Release builds can
@@ -580,6 +641,7 @@ async::Task<Result<void>> UpstreamAttempt::run() noexcept {
     if (!request_plan_.request_end_stream()) {
         http::proxy_core::RequestBodyForwardState forward_state(request_body);
         std::size_t received_request_body = 0;
+        RequestBodyStatsScope request_body_stats(provider_, received_request_body);
         for (;;) {
             auto body = co_await exchange_.read_body(options_.request_body_chunk_size);
             if (!body) {
@@ -642,6 +704,10 @@ async::Task<Result<void>> UpstreamAttempt::run() noexcept {
                 break;
             }
         }
+    } else {
+        // No request body to forward; keep the 0/0 record so the provider data
+        // schema stays uniform across methods.
+        provider_.add_request_body(0, std::chrono::microseconds::zero());
     }
 
     const http::Http1ResponseHead *upstream_head = nullptr;
@@ -817,6 +883,9 @@ async::Task<Result<void>> UpstreamAttempt::run() noexcept {
         co_return std::unexpected(Err::from_error(sent_response_header.error()));
     }
     if (response_end_stream) {
+        // No response body to pipe; keep the 0/0 record so the provider data
+        // schema stays uniform across responses.
+        provider_.add_response_body(0, std::chrono::microseconds::zero());
         if (no_body) {
             auto discarded = co_await upstream.discard_response_body();
             if (!discarded) {
@@ -839,6 +908,7 @@ async::Task<Result<void>> UpstreamAttempt::run() noexcept {
     }
 
     ProxyResponseBodyReader body_reader(upstream, request_plan_.max_response_body_size());
+    ResponseBodyStatsScope response_body_stats(provider_, body_reader);
     const http::HttpBodyPipeOptions pipe_options{
             .buffer_size = options_.response_body_chunk_size,
             .low_water = proxy_.flush.value_or(false)
@@ -850,6 +920,9 @@ async::Task<Result<void>> UpstreamAttempt::run() noexcept {
     auto piped = co_await http::pipe_http_body(http::make_http_body_pipe_reader(body_reader),
                                                http::make_http_body_pipe_writer(telemetry_.response_writer()),
                                                event::EventLoop::current().io_buf_node_pool(), pipe_options);
+    // Flush before the terminal provider calls below; data added after the
+    // transaction completes is dropped.
+    response_body_stats.record();
     if (!piped) {
         const http::HttpBodyPipeError pipe_error = piped.error();
         if (body_reader.limit_exceeded()) {
