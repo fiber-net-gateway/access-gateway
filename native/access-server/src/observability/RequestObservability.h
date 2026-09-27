@@ -25,7 +25,6 @@ struct CompiledRoute;
 struct Exception;
 struct ProxyConnectionObservation;
 struct ProxyUpstreamEndpoint;
-class AccessLogPolicy;
 class ScriptExecutionContext;
 class TracePropagation;
 
@@ -34,16 +33,14 @@ class TracePropagation;
 class RequestObservability final {
 public:
     RequestObservability(http::HttpExchange &exchange, AccessServerMetrics::Worker *metrics, cat::CatClient *cat_client,
-                         const AccessLogPolicy *access_log_policy, const ClientMetadata &client_metadata,
-                         TracePropagation &trace) noexcept;
+                         const ClientMetadata &client_metadata, TracePropagation &trace) noexcept;
 
     RequestObservability(const RequestObservability &) = delete;
     RequestObservability &operator=(const RequestObservability &) = delete;
     RequestObservability(RequestObservability &&) = delete;
     RequestObservability &operator=(RequestObservability &&) = delete;
 
-    void finish(http::HttpExchange &exchange, const ClientMetadata &client_metadata,
-                std::string_view trace_id) noexcept;
+    void finish(http::HttpExchange &exchange) noexcept;
 
     void set_project(ScriptExecutionContext &execution, std::string_view project, std::string_view effective_host,
                      std::string_view context_cluster) noexcept;
@@ -75,7 +72,6 @@ private:
     void update_transaction_name(ScriptExecutionContext &execution) noexcept;
 
     AccessServerMetrics::Worker *metrics_ = nullptr;
-    const AccessLogPolicy *access_log_policy_ = nullptr;
     std::chrono::steady_clock::time_point started_{};
     cat::Transaction root_;
     cat::Event websocket_event_;

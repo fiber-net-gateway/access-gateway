@@ -144,8 +144,8 @@ fiber::async::DetachedTask run_request_on_loop(fiber::event::EventLoop *loop, co
     ClientMetadataResolver client_metadata_resolver(std::move(client_metadata_options));
     fiber::http::HttpHandler handler = [&access_handler, &client_metadata_resolver, connection_secure](
                                                fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
-        fiber::access_server::AccessRequestTelemetry telemetry(exchange, nullptr, nullptr, nullptr,
-                                                               &client_metadata_resolver, connection_secure);
+        fiber::access_server::AccessRequestTelemetry telemetry(exchange, nullptr, nullptr, &client_metadata_resolver,
+                                                               connection_secure);
         co_await access_handler.handle(exchange, telemetry);
     };
     fiber::http::Http1Connection connection(std::move(transport), handler, {});

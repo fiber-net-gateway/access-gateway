@@ -1,7 +1,5 @@
 #include "RequestObservability.h"
 
-#include "AccessLogPolicy.h"
-#include "AccessServerLogCategories.h"
 #include "ScriptExecutionContext.h"
 #include "TracePropagation.h"
 
@@ -32,8 +30,6 @@
 namespace fiber::access_server {
 namespace {
 
-DEFINE_LOGGER(LOG_ACCESS, kAccessServerAccessLogger);
-
 constexpr std::string_view kTraceIdLowcaseHeader = "hi-trace-id";
 constexpr std::uint64_t kTraceIdHeaderHash = http::http_header_name_hash(kTraceIdLowcaseHeader);
 constexpr std::string_view kParentSpanIdLowcaseHeader = "hi-span-id-parent";
@@ -42,32 +38,12 @@ constexpr std::string_view kSpanIdLowcaseHeader = "hi-span-id";
 constexpr std::uint64_t kSpanIdHeaderHash = http::http_header_name_hash(kSpanIdLowcaseHeader);
 constexpr std::size_t kMaxUserAgentBytes = 1024;
 
-const AccessLogPolicy &default_access_log_policy() noexcept {
-    static const AccessLogPolicy policy;
-    return policy;
-}
-
 std::string_view integer_text(char *buffer, std::size_t capacity, std::int64_t value) noexcept {
     const auto converted = std::to_chars(buffer, buffer + capacity, value);
     if (converted.ec != std::errc{}) {
         return {};
     }
     return std::string_view(buffer, static_cast<std::size_t>(converted.ptr - buffer));
-}
-
-std::uint32_t next_access_log_sample() noexcept {
-    static thread_local std::uint64_t sequence = []() noexcept {
-        const event::EventLoop &loop = event::EventLoop::current();
-        const std::uint64_t worker = loop.has_group_index() ? static_cast<std::uint64_t>(loop.group_index()) + 1 : 1;
-        return worker * 0x9e3779b97f4a7c15ULL;
-    }();
-    std::uint64_t value = ++sequence;
-    value ^= value >> 30U;
-    value *= 0xbf58476d1ce4e5b9ULL;
-    value ^= value >> 27U;
-    value *= 0x94d049bb133111ebULL;
-    value ^= value >> 31U;
-    return static_cast<std::uint32_t>(value % kAccessLogSampleScale);
 }
 
 bool has_inbound_context(const cat::MessageTraceContext &context) noexcept {
@@ -97,26 +73,12 @@ cat::MessageTraceContext read_trace_context(const http::HttpHeaders &headers) no
     };
 }
 
-std::string_view response_result(const http::HttpResponseStats &response) noexcept {
-    if (response.terminal_error != common::IoErr::None || !response.completed) {
-        return "canceled";
-    }
-    if (response.status_code >= 200 && response.status_code < 400) {
-        return "success";
-    }
-    if (response.status_code >= 400 && response.status_code < 500) {
-        return "client_error";
-    }
-    return "server_error";
-}
-
 } // namespace
 
 RequestObservability::RequestObservability(http::HttpExchange &exchange, AccessServerMetrics::Worker *metrics,
-                                           cat::CatClient *cat_client, const AccessLogPolicy *access_log_policy,
-                                           const ClientMetadata &client_metadata, TracePropagation &trace) noexcept :
-    metrics_(metrics), access_log_policy_(access_log_policy ? access_log_policy : &default_access_log_policy()),
-    started_(event::EventLoop::current().now()) {
+                                           cat::CatClient *cat_client, const ClientMetadata &client_metadata,
+                                           TracePropagation &trace) noexcept :
+    metrics_(metrics), started_(event::EventLoop::current().now()) {
     if (metrics_) {
         metrics_->request_started();
     }
@@ -168,8 +130,7 @@ RequestObservability::RequestObservability(http::HttpExchange &exchange, AccessS
     add_root_data("trace_context", invalid_fallback ? "invalid_fallback" : (inherited ? "continued" : "new"));
 }
 
-void RequestObservability::finish(http::HttpExchange &exchange, const ClientMetadata &client_metadata,
-                                  std::string_view trace_id) noexcept {
+void RequestObservability::finish(http::HttpExchange &exchange) noexcept {
     if (finished_) {
         return;
     }
@@ -201,39 +162,6 @@ void RequestObservability::finish(http::HttpExchange &exchange, const ClientMeta
     if (root_.valid()) {
         const bool success = !execution_failed_ && response.completed && response.terminal_error == common::IoErr::None;
         (void) root_.complete(success ? cat::status::Success : cat::status::Error);
-    }
-
-    const bool failed = execution_failed_ || !response.completed || response.terminal_error != common::IoErr::None ||
-                        response.status_code >= 400;
-    const std::uint32_t sample = access_log_policy_->options().success_sample_rate_bps >= kAccessLogSampleScale
-                                         ? 0
-                                         : next_access_log_sample();
-    if (access_log_policy_->should_log(failed, sample) && LOG_ACCESS.get().enabled(log::LogLevel::Info)) {
-        const AccessLogUri uri = access_log_policy_->render_uri(exchange.uri());
-        const std::string peer_ip = client_metadata.peer_address.to_string();
-        const std::string client_ip =
-                client_metadata.has_client_address ? client_metadata.client_address.to_string() : std::string{};
-        LOG(LOG_ACCESS, INFO) << "request completed"
-                              << " trace_id=" << log::quoted(trace_id)
-                              << " method=" << log::quoted(exchange.method_view())
-                              << " host=" << log::quoted(exchange.header("Host")) << " path=" << log::quoted(uri.path())
-                              << " query=" << log::quoted(uri.query) << " query_hash=" << log::quoted(uri.query_hash)
-                              << " query_filtered=" << uri.query_filtered << " query_redacted=" << uri.query_redacted
-                              << " path_truncated=" << uri.path_truncated << " query_truncated=" << uri.query_truncated
-                              << " query_hash_failed=" << uri.query_hash_failed << " project=" << log::quoted(project_)
-                              << " client_ip=" << log::quoted(client_ip) << " peer_ip=" << log::quoted(peer_ip)
-                              << " client_scheme=" << log::quoted(client_metadata.external_scheme)
-                              << " client_address_source=" << client_address_source_name(client_metadata.address_source)
-                              << " client_scheme_source=" << client_scheme_source_name(client_metadata.scheme_source)
-                              << " forwarding_status=" << forwarding_status_name(client_metadata.forwarding_status)
-                              << " route=" << log::quoted(route_) << " cluster=" << log::quoted(cluster_)
-                              << " upstream=" << log::quoted(upstream_)
-                              << " response_compression=" << log::quoted(response_compression_)
-                              << " status=" << response.status_code << " result=" << response_result(response)
-                              << " error=" << log::quoted(error_)
-                              << " duration_us=" << std::max<std::int64_t>(duration.count(), 0)
-                              << " response_bytes=" << response.body_bytes_sent
-                              << " io_error=" << common::io_err_name(response.terminal_error);
     }
 }
 
@@ -318,12 +246,10 @@ void RequestObservability::record_proxy_connection(const ProxyConnectionObservat
         metrics_->proxy_connect_candidates_observed(observation.connect_candidates);
     }
     if (observation.happy_eyeballs_success != 0) {
-        metrics_->happy_eyeballs_finished(AccessHappyEyeballsResult::Success,
-                                          observation.happy_eyeballs_success);
+        metrics_->happy_eyeballs_finished(AccessHappyEyeballsResult::Success, observation.happy_eyeballs_success);
     }
     if (observation.happy_eyeballs_failure != 0) {
-        metrics_->happy_eyeballs_finished(AccessHappyEyeballsResult::Failure,
-                                          observation.happy_eyeballs_failure);
+        metrics_->happy_eyeballs_finished(AccessHappyEyeballsResult::Failure, observation.happy_eyeballs_failure);
     }
 }
 

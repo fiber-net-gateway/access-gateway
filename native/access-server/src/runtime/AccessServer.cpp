@@ -24,7 +24,6 @@ AccessServer::AccessServer(event::EventLoop &accept_loop, event::EventLoopGroup 
                               .default_max_request_body_size = options.default_max_request_body_size,
                               .client_metadata = std::move(options.client_metadata),
                               .network_entry = std::move(options.network_entry),
-                              .access_log = std::move(options.access_log),
                               .dns = std::move(options.dns),
                               .dns_resolver_factory = options.dns_resolver_factory,
                               .script_adapter = options.script_adapter,

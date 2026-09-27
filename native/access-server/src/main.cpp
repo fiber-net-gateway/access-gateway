@@ -1,3 +1,4 @@
+#include "observability/AccessLogWriter.h"
 #include "observability/AccessServerLogCategories.h"
 #include "runtime/AccessServerConfig.h"
 #include "runtime/AccessServerRuntime.h"
@@ -136,6 +137,14 @@ int main(int argc, char **argv) {
         return 1;
     }
     fiber::access_server::AccessServerConfig config = std::move(*loaded);
+
+    // Java-compatible access log: one dedicated writer thread with the
+    // AsyncAccessLogWriter semantics, named after this gateway's entry. An
+    // empty directory disables file logging; the executor then skips emission.
+    if (!config.access_log_directory().empty()) {
+        fiber::access_server::initialize_access_log_writer(std::string(config.access_log_directory()),
+                                                           "access-server-" + std::string(config.network_entry()));
+    }
 
     (void) ::signal(SIGPIPE, SIG_IGN);
     fiber::async::SignalSet shutdown_signals;
@@ -309,5 +318,8 @@ int main(int argc, char **argv) {
     http_workers.join();
     nacos_group.join();
     cat_group.join();
+    // Drains and joins the access-log writer after every request worker has
+    // stopped submitting lines.
+    fiber::access_server::shutdown_access_log_writer();
     return exit_code;
 }

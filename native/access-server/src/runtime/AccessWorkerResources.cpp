@@ -16,7 +16,7 @@ AccessWorkerResources::AccessWorkerResources(event::EventLoopGroup &workers, con
                                              ProxyClusterMatcher cluster_matcher,
                                              AccessWorkerResourcesOptions options) :
     workers_(&workers), client_metadata_resolver_(std::move(options.client_metadata)),
-    access_log_policy_(std::move(options.access_log)), dns_(std::move(options.dns), options.dns_resolver_factory),
+    dns_(std::move(options.dns), options.dns_resolver_factory),
     // Idle-cache bounds are per worker shard: each event loop keeps up to 200
     // idle upstream connections per group and 20000 total for reuse, so the
     // process-wide idle ceiling scales with the worker count.
@@ -50,10 +50,6 @@ async::Task<common::IoResult<void>> AccessWorkerResources::initialize() noexcept
     }
     if (!metrics_.valid()) {
         co_return std::unexpected(common::IoErr::NoMem);
-    }
-    auto access_log_initialized = access_log_policy_.initialize();
-    if (!access_log_initialized) {
-        co_return std::unexpected(access_log_initialized.error());
     }
     if (!co_await dns_.init(*workers_)) {
         co_return std::unexpected(common::IoErr::NoMem);
@@ -92,8 +88,7 @@ async::Task<void> AccessWorkerResources::handle(http::HttpExchange &exchange, bo
     (void) apply_network_entry_headers(const_cast<http::HttpHeaders &>(exchange.request_headers()),
                                        exchange.remote_addr().ip(), network_entry_, connection_secure);
     AccessServerMetrics::Worker &worker = metrics_.worker(event::EventLoop::current().group_index());
-    AccessRequestTelemetry telemetry(exchange, &worker, cat_client_, &access_log_policy_, &client_metadata_resolver_,
-                                     connection_secure);
+    AccessRequestTelemetry telemetry(exchange, &worker, cat_client_, &client_metadata_resolver_, connection_secure);
     telemetry.script_context().set_services(&script_http_services_);
     if (!http3_alt_svc_.empty()) {
         (void) telemetry.response_headers().set("Alt-Svc", http3_alt_svc_);

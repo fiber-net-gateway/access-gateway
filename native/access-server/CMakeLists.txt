@@ -54,11 +54,12 @@ if (NOT TARGET fiber::nacos OR NOT TARGET fiber::cat OR NOT TARGET fiber::promet
 endif()
 
 access_server_add_component(access_server_observability
-    "${CMAKE_CURRENT_LIST_DIR}/src/observability/AccessLogPolicy.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/observability/AccessActivationEvidence.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/observability/AccessConfigMetrics.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/observability/AccessDnsMetrics.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/observability/AccessDiscoveryMetrics.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/observability/AccessLogLine.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/observability/AccessLogWriter.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/observability/AccessProcessMetrics.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/observability/AccessRuntimeMetrics.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/observability/AccessServerMetrics.cpp"
@@ -265,7 +266,8 @@ if (FIBER_BUILD_TESTS AND (GTest_FOUND OR TARGET GTest::gtest_main))
         "${CMAKE_CURRENT_LIST_DIR}/tests/AccessInstanceRegistrationTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/AccessDnsMetricsTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/AccessDiscoveryMetricsTest.cpp"
-        "${CMAKE_CURRENT_LIST_DIR}/tests/AccessLogPolicyTest.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/tests/AccessLogLineTest.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/tests/AccessLogWriterTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/AccessProcessMetricsTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/AccessRequestHandlerTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/AccessRequestTelemetryTest.cpp"

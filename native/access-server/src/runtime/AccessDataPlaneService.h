@@ -4,7 +4,6 @@
 #include "../execution/ClientMetadata.h"
 #include "../execution/UpstreamTlsClientPolicy.h"
 #include "../observability/AccessActivationEvidence.h"
-#include "../observability/AccessLogPolicy.h"
 #include "AccessHttpListenerOptions.h"
 #include "AccessRuntimeCoordinator.h"
 #include "AccessScriptRuntime.h"
@@ -38,7 +37,6 @@ struct AccessDataPlaneOptions {
     AccessActivationEndpointOptions activation_endpoint;
     ClientMetadataResolverOptions client_metadata;
     std::string network_entry;
-    AccessLogOptions access_log;
     AccessDnsServiceOptions dns = AccessDnsServiceOptions::local_default();
     AccessDnsResolverFactory dns_resolver_factory = AccessDnsResolverFactory::system();
     ProxyExecutorOptions executor;

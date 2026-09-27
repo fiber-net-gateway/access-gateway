@@ -5,7 +5,9 @@
 #include <atomic>
 #include <chrono>
 #include <cstring>
+#include <fstream>
 #include <future>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -15,6 +17,8 @@
 #include <thread>
 #include <utility>
 #include <vector>
+
+#include <dirent.h>
 
 #include <fiber/async/Sleep.h>
 #include <fiber/async/Spawn.h>
@@ -36,9 +40,12 @@
 #include "execution/ProxyExecutor.h"
 #include "fiber/cat/CatClient.h"
 #include "fiber/cat/CatClientConfig.h"
+#include "observability/AccessLogWriter.h"
 #include "observability/AccessRequestTelemetry.h"
 #include "routing/AccessScriptCompiler.h"
 #include "runtime/RouteConfigStore.h"
+
+#include <unistd.h>
 
 namespace {
 
@@ -639,7 +646,7 @@ run_downstream(fiber::event::EventLoop *loop, const fiber::access_server::RouteC
             });
     fiber::http::HttpHandler http_handler = [&handler, cat_client, metrics, &client_metadata_resolver](
                                                     fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
-        fiber::access_server::AccessRequestTelemetry telemetry(exchange, metrics, cat_client, nullptr,
+        fiber::access_server::AccessRequestTelemetry telemetry(exchange, metrics, cat_client,
                                                                &client_metadata_resolver);
         co_await handler.handle(exchange, telemetry);
     };
@@ -662,7 +669,7 @@ start_h2_downstream(fiber::event::EventLoop *loop, const fiber::access_server::R
                 fiber::access_server::ClientMetadataResolverOptions{
                         .mode = fiber::access_server::ClientMetadataMode::LegacyHeaders,
                 });
-        fiber::access_server::AccessRequestTelemetry telemetry(exchange, &metrics->worker(0), cat_client, nullptr,
+        fiber::access_server::AccessRequestTelemetry telemetry(exchange, &metrics->worker(0), cat_client,
                                                                &client_metadata_resolver);
         fiber::access_server::AccessRequestHandler request_handler(store->snapshot_provider(), {}, {}, proxy_adapter);
         co_await request_handler.handle(exchange, telemetry);
@@ -2805,6 +2812,183 @@ TEST(ProxyExecutorTest, AppliesConfiguredWebSocketTunnelTimeout) {
     ASSERT_EQ(shutdown_future.wait_for(2s), std::future_status::ready);
     group.stop();
     group.join();
+}
+
+// End-to-end check of the Java-compatible access log: a real proxy attempt
+// through the executor must emit one ploto.ACCESS_LOG line per attempt with the
+// ServiceExchange field semantics (inbound trace headers, X-Real-IP client,
+// path without query, response-head status, reused-connection negative
+// connect count).
+TEST(ProxyExecutorTest, WritesJavaCompatibleAccessLogLinesPerProxyAttempt) {
+    class WriterAndDirectoryGuard final {
+    public:
+        WriterAndDirectoryGuard() {
+            std::string pattern = "/tmp/access-log-executor-test-XXXXXX";
+            std::vector<char> buffer(pattern.begin(), pattern.end());
+            buffer.push_back('\0');
+            created_ = ::mkdtemp(buffer.data()) != nullptr;
+            if (created_) {
+                directory_ = buffer.data();
+                fiber::access_server::initialize_access_log_writer(directory_, "access-server-test-entry");
+            }
+        }
+
+        ~WriterAndDirectoryGuard() {
+            fiber::access_server::shutdown_access_log_writer();
+            if (created_) {
+                if (DIR *handle = ::opendir(directory_.c_str()); handle != nullptr) {
+                    while (const dirent *item = ::readdir(handle)) {
+                        const std::string_view name(item->d_name);
+                        if (name != "." && name != "..") {
+                            (void) ::unlink((directory_ + "/" + std::string(name)).c_str());
+                        }
+                    }
+                    ::closedir(handle);
+                }
+                (void) ::rmdir(directory_.c_str());
+            }
+        }
+
+        [[nodiscard]] bool ready() const noexcept { return created_; }
+        [[nodiscard]] const std::string &directory() const noexcept { return directory_; }
+
+    private:
+        std::string directory_;
+        bool created_ = false;
+    };
+
+    WriterAndDirectoryGuard guard;
+    ASSERT_TRUE(guard.ready());
+
+    fiber::event::EventLoopGroup group(1);
+    fiber::http::StealableHttp1ConnectionPoolSet pool(group);
+    ASSERT_TRUE(pool.init());
+    group.start();
+
+    UpstreamState upstream_state;
+    upstream_state.response = {.status = 200, .body = std::string("ok")};
+    std::promise<std::uint16_t> port_promise;
+    std::promise<TestHttpServer> server_promise;
+    auto port_future = port_promise.get_future();
+    auto server_future = server_promise.get_future();
+    fiber::async::spawn(group.at(0),
+                        [&]() { return start_server(&group.at(0), &upstream_state, &port_promise, &server_promise); });
+
+    TestHttpServer server = server_future.get();
+    ASSERT_NE(server.server, nullptr);
+    const std::uint16_t port = port_future.get();
+    ASSERT_NE(port, 0);
+
+    fiber::access_server::RouteConfigStore store;
+    auto published = store.apply("orders", proxy_response_project_config(port));
+    ASSERT_TRUE(published) << published.error().message;
+    fiber::access_server::ProxyExecutor executor(pool);
+
+    // Two requests on one downstream connection: the second proxy attempt
+    // reuses the pooled upstream connection, so its connect field must be a
+    // negative served count.
+    std::string output;
+    std::promise<void> request_promise;
+    auto request_future = request_promise.get_future();
+    std::string requests = "GET /proxy?token=secret-value HTTP/1.1\r\n"
+                           "Host: api.example.com\r\n"
+                           "X-B3-TraceId: 3f2a1c9d0b7e4f5a\r\n"
+                           "HI-SPAN-ID: access-span-1\r\n"
+                           "traceparent: 00-11111111111111111111111111111111-2222222222222222-01\r\n"
+                           "X-Real-IP: 203.0.113.77\r\n"
+                           "\r\n"
+                           "GET /proxy HTTP/1.1\r\n"
+                           "Host: api.example.com\r\n"
+                           "Connection: close\r\n"
+                           "\r\n";
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_downstream(&group.at(0), &store, executor.adapter(), std::move(requests), &output, &request_promise);
+    });
+
+    ASSERT_EQ(request_future.wait_for(5s), std::future_status::ready);
+    ASSERT_EQ(upstream_state.requests.size(), 2U);
+
+    std::promise<void> shutdown_promise;
+    auto shutdown_future = shutdown_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() { return shutdown(&pool, &server, &shutdown_promise); });
+    ASSERT_EQ(shutdown_future.wait_for(2s), std::future_status::ready);
+    group.stop();
+    group.join();
+
+    // Draining the writer on shutdown guarantees the file is complete here
+    // (lines can sit in the flush buffer until close); the guard's shutdown is
+    // idempotent.
+    fiber::access_server::shutdown_access_log_writer();
+    std::ifstream access_log(guard.directory() + "/access.log", std::ios::binary);
+    const std::string content((std::istreambuf_iterator<char>(access_log)), std::istreambuf_iterator<char>());
+    ASSERT_FALSE(content.empty());
+    std::vector<std::string> lines;
+    for (std::size_t position = 0; position < content.size();) {
+        const std::size_t newline = content.find('\n', position);
+        ASSERT_NE(newline, std::string::npos);
+        lines.push_back(content.substr(position, newline - position));
+        position = newline + 1;
+    }
+    ASSERT_EQ(lines.size(), 2u) << content;
+
+    const auto columns = [](const std::string &line) {
+        std::vector<std::string> fields;
+        for (std::size_t position = 0; position <= line.size();) {
+            const std::size_t tab = line.find('\t', position);
+            fields.push_back(line.substr(position, tab == std::string::npos ? std::string::npos : tab - position));
+            if (tab == std::string::npos) {
+                break;
+            }
+            position = tab + 1;
+        }
+        return fields;
+    };
+    // 20 columns: timestamp, log header, then the 18 Java fields.
+    const std::vector<std::string> first = columns(lines[0]);
+    const std::vector<std::string> second = columns(lines[1]);
+    ASSERT_EQ(first.size(), 20u) << lines[0];
+    ASSERT_EQ(second.size(), 20u) << lines[1];
+
+    EXPECT_EQ(first[1], "[INFO ploto.ACCESS_LOG] - -");
+    EXPECT_EQ(first[2], "access-server-test-entry");
+    EXPECT_EQ(first[3], "3f2a1c9d0b7e4f5a");
+    EXPECT_EQ(first[4], "access-span-1");
+    EXPECT_EQ(first[5], "00-11111111111111111111111111111111-2222222222222222-01");
+    EXPECT_EQ(first[6], "GET");
+    EXPECT_EQ(first[7], "api.example.com");
+    EXPECT_EQ(first[8], "203.0.113.77");
+    // receivedPath never carries the query string.
+    EXPECT_EQ(first[9], "/proxy");
+    EXPECT_FALSE(first[10].empty());
+    EXPECT_NE(first[11].find("127.0.0.1"), std::string::npos) << first[11];
+    EXPECT_EQ(first[12], "default");
+    EXPECT_EQ(first[13], "-");
+    EXPECT_EQ(first[14], "default");
+    EXPECT_EQ(first[15], "127.0.0.1");
+    EXPECT_NE(first[16].find("/proxy"), std::string::npos) << first[16];
+    EXPECT_EQ(first[17], "200");
+    // Fresh connection: positive microsecond-grid nanoseconds.
+    const std::int64_t first_connect = std::stoll(first[18]);
+    EXPECT_GE(first_connect, 0);
+    EXPECT_GE(std::stoll(first[19]), 0);
+
+    // The second request had no trace or real-IP headers: the B3 trace id is a
+    // generated 16-char lowercase hex value and the client falls back to the
+    // transport's peer address (the recording transport reports the
+    // unspecified address); the reused upstream connection reports a negative
+    // served count.
+    EXPECT_EQ(second[2], "access-server-test-entry");
+    EXPECT_EQ(second[3].size(), 16u);
+    EXPECT_TRUE(std::all_of(second[3].begin(), second[3].end(), [](char character) {
+        return (character >= '0' && character <= '9') || (character >= 'a' && character <= 'f');
+    })) << second[3];
+    EXPECT_EQ(second[6], "GET");
+    EXPECT_EQ(second[7], "api.example.com");
+    EXPECT_FALSE(second[8].empty());
+    EXPECT_EQ(second[9], "/proxy");
+    EXPECT_EQ(second[17], "200");
+    EXPECT_LT(std::stoll(second[18]), 0) << second[18];
+    EXPECT_GE(std::stoll(second[19]), 0);
 }
 
 } // namespace

@@ -391,32 +391,24 @@ Fiber 当前已提供：
 
 **归属：本项目。Fiber 日志库无须修改。**
 
-**实施状态：已解决（2026-08-16）。** `AccessRequestTelemetry` 不再把 `unparsed_uri`
-写入 INFO 日志，而是消费独立 `AccessLogPolicy` 生成的有界安全字段。默认 query allowlist
-为空，只记录 path；内置敏感 key 不可被配置移除，命中 allowlist 时固定替换为
-`[REDACTED]`。配置还支持附加敏感 key、实例随机密钥 HMAC-SHA256、成功请求 bps 采样及
-path/query 字节上限。4xx/5xx、执行失败、未完成响应和 IO 错误始终保留。
-
-所有 path/query 输出只包含安全 ASCII，控制字符、非 ASCII 和非法 UTF-8 字节按 `%XX`
-编码，截断不会切断编码单元；日志显式给出 filtered/redacted/truncated/hash-failed 状态。
-HMAC 只对最终保留的日志计算，采样使用 worker-local 无锁序列，不在请求热路径引入共享
-计数器竞争。启用 HMAC 后安全随机密钥初始化失败会使 server 初始化失败。
+**实施状态：已解决（2026-08-16；2026-09-27 随 Java 兼容 access log 替换更新）。**
+`AccessLogPolicy` 及其 allowlist/HMAC/采样/截断机制已随结构化访问日志整体移除：访问日志
+现为 Java `ploto-gateway` `AccessLog` 逐字节兼容格式，receivedPath 只包含解析后的 path，
+**任何 query value 都不会写入日志**（比原 allowlist 默认空更强的不变量），亦无转义、截断
+或采样路径。结构化 INFO 行已删除，`AccessRequestTelemetry` 不再输出 `unparsed_uri`。
 
 改造前，`AccessRequestTelemetry` 在 INFO 级记录 `unparsed_uri`，其中通常包含 query
-string，可能泄露 token、签名 URL、session id 和业务敏感参数。
+string，可能泄露 token、签名 URL、session id 和业务敏感参数。第一阶段（2026-08-16）
+曾以 `AccessLogPolicy` 的 allowlist/敏感 key 替换/HMAC/采样/有界编码实现有界脱敏；
+该机制已随结构化访问日志整体移除，上述配置项不复存在。
 
-代码位置：[`AccessRequestTelemetry.cpp`](../src/observability/AccessRequestTelemetry.cpp#L269)。
-
-实现现在默认只记录 path，并支持：
-
-- query key allowlist；
-- 敏感 key 固定替换；
-- 可选的 query hash；
-- 正常请求采样、失败请求保留；
-- 最大字段长度和 UTF-8/控制字符安全编码。
+代码位置：[`AccessLogWriter.cpp`](../src/observability/AccessLogWriter.cpp)（异步写线程、
+轮转与保留）、[`ProxyExecutor.cpp`](../src/execution/ProxyExecutor.cpp)（每 attempt 的
+RAII 行提交）。
 
 Fiber 已经通过 `LoggerManager::queue_stats()` 和 appender stats 暴露队列、丢弃和写错误
-统计。本项目只需将它们接入 access-server 的固定 schema 指标，不需要新增 Fiber API。
+统计。当前 Java 兼容 access log 使用自有的专用写线程（不经 Fiber appender），队列上限、
+丢弃与写错误计数由 `AccessLogWriter` 自身维护。
 
 ### 6.2 S-02：trusted proxy 和真实客户端地址
 
@@ -429,7 +421,9 @@ socket peer 命中启动时严格编译的 CIDR 后生效，按 `Forwarded`、`X
 和 XFP 下标对齐均有覆盖。非法高优先级输入不向低优先级 header 降级，而是使用 socket peer 和
 listener 的真实 TLS 状态。
 
-解析结果由 route CIDR、gray、HTTPS redirect、代理 Location/Refresh、CAT 和 access log 共同消费；
+解析结果由 route CIDR、gray、HTTPS redirect、代理 Location/Refresh 和 CAT 共同消费；
+access log 的 clientIp 列例外，按 Java 语义直接取 `X-Real-IP` header、缺失回退 transport
+peer，不经过该解析；
 安全模式不再因 header 缺失或解析失败跳过 CIDR。`legacy_headers` 单独保存 route/gray 的 Java
 兼容 target，继续覆盖旧 fixture，但必须显式配置。Fiber HTTP/1 exchange 当前不携带 scheme，
 本项目利用业务 listener 全局 TLS 配置确定真实协议，因此本项不需要修改 Fiber。

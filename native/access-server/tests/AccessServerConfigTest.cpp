@@ -38,12 +38,7 @@ TEST(AccessServerConfigTest, LoadsJavaServerDefaultsAndNacosSettings) {
     // Listener security is derived per request from the serving listener; the
     // resolver carries no global connection_secure flag anymore.
     EXPECT_FALSE(config->client_metadata_options().connection_secure);
-    EXPECT_TRUE(config->access_log_options().query_allowlist.empty());
-    EXPECT_TRUE(config->access_log_options().additional_sensitive_query_keys.empty());
-    EXPECT_FALSE(config->access_log_options().query_hash_enabled);
-    EXPECT_EQ(config->access_log_options().success_sample_rate_bps, kAccessLogSampleScale);
-    EXPECT_EQ(config->access_log_options().max_path_bytes, 2048u);
-    EXPECT_EQ(config->access_log_options().max_query_bytes, 2048u);
+    EXPECT_EQ(config->access_log_directory(), "/data/logs/ploto-server");
     EXPECT_EQ(config->upstream_tls_client_policy().verification, UpstreamTlsVerificationMode::LegacyInsecure);
     EXPECT_TRUE(config->upstream_tls_client_policy().ca_file.empty());
     EXPECT_EQ(config->upstream_connect_timeout(), std::chrono::seconds(3));
@@ -231,12 +226,7 @@ TEST(AccessServerConfigTest, LoadsExplicitRuntimeAndCompatibilityKeys) {
         ACCESS_SERVER_TEST_MODE=true
         ACCESS_SERVER_CLIENT_METADATA_MODE=trusted_proxy
         ACCESS_SERVER_TRUSTED_PROXY_CIDRS=10.0.0.0/8,2001:db8::/32
-        ACCESS_SERVER_ACCESS_LOG_QUERY_ALLOWLIST=page,requestId
-        ACCESS_SERVER_ACCESS_LOG_SENSITIVE_QUERY_KEYS=otp,CustomSecret
-        ACCESS_SERVER_ACCESS_LOG_QUERY_HASH_ENABLED=true
-        ACCESS_SERVER_ACCESS_LOG_SUCCESS_SAMPLE_RATE_BPS=2500
-        ACCESS_SERVER_ACCESS_LOG_MAX_PATH_BYTES=4096
-        ACCESS_SERVER_ACCESS_LOG_MAX_QUERY_BYTES=512
+        ACCESS_SERVER_ACCESS_LOG_DIR=/var/log/access
         ACCESS_SERVER_PROJECTS_DATA_ID=custom.projects
         ACCESS_SERVER_ROUTE_DATA_ID_PREFIX=custom.route.
         ACCESS_SERVER_ROUTE_GROUP=CUSTOM-ROUTE
@@ -269,13 +259,7 @@ TEST(AccessServerConfigTest, LoadsExplicitRuntimeAndCompatibilityKeys) {
     EXPECT_FALSE(config->client_metadata_options().connection_secure);
     EXPECT_FALSE(config->plain_http_server_options().tls.enabled());
     EXPECT_FALSE(config->plain_http_server_options().http3_enabled);
-    EXPECT_EQ(config->access_log_options().query_allowlist, (std::vector<std::string>{"page", "requestId"}));
-    EXPECT_EQ(config->access_log_options().additional_sensitive_query_keys,
-              (std::vector<std::string>{"otp", "customsecret"}));
-    EXPECT_TRUE(config->access_log_options().query_hash_enabled);
-    EXPECT_EQ(config->access_log_options().success_sample_rate_bps, 2500u);
-    EXPECT_EQ(config->access_log_options().max_path_bytes, 4096u);
-    EXPECT_EQ(config->access_log_options().max_query_bytes, 512u);
+    EXPECT_EQ(config->access_log_directory(), "/var/log/access");
     EXPECT_FALSE(config->tls_http_server_options().tls.enabled());
     EXPECT_FALSE(config->tls_http_server_options().http3_enabled);
     EXPECT_EQ(config->watcher_options().project_list_data_id, "custom.projects");
@@ -521,26 +505,21 @@ TEST(AccessServerConfigTest, RejectsNonBooleanTestMode) {
     EXPECT_EQ(config.error().key, "ACCESS_SERVER_TEST_MODE");
 }
 
-TEST(AccessServerConfigTest, RejectsInvalidAccessLogPolicySettings) {
-    const auto expect_invalid = [](std::string_view setting) {
-        std::string input = "NACOS_SERVER_ADDRESSES=127.0.0.1\n";
-        input.append(setting);
-        input.push_back('\n');
-        auto config = AccessServerConfig::load_from_string(input);
-        EXPECT_FALSE(config);
-        if (!config) {
-            EXPECT_EQ(config.error().code, AccessServerConfigErrorCode::InvalidValue);
-        }
-    };
+TEST(AccessServerConfigTest, RejectsAccessLogDirectoryWithEmbeddedNul) {
+    // The literal's embedded NUL must reach the parser, so build the input from
+    // an explicit length rather than a NUL-terminated constructor.
+    static constexpr char input[] = "NACOS_SERVER_ADDRESSES=127.0.0.1\nACCESS_SERVER_ACCESS_LOG_DIR=/tmp/\0log\n";
+    auto config = AccessServerConfig::load_from_string(std::string_view(input, sizeof(input) - 1));
+    ASSERT_FALSE(config);
+    EXPECT_EQ(config.error().code, AccessServerConfigErrorCode::InvalidValue);
+    EXPECT_EQ(config.error().key, "ACCESS_SERVER_ACCESS_LOG_DIR");
+}
 
-    expect_invalid("ACCESS_SERVER_ACCESS_LOG_QUERY_ALLOWLIST=page,page");
-    expect_invalid("ACCESS_SERVER_ACCESS_LOG_QUERY_ALLOWLIST=page,");
-    expect_invalid("ACCESS_SERVER_ACCESS_LOG_QUERY_ALLOWLIST=not allowed");
-    expect_invalid("ACCESS_SERVER_ACCESS_LOG_SENSITIVE_QUERY_KEYS=token,Token");
-    expect_invalid("ACCESS_SERVER_ACCESS_LOG_QUERY_HASH_ENABLED=yes");
-    expect_invalid("ACCESS_SERVER_ACCESS_LOG_SUCCESS_SAMPLE_RATE_BPS=10001");
-    expect_invalid("ACCESS_SERVER_ACCESS_LOG_MAX_PATH_BYTES=15");
-    expect_invalid("ACCESS_SERVER_ACCESS_LOG_MAX_QUERY_BYTES=65537");
+TEST(AccessServerConfigTest, EmptyAccessLogDirectoryDisablesFileLogging) {
+    auto config =
+            AccessServerConfig::load_from_string("NACOS_SERVER_ADDRESSES=127.0.0.1\nACCESS_SERVER_ACCESS_LOG_DIR=\n");
+    ASSERT_TRUE(config) << config.error().detail;
+    EXPECT_TRUE(config->access_log_directory().empty());
 }
 
 TEST(AccessServerConfigTest, LoadsLegacyClientMetadataModeAndRejectsUnsafeProxyConfiguration) {
