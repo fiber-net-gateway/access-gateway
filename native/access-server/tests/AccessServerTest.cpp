@@ -346,7 +346,6 @@ TEST(AccessServerTest, ServesPublishedSnapshotAndShutsDownWorkerResources) {
                                                                    });
     AccessServer server(accept_loop, workers, store, {},
                         AccessServerOptions{
-                                .access_log = AccessLogOptions{.query_hash_enabled = true},
                                 .runtime_metrics = &runtime_metrics,
                                 .activation_evidence = &activation_evidence,
                                 .activation_endpoint =
@@ -516,12 +515,6 @@ TEST(AccessServerTest, ServesPublishedSnapshotAndShutsDownWorkerResources) {
     EXPECT_NE(invalid_activation_response.find("HTTP/1.1 400"), std::string::npos);
     EXPECT_NE(invalid_activation_response.find("invalid_page"), std::string::npos);
     EXPECT_EQ(access_logs.find("integration-secret"), std::string::npos);
-    EXPECT_NE(access_logs.find("path=\"/\" query=\"\""), std::string::npos);
-    EXPECT_NE(access_logs.find("query_hash=\"hmac-sha256:"), std::string::npos);
-    EXPECT_NE(access_logs.find("query_filtered=true"), std::string::npos);
-    EXPECT_EQ(access_logs.find("203.0.113.77"), std::string::npos);
-    EXPECT_NE(access_logs.find("client_ip=\"127.0.0.1\" peer_ip=\"127.0.0.1\""), std::string::npos);
-    EXPECT_NE(access_logs.find("forwarding_status=ignored_direct_mode"), std::string::npos);
 }
 
 // Self-signed localhost pair (same fixture material as the fiber endpoint

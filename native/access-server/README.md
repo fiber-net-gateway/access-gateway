@@ -100,8 +100,8 @@ connection pool，以及 Nacos、CAT、Prometheus 组件。迁移不要求这些
 - 已在同一运维 listener 上提供默认关闭、Bearer 鉴权的 `/v1/activation-evidence`：按实例报告
   route/project-list/gray/TLS 候选与 active 摘要、不可变快照 generation/fingerprint 和有界
   discovery 聚合；Project 明细使用绑定 evidence revision 的分页游标，配置内容和自由文本错误不出站；
-- 已接入共享异步 logging 生命周期，访问日志在 `access_server.access` 以结构化
-  key/value 输出 trace、请求、路由、上游、结果、耗时和字节数；队列满时丢弃新日志，
+- 访问日志已替换为 Java `ploto-gateway` `AccessLog` 逐字节兼容格式（每个 proxy attempt
+  一行，详见「配置参考」一节），由独立写线程异步落盘；队列满时丢弃新日志，
   不反向影响请求执行；
 - 2026-07-31 测试环境有限脚本语法快照已完成 352/352 配置 decode + compile-only；完整
   生产 corpus、阶段 8 请求/生命周期/稳定性差分和切流演练尚未完成，当前二进制可用于
@@ -222,9 +222,9 @@ cp native/access-server/access-server.env.example access-server.env
   nameserver 及 timeout/attempts/rotate 完整注入每个 HTTP worker；不会隐式回退公共 DNS；
 - 多地址 upstream 默认使用单一 3 秒 deadline 的 Happy Eyeballs 连接，250 ms 后交错启动另一
   地址族，最多并发 2 个 TCP attempt；一次逻辑连接只持有一个 pool lease；
-- 客户端地址默认取 socket peer，忽略所有 forwarding header；
-- access log 默认只记录经安全编码的 path，不记录 query value；正常请求默认采样率为
-  10000 bps（全量），失败请求始终保留；
+- 客户端地址默认取 socket peer，忽略所有 forwarding header；access log 的 clientIp 列
+  例外，按 Java 语义直接取 `X-Real-IP`，缺失时回退 transport peer；
+- access log 输出 Java 兼容制表符分隔行，receivedPath 不含 query，不转义、不截断、不采样；
 - 项目列表 `ploto.unified-access.projects`，route 前缀
   `ploto.unified-access.route.`，group `ACCESS-SERVER`；
 - gray data ID `ploto.unified-access.gray-match`；
@@ -288,13 +288,20 @@ profile 隔离，跟踪于
 peer 和 listener scheme。路由 CIDR、gray、HTTPS redirect、Location/Refresh、CAT 与 access log
 共享同一次解析结果。
 
-Access log 的 query allowlist、附加敏感 key、HMAC、成功请求采样率和 path/query 字节上限
-分别由 `ACCESS_SERVER_ACCESS_LOG_*` 键配置。默认 allowlist 为空，因此 query value 不会写入
-日志。内置敏感 key 不可移除，即使被 allowlist 命中也只输出 `[REDACTED]`；可选 HMAC 使用
-实例生命周期内的随机密钥，只用于同一实例内关联，密钥不会进入配置或日志。4xx/5xx、执行
-失败、响应未完成和 IO 错误不受成功请求采样率影响。allowlist 对 form-decoded ASCII key
-执行大小写敏感的精确匹配，敏感 key 判断则不区分 ASCII 大小写；允许输出的 value 保留原始
-query 编码并再次执行日志安全编码，不做 percent decode。
+Access log 输出 Java `ploto-gateway` `AccessLog` 的逐字节兼容格式：每个 proxy attempt 一行，
+制表符分隔的 20 列（时间戳、`[INFO ploto.ACCESS_LOG] - -`、网关名、traceId、hiTraceId、
+traceparent、method、host、clientIp、receivedPath、serverIp、appName、三个 cluster、
+backendIp、forwardUri、httpCode、connectNano、responseMillis）。时间戳取 attempt 开始时刻，
+connectNano 为新建连接的建连耗时（微秒 ×1000）或复用连接的负已服务请求数，responseMillis
+在响应头到达时定格；body 或隧道阶段之后的失败不回改已提交的行。receivedPath 不含 query，
+内容不做转义、截断或采样；路由解析失败等未产生可用 upstream plan 的请求不输出行，
+Response 直出路由同样不输出（与 Java ServiceExchange 一致）。网关名固定为
+`access-server-` 拼接 `ACCESS_SERVER_NETWORK_ENTRY` 的值。
+
+日志由独立写线程异步落盘：`ACCESS_SERVER_ACCESS_LOG_DIR`（默认 `/data/logs/ploto-server`）
+必须存在且可写，目录留空则完全关闭 access log；打开失败只回退 stderr 并重试，不影响请求。
+`access.log` 超过 100 MB 轮转为 `access-YYYY-MM-DD.<N>.log`，保留 300 个归档 / 30 天，
+队列上限 20000 行，满时丢弃并计数，绝不阻塞请求 worker。
 
 ### 同步测试环境 Nacos 配置
 

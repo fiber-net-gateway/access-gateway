@@ -42,12 +42,9 @@ constexpr std::string_view kTrustedProxyCidrs = "ACCESS_SERVER_TRUSTED_PROXY_CID
 constexpr std::string_view kNetworkEntry = "ACCESS_SERVER_NETWORK_ENTRY";
 // Matches the gray-match entry byte limit the value feeds into.
 constexpr std::size_t kMaxNetworkEntryBytes = 64;
-constexpr std::string_view kAccessLogQueryAllowlist = "ACCESS_SERVER_ACCESS_LOG_QUERY_ALLOWLIST";
-constexpr std::string_view kAccessLogSensitiveQueryKeys = "ACCESS_SERVER_ACCESS_LOG_SENSITIVE_QUERY_KEYS";
-constexpr std::string_view kAccessLogQueryHashEnabled = "ACCESS_SERVER_ACCESS_LOG_QUERY_HASH_ENABLED";
-constexpr std::string_view kAccessLogSuccessSampleRate = "ACCESS_SERVER_ACCESS_LOG_SUCCESS_SAMPLE_RATE_BPS";
-constexpr std::string_view kAccessLogMaxPathBytes = "ACCESS_SERVER_ACCESS_LOG_MAX_PATH_BYTES";
-constexpr std::string_view kAccessLogMaxQueryBytes = "ACCESS_SERVER_ACCESS_LOG_MAX_QUERY_BYTES";
+// Java AsyncAccessLogWriter's log-directory default.
+constexpr std::string_view kDefaultAccessLogDirectory = "/data/logs/ploto-server";
+constexpr std::string_view kAccessLogDirectory = "ACCESS_SERVER_ACCESS_LOG_DIR";
 constexpr std::string_view kUpstreamTlsMode = "ACCESS_SERVER_UPSTREAM_TLS_MODE";
 constexpr std::string_view kUpstreamTlsCaFile = "ACCESS_SERVER_UPSTREAM_TLS_CA_FILE";
 constexpr std::string_view kUpstreamConnectTimeout = "ACCESS_SERVER_UPSTREAM_CONNECT_TIMEOUT_MILLIS";
@@ -196,17 +193,6 @@ bool parse_boolean(std::string_view input, bool &output) noexcept {
     return false;
 }
 
-bool valid_query_key(std::string_view value) noexcept {
-    if (value.empty() || value.size() > kMaxAccessLogQueryKeyBytes) {
-        return false;
-    }
-    return std::all_of(value.begin(), value.end(), [](unsigned char character) {
-        return (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') ||
-               (character >= '0' && character <= '9') || character == '-' || character == '.' || character == '_' ||
-               character == '~';
-    });
-}
-
 bool valid_instance_id(std::string_view value) noexcept {
     return !value.empty() && value.size() <= 255 &&
            std::all_of(value.begin(), value.end(), [](unsigned char character) {
@@ -220,48 +206,6 @@ bool valid_activation_token(std::string_view value) noexcept {
     return value.size() >= kMinActivationTokenBytes && value.size() <= kMaxActivationTokenBytes &&
            std::all_of(value.begin(), value.end(),
                        [](unsigned char character) { return character >= 0x21U && character <= 0x7eU; });
-}
-
-std::expected<std::vector<std::string>, AccessServerConfigError>
-parse_query_keys(std::string_view input, std::size_t line, std::string_view setting, bool case_insensitive) {
-    std::vector<std::string> output;
-    std::set<std::string, std::less<>> unique;
-    if (input.empty()) {
-        return output;
-    }
-    while (true) {
-        const std::size_t comma = input.find(',');
-        const std::string_view item = trim(comma == std::string_view::npos ? input : input.substr(0, comma));
-        if (!valid_query_key(item)) {
-            return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, line, setting,
-                                         "expected comma-separated query keys using [A-Za-z0-9_.~-]"));
-        }
-        std::string normalized(item);
-        if (case_insensitive) {
-            std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](unsigned char character) {
-                return character >= 'A' && character <= 'Z' ? static_cast<char>(character + ('a' - 'A'))
-                                                            : static_cast<char>(character);
-            });
-        }
-        if (!unique.emplace(normalized).second) {
-            return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, line, setting,
-                                         "query key list contains a duplicate"));
-        }
-        output.push_back(std::move(normalized));
-        if (output.size() > kMaxAccessLogQueryKeys) {
-            return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, line, setting,
-                                         "query key list exceeds 64 entries"));
-        }
-        if (comma == std::string_view::npos) {
-            break;
-        }
-        input.remove_prefix(comma + 1);
-        if (input.empty()) {
-            return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, line, setting,
-                                         "query key list contains an empty entry"));
-        }
-    }
-    return output;
 }
 
 std::expected<std::vector<Cidr>, AccessServerConfigError> parse_trusted_proxy_cidrs(std::string_view input,
@@ -431,7 +375,7 @@ AccessServerConfig::AccessServerConfig(
         AccessActivationEndpointOptions activation_endpoint_options, std::chrono::milliseconds initial_config_timeout,
         std::size_t default_max_request_body_size, bool test_mode,
         ClientMetadataResolverOptions client_metadata_options, std::string network_entry,
-        AccessLogOptions access_log_options, UpstreamTlsClientPolicy upstream_tls_client_policy,
+        std::string access_log_directory, UpstreamTlsClientPolicy upstream_tls_client_policy,
         std::chrono::milliseconds upstream_connect_timeout, ProxyHappyEyeballsPolicy happy_eyeballs_policy,
         AccessDnsMode dns_mode, std::string dns_resolver_config_path, dns::DnsNameserverList dns_override_nameservers,
         std::optional<cat::CatClientConfig> cat_config, nacos::NacosClientConfig nacos_config,
@@ -447,7 +391,7 @@ AccessServerConfig::AccessServerConfig(
     activation_endpoint_options_(std::move(activation_endpoint_options)),
     initial_config_timeout_(initial_config_timeout), default_max_request_body_size_(default_max_request_body_size),
     test_mode_(test_mode), client_metadata_options_(std::move(client_metadata_options)),
-    network_entry_(std::move(network_entry)), access_log_options_(std::move(access_log_options)),
+    network_entry_(std::move(network_entry)), access_log_directory_(std::move(access_log_directory)),
     upstream_tls_client_policy_(std::move(upstream_tls_client_policy)),
     upstream_connect_timeout_(upstream_connect_timeout), happy_eyeballs_policy_(happy_eyeballs_policy),
     dns_mode_(dns_mode), dns_resolver_config_path_(std::move(dns_resolver_config_path)),
@@ -496,7 +440,7 @@ AccessServerConfig::load_from_string(std::string_view input) {
     bool test_mode = false;
     ClientMetadataResolverOptions client_metadata_options;
     std::string network_entry;
-    AccessLogOptions access_log_options;
+    std::string access_log_directory{kDefaultAccessLogDirectory};
     UpstreamTlsClientPolicy upstream_tls_client_policy;
     std::uint64_t upstream_connect_timeout_millis = 3000;
     std::uint64_t happy_eyeballs_delay_millis = 250;
@@ -634,40 +578,12 @@ AccessServerConfig::load_from_string(std::string_view input) {
                                              "desktop)"));
             }
             network_entry = entry.value;
-        } else if (entry.key == kAccessLogQueryAllowlist || entry.key == kAccessLogSensitiveQueryKeys) {
-            const bool sensitive = entry.key == kAccessLogSensitiveQueryKeys;
-            auto parsed = parse_query_keys(value, entry.line, entry.key, sensitive);
-            if (!parsed) {
-                return std::unexpected(std::move(parsed.error()));
-            }
-            if (sensitive) {
-                access_log_options.additional_sensitive_query_keys = std::move(*parsed);
-            } else {
-                access_log_options.query_allowlist = std::move(*parsed);
-            }
-        } else if (entry.key == kAccessLogQueryHashEnabled) {
-            if (!parse_boolean(value, access_log_options.query_hash_enabled)) {
+        } else if (entry.key == kAccessLogDirectory) {
+            if (value.find('\0') != std::string_view::npos) {
                 return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, entry.line, entry.key,
-                                             "expected true or false"));
+                                             "expected a directory path"));
             }
-        } else if (entry.key == kAccessLogSuccessSampleRate) {
-            if (!parse_unsigned(value, access_log_options.success_sample_rate_bps) ||
-                access_log_options.success_sample_rate_bps > kAccessLogSampleScale) {
-                return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, entry.line, entry.key,
-                                             "expected basis points in range 0..10000"));
-            }
-        } else if (entry.key == kAccessLogMaxPathBytes || entry.key == kAccessLogMaxQueryBytes) {
-            std::size_t maximum = 0;
-            if (!parse_unsigned(value, maximum) || maximum < kMinAccessLogFieldBytes ||
-                maximum > kMaxAccessLogFieldBytes) {
-                return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, entry.line, entry.key,
-                                             "expected a byte limit in range 16..65536"));
-            }
-            if (entry.key == kAccessLogMaxPathBytes) {
-                access_log_options.max_path_bytes = maximum;
-            } else {
-                access_log_options.max_query_bytes = maximum;
-            }
+            access_log_directory = entry.value;
         } else if (entry.key == kUpstreamTlsMode) {
             if (value == "legacy_insecure") {
                 upstream_tls_client_policy.verification = UpstreamTlsVerificationMode::LegacyInsecure;
@@ -977,7 +893,7 @@ AccessServerConfig::load_from_string(std::string_view input) {
             tls_address, std::move(http_options), plain_listen_enabled, plain_address, std::move(plain_http_options),
             metrics_address, std::move(activation_endpoint_options), std::chrono::milliseconds(timeout_millis),
             max_request_body, test_mode, std::move(client_metadata_options), std::move(network_entry),
-            std::move(access_log_options), std::move(upstream_tls_client_policy),
+            std::move(access_log_directory), std::move(upstream_tls_client_policy),
             std::chrono::milliseconds(upstream_connect_timeout_millis), happy_eyeballs_policy, dns_mode,
             std::move(dns_resolver_config_path), std::move(dns_override_nameservers), std::move(cat_config),
             std::move(*nacos_config), std::move(watcher_options), std::move(gray_options),

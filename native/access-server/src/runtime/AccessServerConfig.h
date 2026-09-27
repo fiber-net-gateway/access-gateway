@@ -3,7 +3,6 @@
 
 #include "../execution/ClientMetadata.h"
 #include "../execution/UpstreamTlsClientPolicy.h"
-#include "../observability/AccessLogPolicy.h"
 #include "AccessActivationEndpoint.h"
 #include "AccessConfigWatcher.h"
 #include "AccessDnsService.h"
@@ -79,7 +78,9 @@ public:
         return client_metadata_options_;
     }
     [[nodiscard]] std::string_view network_entry() const noexcept { return network_entry_; }
-    [[nodiscard]] const AccessLogOptions &access_log_options() const noexcept { return access_log_options_; }
+    // Directory of the Java-compatible access log (access.log and rotated
+    // access-YYYY-MM-DD.<N>.log archives); empty disables file logging.
+    [[nodiscard]] std::string_view access_log_directory() const noexcept { return access_log_directory_; }
     [[nodiscard]] const UpstreamTlsClientPolicy &upstream_tls_client_policy() const noexcept {
         return upstream_tls_client_policy_;
     }
@@ -116,7 +117,7 @@ private:
                        AccessActivationEndpointOptions activation_endpoint_options,
                        std::chrono::milliseconds initial_config_timeout, std::size_t default_max_request_body_size,
                        bool test_mode, ClientMetadataResolverOptions client_metadata_options, std::string network_entry,
-                       AccessLogOptions access_log_options, UpstreamTlsClientPolicy upstream_tls_client_policy,
+                       std::string access_log_directory, UpstreamTlsClientPolicy upstream_tls_client_policy,
                        std::chrono::milliseconds upstream_connect_timeout,
                        ProxyHappyEyeballsPolicy happy_eyeballs_policy, AccessDnsMode dns_mode,
                        std::string dns_resolver_config_path, dns::DnsNameserverList dns_override_nameservers,
@@ -139,7 +140,7 @@ private:
     bool test_mode_ = false;
     ClientMetadataResolverOptions client_metadata_options_;
     std::string network_entry_;
-    AccessLogOptions access_log_options_;
+    std::string access_log_directory_;
     UpstreamTlsClientPolicy upstream_tls_client_policy_;
     std::chrono::milliseconds upstream_connect_timeout_{3000};
     ProxyHappyEyeballsPolicy happy_eyeballs_policy_;

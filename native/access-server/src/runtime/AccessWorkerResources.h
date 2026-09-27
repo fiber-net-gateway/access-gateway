@@ -5,7 +5,6 @@
 #include "../execution/AccessRequestHandler.h"
 #include "../execution/ClientMetadata.h"
 #include "../execution/ProxyExecutor.h"
-#include "../observability/AccessLogPolicy.h"
 #include "../observability/AccessServerMetrics.h"
 #include "AccessDnsService.h"
 #include "RouteConfigStore.h"
@@ -35,7 +34,6 @@ struct AccessWorkerResourcesOptions {
     std::size_t default_max_request_body_size = 400U << 20U;
     ClientMetadataResolverOptions client_metadata;
     std::string network_entry;
-    AccessLogOptions access_log;
     AccessDnsServiceOptions dns = AccessDnsServiceOptions::local_default();
     AccessDnsResolverFactory dns_resolver_factory = AccessDnsResolverFactory::system();
     AccessRequestScriptAdapter script_adapter;
@@ -69,7 +67,6 @@ private:
 
     event::EventLoopGroup *workers_ = nullptr;
     ClientMetadataResolver client_metadata_resolver_;
-    AccessLogPolicy access_log_policy_;
     AccessDnsService dns_;
     http::StealableHttp1ConnectionPoolSet pool_;
     AccessHttpScriptServices script_http_services_;

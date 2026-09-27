@@ -492,7 +492,7 @@ int main(int argc, char **argv) {
     auto gateway_port = gateway_port_promise.get_future();
     auto gateway_server = gateway_server_promise.get_future();
     fiber::http::HttpHandler gateway_handler = [&](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
-        fiber::access_server::AccessRequestTelemetry telemetry(exchange, nullptr, nullptr, nullptr, &metadata_resolver);
+        fiber::access_server::AccessRequestTelemetry telemetry(exchange, nullptr, nullptr, &metadata_resolver);
         co_await access_handler.handle(exchange, telemetry);
     };
     fiber::async::spawn(group.at(0), [&]() {

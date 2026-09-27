@@ -33,14 +33,13 @@ const ClientMetadataResolver &default_client_metadata_resolver() noexcept {
 } // namespace
 
 AccessRequestTelemetry::AccessRequestTelemetry(http::HttpExchange &exchange, AccessServerMetrics::Worker *metrics,
-                                               cat::CatClient *cat_client, const AccessLogPolicy *access_log_policy,
+                                               cat::CatClient *cat_client,
                                                const ClientMetadataResolver *client_metadata_resolver,
                                                bool connection_secure) noexcept :
     execution_(exchange), response_writer_(http::make_http_response_writer(exchange)),
     client_metadata_((client_metadata_resolver ? *client_metadata_resolver : default_client_metadata_resolver())
                              .resolve(exchange, connection_secure)),
-    trace_(exchange.pool()),
-    observability_(exchange, metrics, cat_client, access_log_policy, client_metadata_, trace_) {}
+    trace_(exchange.pool()), observability_(exchange, metrics, cat_client, client_metadata_, trace_) {}
 
 AccessRequestTelemetry::~AccessRequestTelemetry() noexcept {
     if (gzip_writer_ && !response_compression_recorded_) {
@@ -57,7 +56,7 @@ AccessRequestTelemetry::~AccessRequestTelemetry() noexcept {
                 break;
         }
     }
-    observability_.finish(execution_.exchange(), client_metadata_, trace_.trace_id());
+    observability_.finish(execution_.exchange());
 }
 
 common::IoResult<void> AccessRequestTelemetry::enable_response_compression(std::uint8_t level,

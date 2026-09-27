@@ -25,12 +25,11 @@
 #include <fiber/log/LoggerManager.h>
 #include <fiber/net/IpAddress.h>
 
-#include "observability/AccessLogPolicy.h"
+#include "observability/AccessLogLine.h"
 
 namespace {
 
-using fiber::access_server::AccessLogOptions;
-using fiber::access_server::AccessLogPolicy;
+using fiber::access_server::AccessLogRecord;
 using fiber::access_server::benchmark::AllocationMeasurement;
 using fiber::access_server::benchmark::Distribution;
 
@@ -46,81 +45,69 @@ struct CaseResult {
 };
 
 enum class LogCase : std::uint8_t {
-    Disabled,
-    TenPercent,
-    All,
-    Failure,
-    QueryHash,
+    Typical,
+    LongUri,
 };
 
 std::string_view log_case_name(LogCase kind) noexcept {
     switch (kind) {
-        case LogCase::Disabled:
-            return "log_disabled";
-        case LogCase::TenPercent:
-            return "log_sample_10_percent";
-        case LogCase::All:
-            return "log_all";
-        case LogCase::Failure:
-            return "log_failure_forced";
-        case LogCase::QueryHash:
-            return "log_query_hash";
+        case LogCase::Typical:
+            return "log_encode_typical";
+        case LogCase::LongUri:
+            return "log_encode_long_uri";
     }
     return "unknown";
 }
 
-AccessLogOptions log_options(LogCase kind) {
-    AccessLogOptions options;
-    if (kind == LogCase::Disabled) {
-        options.success_sample_rate_bps = 0;
-    } else if (kind == LogCase::TenPercent) {
-        options.success_sample_rate_bps = 1000;
-    }
-    if (kind == LogCase::QueryHash) {
-        options.query_hash_enabled = true;
-    } else {
-        options.query_allowlist = {"page", "token", "q"};
-    }
-    return options;
-}
-
-std::uint64_t run_log_operations(const AccessLogPolicy &policy, LogCase kind, std::uint64_t operations) {
-    const fiber::http::HttpUri uri{
-            .path = "/api/orders/benchmark",
-            .query = "page=2&token=secret-value&q=benchmark%20query&ignored=private",
-            .unparsed_uri = "/api/orders/benchmark?page=2&token=secret-value&q=benchmark%20query&ignored=private",
-    };
+std::uint64_t run_log_operations(const AccessLogRecord &record, std::uint64_t operations) {
+    // Encodes the Java-compatible line into a reused buffer the way
+    // CompatAccessLogAttempt does on the proxy path.
+    std::string line;
+    line.reserve(384);
     std::uint64_t checksum = 0;
     for (std::uint64_t operation = 0; operation < operations; ++operation) {
-        const bool failed = kind == LogCase::Failure;
-        const std::uint32_t sample = static_cast<std::uint32_t>((operation * 7919U) % 10000U);
-        if (!policy.should_log(failed, sample)) {
-            checksum += 1;
-            continue;
-        }
-        const fiber::access_server::AccessLogUri rendered = policy.render_uri(uri);
-        checksum += rendered.path().size() + rendered.query.size() + rendered.query_hash.size() + 3U;
+        line.clear();
+        fiber::access_server::encode_access_log_line(record, 480, line);
+        checksum += line.size();
     }
     return checksum;
 }
 
 CaseResult measure_log(LogCase kind, std::uint64_t operations) {
-    AccessLogPolicy policy(log_options(kind));
-    if (!policy.initialize()) {
-        return {};
-    }
+    const std::string long_uri = "/api/orders/benchmark?filter=" + std::string(2048, 'a');
+    AccessLogRecord record{};
+    record.timestamp_ms = 1760000000123;
+    record.gateway_name = "access-server-vdi";
+    record.trace_id = "3f2a1c9d0b7e4f5a";
+    record.hi_trace_id = "0";
+    record.trace_parent = "00-3f2a1c9d0b7e4f5a2c9d1e4f7a8b-1b2c3d4e5f607a8b-01";
+    record.http_method = "POST";
+    record.host = "api.haierxj.cn";
+    record.client_ip = "10.24.4.51";
+    record.received_path = "/api/orders/benchmark";
+    record.server_ip = "172.28.2.111";
+    record.app_name = "ploto-orders";
+    record.gw_cluster = "default";
+    record.ctx_cluster = "-";
+    record.ultimate_cluster = "default";
+    record.backend_ip = "10.166.204.157";
+    record.forward_uri =
+            kind == LogCase::Typical ? std::string_view("/api/orders/benchmark") : std::string_view(long_uri);
+    record.http_code = 200;
+    record.connect_nano = -7;
+    record.response_millis = 42;
     std::vector<std::uint64_t> elapsed;
     elapsed.reserve(fiber::access_server::benchmark::kDefaultSamples);
     std::uint64_t checksum = 0;
     for (std::size_t sample = 0; sample < fiber::access_server::benchmark::kDefaultSamples; ++sample) {
         const auto started = std::chrono::steady_clock::now();
-        checksum ^= run_log_operations(policy, kind, operations) + sample;
+        checksum ^= run_log_operations(record, operations) + sample;
         elapsed.push_back(static_cast<std::uint64_t>(
                 std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started)
                         .count()));
     }
     fiber::access_server::benchmark::begin_allocation_measurement();
-    checksum ^= run_log_operations(policy, kind, operations);
+    checksum ^= run_log_operations(record, operations);
     const AllocationMeasurement allocation = fiber::access_server::benchmark::finish_allocation_measurement();
     return {
             .distribution = fiber::access_server::benchmark::summarize(std::move(elapsed), operations),
@@ -333,9 +320,10 @@ int main(int argc, char **argv) {
         return 2;
     }
 
-    std::array<CaseResult, 5> log_results;
-    constexpr std::array<LogCase, 5> kLogCases{
-            LogCase::Disabled, LogCase::TenPercent, LogCase::All, LogCase::Failure, LogCase::QueryHash,
+    std::array<CaseResult, 2> log_results;
+    constexpr std::array<LogCase, 2> kLogCases{
+            LogCase::Typical,
+            LogCase::LongUri,
     };
     for (std::size_t index = 0; index < kLogCases.size(); ++index) {
         log_results[index] = measure_log(kLogCases[index], log_operations);

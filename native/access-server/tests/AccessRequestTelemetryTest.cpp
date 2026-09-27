@@ -135,8 +135,7 @@ fiber::async::DetachedTask run_component_request(fiber::event::EventLoop *loop,
         fiber::access_server::ClientMetadataResolver resolver;
         const fiber::access_server::ClientMetadata metadata = resolver.resolve(exchange, false);
         fiber::access_server::TracePropagation trace(exchange.pool());
-        fiber::access_server::RequestObservability observability(exchange, nullptr, cat_client, nullptr, metadata,
-                                                                 trace);
+        fiber::access_server::RequestObservability observability(exchange, nullptr, cat_client, metadata, trace);
 
         const auto prepared = execution.script_context().prepare_constants(*constants);
         result->constants_prepared = prepared.has_value();
@@ -180,7 +179,7 @@ fiber::async::DetachedTask run_component_request(fiber::event::EventLoop *loop,
                 .end_stream = true,
         });
         (void) sent;
-        observability.finish(exchange, metadata, trace.trace_id());
+        observability.finish(exchange);
     };
     fiber::http::Http1Connection connection(std::move(transport), handler, {});
     co_await connection.run();

@@ -372,9 +372,10 @@ adapter 编译为同步程序，请求热路径只执行已编译程序。通用
 降级读取低优先级 header。地址链 invalid 时使用 socket peer；仅 scheme 链 invalid 时保留已经验证
 的 client address，但 scheme 回退 listener。两种情况仍执行 CIDR/gray，不再 fail-open。
 
-同一 `ClientMetadata` 被 HTTPS、Route CIDR、gray、代理 Location/Refresh、CAT 和 access log 使用。
-日志与 CAT 记录规范化 `clientIp`、`peerIp`、scheme、address/scheme source 和 forwarding status，
-不记录非法原始 header 值。
+同一 `ClientMetadata` 被 HTTPS、Route CIDR、gray、代理 Location/Refresh 和 CAT 使用。
+CAT 记录规范化 `clientIp`、`peerIp`、scheme、address/scheme source 和 forwarding status，
+不记录非法原始 header 值。Java 兼容 access log 的 clientIp 列不走该解析：按 Java 语义直接
+取 `X-Real-IP` header，缺失时回退 transport peer。
 
 ### 8.1 CIDR allows
 
@@ -683,7 +684,7 @@ listener。订阅暂态失败采用封顶指数退避，非法首值被记录为
 - 原始错误之后若错误响应本身写入失败，独立记录 `ResponseError`，不覆盖也不重复原始
   `CALL_ERROR`/`FiberException`；
 - project、route、context cluster、稳定 `Exception.name` 和最终
-  response completion 同时进入 CAT 与 `access_server.access`；实际 upstream 只进 access log，
+  response completion 进入 CAT 根事务 data；实际 upstream 只进 access log，
   CAT 根事务 data 不再记录 `upstream`，改为记录客户端连接协议 `protocol=h1/h2/h3`；每次
   `Access.Provider` attempt 的 data 记录 `upstream`、`attempt`、连接复用与发往 upstream 的
   `uri=path?query`；请求/响应 body 传输记录 `req_body_bytes`/`req_body_us` 与
@@ -695,19 +696,24 @@ listener。订阅暂态失败采用封顶指数退避，非法首值被记录为
   data 记录 `downstream=h1_upgrade|extended_connect`、`result=closed|aborted` 与
   `duration_us`。tunnel 正常结束时由 executor 记 `closed`；proxy coroutine 被销毁等
   中断场景在请求收尾补记 `aborted`，event 必然先于根事务完成；
-- access log 的 `path` 只消费解析后的 path，不再记录包含原始 query 的 `unparsed_uri`；
-  query allowlist 默认为空，内置及附加敏感 key 即使命中 allowlist 也固定替换为
-  `[REDACTED]`。allowlist 对 form-decoded ASCII key 大小写敏感匹配，敏感判断不区分 ASCII
-  大小写；value 不做 percent decode。path/query 经有界 ASCII 安全编码，截断、过滤和脱敏
-  均有独立标记；
-- 可选 query correlation 使用实例随机密钥的 HMAC-SHA256；成功的 2xx/3xx 请求可按 bps
-  无锁采样，4xx/5xx、执行失败、未完成响应和 IO 错误始终保留。采样只影响 access log，
-  不改变 CAT、Prometheus 或 HTTP 结果；
+- access log 逐字节复刻 Java `ploto-gateway` `AccessLog` 行格式：每个 proxy attempt 一行，
+  20 个制表符分隔列（时间戳、`[INFO ploto.ACCESS_LOG] - -`、网关名、traceId、hiTraceId、
+  traceparent、method、host、clientIp、receivedPath、serverIp、appName、gw/ctx/ultimate 三个
+  cluster、backendIp、forwardUri、httpCode、connectNano、responseMillis）。时间戳取 attempt
+  开始；响应头到达即定格 httpCode 与 responseMillis，之后的 body/tunnel 失败不回改该行；
+  未收到响应头的失败以 `001` 提交。connectNano 为新连接建连耗时（µs×1000，用户决策的
+  纳秒等价）或复用连接的负已服务请求数；traceId 取入站 `X-B3-TraceId`，缺失时生成 16 位
+  小写 hex 且不改写入站请求头；appName 为 `access-server-` 拼接 entry 值；receivedPath 不含
+  query，内容不转义、不截断、不采样。路由解析未产生可用 upstream plan 的请求与 RESPONSE
+  直出路由不输出行（与 Java ServiceExchange 一致）。写入由独立线程异步完成，输出到
+  `ACCESS_SERVER_ACCESS_LOG_DIR` 下的 `access.log`，100 MB 轮转为
+  `access-YYYY-MM-DD.<N>.log`，保留 300 个归档 / 30 天，队列满时丢弃计数、不阻塞请求；
 - Prometheus 在独立 listener 输出固定 `result` 标签的请求总数、inflight 和 duration；
   gzip-enabled RESPONSE 另输出 `access_server_response_compression_total`，其有界 `result`
   仅为 `gzip`、`identity` 或 `not_acceptable`。配置更新、readiness 和 route snapshot 规模/age
   也只输出预注册的 `resource`、`result`、`reason`、`state` 聚合；完整 schema 见
-  [`bounded-metrics.md`](bounded-metrics.md)。结构化 access log 和 CAT data 同时记录选择结果。
+  [`bounded-metrics.md`](bounded-metrics.md)。access log 的 gw/ctx/ultimate 三个 cluster 列与
+  CAT data 同时记录选择结果。
   project/route/cluster/Host/Data ID 属于动态控制面或请求输入，不建立无限增长的 label series；
 - CAT、指标或日志记录失败均为 best effort，不得改写 Java 兼容 HTTP 结果。
 

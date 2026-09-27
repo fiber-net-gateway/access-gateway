@@ -1,4 +1,6 @@
 #include "ProxyExecutor.h"
+#include "../observability/AccessLogLine.h"
+#include "../observability/AccessLogWriter.h"
 #include "../observability/AccessRequestTelemetry.h"
 
 #include <fiber/async/TaskSelect.h>
@@ -17,6 +19,8 @@
 #include "ProxyRequestPlan.h"
 #include "ProxyResponsePlan.h"
 
+#include <openssl/rand.h>
+
 #include <algorithm>
 #include <array>
 #include <charconv>
@@ -30,6 +34,8 @@ namespace fiber::access_server {
 namespace {
 
 constexpr std::string_view kTraceCluster = "HI-TRACE-CLUSTER";
+constexpr std::string_view kB3TraceIdHeader = "X-B3-TraceId";
+constexpr std::string_view kRealIpHeader = "X-Real-IP";
 constexpr std::size_t kMaxJavaAttempts = 4;
 
 enum class ProxyFailurePhase : std::uint8_t {
@@ -380,6 +386,182 @@ std::chrono::milliseconds response_header_timeout(std::int32_t timeout_millis) n
     return std::chrono::milliseconds(timeout_millis);
 }
 
+// Java access-log request state: fields fixed across the proxy attempts of one
+// request (ServiceExchange.proxy0 re-reads them per attempt; they cannot change
+// mid-request).
+struct CompatAccessLogRequest {
+    std::string_view trace_id;
+    std::string_view hi_trace_id;
+    std::string_view trace_parent;
+    std::string_view client_ip;
+    std::string_view gw_cluster;
+    std::string_view ctx_cluster;
+    std::string_view ultimate_cluster;
+    // Storage for values generated when the inbound headers are absent; the
+    // Java gateway generates and installs these the same way.
+    std::array<char, 16> generated_trace_id{};
+    std::string generated_client_ip;
+};
+
+// Mirrors resolve_request_host's test-mode host rule: a host of the shape
+// "<prefix>_<cluster>." carried its cluster in the Host header.
+bool host_encoded_cluster(std::string_view origin_host) noexcept {
+    const std::size_t underscore = origin_host.find('_');
+    if (underscore == std::string_view::npos || underscore == 0) {
+        return false;
+    }
+    const std::size_t dot = origin_host.find('.', underscore);
+    return dot != std::string_view::npos && dot > underscore;
+}
+
+void generate_b3_trace_id(std::array<char, 16> &output) noexcept {
+    constexpr char kHex[] = "0123456789abcdef";
+    std::array<unsigned char, 8> random{};
+    if (RAND_bytes(random.data(), static_cast<int>(random.size())) != 1) {
+        output.fill('0');
+        return;
+    }
+    for (std::size_t index = 0; index < random.size(); ++index) {
+        output[index * 2] = kHex[random[index] >> 4U];
+        output[index * 2 + 1] = kHex[random[index] & 0x0FU];
+    }
+}
+
+void init_compat_access_log_request(CompatAccessLogRequest &state, http::HttpExchange &exchange,
+                                    AccessRequestTelemetry &telemetry, const ProxyExecutionInput &input,
+                                    const CompiledProxyRoute &proxy, bool gray_matched,
+                                    const std::optional<std::string_view> &cluster_override) {
+    state.trace_id = exchange.header(kB3TraceIdHeader);
+    if (state.trace_id.empty()) {
+        generate_b3_trace_id(state.generated_trace_id);
+        state.trace_id = std::string_view(state.generated_trace_id.data(), state.generated_trace_id.size());
+    }
+    state.hi_trace_id = exchange.header("HI-SPAN-ID");
+    state.trace_parent = telemetry.trace_parent();
+    state.client_ip = exchange.header(kRealIpHeader);
+    if (state.client_ip.empty()) {
+        state.generated_client_ip = telemetry.client_metadata().peer_address.to_string();
+        state.client_ip = state.generated_client_ip;
+    }
+
+    const bool host_encoded = host_encoded_cluster(input.origin_host);
+    const std::optional<std::string_view> configured = proxy.address_selector->configured_cluster();
+    const std::string_view default_cluster =
+            configured.has_value() && !configured->empty() ? *configured : std::string_view("default");
+    // Java decider semantics: gwCluster is the cluster before request-driven
+    // overrides, ctxCluster the request-specified cluster (gray tag or trace
+    // header), ultimateCluster the cluster finally used for selection.
+    state.gw_cluster =
+            host_encoded && !input.initial_context_cluster.empty() ? input.initial_context_cluster : default_cluster;
+    if (!host_encoded && !input.initial_context_cluster.empty()) {
+        state.ctx_cluster = input.initial_context_cluster;
+    } else if (gray_matched) {
+        state.ctx_cluster = "gray";
+    }
+    state.ultimate_cluster = cluster_override.has_value() ? *cluster_override : default_cluster;
+}
+
+// One Java access-log line per proxy attempt, mirroring the Java
+// allocLog/commit lifecycle: the timestamp is the attempt start, the status is
+// the upstream response head (or 1 — rendered "001" — on any earlier failure or
+// abort), and emission happens when the attempt scope ends, including coroutine
+// cancellation. Attempts that never reach a usable request plan produce no
+// line, matching ServiceExchange.
+class CompatAccessLogAttempt final : public common::NonCopyable, public common::NonMovable {
+public:
+    CompatAccessLogAttempt(const CompatAccessLogRequest &request, http::HttpExchange &exchange) noexcept :
+        request_(request), exchange_(exchange),
+        timestamp_ms_(std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::system_clock::now().time_since_epoch())
+                              .count()) {}
+
+    // Called once the attempt has a concrete upstream (equivalent of Java's
+    // proxy0 populating forwardUri/backendIp right before sendForResp).
+    void arm(std::string_view app_name, std::string_view backend_ip, std::string_view forward_uri) noexcept {
+        if (access_log_writer() == nullptr) {
+            return;
+        }
+        app_name_ = app_name;
+        backend_ip_ = backend_ip;
+        forward_uri_ = forward_uri;
+        armed_ = true;
+    }
+
+    // Java ConnRecorder: negative served count for a reused connection,
+    // otherwise connect latency (microsecond grid times 1000).
+    void set_connect_nano(std::int64_t value) noexcept { connect_nano_ = value; }
+
+    [[nodiscard]] std::int64_t elapsed_nano() const noexcept {
+        return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - started_)
+                       .count() *
+               1000;
+    }
+
+    // Equivalent of the Java sendForResp Single completing at response-head
+    // arrival: fixes status and duration; later body or tunnel failures do not
+    // change the committed line.
+    void mark_response(int status) noexcept {
+        response_status_ = status;
+        response_millis_ = elapsed_millis();
+    }
+
+    ~CompatAccessLogAttempt() {
+        if (!armed_) {
+            return;
+        }
+        AccessLogWriter *writer = access_log_writer();
+        if (writer == nullptr) {
+            return;
+        }
+        try {
+            AccessLogRecord record{};
+            record.timestamp_ms = timestamp_ms_;
+            record.gateway_name = writer->gateway_name();
+            record.trace_id = request_.trace_id;
+            record.hi_trace_id = request_.hi_trace_id;
+            record.trace_parent = request_.trace_parent;
+            record.http_method = exchange_.method_view();
+            record.host = exchange_.header("Host");
+            record.client_ip = request_.client_ip;
+            record.received_path = exchange_.uri().path;
+            record.server_ip = writer->server_ip();
+            record.app_name = app_name_;
+            record.gw_cluster = request_.gw_cluster;
+            record.ctx_cluster = request_.ctx_cluster;
+            record.ultimate_cluster = request_.ultimate_cluster;
+            record.backend_ip = backend_ip_;
+            record.forward_uri = forward_uri_;
+            record.http_code = response_status_ > 0 ? response_status_ : 1;
+            record.connect_nano = connect_nano_;
+            record.response_millis = response_status_ > 0 ? response_millis_ : elapsed_millis();
+            std::string line;
+            line.reserve(384);
+            encode_access_log_line(record, writer->utc_offset_minutes(), line);
+            writer->submit(std::move(line));
+        } catch (...) {
+            // Logging must never fail a request.
+        }
+    }
+
+private:
+    [[nodiscard]] std::int64_t elapsed_millis() const noexcept {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started_)
+                .count();
+    }
+
+    const CompatAccessLogRequest &request_;
+    http::HttpExchange &exchange_;
+    std::string_view app_name_;
+    std::string_view backend_ip_;
+    std::string_view forward_uri_;
+    std::int64_t timestamp_ms_;
+    std::chrono::steady_clock::time_point started_ = std::chrono::steady_clock::now();
+    std::int64_t connect_nano_ = 0;
+    std::int64_t response_millis_ = 0;
+    int response_status_ = 0;
+    bool armed_ = false;
+};
+
 ExceptionResult response_body_too_large(mem::BufPool &pool, std::size_t size) noexcept {
     std::array<char, std::numeric_limits<std::size_t>::digits10 + 1> buffer{};
     const auto formatted = std::to_chars(buffer.data(), buffer.data() + buffer.size(), size);
@@ -575,10 +757,11 @@ public:
                     AccessRequestTelemetry &telemetry, ProxyRequestPlan &request_plan, ProxyUpstreamEndpoint &endpoint,
                     ProxyUpstreamConnection &connection, ProxyAddressSelector &selector,
                     const ProxyExecutorOptions &options, AccessProviderTransaction &provider,
-                    ProxyAttemptMetricScope &attempt_metrics, WebSocketMetricScope &websocket_metrics) noexcept :
+                    ProxyAttemptMetricScope &attempt_metrics, WebSocketMetricScope &websocket_metrics,
+                    CompatAccessLogAttempt &access_log) noexcept :
         exchange_(exchange), proxy_(proxy), input_(input), telemetry_(telemetry), request_plan_(request_plan),
         endpoint_(endpoint), connection_(connection), selector_(selector), options_(options), provider_(provider),
-        attempt_metrics_(attempt_metrics), websocket_metrics_(websocket_metrics) {}
+        attempt_metrics_(attempt_metrics), websocket_metrics_(websocket_metrics), access_log_(access_log) {}
 
     [[nodiscard]] async::Task<Result<void>> run() noexcept;
 
@@ -603,6 +786,7 @@ private:
     AccessProviderTransaction &provider_;
     ProxyAttemptMetricScope &attempt_metrics_;
     WebSocketMetricScope &websocket_metrics_;
+    CompatAccessLogAttempt &access_log_;
     bool selection_reported_ = false;
 };
 
@@ -725,6 +909,10 @@ async::Task<Result<void>> UpstreamAttempt::run() noexcept {
             break;
         }
     }
+
+    // Java commits the access-log line when sendForResp's Single completes at
+    // response-head arrival; later body or tunnel failures leave it unchanged.
+    access_log_.mark_response(upstream_head->status_code);
 
     if (upstream_head->status_code >= 500) {
         report_selection(false);
@@ -1026,8 +1214,10 @@ async::Task<Result<void>> ProxyExecutor::execute_impl(http::HttpExchange &exchan
     if (*context_cluster) {
         cluster_override = **context_cluster;
     }
-    if (cluster_matcher_.matches &&
-        cluster_matcher_.matches(cluster_matcher_.context, exchange.header("X-Entry"), telemetry.client_metadata())) {
+    const bool gray_matched =
+            cluster_matcher_.matches != nullptr &&
+            cluster_matcher_.matches(cluster_matcher_.context, exchange.header("X-Entry"), telemetry.client_metadata());
+    if (gray_matched) {
         cluster_override = std::string_view("gray");
         auto stored = telemetry.put_trace_context(kTraceCluster, "gray");
         if (!stored) {
@@ -1035,6 +1225,10 @@ async::Task<Result<void>> ProxyExecutor::execute_impl(http::HttpExchange &exchan
             co_return std::unexpected(Err::from_error(stored.error()));
         }
     }
+
+    CompatAccessLogRequest access_log_request;
+    init_compat_access_log_request(access_log_request, exchange, telemetry, input, proxy, gray_matched,
+                                   cluster_override);
 
     ProxyRequestPlan request_plan(exchange.pool(), exchange, proxy);
     WebSocketMetricScope websocket_metrics(telemetry, request_plan.websocket_upgrade());
@@ -1047,6 +1241,11 @@ async::Task<Result<void>> ProxyExecutor::execute_impl(http::HttpExchange &exchan
             effective_upstream_tls_client_policy(options_.upstream_tls, tls_profile);
 
     for (std::size_t attempt = 0; attempt < kMaxJavaAttempts; ++attempt) {
+        // Java allocates the AccessLog line before loadBalance: one line per
+        // proxy attempt, timestamped at the attempt start. Attempts that fail
+        // before a usable plan exists leave it unarmed (no line); connect and
+        // later failures commit status 1 ("001").
+        CompatAccessLogAttempt access_log(access_log_request, exchange);
         auto selected = proxy.address_selector->select_address(
                 cluster_override,
                 std::span<const std::uint64_t>(excluded_selection_tokens.data(), excluded_selection_token_count));
@@ -1084,6 +1283,7 @@ async::Task<Result<void>> ProxyExecutor::execute_impl(http::HttpExchange &exchan
 
         const std::string_view provider_name =
                 selected->provider_name.empty() ? selected->host_header : selected->provider_name;
+        access_log.arm(provider_name, connection_key.host(), request_plan.request_head().target);
         AccessProviderTransaction provider_transaction = telemetry.start_provider_transaction(provider_name);
         provider_transaction.add_upstream(selected->host_header, attempt + 1);
         provider_transaction.add_uri(request_plan.request_head().target);
@@ -1102,9 +1302,14 @@ async::Task<Result<void>> ProxyExecutor::execute_impl(http::HttpExchange &exchan
             continue;
         }
         telemetry.record_proxy_connection(connected->observation);
+        // Java ConnRecorder: a reused connection reports the negated count of
+        // requests it has served; a fresh one reports connect latency.
+        const std::uint64_t served_requests = connected->connection->request_count();
+        access_log.set_connect_nano(served_requests > 0 ? -static_cast<std::int64_t>(served_requests)
+                                                        : access_log.elapsed_nano());
         UpstreamAttempt upstream_attempt(exchange, proxy, input, telemetry, request_plan, *selected, *connected,
                                          *proxy.address_selector, options_, provider_transaction, attempt_metrics,
-                                         websocket_metrics);
+                                         websocket_metrics, access_log);
         co_return co_await upstream_attempt.run();
     }
 

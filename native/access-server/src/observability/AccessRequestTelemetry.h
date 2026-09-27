@@ -35,7 +35,6 @@ struct Exception;
 struct CompiledRoute;
 struct ProxyUpstreamEndpoint;
 struct ProxyConnectionObservation;
-class AccessLogPolicy;
 class ClientMetadataResolver;
 
 // Stable request-lifetime façade. By-value components keep request ownership in
@@ -43,8 +42,7 @@ class ClientMetadataResolver;
 class AccessRequestTelemetry final : public common::NonCopyable, public common::NonMovable {
 public:
     AccessRequestTelemetry(http::HttpExchange &exchange, AccessServerMetrics::Worker *metrics,
-                           cat::CatClient *cat_client, const AccessLogPolicy *access_log_policy = nullptr,
-                           const ClientMetadataResolver *client_metadata_resolver = nullptr,
+                           cat::CatClient *cat_client, const ClientMetadataResolver *client_metadata_resolver = nullptr,
                            bool connection_secure = false) noexcept;
     ~AccessRequestTelemetry() noexcept;
 
@@ -96,9 +94,7 @@ public:
     void start_websocket_session(std::string_view name, bool extended_connect) noexcept {
         observability_.start_websocket_session(name, extended_connect);
     }
-    void finish_websocket_session(bool closed) noexcept {
-        observability_.finish_websocket_session(closed);
-    }
+    void finish_websocket_session(bool closed) noexcept { observability_.finish_websocket_session(closed); }
 
     [[nodiscard]] std::string_view trace_id() const noexcept { return trace_.trace_id(); }
     [[nodiscard]] std::string_view trace_parent() const noexcept { return trace_.trace_parent(); }
