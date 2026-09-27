@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -201,56 +202,29 @@ public:
         co_return fiber::common::IoResult<void>{};
     }
 
-    fiber::async::Task<fiber::common::IoResult<std::size_t>> read(void *, std::size_t,
-                                                                  std::chrono::milliseconds) override {
-        if (hold_open_after_input_) {
-            co_await fiber::async::sleep(10s);
-        }
-        co_return static_cast<std::size_t>(0);
-    }
-
-    fiber::async::Task<fiber::common::IoResult<std::size_t>> read_into(fiber::mem::IoBuf &buffer,
-                                                                       std::chrono::milliseconds) override {
-        if (input_consumed_) {
+    fiber::async::Task<fiber::common::IoResult<std::size_t>> readv(std::size_t size, fiber::mem::IoBufChain &out,
+                                                                   std::chrono::milliseconds) override {
+        if (input_offset_ == input_.size()) {
             if (hold_open_after_input_) {
                 co_await fiber::async::sleep(10s);
             }
             co_return static_cast<std::size_t>(0);
         }
-        if (buffer.writable() < input_.size()) {
-            co_return std::unexpected(fiber::common::IoErr::MessageTooLarge);
+        const std::size_t count = std::min(size, input_.size() - input_offset_);
+        if (count == 0) {
+            co_return static_cast<std::size_t>(0);
         }
-        std::memcpy(buffer.writable_data(), input_.data(), input_.size());
-        buffer.commit(input_.size());
-        input_consumed_ = true;
-        co_return input_.size();
-    }
-
-    fiber::async::Task<fiber::common::IoResult<std::size_t>> readv_into(fiber::mem::IoBufChain &,
-                                                                        std::chrono::milliseconds) override {
-        co_return std::unexpected(fiber::common::IoErr::NotSupported);
-    }
-
-    fiber::async::Task<fiber::common::IoResult<std::size_t>> write(const void *buffer, std::size_t size,
-                                                                   std::chrono::milliseconds) override {
-        if (fail_writes_) {
-            co_return std::unexpected(fiber::common::IoErr::ConnReset);
+        auto buffer = fiber::mem::IoBuf::allocate(count);
+        if (!buffer) {
+            co_return std::unexpected(fiber::common::IoErr::NoMem);
         }
-        output_.append(static_cast<const char *>(buffer), size);
-        observe_output();
-        co_return size;
-    }
-
-    fiber::async::Task<fiber::common::IoResult<std::size_t>> write(fiber::mem::IoBuf &buffer,
-                                                                   std::chrono::milliseconds) override {
-        if (fail_writes_) {
-            co_return std::unexpected(fiber::common::IoErr::ConnReset);
+        std::memcpy(buffer.writable_data(), input_.data() + input_offset_, count);
+        buffer.commit(count);
+        if (!out.append(std::move(buffer))) {
+            co_return std::unexpected(fiber::common::IoErr::NoMem);
         }
-        const std::size_t size = buffer.readable();
-        output_.append(reinterpret_cast<const char *>(buffer.readable_data()), size);
-        buffer.consume(size);
-        observe_output();
-        co_return size;
+        input_offset_ += count;
+        co_return count;
     }
 
     fiber::async::Task<fiber::common::IoResult<std::size_t>> writev(fiber::mem::IoBufChain &buffers,
@@ -297,7 +271,7 @@ private:
     std::string input_;
     std::string &output_;
     fiber::net::SocketAddress remote_addr_{};
-    bool input_consumed_ = false;
+    std::size_t input_offset_ = 0;
     bool closed_ = false;
     bool hold_open_after_input_ = false;
     bool fail_writes_ = false;
@@ -431,7 +405,7 @@ fiber::async::Task<fiber::common::IoResult<std::string>> read_body(Exchange &exc
 
 fiber::async::DetachedTask collect_access_metrics(fiber::access_server::AccessServerMetrics *metrics,
                                                   std::promise<fiber::common::IoResult<std::string>> *done) {
-    auto collected = co_await metrics->collect(fiber::event::EventLoop::current().io_buf_node_pool());
+    auto collected = co_await metrics->collect();
     fiber::common::IoErr error = fiber::common::IoErr::None;
     std::string output;
     if (collected) {

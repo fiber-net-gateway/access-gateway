@@ -159,7 +159,7 @@ public:
         Identity *identity = nullptr;
     };
 
-    [[nodiscard]] const net::TlsCredential *select(std::string_view server_name) noexcept {
+    [[nodiscard]] std::shared_ptr<const net::TlsCredential> select(std::string_view server_name) noexcept {
         Identity *identity = nullptr;
         if (!server_name.empty()) {
             identity = find(exact_names, server_name);
@@ -173,7 +173,7 @@ public:
         if (!identity) {
             identity = default_identity;
         }
-        return &identity->client->credential();
+        return {identity->client, &identity->client->credential()};
     }
 
     static Identity *find(const std::vector<NameEntry> &entries, std::string_view name) noexcept {
@@ -473,13 +473,14 @@ TlsCertificateStore::find_client_identity(void *context, std::string_view id) no
 std::size_t TlsCertificateStore::certificate_count() const noexcept { return active_ ? active_->identities.size() : 0; }
 
 common::IoErr TlsCertificateStore::configure_handshake(void *context, net::TlsServerHandshakeConfig &config,
-                                                       const net::TlsClientHelloView &client_hello) noexcept {
+                                                       const tls::TlsClientHelloView &client_hello) noexcept {
     auto &store = *static_cast<TlsCertificateStore *>(context);
-    const net::TlsCredential *selected = store.select_credential(client_hello.server_name);
-    return selected ? config.add_credential(*selected) : common::IoErr::Invalid;
+    auto selected = store.select_credential(client_hello.server_name);
+    return selected ? config.add_credential(std::move(selected)) : common::IoErr::Invalid;
 }
 
-const net::TlsCredential *TlsCertificateStore::select_credential(std::string_view server_name) noexcept {
+std::shared_ptr<const net::TlsCredential>
+TlsCertificateStore::select_credential(std::string_view server_name) noexcept {
     event::EventLoop *loop = event::EventLoop::current_or_null();
     if (!loop || !loop->has_group_index() || loop->group() != workers_) {
         return nullptr;
@@ -493,7 +494,7 @@ const net::TlsCredential *TlsCertificateStore::select_credential(std::string_vie
         }
         slot.hazard.store(snapshot, std::memory_order_seq_cst);
     } while (snapshot != current_.load(std::memory_order_seq_cst));
-    const net::TlsCredential *selected = snapshot->select(server_name);
+    auto selected = snapshot->select(server_name);
     loop->post_local<WorkerSlot, &WorkerSlot::clear_entry, &clear_hazard>(slot);
     return selected;
 }

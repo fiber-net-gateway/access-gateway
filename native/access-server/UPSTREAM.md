@@ -10,16 +10,18 @@ HTTP, JSON/script, Nacos, CAT, and Prometheus modules are consumed from the pinn
 historical application import revision.
 
 The current reusable Fiber dependency is pinned at
-`054b36878671ea77ec84ec2fd1fc790cb9b09623`. The pinned revision carries no repository-owned
-compatibility patches: the four defects that previously required patches under `native/patches/`
-are fixed inside this reviewed range (see `native/patches/README.md` for the retired-patch map).
+`270035b7707b8d3825e31eca2d1c67d1da1ef640` (upstream `master`, fetched 2026-09-27). The pinned
+revision carries no repository-owned compatibility patches: the TLS dynamic-credential lifetime
+defect ([upstream issue #41](https://github.com/fiber-net-gateway/fiber-gateway-cpp/issues/41)),
+briefly patched against `f832d5458d3bfca1cefa45a4c7a6cb1cd0662f23`, is fixed upstream in `90ed153`
+(see `native/patches/README.md` for the retired-patch map).
 The repository-owned regression
 `ProxyExecutorTest.StreamsChunkedUpstreamWhoseFramingArrivesSeparatelyFromPayload` still guards
 the HTTP/1 chunked split-framing fix from the application side.
 The reviewed update range from the previous pin is
-`0c56be5fc9e9e106a45b219e49739fedfbaf31b1..054b36878671ea77ec84ec2fd1fc790cb9b09623`.
+`054b36878671ea77ec84ec2fd1fc790cb9b09623..270035b7707b8d3825e31eca2d1c67d1da1ef640`.
 The complete reviewed range from the original import pin is
-`0fda7764bf94944aca4b674ab5ab311184703118..054b36878671ea77ec84ec2fd1fc790cb9b09623`.
+`0fda7764bf94944aca4b674ab5ab311184703118..270035b7707b8d3825e31eca2d1c67d1da1ef640`.
 It removes the obsolete upstream `apps/access-server`, adds Nacos hostname and bounded service
 status APIs, system resolver/multi-nameserver support, client TLS identities and HTTP/1 pool
 affinity, a cancellable Happy Eyeballs connector, and a reusable public HTTP gzip response writer
@@ -161,6 +163,37 @@ batch; a Fiber-internal breaking change — access-server does not use the Polle
 application source was synchronized back from
 upstream as part of this dependency update; the historical import revision above remains
 unchanged.
+
+The 2026-09-27 delta replaces BoringSSL's TLS protocol engines with Fiber's in-tree TLS 1.2/1.3
+record, handshake, certificate, and ticket engines, including QUIC integration; BoringSSL remains
+the crypto provider. It adds P-384 ECDHE, AEAD record bounds checks, per-message handshake limits,
+a ten-certificate chain cap, alert interoperability fixes, and TLS fuzz/interop harnesses.
+`TlsClientHelloView` moves to `fiber::tls`. Server session tickets now require an explicit
+`TlsTicketService`; access-server does not configure one, so downstream connections use full
+handshakes without ticket resumption. Existing TLS version and verification policy remain selected
+by the product configuration; interoperability must be checked independently of unit tests.
+
+`IoBufChain` resolves its node cache through the current EventLoop instead of storing a pool
+pointer. Metrics collection and body piping no longer accept a node pool. All product chain use
+and destruction remain on the owning request/collection loop. `HttpTransport` now exposes
+append-only `readv` and consuming `writev`; transport test doubles were migrated with bounded
+partial reads. `Task::operator co_await` becomes rvalue-only, EventLoopGroup storage is private,
+DNS cache upserts take caller time, HTTP/3 attach/header send share a deadline, and route-pattern
+errors become returned values. Access-server now checks the matcher insertion result, preserving
+its existing invalid-path rejection before snapshot publication.
+
+Dynamic server certificate selection now returns an aliasing shared pointer to the immutable
+identity and supplies it to the owning `add_credential` overload that upstream added for issue #41
+(`90ed153`); upstream holds that owner in net-layer handshake staging rather than the copied engine
+config. The worker hazard still
+protects snapshot lookup; the handshake config independently pins just the selected identity after
+snapshot reclamation. This adds reference-count operations per handshake, no extra control-block
+allocation, PEM parsing, or per-request overhead. Config destruction releases the owner on success,
+failure, and cancellation; QUIC releases it at the handshake done-transition. Regression coverage also
+stalls a handshake while rotation reclaims the old snapshot, then verifies release after peer close.
+The CMake integration supplies Fiber's test support directory to its embedded Nacos and Prometheus
+tests. Production script-corpus differential verification and final cutover gates remain unfinished;
+this dependency upgrade does not claim production compatibility.
 
 The import preserves upstream source, tests, fixtures, documentation, scripts, and the example
 environment file. Repository-integration changes replace upstream-relative test-support includes,

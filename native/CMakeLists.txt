@@ -77,6 +77,15 @@ endif()
 add_subdirectory("${ACCESS_GATEWAY_FIBER_SOURCE_DIR}"
     "${CMAKE_BINARY_DIR}/fiber-gateway-cpp")
 
+# These upstream tests assume Fiber is the top-level project. Supply their
+# test-only support headers explicitly when Fiber is embedded here.
+foreach(ACCESS_GATEWAY_FIBER_TEST_TARGET fiber_nacos_tests fiber_prometheus_tests)
+    if (TARGET ${ACCESS_GATEWAY_FIBER_TEST_TARGET})
+        target_include_directories(${ACCESS_GATEWAY_FIBER_TEST_TARGET} PRIVATE
+            "${ACCESS_GATEWAY_FIBER_SOURCE_DIR}/tests")
+    endif()
+endforeach()
+
 # Fiber carries the zlib 1.3.2 deflate core in-tree (compiled into fiber_lib and the optional
 # fiber_http_compression target); no external or downloaded zlib is part of the build anymore.
 

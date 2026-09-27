@@ -1,7 +1,7 @@
 # Native compatibility patches
 
 Temporary, narrowly scoped patches applied on top of the pinned
-`third_party/fiber-gateway-cpp` submodule revision (`7da6926ee410fcd6ccdd9b50c44c5638cbc61eb8`,
+`third_party/fiber-gateway-cpp` submodule revision (`270035b7707b8d3825e31eca2d1c67d1da1ef640`,
 see `native/access-server/UPSTREAM.md`). Each patch exists because the pinned
 revision contains a defect that blocks this product, the fix belongs upstream,
 and waiting for a pin update is not acceptable.
@@ -21,6 +21,16 @@ the rest, and update the revision check in `apply.sh`.
 None. The pinned revision carries no compatibility patches.
 
 ## Retired patches
+
+`0001-tls-retain-dynamic-credentials.patch` was carried briefly against
+`f832d5458d3bfca1cefa45a4c7a6cb1cd0662f23` and dropped once upstream fixed
+[issue #41](https://github.com/fiber-net-gateway/fiber-gateway-cpp/issues/41) in
+`90ed153` `fix(tls): retain dynamic server credentials through the handshake` (merged as
+`270035b`). Upstream provides the same owning
+`TlsServerHandshakeConfig::add_credential(std::shared_ptr<const TlsCredential>)` overload but keeps
+the owner in net-layer handshake staging (`TlsStreamFd`, `QuicTlsSession`) instead of
+`tls::TlsServerConfig`, releasing it when the handshake ends. The product call site is unchanged;
+`TlsCertificateStoreTest.RetainsSelectedIdentityUntilSuspendedHandshakeEnds` still guards it.
 
 Four patches formerly carried here landed upstream in the reviewed range
 `dfa5676c0a4e186767372ea5d2e1dd5573ba925a..e9a804053b14c206ed4a4fcd3b89e9a6789387a2`

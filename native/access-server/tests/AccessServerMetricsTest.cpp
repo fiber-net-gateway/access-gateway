@@ -42,7 +42,7 @@ fiber::async::DetachedTask record_and_collect(fiber::access_server::AccessServer
     worker.websocket_session_started();
     worker.websocket_session_finished(AccessWebSocketSessionResult::Aborted);
 
-    auto collected = co_await metrics->collect(fiber::event::EventLoop::current().io_buf_node_pool());
+    auto collected = co_await metrics->collect();
     fiber::common::IoErr error = fiber::common::IoErr::None;
     std::string output;
     if (!collected) {
@@ -92,10 +92,8 @@ TEST(AccessServerMetricsTest, AggregatesOnlyFixedProxyAndWebSocketDimensions) {
     EXPECT_NE(collected->find("access_server_proxy_connect_attempts_total{result=\"create_failure\"} 2"),
               std::string::npos);
     EXPECT_NE(collected->find("access_server_proxy_connect_candidates_total 5"), std::string::npos);
-    EXPECT_NE(collected->find("access_server_proxy_happy_eyeballs_total{result=\"success\"} 1"),
-              std::string::npos);
-    EXPECT_NE(collected->find("access_server_proxy_happy_eyeballs_total{result=\"failure\"} 2"),
-              std::string::npos);
+    EXPECT_NE(collected->find("access_server_proxy_happy_eyeballs_total{result=\"success\"} 1"), std::string::npos);
+    EXPECT_NE(collected->find("access_server_proxy_happy_eyeballs_total{result=\"failure\"} 2"), std::string::npos);
     EXPECT_NE(collected->find("access_server_websocket_handshakes_total{result=\"rejected\"} 1"), std::string::npos);
     EXPECT_NE(collected->find("access_server_websocket_handshakes_total{result=\"failed\"} 1"), std::string::npos);
     EXPECT_NE(collected->find("access_server_websocket_sessions_total{result=\"aborted\"} 1"), std::string::npos);

@@ -170,7 +170,7 @@ public:
     [[nodiscard]] bool valid() const noexcept { return valid_; }
     [[nodiscard]] Worker &worker(std::size_t index) noexcept;
 
-    [[nodiscard]] async::Task<common::IoResult<mem::IoBufChain>> collect(mem::IoBufNodePool &node_pool) noexcept;
+    [[nodiscard]] async::Task<common::IoResult<mem::IoBufChain>> collect() noexcept;
 
     void stop_collecting() noexcept;
     [[nodiscard]] async::Task<void> wait_for_idle() noexcept;

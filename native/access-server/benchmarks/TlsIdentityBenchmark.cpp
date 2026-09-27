@@ -192,8 +192,8 @@ fiber::async::DetachedTask run_benchmark(TlsCertificateStore *store, const TlsCe
             std::uint64_t checksum = 0;
             const auto started = std::chrono::steady_clock::now();
             for (std::uint64_t operation = 0; operation < selection_operations; ++operation) {
-                const fiber::net::TlsCredential *selected = store->select_credential(kServerNames[case_index]);
-                checksum += reinterpret_cast<std::uintptr_t>(selected) != 0 ? 1U : 0U;
+                auto selected = store->select_credential(kServerNames[case_index]);
+                checksum += reinterpret_cast<std::uintptr_t>(selected.get()) != 0 ? 1U : 0U;
             }
             elapsed.push_back(static_cast<std::uint64_t>(
                     std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started)
@@ -209,7 +209,7 @@ fiber::async::DetachedTask run_benchmark(TlsCertificateStore *store, const TlsCe
     rotation_elapsed.reserve(prepared->size());
     for (auto &candidate: *prepared) {
         const auto started = std::chrono::steady_clock::now();
-        const fiber::net::TlsCredential *selected = store->select_credential("api.example.com");
+        auto selected = store->select_credential("api.example.com");
         auto committed = store->commit(std::move(candidate));
         if (selected == nullptr || !committed || *committed != TlsCertificateUpdateStatus::Published) {
             co_await store->shutdown();

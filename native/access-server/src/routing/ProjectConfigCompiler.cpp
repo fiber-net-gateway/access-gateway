@@ -1125,7 +1125,10 @@ ProjectSnapshotResult ProjectConfigCompiler::compile(std::string_view project, c
     RouteDefiner definer(snapshot.routes_, pending, limits_->project_route.max_path_variables);
     util::RoutePathMatcher<std::uint32_t>::Builder<std::uint32_t, RouteDefiner> path_builder(definer);
     for (std::uint32_t i = 0; i < snapshot.routes_.size(); ++i) {
-        path_builder.add_route(snapshot.routes_[i].path, i);
+        auto added = path_builder.add_route(snapshot.routes_[i].path, i);
+        if (!added) {
+            return std::unexpected(route_error(AccessConfigErrorCode::InvalidField, i, "path", added.error().message));
+        }
     }
     snapshot.path_matcher_ = path_builder.build();
     if (definer.error()) {

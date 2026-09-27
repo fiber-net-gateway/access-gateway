@@ -38,6 +38,7 @@
 #include <fiber/nacos/Subscription.h>
 #include <fiber/net/TlsCredential.h>
 #include <fiber/net/TlsServerHandshakeConfig.h>
+#include <fiber/tls/handshake/TlsClientHandshakeEngine.h>
 
 #include "NacosSnapshotTestBuilder.h"
 #include "NacosSubscriptionStub.h"
@@ -242,15 +243,17 @@ struct RotateDuringTlsSelect {
     std::array<std::uintptr_t, 2> selected_credentials{};
     std::size_t calls = 0;
     bool commit_succeeded = false;
+    std::weak_ptr<const net::TlsCredential> selected_owner;
 };
 
 common::IoErr rotate_during_tls_select(void *context, net::TlsServerHandshakeConfig &config,
-                                       const net::TlsClientHelloView &input) noexcept {
+                                       const tls::TlsClientHelloView &input) noexcept {
     auto &state = *static_cast<RotateDuringTlsSelect *>(context);
-    const net::TlsCredential *selected = state.store->select_credential(input.server_name);
-    common::IoErr result = selected ? config.add_credential(*selected) : common::IoErr::Invalid;
+    auto selected = state.store->select_credential(input.server_name);
+    state.selected_owner = selected;
+    common::IoErr result = selected ? config.add_credential(selected) : common::IoErr::Invalid;
     if (state.calls < state.selected_credentials.size()) {
-        state.selected_credentials[state.calls] = reinterpret_cast<std::uintptr_t>(selected);
+        state.selected_credentials[state.calls] = reinterpret_cast<std::uintptr_t>(selected.get());
     }
     ++state.calls;
     if (state.prepared) {
@@ -308,6 +311,68 @@ async::Task<TlsHandshakePairResult> run_tls_handshake_pair(event::EventLoop &loo
     co_await server_handshake.join();
     (*client_transport)->close();
     (*server_transport)->close();
+    co_return result;
+}
+
+// Send only ClientHello: the server must keep its selected credential while
+// blocked waiting for the client's next flight, even after snapshot reclamation.
+async::Task<TlsHandshakePairResult> run_suspended_tls_handshake(event::EventLoop &loop,
+                                                                const net::TlsServerParam &server_options,
+                                                                RotateDuringTlsSelect &rotation,
+                                                                const TlsReclaimRecorder &recorder) {
+    TlsHandshakePairResult result;
+    int sockets[2] = {-1, -1};
+    if (::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, sockets) != 0) {
+        co_return result;
+    }
+    const net::SocketAddress peer(net::IpAddress::loopback_v4(), 443);
+    net::AcceptResult server_accept(sockets[0], peer);
+    net::AcceptResult client_accept(sockets[1], peer);
+    auto server = http::TlsTransport::create(loop, std::move(server_accept));
+    auto client = http::TcpTransport::create(loop, std::move(client_accept));
+    if (!server || !client) {
+        co_return result;
+    }
+    tls::TlsClientConfig config;
+    config.sni_host = "api.example.com";
+    config.verify_peer = false;
+    tls::TlsClientHandshakeEngine engine(config, nullptr);
+    EXPECT_FALSE(engine.failed());
+    auto output = engine.take_output();
+    EXPECT_GT(output.readable_bytes(), 0U);
+    async::WaitGroup pending;
+    bool finished = false;
+    pending.add();
+    async::spawn(loop, [&]() -> async::DetachedTask {
+        auto handshake = co_await (*server)->handshake(server_options, std::chrono::seconds(2));
+        result.server = handshake ? common::IoErr::None : handshake.error();
+        finished = true;
+        pending.done();
+    });
+    while (output.readable_bytes() > 0) {
+        auto written = co_await (*client)->writev(output, std::chrono::seconds(2));
+        EXPECT_TRUE(written);
+        if (!written || *written == 0) {
+            break;
+        }
+    }
+    while (rotation.calls == 0 && !finished) {
+        co_await async::yield();
+    }
+    // Hazard clearing and snapshot reclamation use separate queue turns.
+    co_await async::yield();
+    co_await async::yield();
+    EXPECT_FALSE(finished);
+    EXPECT_GE(recorder.observation_count, 2U);
+    if (recorder.observation_count >= 2U) {
+        EXPECT_EQ(recorder.observations[1].reclaimed_snapshots, 1U);
+    }
+    EXPECT_FALSE(rotation.selected_owner.expired());
+    (*client)->close();
+    result.client = common::IoErr::Canceled;
+    co_await pending.join();
+    EXPECT_TRUE(rotation.selected_owner.expired());
+    (*server)->close();
     co_return result;
 }
 
@@ -469,7 +534,7 @@ TEST(TlsCertificateStoreTest, PostsReaperOnlyForSnapshotsStillHeldByHazards) {
                   std::string::npos);
         EXPECT_NE(idle_output.find("access_server_tls_certificate_retired_snapshots 0"), std::string::npos);
 
-        const net::TlsCredential *selected = store.select_credential("api.example.com");
+        auto selected = store.select_credential("api.example.com");
         EXPECT_NE(selected, nullptr);
         config.version = 2;
         auto rotated = store.apply(config, "wire-v2");
@@ -541,7 +606,7 @@ TEST(TlsCertificateStoreTest, PostsReaperOnlyForSnapshotsStillHeldByHazards) {
         if (published) {
             EXPECT_EQ(*published, TlsCertificateUpdateStatus::Published);
         }
-        const net::TlsCredential *selected = store.select_credential("api.example.com");
+        auto selected = store.select_credential("api.example.com");
         EXPECT_NE(selected, nullptr);
         after_idle_clear.schedule();
         co_return;
@@ -553,7 +618,7 @@ TEST(TlsCertificateStoreTest, PostsReaperOnlyForSnapshotsStillHeldByHazards) {
     EXPECT_EQ(status, std::future_status::ready);
 }
 
-TEST(TlsCertificateStoreTest, KeepsSelectedIdentityAliveWhenRotationInterleavesWithHandshake) {
+void check_rotation_during_handshake(bool suspend_client) {
     using namespace std::chrono_literals;
 
     auto [certificate_pem, private_key_pem] = make_test_identity();
@@ -606,9 +671,16 @@ TEST(TlsCertificateStoreTest, KeepsSelectedIdentityAliveWhenRotationInterleavesW
 
             if (server_options.enabled()) {
                 const TlsHandshakePairResult first =
-                        co_await run_tls_handshake_pair(loop, server_options, client_options);
-                EXPECT_EQ(first.server, common::IoErr::None);
-                EXPECT_EQ(first.client, common::IoErr::None);
+                        suspend_client ? co_await run_suspended_tls_handshake(loop, server_options, rotation, recorder)
+                                       : co_await run_tls_handshake_pair(loop, server_options, client_options);
+                if (suspend_client) {
+                    EXPECT_NE(first.server, common::IoErr::None);
+                    EXPECT_EQ(first.client, common::IoErr::Canceled);
+                } else {
+                    EXPECT_EQ(first.server, common::IoErr::None);
+                    EXPECT_EQ(first.client, common::IoErr::None);
+                }
+                EXPECT_TRUE(rotation.selected_owner.expired());
                 EXPECT_TRUE(rotation.commit_succeeded);
                 EXPECT_EQ(store.version(), 2U);
 
@@ -657,6 +729,14 @@ TEST(TlsCertificateStoreTest, KeepsSelectedIdentityAliveWhenRotationInterleavesW
     workers.stop();
     workers.join();
     EXPECT_EQ(status, std::future_status::ready);
+}
+
+TEST(TlsCertificateStoreTest, KeepsSelectedIdentityAliveWhenRotationInterleavesWithHandshake) {
+    check_rotation_during_handshake(false);
+}
+
+TEST(TlsCertificateStoreTest, RetainsSelectedIdentityUntilSuspendedHandshakeEnds) {
+    check_rotation_during_handshake(true);
 }
 
 TEST(TlsCertificateWatcherTest, CompilesInlineAndPublishesLatestSnapshot) {

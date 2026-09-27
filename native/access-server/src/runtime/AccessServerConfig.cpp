@@ -14,7 +14,7 @@ namespace fiber::access_server {
 namespace {
 
 common::IoErr pending_tls_configuration(void *, net::TlsServerHandshakeConfig &,
-                                        const net::TlsClientHelloView &) noexcept {
+                                        const tls::TlsClientHelloView &) noexcept {
     return common::IoErr::Invalid;
 }
 

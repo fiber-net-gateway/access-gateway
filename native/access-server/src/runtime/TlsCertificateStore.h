@@ -96,7 +96,8 @@ public:
     [[nodiscard]] async::Task<void> shutdown() noexcept;
 
     [[nodiscard]] net::TlsServerParam tls_server_param() noexcept;
-    [[nodiscard]] const net::TlsCredential *select_credential(std::string_view server_name) noexcept;
+    // Pins the selected identity through a suspended handshake, independently of snapshot reclamation.
+    [[nodiscard]] std::shared_ptr<const net::TlsCredential> select_credential(std::string_view server_name) noexcept;
     [[nodiscard]] UpstreamTlsClientIdentityResolver client_identity_resolver() noexcept;
     [[nodiscard]] std::shared_ptr<TlsBootstrapIdentity> bootstrap_identity() const noexcept { return bootstrap_; }
     [[nodiscard]] std::uint64_t version() const noexcept { return version_; }
@@ -119,7 +120,7 @@ private:
     };
 
     [[nodiscard]] static common::IoErr configure_handshake(void *context, net::TlsServerHandshakeConfig &config,
-                                                           const net::TlsClientHelloView &client_hello) noexcept;
+                                                           const tls::TlsClientHelloView &client_hello) noexcept;
     [[nodiscard]] static std::shared_ptr<const UpstreamTlsClientIdentity>
     find_client_identity(void *context, std::string_view id) noexcept;
     static void clear_hazard(WorkerSlot *slot) noexcept;
