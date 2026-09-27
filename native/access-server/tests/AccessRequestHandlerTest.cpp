@@ -81,42 +81,26 @@ public:
         co_return fiber::common::IoResult<void>{};
     }
 
-    fiber::async::Task<fiber::common::IoResult<std::size_t>> read(void *, std::size_t,
-                                                                  std::chrono::milliseconds) override {
-        co_return static_cast<std::size_t>(0);
-    }
-
-    fiber::async::Task<fiber::common::IoResult<std::size_t>> read_into(fiber::mem::IoBuf &buffer,
-                                                                       std::chrono::milliseconds) override {
-        if (input_consumed_) {
+    fiber::async::Task<fiber::common::IoResult<std::size_t>> readv(std::size_t size, fiber::mem::IoBufChain &out,
+                                                                   std::chrono::milliseconds) override {
+        if (input_offset_ == input_.size()) {
             co_return static_cast<std::size_t>(0);
         }
-        if (buffer.writable() < input_.size()) {
-            co_return std::unexpected(fiber::common::IoErr::MessageTooLarge);
+        const std::size_t count = std::min(size, input_.size() - input_offset_);
+        if (count == 0) {
+            co_return static_cast<std::size_t>(0);
         }
-        std::memcpy(buffer.writable_data(), input_.data(), input_.size());
-        buffer.commit(input_.size());
-        input_consumed_ = true;
-        co_return input_.size();
-    }
-
-    fiber::async::Task<fiber::common::IoResult<std::size_t>> readv_into(fiber::mem::IoBufChain &,
-                                                                        std::chrono::milliseconds) override {
-        co_return std::unexpected(fiber::common::IoErr::NotSupported);
-    }
-
-    fiber::async::Task<fiber::common::IoResult<std::size_t>> write(const void *buffer, std::size_t size,
-                                                                   std::chrono::milliseconds) override {
-        output_.append(static_cast<const char *>(buffer), size);
-        co_return size;
-    }
-
-    fiber::async::Task<fiber::common::IoResult<std::size_t>> write(fiber::mem::IoBuf &buffer,
-                                                                   std::chrono::milliseconds) override {
-        const std::size_t size = buffer.readable();
-        output_.append(reinterpret_cast<const char *>(buffer.readable_data()), size);
-        buffer.consume(size);
-        co_return size;
+        auto buffer = fiber::mem::IoBuf::allocate(count);
+        if (!buffer) {
+            co_return std::unexpected(fiber::common::IoErr::NoMem);
+        }
+        std::memcpy(buffer.writable_data(), input_.data() + input_offset_, count);
+        buffer.commit(count);
+        if (!out.append(std::move(buffer))) {
+            co_return std::unexpected(fiber::common::IoErr::NoMem);
+        }
+        input_offset_ += count;
+        co_return count;
     }
 
     fiber::async::Task<fiber::common::IoResult<std::size_t>> writev(fiber::mem::IoBufChain &buffers,
@@ -145,7 +129,7 @@ private:
     std::string input_;
     std::string &output_;
     fiber::net::SocketAddress remote_addr_{};
-    bool input_consumed_ = false;
+    std::size_t input_offset_ = 0;
     bool closed_ = false;
 };
 

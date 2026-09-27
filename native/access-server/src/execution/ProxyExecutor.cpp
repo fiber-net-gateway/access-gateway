@@ -917,9 +917,9 @@ async::Task<Result<void>> UpstreamAttempt::run() noexcept {
             .read_timeout = std::chrono::milliseconds::max(),
             .write_timeout = options_.downstream_write_timeout,
     };
-    auto piped = co_await http::pipe_http_body(http::make_http_body_pipe_reader(body_reader),
-                                               http::make_http_body_pipe_writer(telemetry_.response_writer()),
-                                               event::EventLoop::current().io_buf_node_pool(), pipe_options);
+    auto piped =
+            co_await http::pipe_http_body(http::make_http_body_pipe_reader(body_reader),
+                                          http::make_http_body_pipe_writer(telemetry_.response_writer()), pipe_options);
     // Flush before the terminal provider calls below; data added after the
     // transaction completes is dropped.
     response_body_stats.record();

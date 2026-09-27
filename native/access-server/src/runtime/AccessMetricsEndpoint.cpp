@@ -80,7 +80,7 @@ async::Task<void> AccessMetricsEndpoint::handle(http::HttpExchange &exchange) no
         co_await activation_endpoint_.handle(exchange);
         co_return;
     }
-    auto collected = co_await metrics_->collect(event::EventLoop::current().io_buf_node_pool());
+    auto collected = co_await metrics_->collect();
     if (!collected) {
         constexpr std::string_view kBusy = "metrics unavailable\n";
         http::HttpHeaders headers(exchange.pool());

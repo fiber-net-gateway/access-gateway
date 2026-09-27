@@ -527,8 +527,6 @@ int main(int argc, char **argv) {
     const bool shutdown_completed = shutdown_done.wait_for(10s) == std::future_status::ready;
     group.stop();
     group.join();
-    delete gateway;
-    delete upstream;
 
     if (!http.success || !websocket.success || !shutdown_completed ||
         upstream_state.websocket_sessions.load(std::memory_order_relaxed) != websocket_sessions) {

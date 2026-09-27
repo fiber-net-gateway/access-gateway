@@ -256,11 +256,9 @@ bool AccessServerMetrics::initialize(event::EventLoopGroup &worker_group) {
             registry_.register_counter("access_server_proxy_connect_attempts_total",
                                        "New upstream transport connection attempt outcomes.", kResultLabel);
     auto proxy_connect_candidates = registry_.register_counter(
-            "access_server_proxy_connect_candidates_total",
-            "Address candidates supplied to new upstream connections.");
-    auto happy_eyeballs = registry_.register_counter(
-            "access_server_proxy_happy_eyeballs_total", "Multi-address upstream connection race outcomes.",
-            kResultLabel);
+            "access_server_proxy_connect_candidates_total", "Address candidates supplied to new upstream connections.");
+    auto happy_eyeballs = registry_.register_counter("access_server_proxy_happy_eyeballs_total",
+                                                     "Multi-address upstream connection race outcomes.", kResultLabel);
     auto websocket_handshakes = registry_.register_counter("access_server_websocket_handshakes_total",
                                                            "WebSocket proxy handshake outcomes.", kResultLabel);
     auto websocket_sessions = registry_.register_counter("access_server_websocket_sessions_total",
@@ -348,8 +346,7 @@ bool AccessServerMetrics::initialize(event::EventLoopGroup &worker_group) {
         auto proxy_attempts_inflight_value = shard->gauge(*proxy_attempts_inflight_series);
         auto proxy_connect_candidates_value = shard->counter(*proxy_connect_candidates_series);
         auto websocket_sessions_inflight_value = shard->gauge(*websocket_sessions_inflight_series);
-        if (!duration_value || !inflight_value || !proxy_attempts_inflight_value ||
-            !proxy_connect_candidates_value ||
+        if (!duration_value || !inflight_value || !proxy_attempts_inflight_value || !proxy_connect_candidates_value ||
             !websocket_sessions_inflight_value) {
             return false;
         }
@@ -368,8 +365,8 @@ AccessServerMetrics::Worker &AccessServerMetrics::worker(std::size_t index) noex
     return workers_[index];
 }
 
-async::Task<common::IoResult<mem::IoBufChain>> AccessServerMetrics::collect(mem::IoBufNodePool &node_pool) noexcept {
-    auto collected = co_await registry_.collect_text(node_pool);
+async::Task<common::IoResult<mem::IoBufChain>> AccessServerMetrics::collect() noexcept {
+    auto collected = co_await registry_.collect_text();
     if (!collected || !runtime_metrics_) {
         co_return collected;
     }
