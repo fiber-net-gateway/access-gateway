@@ -159,9 +159,12 @@ void AccessLogWriter::write_loop() {
                 if (buffer_.empty()) {
                     wakeup_.wait(lock, [this]() { return !queue_.empty() || closing_; });
                 } else {
+                    // Wall-clock deadline: libc++'s steady-clock wait_until
+                    // targets pthread_cond_clockwait (glibc 2.30), which the
+                    // CentOS 7 deployment target does not provide.
                     const auto deadline = last_write_ + options_.flush_interval;
                     wakeup_.wait_until(lock, deadline, [this, &deadline]() {
-                        return !queue_.empty() || closing_ || std::chrono::steady_clock::now() >= deadline;
+                        return !queue_.empty() || closing_ || std::chrono::system_clock::now() >= deadline;
                     });
                 }
             }
@@ -190,7 +193,7 @@ void AccessLogWriter::write_loop() {
             break;
         }
         if (!buffer_.empty()) {
-            const auto now = std::chrono::steady_clock::now();
+            const auto now = std::chrono::system_clock::now();
             if (now - last_write_ >= options_.flush_interval) {
                 flush_buffer();
             }
@@ -230,7 +233,7 @@ void AccessLogWriter::flush_buffer() noexcept {
     if (buffer_.empty()) {
         return;
     }
-    last_write_ = std::chrono::steady_clock::now();
+    last_write_ = std::chrono::system_clock::now();
     if (file_descriptor_ < 0 && !open_log_file()) {
         buffer_.clear();
         return;

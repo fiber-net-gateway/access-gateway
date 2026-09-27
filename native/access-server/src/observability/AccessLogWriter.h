@@ -85,7 +85,9 @@ private:
     std::uint64_t current_file_size_ = 0;
     int archive_index_ = 0;
     int last_rotation_day_ = -1;
-    std::chrono::steady_clock::time_point last_write_{};
+    // Wall clock so the timed wait stays on pthread_cond_timedwait (glibc 2.17
+    // compatible); a wall-clock step can only shift a flush deadline.
+    std::chrono::system_clock::time_point last_write_{};
 
     std::atomic_uint64_t dropped_lines_{0};
     std::atomic_uint64_t written_lines_{0};
