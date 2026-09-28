@@ -914,9 +914,9 @@ async::Task<Result<void>> UpstreamAttempt::run() noexcept {
     // response-head arrival; later body or tunnel failures leave it unchanged.
     access_log_.mark_response(upstream_head->status_code);
 
-    if (upstream_head->status_code >= 500) {
-        report_selection(false);
-    }
+    // A received response head proves the upstream is serving. Business-level
+    // 5xx does not charge the circuit breaker (deliberate divergence from the
+    // Java gateway, which counted response status >= 500 as attempt failures).
     const bool websocket_response = request_plan_.websocket_upgrade() && upstream_head->status_code == 101;
     if (request_plan_.websocket_upgrade() && !websocket_response) {
         websocket_metrics_.rejected();
