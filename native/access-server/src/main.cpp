@@ -1,4 +1,4 @@
-#include "observability/AccessLogWriter.h"
+#include "observability/AccessLogChannel.h"
 #include "observability/AccessServerLogCategories.h"
 #include "runtime/AccessServerConfig.h"
 #include "runtime/AccessServerRuntime.h"
@@ -15,8 +15,10 @@
 #include <utility>
 
 #include <cerrno>
+#include <fcntl.h>
 #include <pthread.h>
 #include <sys/socket.h>
+#include <unistd.h>
 
 #include <fiber/async/Signal.h>
 #include <fiber/async/Spawn.h>
@@ -77,9 +79,23 @@ void print_runtime_error(const fiber::access_server::AccessServerRuntimeError &e
 struct AccessLoggingConfig {
     fiber::log::LogConfig config;
     fiber::log::AppenderId primary_appender = fiber::log::kInvalidAppenderId;
+    fiber::log::AppenderId access_appender = fiber::log::kInvalidAppenderId;
 };
 
-fiber::log::LogConfigResult<AccessLoggingConfig> make_log_config() {
+// A FileAppender open failure aborts LoggerManager::initialize (fatal), but the
+// gateway must tolerate an unusable access-log directory: probe the path with
+// the appender's own open flags first and simply disable the access log.
+bool access_log_path_writable(const std::string &path) {
+    const int descriptor = ::open(path.c_str(), O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0644);
+    if (descriptor < 0) {
+        std::cerr << "access log disabled; cannot open " << path << ": errno=" << errno << '\n';
+        return false;
+    }
+    (void) ::close(descriptor);
+    return true;
+}
+
+fiber::log::LogConfigResult<AccessLoggingConfig> make_log_config(std::string_view access_log_directory) {
     fiber::log::LogConfigBuilder builder;
     auto console = builder.add_console_appender({
             .name = "access_server_stderr",
@@ -103,6 +119,48 @@ fiber::log::LogConfigResult<AccessLoggingConfig> make_log_config() {
     if (!root) {
         return std::unexpected(std::move(root.error()));
     }
+    fiber::log::AppenderId access_appender = fiber::log::kInvalidAppenderId;
+    if (!access_log_directory.empty()) {
+        std::string path{access_log_directory};
+        if (!path.ends_with('/')) {
+            path.push_back('/');
+        }
+        path.append("access.log");
+        if (access_log_path_writable(path)) {
+            // Access lines are pre-encoded TSV records: MessageOnly layout
+            // plus a raw (non-escaping) submission keeps the file bytes
+            // identical to the Java format. The dedicated non-additive logger
+            // keeps the traffic ledger out of the console and independent of
+            // diagnostic level changes.
+            auto file = builder.add_file_appender({
+                    .name = "access_server_access_log",
+                    .path = std::move(path),
+                    .buffer_size = 63 << 10,
+                    .flush_interval = std::chrono::milliseconds(1000),
+                    .rotation =
+                            fiber::log::FileRotationOptions{
+                                    .max_file_size = 100ULL << 20,
+                                    .archive_name = "{base}.{utc}.{seq}",
+                                    .max_archives = 300,
+                            },
+                    .layout = fiber::log::FileAppenderLayout::MessageOnly,
+            });
+            if (!file) {
+                return std::unexpected(std::move(file.error()));
+            }
+            auto access_logger = builder.add_logger(
+                    {
+                            .name = "access_server.access",
+                            .level = fiber::log::LogLevel::Info,
+                            .additive = false,
+                    },
+                    {*file});
+            if (!access_logger) {
+                return std::unexpected(std::move(access_logger.error()));
+            }
+            access_appender = *file;
+        }
+    }
     auto config = builder.finish();
     if (!config) {
         return std::unexpected(std::move(config.error()));
@@ -110,6 +168,7 @@ fiber::log::LogConfigResult<AccessLoggingConfig> make_log_config() {
     return AccessLoggingConfig{
             .config = std::move(*config),
             .primary_appender = *console,
+            .access_appender = access_appender,
     };
 }
 
@@ -138,14 +197,6 @@ int main(int argc, char **argv) {
     }
     fiber::access_server::AccessServerConfig config = std::move(*loaded);
 
-    // Java-compatible access log: one dedicated writer thread with the
-    // AsyncAccessLogWriter semantics, named after this gateway's entry. An
-    // empty directory disables file logging; the executor then skips emission.
-    if (!config.access_log_directory().empty()) {
-        fiber::access_server::initialize_access_log_writer(std::string(config.access_log_directory()),
-                                                           "access-server-" + std::string(config.network_entry()));
-    }
-
     (void) ::signal(SIGPIPE, SIG_IGN);
     fiber::async::SignalSet shutdown_signals;
     shutdown_signals.add(SIGINT).add(SIGTERM);
@@ -154,18 +205,25 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    auto log_config = make_log_config();
+    auto log_config = make_log_config(config.access_log_directory());
     if (!log_config) {
         std::cerr << "failed to build access-server logging configuration: " << log_config.error().message << '\n';
         return 1;
     }
     const fiber::log::AppenderId primary_log_appender = log_config->primary_appender;
+    const fiber::log::AppenderId access_log_appender = log_config->access_appender;
     auto logging_started = fiber::log::LoggerManager::global().initialize(std::move(log_config->config));
     if (!logging_started) {
         std::cerr << "failed to initialize access-server logging: " << logging_started.error().message << '\n';
         return 1;
     }
     LoggingShutdownGuard logging_guard;
+    // Java-compatible access log rides the shared LogWorker pipeline, named
+    // after this gateway's entry. An empty directory (or an unwritable one)
+    // leaves the channel uninstalled; the executor then skips emission.
+    if (access_log_appender != fiber::log::kInvalidAppenderId) {
+        fiber::access_server::install_access_log_channel("access-server-" + std::string(config.network_entry()));
+    }
 
     const fiber::util::CpuConcurrency cpu = fiber::util::detect_cpu_concurrency();
     fiber::event::EventLoop accept_loop;
@@ -175,6 +233,7 @@ int main(int argc, char **argv) {
     const fiber::access_server::AccessProcessMetricsSources process_metrics{
             .logger = &fiber::log::LoggerManager::global(),
             .log_appender = primary_log_appender,
+            .access_log_appender = access_log_appender,
     };
     auto created = fiber::access_server::AccessServerRuntime::create(accept_loop, nacos_group.at(0), cat_group.at(0),
                                                                      http_workers, config, fiber::net::ListenOptions{},
@@ -318,8 +377,8 @@ int main(int argc, char **argv) {
     http_workers.join();
     nacos_group.join();
     cat_group.join();
-    // Drains and joins the access-log writer after every request worker has
-    // stopped submitting lines.
-    fiber::access_server::shutdown_access_log_writer();
+    // Drops the access-log channel after every request worker has stopped
+    // submitting lines; the LoggingShutdownGuard drain flushes the tail.
+    fiber::access_server::uninstall_access_log_channel();
     return exit_code;
 }

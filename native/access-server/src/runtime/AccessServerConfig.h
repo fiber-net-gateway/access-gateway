@@ -79,7 +79,7 @@ public:
     }
     [[nodiscard]] std::string_view network_entry() const noexcept { return network_entry_; }
     // Directory of the Java-compatible access log (access.log and rotated
-    // access-YYYY-MM-DD.<N>.log archives); empty disables file logging.
+    // access.log.<utc-stamp>.<sequence> archives); empty disables file logging.
     [[nodiscard]] std::string_view access_log_directory() const noexcept { return access_log_directory_; }
     [[nodiscard]] const UpstreamTlsClientPolicy &upstream_tls_client_policy() const noexcept {
         return upstream_tls_client_policy_;

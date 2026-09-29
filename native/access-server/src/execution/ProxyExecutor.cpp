@@ -1,6 +1,6 @@
 #include "ProxyExecutor.h"
+#include "../observability/AccessLogChannel.h"
 #include "../observability/AccessLogLine.h"
-#include "../observability/AccessLogWriter.h"
 #include "../observability/AccessRequestTelemetry.h"
 
 #include <fiber/async/TaskSelect.h>
@@ -478,7 +478,7 @@ public:
     // Called once the attempt has a concrete upstream (equivalent of Java's
     // proxy0 populating forwardUri/backendIp right before sendForResp).
     void arm(std::string_view app_name, std::string_view backend_ip, std::string_view forward_uri) noexcept {
-        if (access_log_writer() == nullptr) {
+        if (access_log_channel() == nullptr) {
             return;
         }
         app_name_ = app_name;
@@ -509,14 +509,14 @@ public:
         if (!armed_) {
             return;
         }
-        AccessLogWriter *writer = access_log_writer();
-        if (writer == nullptr) {
+        AccessLogChannel *channel = access_log_channel();
+        if (channel == nullptr) {
             return;
         }
         try {
             AccessLogRecord record{};
             record.timestamp_ms = timestamp_ms_;
-            record.gateway_name = writer->gateway_name();
+            record.gateway_name = channel->gateway_name();
             record.trace_id = request_.trace_id;
             record.hi_trace_id = request_.hi_trace_id;
             record.trace_parent = request_.trace_parent;
@@ -524,7 +524,7 @@ public:
             record.host = exchange_.header("Host");
             record.client_ip = request_.client_ip;
             record.received_path = exchange_.uri().path;
-            record.server_ip = writer->server_ip();
+            record.server_ip = channel->server_ip();
             record.app_name = app_name_;
             record.gw_cluster = request_.gw_cluster;
             record.ctx_cluster = request_.ctx_cluster;
@@ -536,8 +536,8 @@ public:
             record.response_millis = response_status_ > 0 ? response_millis_ : elapsed_millis();
             std::string line;
             line.reserve(384);
-            encode_access_log_line(record, writer->utc_offset_minutes(), line);
-            writer->submit(std::move(line));
+            encode_access_log_line(record, channel->utc_offset_minutes(), line);
+            channel->submit(std::move(line));
         } catch (...) {
             // Logging must never fail a request.
         }

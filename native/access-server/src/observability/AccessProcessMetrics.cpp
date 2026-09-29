@@ -320,6 +320,10 @@ AccessProcessMetricsSnapshot AccessProcessMetrics::snapshot() const noexcept {
         value.log_queue = sources_.logger->queue_stats();
         value.log_appender = sources_.logger->appender_stats(sources_.log_appender);
     }
+    if (sources_.logger && sources_.access_log_appender != log::kInvalidAppenderId && sources_.logger->running()) {
+        value.access_log_available = true;
+        value.access_log_appender = sources_.logger->appender_stats(sources_.access_log_appender);
+    }
     if (sources_.cat_client) {
         value.cat_enabled = true;
         value.cat_state = sources_.cat_client->state();
@@ -384,6 +388,39 @@ void append_access_process_metrics(std::string &output, const AccessProcessMetri
     output.append("# HELP access_server_log_appender_active_file_bytes Current primary appender file size.\n");
     output.append("# TYPE access_server_log_appender_active_file_bytes gauge\n");
     append_series(output, "access_server_log_appender_active_file_bytes", {}, snapshot.log_appender.active_file_bytes);
+
+    output.append("# HELP access_server_access_log_available Whether the access-log appender is configured and "
+                  "available.\n");
+    output.append("# TYPE access_server_access_log_available gauge\n");
+    append_series(output, "access_server_access_log_available", {}, snapshot.access_log_available ? 1U : 0U);
+    output.append("# HELP access_server_access_log_appender_records_total Access-log appender record outcomes.\n");
+    output.append("# TYPE access_server_access_log_appender_records_total counter\n");
+    append_labeled_values(
+            output, "access_server_access_log_appender_records_total", kLogAppenderResultLabels,
+            std::array<std::uint64_t, kLogAppenderResultLabels.size()>{snapshot.access_log_appender.written_records,
+                                                                       snapshot.access_log_appender.dropped_records});
+    output.append("# HELP access_server_access_log_appender_written_bytes_total Bytes written by the access-log "
+                  "appender.\n");
+    output.append("# TYPE access_server_access_log_appender_written_bytes_total counter\n");
+    append_series(output, "access_server_access_log_appender_written_bytes_total", {},
+                  snapshot.access_log_appender.written_bytes);
+    output.append("# HELP access_server_access_log_appender_failures_total Access-log appender operation failures.\n");
+    output.append("# TYPE access_server_access_log_appender_failures_total counter\n");
+    append_labeled_values(output, "access_server_access_log_appender_failures_total", kLogAppenderFailureLabels,
+                          std::array<std::uint64_t, kLogAppenderFailureLabels.size()>{
+                                  snapshot.access_log_appender.write_errors, snapshot.access_log_appender.reopen_errors,
+                                  snapshot.access_log_appender.rotation_errors,
+                                  snapshot.access_log_appender.retention_errors});
+    output.append("# HELP access_server_access_log_appender_rotations_total Completed access-log appender "
+                  "rotations.\n");
+    output.append("# TYPE access_server_access_log_appender_rotations_total counter\n");
+    append_series(output, "access_server_access_log_appender_rotations_total", {},
+                  snapshot.access_log_appender.rotations);
+    output.append("# HELP access_server_access_log_appender_active_file_bytes Current access-log appender file "
+                  "size.\n");
+    output.append("# TYPE access_server_access_log_appender_active_file_bytes gauge\n");
+    append_series(output, "access_server_access_log_appender_active_file_bytes", {},
+                  snapshot.access_log_appender.active_file_bytes);
 
     output.append("# HELP access_server_cat_state Configured CAT client lifecycle state.\n");
     output.append("# TYPE access_server_cat_state gauge\n");
