@@ -88,6 +88,9 @@ public:
     void set_upstream(const ProxyUpstreamEndpoint &endpoint) noexcept {
         observability_.set_upstream(execution_, endpoint);
     }
+    void record_cluster_selection(const AccessClusterSelection &selection) noexcept {
+        observability_.record_cluster_selection(selection);
+    }
     [[nodiscard]] AccessProviderTransaction start_provider_transaction(std::string_view name) noexcept {
         return observability_.start_provider_transaction(name);
     }

@@ -1249,7 +1249,8 @@ TEST(ProxyExecutorTest, StreamsJavaCompatibleRequestsAndReusesTheUpstreamConnect
     EXPECT_FALSE(first.span_id.empty());
     EXPECT_NE(first.span_id, first.parent_span_id);
     EXPECT_EQ(first.trace_parent, "00-11111111111111111111111111111111-2222222222222222-01");
-    EXPECT_EQ(first.trace_state, "vendor=opaque,bnrc=2F0tFt-1tSBej-2COt9SEFZWpzngwogq7x4c-1tSBej-aL8nZlUy-1nka5V");
+    EXPECT_EQ(first.trace_state, "vendor=opaque,bnrc=2F0tFt-1tSBej-"
+                                 "2COt9SEFZWpzngwogq7x4c-1tSBej-aL8nZlUy-1nka5V");
     EXPECT_EQ(first.body, "hello");
 
     const ObservedUpstreamRequest &second = upstream_state.requests[1];
@@ -1287,6 +1288,9 @@ TEST(ProxyExecutorTest, StreamsJavaCompatibleRequestsAndReusesTheUpstreamConnect
     EXPECT_FALSE(cat_capture.contains(" upstream="));
     EXPECT_FALSE(cat_capture.contains("connection_request_count="));
     EXPECT_FALSE(cat_capture.contains("connection_reuse_count="));
+    // Static-address selectors have no Java HostSource counterpart and record
+    // no LoadBalance events (all requests in this test use static upstreams).
+    EXPECT_FALSE(cat_capture.contains("LoadBalance"));
 
     const auto run_additional_request = [&](fiber::access_server::AccessProxyAdapter adapter,
                                             std::string &request_output, bool fail_writes = false) {
@@ -1745,6 +1749,166 @@ TEST(ProxyExecutorTest, KeepsOverrideFailureWhenFallbackPolicyDeclines) {
     group.join();
 }
 
+// Java ClusteredLoadBalancer.loadBalance records one LoadBalance CAT event per
+// selection attempt with tags req/fallback/final and status SUC / "cbt" /
+// ERROR; the fallback re-selection stays inside the same event.
+TEST(ProxyExecutorTest, RecordsJavaLoadBalanceEventsForClusterSelections) {
+    fiber::event::EventLoopGroup group(1);
+    fiber::http::StealableHttp1ConnectionPoolSet pool(group);
+    ASSERT_TRUE(pool.init());
+
+    fiber::net::TcpListener cat_collector(group.at(0));
+    ASSERT_TRUE(cat_collector.bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), {}));
+    auto cat_port = bound_port(cat_collector.fd());
+    ASSERT_TRUE(cat_port);
+    fiber::cat::CatClientConfigParams cat_params{
+            .app_key = "access-server-test",
+            .hostname = "test-host",
+            .ip = "127.0.0.1",
+            .thread_group_name = "test",
+            .thread_id = "0",
+            .thread_name = "worker",
+    };
+    cat_params.bootstrap_collectors.emplace_back(fiber::net::IpAddress::loopback_v4(), *cat_port);
+    auto cat_config = fiber::cat::CatClientConfig::create(std::move(cat_params));
+    ASSERT_TRUE(cat_config);
+    fiber::cat::CatClientOptions cat_options;
+    cat_options.enable_heartbeat = false;
+    cat_options.enable_system_stats = false;
+    cat_options.collector_connect_timeout = 10ms;
+    cat_options.collector_write_timeout = 10ms;
+    cat_options.reconnect_initial_delay = 10ms;
+    cat_options.reconnect_max_delay = 10ms;
+    cat_options.shutdown_drain_timeout = 20ms;
+    cat_options.aggregation_flush_interval = 10ms;
+    auto created_cat_client =
+            fiber::cat::CatClient::create(group.at(0), std::move(*cat_config), std::move(cat_options));
+    ASSERT_TRUE(created_cat_client);
+    std::unique_ptr<fiber::cat::CatClient> cat_client = std::move(*created_cat_client);
+    CatFrameCapture cat_capture;
+    std::promise<void> cat_capture_done_promise;
+    auto cat_capture_done = cat_capture_done_promise.get_future();
+    std::promise<bool> cat_started_promise;
+    auto cat_started = cat_started_promise.get_future();
+
+    group.start();
+    fiber::async::spawn(group.at(0),
+                        [&]() { return collect_cat_frames(&cat_collector, &cat_capture, &cat_capture_done_promise); });
+    fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
+        cat_started_promise.set_value(cat_client->start().has_value());
+        co_return;
+    });
+    ASSERT_EQ(cat_started.wait_for(2s), std::future_status::ready);
+    ASSERT_TRUE(cat_started.get());
+
+    UpstreamState upstream_state;
+    std::promise<std::uint16_t> port_promise;
+    std::promise<TestHttpServer> server_promise;
+    auto port_future = port_promise.get_future();
+    auto server_future = server_promise.get_future();
+    fiber::async::spawn(group.at(0),
+                        [&]() { return start_server(&group.at(0), &upstream_state, &port_promise, &server_promise); });
+    TestHttpServer server = server_future.get();
+    ASSERT_NE(server.server, nullptr);
+    const std::uint16_t port = port_future.get();
+    ASSERT_NE(port, 0);
+
+    ServiceSelectorState selector_state{
+            .port = port,
+            .good_host_header = "127.0.0.1:" + std::to_string(port),
+            .bad_host_header = "127.0.0.2:" + std::to_string(port),
+            .good_connection_key = fiber::http::HttpConnectionGroupKey::make(
+                    "127.0.0.1", port, fiber::http::HttpConnectionGroupKey::Scheme::Http),
+            .bad_connection_key = fiber::http::HttpConnectionGroupKey::make(
+                    "unreachable.example", port, fiber::http::HttpConnectionGroupKey::Scheme::Http),
+            .override_select_error = fiber::access_server::ProxyAddressSelectErrorCode::NoHosts,
+    };
+    fiber::access_server::RouteConfigStore store({}, fiber::access_server::ProxyAddressSelectorFactory{
+                                                             .context = &selector_state,
+                                                             .create_service = make_test_service_selector,
+                                                     });
+    auto config = service_project_config();
+    (**config.routes->begin()).context = {
+            {.name = "cluster", .value = "canary"},
+    };
+    auto published = store.apply("orders", std::move(config));
+    ASSERT_TRUE(published) << published.error().message;
+
+    FallbackPolicyState policy_state;
+    fiber::access_server::ProxyExecutorOptions executor_options;
+    executor_options.cluster_fallback = fiber::access_server::ProxyClusterFallback{
+            .context = &policy_state,
+            .should_fallback = capture_fallback_policy,
+    };
+    fiber::access_server::ProxyExecutor executor(pool,
+                                                 fiber::access_server::ProxyClusterMatcher{
+                                                         .context = &selector_state,
+                                                         .matches = never_match_gray,
+                                                 },
+                                                 {}, executor_options);
+
+    // First request: the override selection fails with NoHosts and the decider
+    // falls back to the configured cluster — one event, all three tags, SUC.
+    std::string fallback_output;
+    std::promise<void> fallback_promise;
+    auto fallback_future = fallback_promise.get_future();
+    std::string fallback_request = "GET /proxy HTTP/1.1\r\n"
+                                   "Host: api.example.com\r\n"
+                                   "Connection: close\r\n\r\n";
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_downstream(&group.at(0), &store, executor.adapter(), std::move(fallback_request), &fallback_output,
+                              &fallback_promise, nullptr, false, cat_client.get());
+    });
+    ASSERT_EQ(fallback_future.wait_for(5s), std::future_status::ready);
+    EXPECT_EQ(count_status(fallback_output, "HTTP/1.1 201 Created\r\n"), 1U);
+    // Event data is '&'-joined in Java addTag order: req, fallback, final. The
+    // status string follows the event name in the NT1 record.
+    const std::string success_status = std::string("inventory") + std::string{'\x01', '0'};
+    EXPECT_TRUE(wait_for_cat_frame(cat_capture, "LoadBalance", "req=canary&fallback=stable&final=stable"));
+    EXPECT_TRUE(wait_for_cat_frame(cat_capture, "LoadBalance", success_status));
+
+    // Second request: the override selection fails with CircuitOpen and the
+    // policy declines the fallback — same event shape, no fallback tag, final
+    // keeps the requested cluster, status "cbt".
+    selector_state.override_select_error = fiber::access_server::ProxyAddressSelectErrorCode::CircuitOpen;
+    policy_state.fallback = false;
+    std::string circuit_output;
+    std::promise<void> circuit_promise;
+    auto circuit_future = circuit_promise.get_future();
+    std::string circuit_request = "GET /proxy HTTP/1.1\r\n"
+                                  "Host: api.example.com\r\n"
+                                  "Connection: close\r\n\r\n";
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_downstream(&group.at(0), &store, executor.adapter(), std::move(circuit_request), &circuit_output,
+                              &circuit_promise, nullptr, false, cat_client.get());
+    });
+    ASSERT_EQ(circuit_future.wait_for(5s), std::future_status::ready);
+    EXPECT_NE(circuit_output.find("HTTP/1.1 503 Service Unavailable\r\n"), std::string::npos);
+    EXPECT_NE(circuit_output.find(R"("name":"UPSTREAM_CIRCUIT_BREAK")"), std::string::npos);
+    const std::string circuit_status = std::string("inventory") + std::string{'\x03', 'c', 'b', 't'};
+    EXPECT_TRUE(wait_for_cat_frame(cat_capture, "LoadBalance", "req=canary&final=canary"));
+    EXPECT_TRUE(wait_for_cat_frame(cat_capture, "LoadBalance", circuit_status));
+    // Request one ran two selections (failed override, fallback re-selection)
+    // but records a single event; request two ran one selection. Three
+    // selections, two LoadBalance events.
+    EXPECT_EQ(selector_state.select_count, 3U);
+
+    std::promise<void> shutdown_promise;
+    auto shutdown_future = shutdown_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() { return shutdown(&pool, &server, &shutdown_promise); });
+    ASSERT_EQ(shutdown_future.wait_for(2s), std::future_status::ready);
+    std::promise<void> cat_shutdown_promise;
+    auto cat_shutdown = cat_shutdown_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
+        co_await cat_client->shutdown();
+        cat_shutdown_promise.set_value();
+    });
+    ASSERT_EQ(cat_shutdown.wait_for(2s), std::future_status::ready);
+    ASSERT_EQ(cat_capture_done.wait_for(2s), std::future_status::ready);
+    group.stop();
+    group.join();
+}
+
 TEST(ProxyExecutorTest, StopsBeforeConnectionAcquisitionWhenRequestHeadPreparationFails) {
     fiber::event::EventLoopGroup group(1);
     fiber::http::StealableHttp1ConnectionPoolSet pool(group);
@@ -2030,12 +2194,13 @@ TEST(ProxyExecutorTest, FlushControlsCrossReadResponseBodyAggregation) {
     group.join();
 }
 
-// A raw HTTP/1 upstream whose chunked framing deliberately crosses transport read
-// boundaries: the response headers arrive alone, the chunk-size line is split
-// mid-line, and the payload of the already-parsed chunk arrives only in a later
-// read. Regression guard for ClientHttp1Exchange::read_body returning an empty,
-// non-complete body (or failing the exchange) for chunked responses — the proxy
-// pipe treats both as protocol errors and aborts the downstream response.
+// A raw HTTP/1 upstream whose chunked framing deliberately crosses transport
+// read boundaries: the response headers arrive alone, the chunk-size line is
+// split mid-line, and the payload of the already-parsed chunk arrives only in a
+// later read. Regression guard for ClientHttp1Exchange::read_body returning an
+// empty, non-complete body (or failing the exchange) for chunked responses —
+// the proxy pipe treats both as protocol errors and aborts the downstream
+// response.
 fiber::async::DetachedTask serve_split_framing_upstream(fiber::net::TcpListener *listener,
                                                         std::promise<void> *done) noexcept {
     auto accepted = co_await listener->accept();
