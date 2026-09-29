@@ -298,10 +298,12 @@ connectNano 为新建连接的建连耗时（微秒 ×1000）或复用连接的�
 Response 直出路由同样不输出（与 Java ServiceExchange 一致）。网关名固定为
 `access-server-` 拼接 `ACCESS_SERVER_NETWORK_ENTRY` 的值。
 
-日志由独立写线程异步落盘：`ACCESS_SERVER_ACCESS_LOG_DIR`（默认 `/data/logs/ploto-server`）
-必须存在且可写，目录留空则完全关闭 access log；打开失败只回退 stderr 并重试，不影响请求。
-`access.log` 超过 100 MB 轮转为 `access-YYYY-MM-DD.<N>.log`，保留 300 个归档 / 30 天，
-队列上限 20000 行，满时丢弃并计数，绝不阻塞请求 worker。
+日志经 Fiber 共享日志管线（LogWorker）异步落盘，无独立写线程：`ACCESS_SERVER_ACCESS_LOG_DIR`
+（默认 `/data/logs/ploto-server`）必须存在且可写，目录留空则完全关闭 access log；启动时打开
+失败仅禁用 access log 并提示 stderr，不影响请求，运行期写失败丢弃该行并计数。
+`access.log` 超过 100 MB 轮转为 `access.log.<UTC时间戳>.<序号>.log` 归档，按数量保留 300 个
+（无时间保留）。access 行与诊断日志共用一条 DropNewest 队列（64 MiB 字节预算），满时丢弃
+新到的行并计数，绝不阻塞请求 worker。
 
 ### 同步测试环境 Nacos 配置
 

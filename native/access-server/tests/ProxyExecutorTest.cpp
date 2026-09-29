@@ -31,6 +31,8 @@
 #include <fiber/http/Server.h>
 #include <fiber/http/endpoint/Http1Endpoint.h>
 #include <fiber/http/endpoint/Http2Endpoint.h>
+#include <fiber/log/LogConfig.h>
+#include <fiber/log/LoggerManager.h>
 #include <fiber/net/SocketAddress.h>
 #include <fiber/net/TcpListener.h>
 #include <fiber/net/TcpStream.h>
@@ -40,7 +42,7 @@
 #include "execution/ProxyExecutor.h"
 #include "fiber/cat/CatClient.h"
 #include "fiber/cat/CatClientConfig.h"
-#include "observability/AccessLogWriter.h"
+#include "observability/AccessLogChannel.h"
 #include "observability/AccessRequestTelemetry.h"
 #include "routing/AccessScriptCompiler.h"
 #include "runtime/RouteConfigStore.h"
@@ -2820,21 +2822,68 @@ TEST(ProxyExecutorTest, AppliesConfiguredWebSocketTunnelTimeout) {
 // path without query, response-head status, reused-connection negative
 // connect count).
 TEST(ProxyExecutorTest, WritesJavaCompatibleAccessLogLinesPerProxyAttempt) {
-    class WriterAndDirectoryGuard final {
+    // Mirrors the production logging setup: access lines ride the shared
+    // LogWorker pipeline onto a MessageOnly file appender behind a dedicated
+    // non-additive logger. This is the only test in the binary that may
+    // initialize the process-global LoggerManager.
+    class LoggingAndDirectoryGuard final {
     public:
-        WriterAndDirectoryGuard() {
+        LoggingAndDirectoryGuard() {
             std::string pattern = "/tmp/access-log-executor-test-XXXXXX";
             std::vector<char> buffer(pattern.begin(), pattern.end());
             buffer.push_back('\0');
             created_ = ::mkdtemp(buffer.data()) != nullptr;
-            if (created_) {
-                directory_ = buffer.data();
-                fiber::access_server::initialize_access_log_writer(directory_, "access-server-test-entry");
+            if (!created_) {
+                return;
             }
+            directory_ = buffer.data();
+            fiber::log::LogConfigBuilder builder;
+            auto console = builder.add_console_appender({
+                    .name = "access_server_test_stderr",
+                    .stream = fiber::log::ConsoleStream::Stderr,
+            });
+            auto file = builder.add_file_appender({
+                    .name = "access_server_test_access_log",
+                    .path = directory_ + "/access.log",
+                    .buffer_size = 63 << 10,
+                    .flush_interval = std::chrono::milliseconds(1000),
+                    .rotation =
+                            fiber::log::FileRotationOptions{
+                                    .max_file_size = 100ULL << 20,
+                                    .archive_name = "{base}.{utc}.{seq}",
+                                    .max_archives = 300,
+                            },
+                    .layout = fiber::log::FileAppenderLayout::MessageOnly,
+            });
+            auto access_logger = builder.add_logger(
+                    {
+                            .name = "access_server.access",
+                            .level = fiber::log::LogLevel::Info,
+                            .additive = false,
+                    },
+                    {*file});
+            auto root = builder.set_root_logger({.level = fiber::log::LogLevel::Info}, {*console});
+            auto queue = builder.set_async_options({
+                    .full_policy = fiber::log::LogQueueFullPolicy::DropNewest,
+            });
+            auto config = builder.finish();
+            if (!console || !file || !access_logger || !root || !queue || !config) {
+                return;
+            }
+            auto started = fiber::log::LoggerManager::global().initialize(std::move(*config));
+            if (!started) {
+                return;
+            }
+            initialized_ = true;
+            fiber::access_server::install_access_log_channel("access-server-test-entry");
+            ready_ = fiber::access_server::access_log_channel() != nullptr;
         }
 
-        ~WriterAndDirectoryGuard() {
-            fiber::access_server::shutdown_access_log_writer();
+        ~LoggingAndDirectoryGuard() {
+            fiber::access_server::uninstall_access_log_channel();
+            if (initialized_) {
+                fiber::log::LoggerManager::global().shutdown();
+            }
             if (created_) {
                 if (DIR *handle = ::opendir(directory_.c_str()); handle != nullptr) {
                     while (const dirent *item = ::readdir(handle)) {
@@ -2849,15 +2898,17 @@ TEST(ProxyExecutorTest, WritesJavaCompatibleAccessLogLinesPerProxyAttempt) {
             }
         }
 
-        [[nodiscard]] bool ready() const noexcept { return created_; }
+        [[nodiscard]] bool ready() const noexcept { return ready_; }
         [[nodiscard]] const std::string &directory() const noexcept { return directory_; }
 
     private:
         std::string directory_;
         bool created_ = false;
+        bool initialized_ = false;
+        bool ready_ = false;
     };
 
-    WriterAndDirectoryGuard guard;
+    LoggingAndDirectoryGuard guard;
     ASSERT_TRUE(guard.ready());
 
     fiber::event::EventLoopGroup group(1);
@@ -2915,10 +2966,10 @@ TEST(ProxyExecutorTest, WritesJavaCompatibleAccessLogLinesPerProxyAttempt) {
     group.stop();
     group.join();
 
-    // Draining the writer on shutdown guarantees the file is complete here
-    // (lines can sit in the flush buffer until close); the guard's shutdown is
-    // idempotent.
-    fiber::access_server::shutdown_access_log_writer();
+    // A synchronous flush guarantees the file is complete here: lines can sit
+    // in the appender's flush buffer until the interval elapses, and the flush
+    // control runs on the log loop after every already-submitted record.
+    fiber::log::LoggerManager::global().flush();
     std::ifstream access_log(guard.directory() + "/access.log", std::ios::binary);
     const std::string content((std::istreambuf_iterator<char>(access_log)), std::istreambuf_iterator<char>());
     ASSERT_FALSE(content.empty());

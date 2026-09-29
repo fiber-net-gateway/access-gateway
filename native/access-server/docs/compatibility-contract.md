@@ -705,9 +705,10 @@ listener。订阅暂态失败采用封顶指数退避，非法首值被记录为
   纳秒等价）或复用连接的负已服务请求数；traceId 取入站 `X-B3-TraceId`，缺失时生成 16 位
   小写 hex 且不改写入站请求头；appName 为 `access-server-` 拼接 entry 值；receivedPath 不含
   query，内容不转义、不截断、不采样。路由解析未产生可用 upstream plan 的请求与 RESPONSE
-  直出路由不输出行（与 Java ServiceExchange 一致）。写入由独立线程异步完成，输出到
-  `ACCESS_SERVER_ACCESS_LOG_DIR` 下的 `access.log`，100 MB 轮转为
-  `access-YYYY-MM-DD.<N>.log`，保留 300 个归档 / 30 天，队列满时丢弃计数、不阻塞请求；
+  直出路由不输出行（与 Java ServiceExchange 一致）。写入经 Fiber 共享日志管线异步完成
+  （非独立线程），输出到 `ACCESS_SERVER_ACCESS_LOG_DIR` 下的 `access.log`，100 MB 轮转为
+  `access.log.<UTC时间戳>.<序号>.log`（与 Java 归档命名不同，无时间保留），按数量保留 300 个
+  归档；access 行与诊断日志共用 DropNewest 队列，满时丢弃计数、不阻塞请求；
 - Prometheus 在独立 listener 输出固定 `result` 标签的请求总数、inflight 和 duration；
   gzip-enabled RESPONSE 另输出 `access_server_response_compression_total`，其有界 `result`
   仅为 `gzip`、`identity` 或 `not_acceptable`。配置更新、readiness 和 route snapshot 规模/age

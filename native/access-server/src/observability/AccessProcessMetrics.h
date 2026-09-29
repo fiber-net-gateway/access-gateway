@@ -17,6 +17,8 @@ struct AccessProcessMetricsSources {
     // scrapes. AccessServerRuntime enforces that shutdown order.
     const log::LoggerManager *logger = nullptr;
     log::AppenderId log_appender = log::kInvalidAppenderId;
+    // Access-log file appender, when the access log is enabled.
+    log::AppenderId access_log_appender = log::kInvalidAppenderId;
     const cat::CatClient *cat_client = nullptr;
 };
 
@@ -40,6 +42,8 @@ struct AccessProcessMetricsSnapshot {
     bool logging_available = false;
     log::LogQueueStats log_queue;
     log::AppenderStats log_appender;
+    bool access_log_available = false;
+    log::AppenderStats access_log_appender;
     bool cat_enabled = false;
     cat::CatClientState cat_state = cat::CatClientState::Created;
     cat::CatClientStats cat;
