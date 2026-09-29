@@ -688,6 +688,14 @@ listener。订阅暂态失败采用封顶指数退避，非法首值被记录为
   响应（含 5xx 状态码，HTTP code 只进 data `status`）与 websocket 握手验证通过即完成且
   置成功 `0`；连接、发送、读取、握手或取消等流程失败才置 `-1`。websocket 在 upstream
   握手通过后即完成 provider，不再覆盖后续 tunnel 时长；
+- service 地址选择按 Java `ClusteredLoadBalancer.loadBalance` 在根事务记录
+  `LoadBalance` event，名称为 service：data 按 Java addTag 顺序记录 `req`（请求指定
+  cluster，存在时）、`fallback`（回退到的配置 cluster，仅实际回退时）和 `final`（本次
+  最终 cluster，回退时为配置 cluster）；status 选中为 `0`、熔断为 `cbt`、无实例为
+  `ERROR`。每个 proxy attempt 一个 event（对应 Java 重试重跑 loadBalance），回退重选留在
+  同一 event 内且先于 `Access.Provider` 完成；静态 addresses selector 无 Java
+  HostSource 对应，不记录。Java 的 `circuit_break`/`empty_service` 计数由既有 proxy
+  failure 指标承担，不新增计数器；
 - 原始错误之后若错误响应本身写入失败，独立记录 `ResponseError`，不覆盖也不重复原始
   `CALL_ERROR`/`FiberException`；
 - project、route、context cluster、稳定 `Exception.name` 和最终

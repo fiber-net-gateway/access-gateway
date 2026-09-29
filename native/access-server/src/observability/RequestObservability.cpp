@@ -346,6 +346,42 @@ void RequestObservability::set_upstream(ScriptExecutionContext &execution,
     upstream_ = execution.copy_to_request_pool(endpoint.host_header);
 }
 
+void RequestObservability::record_cluster_selection(const AccessClusterSelection &selection) noexcept {
+    // Java ClusteredLoadBalancer.loadBalance: one LoadBalance child event per
+    // selection attempt with tags req/fallback/final and status SUC / "cbt" /
+    // ERROR. Static address selectors have no Java HostSource counterpart (no
+    // service name, no cluster) and record nothing.
+    if (!root_.valid() || selection.service.empty()) {
+        return;
+    }
+    auto event = root_.start_event("LoadBalance", selection.service);
+    if (!event) {
+        return;
+    }
+    std::string_view final_cluster{};
+    if (selection.fell_back && selection.configured_cluster) {
+        // The Java deciders reset ctx.cluster to the configured cluster before
+        // re-selecting, so both outcomes of the fallback carry it.
+        final_cluster = *selection.configured_cluster;
+    } else if (selection.requested_cluster) {
+        final_cluster = *selection.requested_cluster;
+    } else if (selection.configured_cluster) {
+        final_cluster = *selection.configured_cluster;
+    }
+    if (selection.requested_cluster && !selection.requested_cluster->empty()) {
+        (void) event->add_data("req", *selection.requested_cluster);
+    }
+    if (selection.fell_back && selection.configured_cluster) {
+        (void) event->add_data("fallback", *selection.configured_cluster);
+    }
+    (void) event->add_data("final", final_cluster);
+    const std::string_view status = selection.result == AccessClusterSelectionResult::CircuitBroken
+                                            ? std::string_view("cbt")
+                                    : selection.result == AccessClusterSelectionResult::NoHosts ? cat::status::Error
+                                                                                                : cat::status::Success;
+    (void) event->complete(status);
+}
+
 AccessProviderTransaction RequestObservability::start_provider_transaction(std::string_view name) noexcept {
     if (!root_.valid()) {
         return {};

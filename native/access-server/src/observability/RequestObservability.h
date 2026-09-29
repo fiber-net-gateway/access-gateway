@@ -5,6 +5,7 @@
 #include "AccessServerMetrics.h"
 
 #include <chrono>
+#include <optional>
 #include <string_view>
 
 #include <fiber/cat/Transaction.h>
@@ -27,6 +28,26 @@ struct ProxyConnectionObservation;
 struct ProxyUpstreamEndpoint;
 class ScriptExecutionContext;
 class TracePropagation;
+
+// Java ClusteredLoadBalancer.loadBalance records one LoadBalance event per
+// address-selection attempt; the outcome maps to the Java statuses SUC / "cbt"
+// / ERROR.
+enum class AccessClusterSelectionResult : std::uint8_t {
+    Selected,
+    CircuitBroken,
+    NoHosts,
+};
+
+// One address-selection attempt: the request-specified cluster (trace context
+// or gray), the route's configured cluster, and whether the decider fell back
+// to the configured cluster after the request-specified selection failed.
+struct AccessClusterSelection {
+    std::string_view service;
+    std::optional<std::string_view> requested_cluster;
+    std::optional<std::string_view> configured_cluster;
+    bool fell_back = false;
+    AccessClusterSelectionResult result = AccessClusterSelectionResult::Selected;
+};
 
 // Owns request metrics, CAT records, bounded log fields, and terminal request
 // accounting. Request execution and trace propagation remain explicit inputs.
@@ -60,6 +81,7 @@ public:
     void record_websocket_session_finished(AccessWebSocketSessionResult result) noexcept;
     void mark_io_error(ScriptExecutionContext &execution, common::IoErr error) noexcept;
     void set_upstream(ScriptExecutionContext &execution, const ProxyUpstreamEndpoint &endpoint) noexcept;
+    void record_cluster_selection(const AccessClusterSelection &selection) noexcept;
     [[nodiscard]] AccessProviderTransaction start_provider_transaction(std::string_view name) noexcept;
     void start_websocket_session(std::string_view name, bool extended_connect) noexcept;
     void finish_websocket_session(bool closed) noexcept;

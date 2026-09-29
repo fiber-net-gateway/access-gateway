@@ -1269,6 +1269,7 @@ async::Task<Result<void>> ProxyExecutor::execute_impl(http::HttpExchange &exchan
         auto selected = proxy.address_selector->select_address(
                 cluster_override,
                 std::span<const std::uint64_t>(excluded_selection_tokens.data(), excluded_selection_token_count));
+        bool fell_back = false;
         if (!selected && fallback_cluster &&
             options_.cluster_fallback.should_fallback(options_.cluster_fallback.context,
                                                       proxy.address_selector->service_name(), *fallback_cluster,
@@ -1276,6 +1277,7 @@ async::Task<Result<void>> ProxyExecutor::execute_impl(http::HttpExchange &exchan
             // Java decider fallback: re-select with the configured cluster. A
             // failed fallback selection reports its own error, matching the
             // second decide() call running with the original cluster.
+            fell_back = true;
             auto fallback_selected = proxy.address_selector->select_address(
                     std::nullopt,
                     std::span<const std::uint64_t>(excluded_selection_tokens.data(), excluded_selection_token_count));
@@ -1286,6 +1288,19 @@ async::Task<Result<void>> ProxyExecutor::execute_impl(http::HttpExchange &exchan
                 selected = std::unexpected(fallback_selected.error());
             }
         }
+        // Java ClusteredLoadBalancer.loadBalance: one LoadBalance event per
+        // selection attempt (fallback re-selection included), completed before
+        // the provider transaction starts.
+        telemetry.record_cluster_selection(AccessClusterSelection{
+                .service = proxy.address_selector->service_name(),
+                .requested_cluster = cluster_override,
+                .configured_cluster = proxy.address_selector->configured_cluster(),
+                .fell_back = fell_back,
+                .result = selected ? AccessClusterSelectionResult::Selected
+                          : selected.error().code == ProxyAddressSelectErrorCode::CircuitOpen
+                                  ? AccessClusterSelectionResult::CircuitBroken
+                                  : AccessClusterSelectionResult::NoHosts,
+        });
         if (!selected) {
             ProxyFailure selected_failure = previous_failure.value_or(from_select_error(selected.error()));
             if (!previous_failure) {
