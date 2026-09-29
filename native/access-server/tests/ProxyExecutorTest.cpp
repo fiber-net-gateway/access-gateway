@@ -111,6 +111,9 @@ struct ServiceSelectorState {
     std::size_t cluster_match_count = 0;
     std::optional<std::string> expected_cluster_override;
     std::optional<fiber::access_server::ProxyAddressSelectErrorCode> select_error;
+    // When set, selections carrying a cluster override fail with this code and
+    // override-free selections return the good instance directly.
+    std::optional<fiber::access_server::ProxyAddressSelectErrorCode> override_select_error;
     std::vector<std::pair<std::uint64_t, bool>> reports;
 };
 
@@ -129,6 +132,25 @@ resolve_proxy_addresses(void *context, std::string_view) noexcept {
 bool never_match_gray(void *context, std::string_view, const fiber::access_server::ClientMetadata &) noexcept {
     ++static_cast<ServiceSelectorState *>(context)->cluster_match_count;
     return false;
+}
+
+struct FallbackPolicyState {
+    std::string service;
+    std::string configured_cluster;
+    std::string requested_cluster;
+    std::optional<fiber::access_server::ProxyAddressSelectErrorCode> error;
+    bool fallback = true;
+};
+
+bool capture_fallback_policy(void *context, std::string_view service, std::string_view configured_cluster,
+                             std::string_view requested_cluster,
+                             fiber::access_server::ProxyAddressSelectErrorCode error) noexcept {
+    auto &state = *static_cast<FallbackPolicyState *>(context);
+    state.service = std::string(service);
+    state.configured_cluster = std::string(configured_cluster);
+    state.requested_cluster = std::string(requested_cluster);
+    state.error = error;
+    return state.fallback;
 }
 
 struct TemplateEvaluationState {
@@ -940,6 +962,25 @@ public:
     std::expected<fiber::access_server::ProxyUpstreamEndpoint, fiber::access_server::ProxyAddressSelectError>
     select_address(std::optional<std::string_view> cluster_override,
                    std::span<const std::uint64_t> excluded_selection_tokens) noexcept override {
+        if (state_->override_select_error) {
+            ++state_->select_count;
+            if (cluster_override) {
+                const bool circuit_open = *state_->override_select_error ==
+                                          fiber::access_server::ProxyAddressSelectErrorCode::CircuitOpen;
+                return std::unexpected(fiber::access_server::ProxyAddressSelectError{
+                        .code = *state_->override_select_error,
+                        .io_error = fiber::common::IoErr::NotFound,
+                        .message = circuit_open ? "service upstream circuit breaker is open"
+                                                : "no available service instance",
+                });
+            }
+            return fiber::access_server::ProxyUpstreamEndpoint{
+                    .connection_key = &*state_->good_connection_key,
+                    .host_header = std::string_view(state_->good_host_header),
+                    .provider_name = service_,
+                    .selection_token = 2U,
+            };
+        }
         const bool cluster_override_matches =
                 state_->expected_cluster_override
                         ? cluster_override && *cluster_override == *state_->expected_cluster_override
@@ -1550,6 +1591,148 @@ TEST(ProxyExecutorTest, PreservesPreConnectSelectionFailureKinds) {
     EXPECT_EQ(circuit_output.find("HTTP_CLIENT_CONNECT_ERROR"), std::string::npos);
     EXPECT_EQ(selector_state.select_count, 2U);
     EXPECT_TRUE(selector_state.reports.empty());
+
+    std::promise<void> shutdown_promise;
+    auto shutdown_future = shutdown_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
+        co_await pool.shutdown_async();
+        shutdown_promise.set_value();
+    });
+    ASSERT_EQ(shutdown_future.wait_for(2s), std::future_status::ready);
+    group.stop();
+    group.join();
+}
+
+TEST(ProxyExecutorTest, FallsBackToConfiguredClusterWhenOverrideSelectionFails) {
+    fiber::event::EventLoopGroup group(1);
+    fiber::http::StealableHttp1ConnectionPoolSet pool(group);
+    ASSERT_TRUE(pool.init());
+
+    UpstreamState upstream_state;
+    std::promise<std::uint16_t> port_promise;
+    std::promise<TestHttpServer> server_promise;
+    auto port_future = port_promise.get_future();
+    auto server_future = server_promise.get_future();
+    group.start();
+    fiber::async::spawn(group.at(0),
+                        [&]() { return start_server(&group.at(0), &upstream_state, &port_promise, &server_promise); });
+
+    TestHttpServer server = server_future.get();
+    ASSERT_NE(server.server, nullptr);
+    const std::uint16_t port = port_future.get();
+    ASSERT_NE(port, 0);
+
+    ServiceSelectorState selector_state{
+            .port = port,
+            .good_host_header = "127.0.0.1:" + std::to_string(port),
+            .bad_host_header = "127.0.0.2:" + std::to_string(port),
+            .good_connection_key = fiber::http::HttpConnectionGroupKey::make(
+                    "127.0.0.1", port, fiber::http::HttpConnectionGroupKey::Scheme::Http),
+            .bad_connection_key = fiber::http::HttpConnectionGroupKey::make(
+                    "unreachable.example", port, fiber::http::HttpConnectionGroupKey::Scheme::Http),
+            .override_select_error = fiber::access_server::ProxyAddressSelectErrorCode::NoHosts,
+    };
+    fiber::access_server::RouteConfigStore store({}, fiber::access_server::ProxyAddressSelectorFactory{
+                                                             .context = &selector_state,
+                                                             .create_service = make_test_service_selector,
+                                                     });
+    auto config = service_project_config();
+    (**config.routes->begin()).context = {
+            {.name = "cluster", .value = "canary"},
+    };
+    auto published = store.apply("orders", std::move(config));
+    ASSERT_TRUE(published) << published.error().message;
+
+    FallbackPolicyState policy_state;
+    fiber::access_server::ProxyExecutorOptions executor_options;
+    executor_options.cluster_fallback = fiber::access_server::ProxyClusterFallback{
+            .context = &policy_state,
+            .should_fallback = capture_fallback_policy,
+    };
+    fiber::access_server::ProxyExecutor executor(pool,
+                                                 fiber::access_server::ProxyClusterMatcher{
+                                                         .context = &selector_state,
+                                                         .matches = never_match_gray,
+                                                 },
+                                                 {}, executor_options);
+    std::string output;
+    std::promise<void> request_promise;
+    auto request_future = request_promise.get_future();
+    std::string request = "GET /proxy HTTP/1.1\r\n"
+                          "Host: api.example.com\r\n"
+                          "Connection: close\r\n\r\n";
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_downstream(&group.at(0), &store, executor.adapter(), std::move(request), &output, &request_promise);
+    });
+
+    ASSERT_EQ(request_future.wait_for(5s), std::future_status::ready);
+    EXPECT_EQ(count_status(output, "HTTP/1.1 201 Created\r\n"), 1U);
+    ASSERT_EQ(upstream_state.requests.size(), 1U);
+    EXPECT_EQ(upstream_state.requests[0].host, selector_state.good_host_header);
+    // One failed override selection, one configured-cluster selection.
+    EXPECT_EQ(selector_state.select_count, 2U);
+    EXPECT_EQ(policy_state.service, "inventory");
+    EXPECT_EQ(policy_state.configured_cluster, "stable");
+    EXPECT_EQ(policy_state.requested_cluster, "canary");
+    EXPECT_EQ(policy_state.error, fiber::access_server::ProxyAddressSelectErrorCode::NoHosts);
+
+    std::promise<void> shutdown_promise;
+    auto shutdown_future = shutdown_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() { return shutdown(&pool, &server, &shutdown_promise); });
+    ASSERT_EQ(shutdown_future.wait_for(2s), std::future_status::ready);
+    group.stop();
+    group.join();
+}
+
+TEST(ProxyExecutorTest, KeepsOverrideFailureWhenFallbackPolicyDeclines) {
+    fiber::event::EventLoopGroup group(1);
+    fiber::http::StealableHttp1ConnectionPoolSet pool(group);
+    ASSERT_TRUE(pool.init());
+    group.start();
+
+    ServiceSelectorState selector_state{
+            .override_select_error = fiber::access_server::ProxyAddressSelectErrorCode::NoHosts,
+    };
+    fiber::access_server::RouteConfigStore store({}, fiber::access_server::ProxyAddressSelectorFactory{
+                                                             .context = &selector_state,
+                                                             .create_service = make_test_service_selector,
+                                                     });
+    auto config = service_project_config();
+    (**config.routes->begin()).context = {
+            {.name = "cluster", .value = "canary"},
+    };
+    auto published = store.apply("orders", std::move(config));
+    ASSERT_TRUE(published) << published.error().message;
+
+    FallbackPolicyState policy_state;
+    policy_state.fallback = false;
+    fiber::access_server::ProxyExecutorOptions executor_options;
+    executor_options.cluster_fallback = fiber::access_server::ProxyClusterFallback{
+            .context = &policy_state,
+            .should_fallback = capture_fallback_policy,
+    };
+    fiber::access_server::ProxyExecutor executor(pool,
+                                                 fiber::access_server::ProxyClusterMatcher{
+                                                         .context = &selector_state,
+                                                         .matches = never_match_gray,
+                                                 },
+                                                 {}, executor_options);
+    std::string output;
+    std::promise<void> request_promise;
+    auto request_future = request_promise.get_future();
+    std::string request = "GET /proxy HTTP/1.1\r\n"
+                          "Host: api.example.com\r\n"
+                          "Connection: close\r\n\r\n";
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_downstream(&group.at(0), &store, executor.adapter(), std::move(request), &output, &request_promise);
+    });
+
+    ASSERT_EQ(request_future.wait_for(2s), std::future_status::ready);
+    EXPECT_NE(output.find("HTTP/1.1 503 Service Unavailable\r\n"), std::string::npos);
+    EXPECT_NE(output.find(R"("name":"UPSTREAM_NO_HOSTS")"), std::string::npos);
+    EXPECT_EQ(selector_state.select_count, 1U);
+    EXPECT_EQ(policy_state.requested_cluster, "canary");
+    EXPECT_EQ(policy_state.configured_cluster, "stable");
 
     std::promise<void> shutdown_promise;
     auto shutdown_future = shutdown_promise.get_future();

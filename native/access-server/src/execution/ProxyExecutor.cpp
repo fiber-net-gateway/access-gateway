@@ -379,6 +379,24 @@ Result<std::optional<std::string>> evaluate_proxy_context(std::span<const Compil
     return cluster;
 }
 
+// Java decider fallback target: the route's configured cluster, usable only
+// when a request-specified override exists, the selector is cluster-aware, and
+// the two differ (gray-tag or trace-header clusters other than the configured
+// one). Static-address selectors report no configured cluster, matching the
+// Java deciders running only on the clustered load balancer.
+std::optional<std::string_view> cluster_fallback_target(const ProxyAddressSelector &selector,
+                                                        const std::optional<std::string_view> &cluster_override,
+                                                        const ProxyClusterFallback &fallback) noexcept {
+    if (!cluster_override || fallback.should_fallback == nullptr) {
+        return std::nullopt;
+    }
+    const std::optional<std::string_view> configured = selector.configured_cluster();
+    if (!configured || configured->empty() || *configured == *cluster_override) {
+        return std::nullopt;
+    }
+    return configured;
+}
+
 std::chrono::milliseconds response_header_timeout(std::int32_t timeout_millis) noexcept {
     if (timeout_millis < 0) {
         return std::chrono::milliseconds::max();
@@ -1229,6 +1247,8 @@ async::Task<Result<void>> ProxyExecutor::execute_impl(http::HttpExchange &exchan
     CompatAccessLogRequest access_log_request;
     init_compat_access_log_request(access_log_request, exchange, telemetry, input, proxy, gray_matched,
                                    cluster_override);
+    const std::optional<std::string_view> fallback_cluster =
+            cluster_fallback_target(*proxy.address_selector, cluster_override, options_.cluster_fallback);
 
     ProxyRequestPlan request_plan(exchange.pool(), exchange, proxy);
     WebSocketMetricScope websocket_metrics(telemetry, request_plan.websocket_upgrade());
@@ -1249,6 +1269,23 @@ async::Task<Result<void>> ProxyExecutor::execute_impl(http::HttpExchange &exchan
         auto selected = proxy.address_selector->select_address(
                 cluster_override,
                 std::span<const std::uint64_t>(excluded_selection_tokens.data(), excluded_selection_token_count));
+        if (!selected && fallback_cluster &&
+            options_.cluster_fallback.should_fallback(options_.cluster_fallback.context,
+                                                      proxy.address_selector->service_name(), *fallback_cluster,
+                                                      *cluster_override, selected.error().code)) {
+            // Java decider fallback: re-select with the configured cluster. A
+            // failed fallback selection reports its own error, matching the
+            // second decide() call running with the original cluster.
+            auto fallback_selected = proxy.address_selector->select_address(
+                    std::nullopt,
+                    std::span<const std::uint64_t>(excluded_selection_tokens.data(), excluded_selection_token_count));
+            if (fallback_selected) {
+                access_log_request.ultimate_cluster = *fallback_cluster;
+                selected = std::move(fallback_selected);
+            } else {
+                selected = std::unexpected(fallback_selected.error());
+            }
+        }
         if (!selected) {
             ProxyFailure selected_failure = previous_failure.value_or(from_select_error(selected.error()));
             if (!previous_failure) {

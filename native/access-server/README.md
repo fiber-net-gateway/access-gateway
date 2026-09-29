@@ -230,7 +230,10 @@ cp native/access-server/access-server.env.example access-server.env
 - gray data ID `ploto.unified-access.gray-match`；
 - Naming/gray group `DEFAULT_GROUP`；service 路由缺省 cluster 固定为 `default`。
 - 测试环境 Host cluster 模式默认关闭；仅在明确配置
-  `ACCESS_SERVER_TEST_MODE=true` 时启用。
+  `ACCESS_SERVER_TEST_MODE=true` 时启用。同一开关控制测试环境的 cluster 回退白名单
+  `ploto.test.temp-cluster-apps`（DEFAULT_GROUP，service→cluster 集合）：请求指定 cluster
+  选择失败（无实例）且未列入白名单时回退用配置 cluster 重选；production 对无实例与
+  熔断失败均无条件回退（与 Java decider 一致）。
 
 完整键和值示例见 [`access-server.env.example`](access-server.env.example)。配置文件采用
 严格的 `KEY=VALUE` 行格式，空行和以 `#` 开头的注释会忽略；重复键和未知键会使进程

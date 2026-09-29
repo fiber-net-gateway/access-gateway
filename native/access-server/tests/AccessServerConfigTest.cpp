@@ -63,6 +63,8 @@ TEST(AccessServerConfigTest, LoadsJavaServerDefaultsAndNacosSettings) {
     EXPECT_EQ(config->watcher_options().project_route_data_id_prefix, kProjectRouteDataIdPrefix);
     EXPECT_EQ(config->watcher_options().project_route_group, kProjectRouteGroup);
     EXPECT_EQ(config->gray_watcher_options().data_id, kGrayConfigDataId);
+    EXPECT_EQ(config->temp_cluster_watcher_options().data_id, kTempClusterConfigDataId);
+    EXPECT_EQ(config->temp_cluster_watcher_options().group, kDefaultNacosGroup);
     EXPECT_EQ(config->service_discovery_options().group, kDefaultNacosGroup);
     EXPECT_EQ(config->instance_registration_options().service_name, "unified-access-server");
     EXPECT_EQ(config->instance_registration_options().group, kDefaultNacosGroup);
@@ -231,6 +233,7 @@ TEST(AccessServerConfigTest, LoadsExplicitRuntimeAndCompatibilityKeys) {
         ACCESS_SERVER_ROUTE_DATA_ID_PREFIX=custom.route.
         ACCESS_SERVER_ROUTE_GROUP=CUSTOM-ROUTE
         ACCESS_SERVER_GRAY_DATA_ID=custom.gray
+        ACCESS_SERVER_TEMP_CLUSTER_DATA_ID=custom.temp
         ACCESS_SERVER_NAMING_GROUP=CUSTOM-GROUP
         ACCESS_SERVER_ZONE=sh
         NACOS_SERVER_ADDRESSES=10.0.0.1
@@ -267,6 +270,8 @@ TEST(AccessServerConfigTest, LoadsExplicitRuntimeAndCompatibilityKeys) {
     EXPECT_EQ(config->watcher_options().project_route_group, "CUSTOM-ROUTE");
     EXPECT_EQ(config->gray_watcher_options().data_id, "custom.gray");
     EXPECT_EQ(config->gray_watcher_options().group, "CUSTOM-GROUP");
+    EXPECT_EQ(config->temp_cluster_watcher_options().data_id, "custom.temp");
+    EXPECT_EQ(config->temp_cluster_watcher_options().group, "CUSTOM-GROUP");
     EXPECT_EQ(config->service_discovery_options().group, "CUSTOM-GROUP");
     EXPECT_EQ(config->service_discovery_options().zone, "sh");
     EXPECT_EQ(config->nacos_config().username(), "user");

@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <expected>
 #include <memory>
@@ -343,6 +344,106 @@ struct FailureCase {
     std::optional<AccessServerRuntimeErrorCode> error;
     std::vector<std::string> expected_events;
 };
+
+struct TestModeProbeResult {
+    bool started = false;
+    bool circuit_open_falls_back = false;
+    bool no_hosts_falls_back = false;
+    std::vector<std::string> events;
+};
+
+TestModeProbeResult run_supervisor_probe(bool test_mode) {
+    TestModeProbeResult result;
+    LifecycleEvents events;
+    FakeResourceLifecycle cat{.events = &events, .name = "cat"};
+    FakeResourceLifecycle nacos{.events = &events, .name = "nacos"};
+    auto config_service = std::make_unique<FakeConfigService>(events, false, "", ProjectListReplay::Valid, false);
+    auto naming_service = std::make_unique<FakeNamingService>(events, false);
+
+    fiber::event::EventLoop coordinator_loop;
+    fiber::event::EventLoopGroup nacos_group(1);
+    fiber::event::EventLoopGroup cat_group(1);
+    fiber::event::EventLoopGroup http_workers(1);
+    nacos_group.start();
+    cat_group.start();
+    http_workers.start();
+
+    AccessControlPlaneOptions options;
+    options.config_watcher.project_list_data_id = "projects";
+    options.config_watcher.project_route_data_id_prefix = "routes.";
+    options.config_watcher.project_route_group = "routes-group";
+    options.gray_watcher.data_id = "gray";
+    options.gray_watcher.group = "gray-group";
+    options.tls_certificate_watcher.data_id = "tls";
+    options.tls_certificate_watcher.group = "tls-group";
+    // tls_enabled=false keeps start() from waiting for the first certificate
+    // snapshot, matching the success rollout case this probe mirrors.
+    options.tls_enabled = false;
+    options.test_mode = test_mode;
+
+    {
+        AccessControlPlaneSupervisor supervisor(coordinator_loop, nacos_group.at(0), cat_group.at(0), http_workers,
+                                                std::move(options),
+                                                AccessControlPlaneDependencies{
+                                                        .config_service = std::move(config_service),
+                                                        .naming_service = std::move(naming_service),
+                                                        .cat_lifecycle = cat.adapter(),
+                                                        .nacos_lifecycle = nacos.adapter(),
+                                                });
+
+        fiber::async::spawn(coordinator_loop, [&]() -> fiber::async::DetachedTask {
+            auto started = co_await supervisor.start();
+            result.started = started.has_value();
+            if (started) {
+                const fiber::access_server::ProxyClusterFallback fallback = supervisor.cluster_fallback();
+                result.circuit_open_falls_back =
+                        fallback.should_fallback != nullptr &&
+                        fallback.should_fallback(fallback.context, "orders", "stable", "gray",
+                                                 fiber::access_server::ProxyAddressSelectErrorCode::CircuitOpen);
+                result.no_hosts_falls_back =
+                        fallback.should_fallback != nullptr &&
+                        fallback.should_fallback(fallback.context, "orders", "stable", "temp-1",
+                                                 fiber::access_server::ProxyAddressSelectErrorCode::NoHosts);
+            }
+            co_await supervisor.shutdown();
+            coordinator_loop.stop();
+        });
+
+        coordinator_loop.run();
+    }
+
+    http_workers.stop();
+    http_workers.join();
+    cat_group.stop();
+    cat_group.join();
+    nacos_group.stop();
+    nacos_group.join();
+
+    result.events = events.snapshot();
+    return result;
+}
+
+bool contains_event(const std::vector<std::string> &events, std::string_view name) {
+    return std::find(events.begin(), events.end(), name) != events.end();
+}
+
+TEST(AccessControlPlaneSupervisorTest, GatesTempClusterWatcherAndFallbackPolicyOnTestMode) {
+    // Production keeps the unconditional Java GrayTagClusterDecider fallback
+    // and never subscribes to the test-mode whitelist.
+    const TestModeProbeResult production = run_supervisor_probe(false);
+    ASSERT_TRUE(production.started);
+    EXPECT_FALSE(contains_event(production.events, "ploto.test.temp-cluster-apps.start"));
+    EXPECT_TRUE(production.circuit_open_falls_back);
+    EXPECT_TRUE(production.no_hosts_falls_back);
+
+    // Test mode starts the whitelist watcher and restricts fallback to
+    // no-host selections of unlisted clusters (empty whitelist here).
+    const TestModeProbeResult test_env = run_supervisor_probe(true);
+    ASSERT_TRUE(test_env.started);
+    EXPECT_TRUE(contains_event(test_env.events, "ploto.test.temp-cluster-apps.start"));
+    EXPECT_FALSE(test_env.circuit_open_falls_back);
+    EXPECT_TRUE(test_env.no_hosts_falls_back);
+}
 
 class AccessControlPlaneSupervisorFailureTest : public testing::TestWithParam<FailureCase> {};
 

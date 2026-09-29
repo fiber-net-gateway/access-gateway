@@ -51,6 +51,8 @@ std::string_view access_server_runtime_stage_name(AccessServerRuntimeErrorCode c
             return "start CAT client";
         case AccessServerRuntimeErrorCode::StartGrayWatcher:
             return "subscribe gray configuration";
+        case AccessServerRuntimeErrorCode::StartTempClusterWatcher:
+            return "subscribe temp-cluster configuration";
         case AccessServerRuntimeErrorCode::StartTlsCertificateWatcher:
             return "subscribe TLS certificate configuration";
         case AccessServerRuntimeErrorCode::StartAccessWatcher:

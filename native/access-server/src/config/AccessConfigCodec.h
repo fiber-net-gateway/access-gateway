@@ -14,6 +14,7 @@ namespace fiber::access_server {
 
 using ProjectConfigResult = std::expected<std::optional<ProjectConfig>, AccessConfigError>;
 using GrayMatchConfigResult = std::expected<std::optional<GrayMatchConfig>, AccessConfigError>;
+using TempClusterConfigResult = std::expected<std::optional<TempClusterConfig>, AccessConfigError>;
 using ProjectListResult = std::expected<std::vector<std::string>, AccessConfigError>;
 
 // Empty content and a JSON null match AccessRouteConfigWatcher's empty-conf
@@ -25,6 +26,12 @@ using ProjectListResult = std::expected<std::vector<std::string>, AccessConfigEr
 // null or empty object is an accepted update that clears all gray rules.
 [[nodiscard]] GrayMatchConfigResult parse_gray_match_config(std::string_view content,
                                                             const AccessConfigLimits &limits = kAccessConfigLimits);
+
+// Java temp-cluster whitelist (test environments only): every valid payload —
+// including empty and null content — is an accepted update; an empty payload
+// clears the whitelist. Invalid payloads are rejected so the watcher can keep
+// the previous snapshot.
+[[nodiscard]] TempClusterConfigResult parse_temp_cluster_config(std::string_view content);
 
 // Matches DynamicRouteConfigWatcher: the complete value is trimmed once and
 // then split on ';'. Individual project names are not trimmed.

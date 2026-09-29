@@ -66,6 +66,7 @@ AccessControlPlaneSupervisor::AccessControlPlaneSupervisor(event::EventLoop &coo
     config_compiler_(nacos_loop), runtime_metrics_(nacos_loop, options.process_metrics),
     nacos_status_monitor_(nacos_loop, *config_service_, *naming_service_, runtime_metrics_.discovery().observer()),
     activation_evidence_(nacos_loop, activation_identity(options.activation_endpoint)), gray_store_(http_workers),
+    temp_cluster_store_(),
     service_discovery_(nacos_loop, *naming_service_,
                        AccessServiceOps{.swrr_options = options.service_discovery.swrr_options,
                                         .zone = options.service_discovery.zone,
@@ -80,6 +81,7 @@ AccessControlPlaneSupervisor::AccessControlPlaneSupervisor(event::EventLoop &coo
     gray_watcher_(nacos_loop, *config_service_, gray_store_, std::move(options.gray_watcher),
                   options.activation_endpoint.enabled ? activation_evidence_.gray_observer()
                                                       : AccessGrayActivationEvidenceObserver{}),
+    temp_cluster_watcher_(nacos_loop, *config_service_, temp_cluster_store_, std::move(options.temp_cluster_watcher)),
     tls_certificate_store_(nacos_loop, http_workers, options.quic_enabled, runtime_metrics_.tls().observer(),
                            TlsCertificateIdentityObserver{
                                    .context = &config_watcher_,
@@ -89,7 +91,7 @@ AccessControlPlaneSupervisor::AccessControlPlaneSupervisor(event::EventLoop &coo
                              std::move(options.tls_certificate_watcher),
                              options.activation_endpoint.enabled ? activation_evidence_.tls_observer()
                                                                  : AccessTlsActivationEvidenceObserver{}),
-    tls_enabled_(options.tls_enabled) {
+    tls_enabled_(options.tls_enabled), test_mode_(options.test_mode) {
     FIBER_ASSERT(config_service_);
     FIBER_ASSERT(naming_service_);
     route_store_.set_tls_client_identity_resolver(tls_certificate_store_.client_identity_resolver());
@@ -259,6 +261,19 @@ async::DetachedTask AccessControlPlaneSupervisor::start_nacos_on_owner() noexcep
         co_return;
     }
     gray_watcher_started_ = true;
+    if (test_mode_) {
+        auto temp_cluster_started = temp_cluster_watcher_.start();
+        if (!temp_cluster_started) {
+            nacos_start_publisher_->publish(NacosStartStatus{
+                    .error = make_access_server_runtime_io_error(AccessServerRuntimeErrorCode::StartTempClusterWatcher,
+                                                                 temp_cluster_started.error().io_error,
+                                                                 std::move(temp_cluster_started.error().message)),
+            });
+            nacos_start_tasks_.done();
+            co_return;
+        }
+        temp_cluster_watcher_started_ = true;
+    }
     auto tls_started = tls_certificate_watcher_.start();
     if (!tls_started) {
         nacos_start_publisher_->publish(NacosStartStatus{
@@ -298,6 +313,10 @@ async::DetachedTask AccessControlPlaneSupervisor::shutdown_nacos_on_owner() noex
     if (tls_certificate_watcher_started_) {
         co_await tls_certificate_watcher_.shutdown();
         tls_certificate_watcher_started_ = false;
+    }
+    if (temp_cluster_watcher_started_) {
+        co_await temp_cluster_watcher_.shutdown();
+        temp_cluster_watcher_started_ = false;
     }
     if (gray_watcher_started_) {
         co_await gray_watcher_.shutdown();
