@@ -19,6 +19,9 @@ struct ProxyExecutorOptions {
     std::size_t request_body_chunk_size = 64 * 1024;
     std::size_t response_body_chunk_size = 64 * 1024;
     std::chrono::milliseconds downstream_write_timeout{30000};
+    // Java cluster-decider fallback policy; absent in tests which pin the
+    // pre-decider behavior.
+    ProxyClusterFallback cluster_fallback;
 };
 
 class ProxyExecutor final : public common::NonCopyable, public common::NonMovable {

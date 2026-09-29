@@ -13,6 +13,8 @@
 #include "GrayMatchStore.h"
 #include "NacosStatusMonitor.h"
 #include "RouteConfigStore.h"
+#include "TempClusterConfigWatcher.h"
+#include "TempClusterStore.h"
 #include "TlsCertificateStore.h"
 #include "TlsCertificateWatcher.h"
 
@@ -64,12 +66,16 @@ struct AccessControlPlaneOptions {
     AccessActivationEndpointOptions activation_endpoint;
     AccessConfigWatcherOptions config_watcher;
     GrayConfigWatcherOptions gray_watcher;
+    TempClusterConfigWatcherOptions temp_cluster_watcher;
     TlsCertificateWatcherOptions tls_certificate_watcher;
     AccessServiceDiscoveryOptions service_discovery;
     AccessInstanceRegistrationOptions instance_registration;
     AccessProcessMetricsSources process_metrics;
     bool tls_enabled = false;
     bool quic_enabled = false;
+    // Test environments subscribe the temp-cluster whitelist and use the Java
+    // test decider fallback; production uses the unconditional fallback.
+    bool test_mode = false;
 };
 
 class AccessControlPlaneSupervisor final : public common::NonCopyable, public common::NonMovable {
@@ -89,6 +95,12 @@ public:
 
     [[nodiscard]] RouteConfigStore &route_store() noexcept { return route_store_; }
     [[nodiscard]] ProxyClusterMatcher gray_matcher() noexcept { return gray_store_.adapter(); }
+    // Java decider selection for the request-specified cluster: test mode
+    // keeps circuit-open failures and honors the temp-cluster whitelist,
+    // production falls back on every selection failure.
+    [[nodiscard]] ProxyClusterFallback cluster_fallback() noexcept {
+        return test_mode_ ? temp_cluster_store_.adapter() : make_unconditional_cluster_fallback();
+    }
     [[nodiscard]] AccessRuntimeMetrics &runtime_metrics() noexcept { return runtime_metrics_; }
     [[nodiscard]] AccessActivationEvidenceStore &activation_evidence() noexcept { return activation_evidence_; }
     [[nodiscard]] cat::CatClient *cat_client() const noexcept { return cat_client_.get(); }
@@ -153,10 +165,12 @@ private:
     NacosStatusMonitor nacos_status_monitor_;
     AccessActivationEvidenceStore activation_evidence_;
     GrayMatchStore gray_store_;
+    TempClusterStore temp_cluster_store_;
     AccessServiceDiscovery service_discovery_;
     RouteConfigStore route_store_;
     AccessConfigWatcher config_watcher_;
     GrayConfigWatcher gray_watcher_;
+    TempClusterConfigWatcher temp_cluster_watcher_;
     TlsCertificateStore tls_certificate_store_;
     TlsCertificateWatcher tls_certificate_watcher_;
     async::WaitGroup nacos_start_tasks_;
@@ -176,11 +190,13 @@ private:
     std::optional<async::Watch<bool>::Publisher> cat_stopped_publisher_;
     State state_ = State::Created;
     bool tls_enabled_ = false;
+    bool test_mode_ = false;
     bool cat_start_attempted_ = false;
     bool nacos_client_start_attempted_ = false;
     bool config_service_start_attempted_ = false;
     bool naming_service_start_attempted_ = false;
     bool gray_watcher_started_ = false;
+    bool temp_cluster_watcher_started_ = false;
     bool tls_certificate_watcher_started_ = false;
     bool config_watcher_started_ = false;
     bool nacos_shutdown_spawned_ = false;

@@ -652,7 +652,14 @@ NamingService route 依赖协调和原子服务目录：仅接受 enabled、heal
 不属于兼容边界。
 
 production gray 原子快照在 selector 前覆盖 cluster，非空 context cluster 次之，
-最后才使用 route 默认 cluster。`ProxyExecutor` 在选择/连接 upstream、转发 request/response
+最后才使用 route 默认 cluster。请求指定 cluster（context cluster、Host 编码 cluster 或
+`HI-TRACE-CLUSTER`）与路由配置 cluster 不同且选择失败时，按 Java cluster decider 语义
+回退：测试环境（`ACCESS_SERVER_TEST_MODE=true`）仅在选择结果为无实例（Java S_NO_IP）且
+service+cluster 未列入 `ploto.test.temp-cluster-apps` 白名单（DEFAULT_GROUP，内容为
+service→cluster 集合的 JSON map；空或 `null` 内容清空白名单，与 gray 规则的保留语义不同；
+非法内容保留旧快照）时，用配置 cluster 重新选择；production 对无实例和熔断
+（S_CIRCUIT_BROKEN）均无条件回退。静态 addresses selector 无配置 cluster，不参与回退；
+access log 的 ultimate cluster 列记录最终实际使用的 cluster。`ProxyExecutor` 在选择/连接 upstream、转发 request/response
 以及 tunnel 期间监视 downstream response channel；downstream 关闭会销毁未完成的 proxy
 coroutine，并使 active upstream exchange 退出 pool 复用。RESPONSE、redirect 和错误响应
 直接等待 downstream IO，由相应读写操作返回 channel 关闭错误。上述组件已在

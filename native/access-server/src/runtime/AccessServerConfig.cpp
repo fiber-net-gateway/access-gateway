@@ -60,6 +60,7 @@ constexpr std::string_view kProjectsDataId = "ACCESS_SERVER_PROJECTS_DATA_ID";
 constexpr std::string_view kRouteDataIdPrefix = "ACCESS_SERVER_ROUTE_DATA_ID_PREFIX";
 constexpr std::string_view kRouteGroup = "ACCESS_SERVER_ROUTE_GROUP";
 constexpr std::string_view kGrayDataId = "ACCESS_SERVER_GRAY_DATA_ID";
+constexpr std::string_view kTempClusterDataId = "ACCESS_SERVER_TEMP_CLUSTER_DATA_ID";
 constexpr std::string_view kNamingGroup = "ACCESS_SERVER_NAMING_GROUP";
 constexpr std::string_view kZone = "ACCESS_SERVER_ZONE";
 constexpr std::string_view kCluster = "ACCESS_SERVER_CLUSTER";
@@ -380,6 +381,7 @@ AccessServerConfig::AccessServerConfig(
         AccessDnsMode dns_mode, std::string dns_resolver_config_path, dns::DnsNameserverList dns_override_nameservers,
         std::optional<cat::CatClientConfig> cat_config, nacos::NacosClientConfig nacos_config,
         AccessConfigWatcherOptions watcher_options, GrayConfigWatcherOptions gray_watcher_options,
+        TempClusterConfigWatcherOptions temp_cluster_watcher_options,
         TlsCertificateWatcherOptions tls_certificate_watcher_options,
         AccessServiceDiscoveryOptions service_discovery_options,
         AccessInstanceRegistrationOptions instance_registration_options,
@@ -398,6 +400,7 @@ AccessServerConfig::AccessServerConfig(
     dns_override_nameservers_(std::move(dns_override_nameservers)), cat_config_(std::move(cat_config)),
     nacos_config_(std::move(nacos_config)), watcher_options_(std::move(watcher_options)),
     gray_watcher_options_(std::move(gray_watcher_options)),
+    temp_cluster_watcher_options_(std::move(temp_cluster_watcher_options)),
     tls_certificate_watcher_options_(std::move(tls_certificate_watcher_options)),
     service_discovery_options_(std::move(service_discovery_options)),
     instance_registration_options_(std::move(instance_registration_options)),
@@ -460,6 +463,7 @@ AccessServerConfig::load_from_string(std::string_view input) {
     nacos_params.namespace_id = "public";
     AccessConfigWatcherOptions watcher_options;
     GrayConfigWatcherOptions gray_options;
+    TempClusterConfigWatcherOptions temp_cluster_options;
     TlsCertificateWatcherOptions tls_certificate_options;
     AccessServiceDiscoveryOptions service_discovery_options;
     AccessInstanceRegistrationOptions instance_registration_options;
@@ -676,9 +680,12 @@ AccessServerConfig::load_from_string(std::string_view input) {
             watcher_options.project_route_group = entry.value;
         } else if (entry.key == kGrayDataId) {
             gray_options.data_id = entry.value;
+        } else if (entry.key == kTempClusterDataId) {
+            temp_cluster_options.data_id = entry.value;
         } else if (entry.key == kNamingGroup) {
             service_discovery_options.group = entry.value;
             gray_options.group = entry.value;
+            temp_cluster_options.group = entry.value;
             instance_registration_options.group = entry.value;
         } else if (entry.key == kZone) {
             service_discovery_options.zone = entry.value;
@@ -757,6 +764,7 @@ AccessServerConfig::load_from_string(std::string_view input) {
 
     if (watcher_options.project_list_data_id.empty() || watcher_options.project_route_data_id_prefix.empty() ||
         watcher_options.project_route_group.empty() || gray_options.data_id.empty() || gray_options.group.empty() ||
+        temp_cluster_options.data_id.empty() || temp_cluster_options.group.empty() ||
         tls_certificate_options.data_id.empty() || tls_certificate_options.group.empty() ||
         service_discovery_options.group.empty()) {
         return std::unexpected(
@@ -897,7 +905,7 @@ AccessServerConfig::load_from_string(std::string_view input) {
             std::chrono::milliseconds(upstream_connect_timeout_millis), happy_eyeballs_policy, dns_mode,
             std::move(dns_resolver_config_path), std::move(dns_override_nameservers), std::move(cat_config),
             std::move(*nacos_config), std::move(watcher_options), std::move(gray_options),
-            std::move(tls_certificate_options), std::move(service_discovery_options),
+            std::move(temp_cluster_options), std::move(tls_certificate_options), std::move(service_discovery_options),
             std::move(instance_registration_options), selected_registration_listener);
 }
 

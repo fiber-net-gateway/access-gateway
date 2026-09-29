@@ -132,6 +132,19 @@ struct ProxyClusterMatcher {
     Function matches = nullptr;
 };
 
+// Java cluster-decider fallback: when a request-specified cluster yields no
+// upstream, the decider may retry the selection with the route's configured
+// cluster. The policy encodes the environment difference between the Java
+// deciders (test keeps circuit-break failures and honors the temp-cluster
+// whitelist; production falls back on every selection failure).
+struct ProxyClusterFallback {
+    using Function = bool (*)(void *context, std::string_view service, std::string_view configured_cluster,
+                              std::string_view requested_cluster, ProxyAddressSelectErrorCode error) noexcept;
+
+    void *context = nullptr;
+    Function should_fallback = nullptr;
+};
+
 [[nodiscard]] std::shared_ptr<ProxyAddressSelector>
 make_static_proxy_address_selector(std::vector<AccessUpstreamInstance> addresses);
 

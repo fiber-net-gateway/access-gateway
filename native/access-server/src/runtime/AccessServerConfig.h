@@ -11,6 +11,7 @@
 #include "AccessRuntimeCoordinator.h"
 #include "AccessServiceDiscovery.h"
 #include "GrayConfigWatcher.h"
+#include "TempClusterConfigWatcher.h"
 #include "TlsCertificateWatcher.h"
 
 #include <chrono>
@@ -99,6 +100,9 @@ public:
     [[nodiscard]] const GrayConfigWatcherOptions &gray_watcher_options() const noexcept {
         return gray_watcher_options_;
     }
+    [[nodiscard]] const TempClusterConfigWatcherOptions &temp_cluster_watcher_options() const noexcept {
+        return temp_cluster_watcher_options_;
+    }
     [[nodiscard]] const TlsCertificateWatcherOptions &tls_certificate_watcher_options() const noexcept {
         return tls_certificate_watcher_options_;
     }
@@ -123,6 +127,7 @@ private:
                        std::string dns_resolver_config_path, dns::DnsNameserverList dns_override_nameservers,
                        std::optional<cat::CatClientConfig> cat_config, nacos::NacosClientConfig nacos_config,
                        AccessConfigWatcherOptions watcher_options, GrayConfigWatcherOptions gray_watcher_options,
+                       TempClusterConfigWatcherOptions temp_cluster_watcher_options,
                        TlsCertificateWatcherOptions tls_certificate_watcher_options,
                        AccessServiceDiscoveryOptions service_discovery_options,
                        AccessInstanceRegistrationOptions instance_registration_options,
@@ -151,6 +156,7 @@ private:
     nacos::NacosClientConfig nacos_config_;
     AccessConfigWatcherOptions watcher_options_;
     GrayConfigWatcherOptions gray_watcher_options_;
+    TempClusterConfigWatcherOptions temp_cluster_watcher_options_;
     TlsCertificateWatcherOptions tls_certificate_watcher_options_;
     AccessServiceDiscoveryOptions service_discovery_options_;
     AccessInstanceRegistrationOptions instance_registration_options_;

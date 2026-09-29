@@ -91,8 +91,9 @@ Document any test that cannot be run and why; do not claim production compatibil
 | Project route | `ploto.unified-access.route.<project>` | `ACCESS-SERVER` |
 | TLS certificate snapshot | `ploto.unified-access.tls-certificates` | `ACCESS-SERVER` |
 | Gray rules | `ploto.unified-access.gray-match` | `DEFAULT_GROUP` |
+| Test-env cluster whitelist | `ploto.test.temp-cluster-apps` | `DEFAULT_GROUP` |
 
-The project list is a semicolon-separated string, not JSON. Route and gray-rule payloads must retain the native compatibility codec's Java wire behavior. Any change to the wire model, defaults, validation, routing behavior, publication semantics, or activation evidence is cross-component work: update the native codec/runtime and tests first (or in the same change), then server schemas/services, frontend types and editors, fixtures, and user docs.
+The project list is a semicolon-separated string, not JSON. Route and gray-rule payloads must retain the native compatibility codec's Java wire behavior. `ploto.test.temp-cluster-apps` (JSON map of service → cluster set) is consumed by the data plane only when `ACCESS_SERVER_TEST_MODE=true` — it gates the request-specified-cluster fallback to the configured cluster; it is not published by the console and carries no activation evidence. Any change to the wire model, defaults, validation, routing behavior, publication semantics, or activation evidence is cross-component work: update the native codec/runtime and tests first (or in the same change), then server schemas/services, frontend types and editors, fixtures, and user docs.
 
 ## Commit conventions
 

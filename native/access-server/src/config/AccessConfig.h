@@ -14,6 +14,7 @@ inline constexpr std::string_view kProjectListDataId = "ploto.unified-access.pro
 inline constexpr std::string_view kProjectRouteDataIdPrefix = "ploto.unified-access.route.";
 inline constexpr std::string_view kProjectRouteGroup = "ACCESS-SERVER";
 inline constexpr std::string_view kGrayConfigDataId = "ploto.unified-access.gray-match";
+inline constexpr std::string_view kTempClusterConfigDataId = "ploto.test.temp-cluster-apps";
 inline constexpr std::string_view kDefaultNacosGroup = "DEFAULT_GROUP";
 
 enum class RouteType : std::uint8_t {
@@ -151,6 +152,19 @@ struct GrayMatchConfigEntry {
 };
 
 using GrayMatchConfig = std::vector<GrayMatchConfigEntry>;
+
+// Java ReqTraceSpecifiedClusterDecider's ploto.test.temp-cluster-apps content:
+// service name -> clusters for which a request-specified cluster with no
+// instance must NOT fall back to the configured cluster (the empty-cluster
+// error is kept instead).
+struct TempClusterConfigEntry {
+    std::string service;
+    std::vector<std::string> clusters;
+
+    bool operator==(const TempClusterConfigEntry &) const = default;
+};
+
+using TempClusterConfig = std::vector<TempClusterConfigEntry>;
 
 } // namespace fiber::access_server
 
