@@ -15,6 +15,9 @@ namespace {
 
 constexpr std::string_view kTraceCluster = "HI-TRACE-CLUSTER";
 constexpr std::string_view kOriginHostHeader = "ploto-origin-host";
+constexpr std::string_view kHostHeaderName = "host";
+constexpr std::string_view kHostHeaderLowcase = "host";
+constexpr std::uint64_t kHostHeaderHash = http::http_header_name_hash(kHostHeaderLowcase);
 constexpr std::string_view kStrictTransportSecurity = "Strict-Transport-Security";
 constexpr std::string_view kStrictTransportSecurityLowcase = "strict-transport-security";
 constexpr std::uint64_t kStrictTransportSecurityHash = http::http_header_name_hash(kStrictTransportSecurityLowcase);
@@ -141,7 +144,15 @@ common::IoResult<RouteMatch> match_route(const ProjectRouteSnapshot &project, ht
     return context.result();
 }
 
-RequestHostContext resolve_request_host(const http::HttpExchange &exchange, bool test_mode) {
+// Mirrors Java ExtClusterNameFetcher: in test mode the request Host header may carry a
+// "_<cluster>" segment before the first dot ("api_gray.example.com"). The suffix selects the
+// upstream cluster and the exchange's Host header is rewritten to the stripped form, so every
+// later reader — $header.host templates and route conditions, Location/Refresh rewriting, the
+// websocket session record — observes the same host Java would have set. The original host
+// stays in RequestHostContext::origin_host for the outbound ploto-origin-host header.
+// The rewrite uses the pool-copying set() overload and reseats the first-wins host ref, per
+// the upstream mutable-request-phase contract; it must run before the first $header access.
+std::expected<RequestHostContext, Err> resolve_request_host(http::HttpExchange &exchange, bool test_mode) noexcept {
     RequestHostContext result;
     result.origin_host = exchange.header("Host");
     result.effective_host = result.origin_host;
@@ -159,6 +170,12 @@ RequestHostContext resolve_request_host(const http::HttpExchange &exchange, bool
         result.effective_host = result.normalized_host;
         result.cluster = result.origin_host.substr(underscore + 1, dot - underscore - 1);
         result.extracted_cluster = true;
+        http::HttpHeaders::HeaderField *const host_field = exchange.request_headers().set(
+                kHostHeaderName, result.normalized_host, kHostHeaderLowcase.data(), kHostHeaderHash);
+        if (host_field == nullptr) {
+            return std::unexpected(Err::from_error(common::IoErr::NoMem));
+        }
+        exchange.request_header_refs().host = host_field;
         return result;
     }
     result.cluster = exchange.header(kTraceCluster);
@@ -267,7 +284,11 @@ AccessRequestHandler::handle_and_finalize(http::HttpExchange &exchange,
 async::Task<Result<void>> AccessRequestHandler::handle_impl(http::HttpExchange &exchange,
                                                             AccessRequestTelemetry &telemetry) const noexcept {
     const std::shared_ptr<const AccessRouteSnapshot> snapshot = snapshot_provider_.pin(snapshot_provider_.context);
-    RequestHostContext request_host = resolve_request_host(exchange, options_.test_mode);
+    const std::expected<RequestHostContext, Err> resolved_host = resolve_request_host(exchange, options_.test_mode);
+    if (!resolved_host) {
+        co_return std::unexpected(resolved_host.error());
+    }
+    RequestHostContext request_host = std::move(*resolved_host);
     const ProjectHostMatch host_match = snapshot->match_host(request_host.effective_host);
     if (!host_match) {
         co_return std::unexpected(Err::from_exception(Exception::router_not_found()));
