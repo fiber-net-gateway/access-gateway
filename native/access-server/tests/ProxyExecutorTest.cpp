@@ -89,6 +89,9 @@ struct UpstreamState {
         std::chrono::milliseconds delay{};
         std::chrono::milliseconds body_initial_delay{};
         std::chrono::milliseconds body_chunk_delay{};
+        // Holds an incomplete body stream open this long before the fixture
+        // aborts it, so an idle-cut fires before the transport ends.
+        std::chrono::milliseconds body_tail_delay{};
         bool chunked = false;
         bool websocket = false;
         std::promise<void> *request_received = nullptr;
@@ -234,10 +237,16 @@ public:
     }
 
     fiber::async::Task<fiber::common::IoResult<std::size_t>> readv(std::size_t size, fiber::mem::IoBufChain &out,
-                                                                   std::chrono::milliseconds) override {
+                                                                   std::chrono::milliseconds timeout) override {
         if (input_offset_ == input_.size()) {
             if (hold_open_after_input_) {
-                co_await fiber::async::sleep(10s);
+                // Mirror real transports: a held-open read fails with TimedOut
+                // once the caller's deadline elapses. Unbounded (or >10s)
+                // reads keep the historical 10s hold followed by EOF.
+                co_await fiber::async::sleep(std::min<std::chrono::milliseconds>(timeout, 10s));
+                if (timeout <= 10s) {
+                    co_return std::unexpected(fiber::common::IoErr::TimedOut);
+                }
             }
             co_return static_cast<std::size_t>(0);
         }
@@ -594,6 +603,9 @@ fiber::async::Task<void> serve_upstream(fiber::http::HttpExchange &exchange, Ups
             }
         }
         if (!complete) {
+            if (state->response.body_tail_delay > 0ms) {
+                co_await fiber::async::sleep(state->response.body_tail_delay);
+            }
             (void) exchange.abort(fiber::common::IoErr::ConnReset);
         }
     }
@@ -2538,6 +2550,177 @@ TEST(ProxyExecutorTest, AbortsDownstreamAfterAnUpstreamBodyEndsEarly) {
     EXPECT_EQ(selector_state.reports, (std::vector<std::pair<std::uint64_t, bool>>{
                                               {1, false},
                                               {2, false},
+                                      }));
+
+    std::promise<void> shutdown_promise;
+    auto shutdown_future = shutdown_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() { return shutdown(&pool, &server, &shutdown_promise); });
+    ASSERT_EQ(shutdown_future.wait_for(2s), std::future_status::ready);
+    group.stop();
+    group.join();
+}
+
+TEST(ProxyExecutorTest, BodyReadIdleTimeoutFloorsBelowTheRouteTimeout) {
+    const std::chrono::milliseconds floor{60000};
+    EXPECT_EQ(fiber::access_server::body_read_idle_timeout(0, floor), floor);
+    EXPECT_EQ(fiber::access_server::body_read_idle_timeout(5, floor), floor);
+    EXPECT_EQ(fiber::access_server::body_read_idle_timeout(59999, floor), floor);
+    EXPECT_EQ(fiber::access_server::body_read_idle_timeout(60000, floor), floor);
+    EXPECT_EQ(fiber::access_server::body_read_idle_timeout(300000, floor), std::chrono::milliseconds{300000});
+    EXPECT_EQ(fiber::access_server::body_read_idle_timeout(-1, floor), std::chrono::milliseconds::max());
+}
+
+TEST(ProxyExecutorTest, CutsIdleUpstreamResponseBodyWithoutChargingTheUpstream) {
+    fiber::event::EventLoopGroup group(1);
+    fiber::http::StealableHttp1ConnectionPoolSet pool(group);
+    ASSERT_TRUE(pool.init());
+    group.start();
+
+    UpstreamState upstream_state{
+            .response =
+                    {
+                            .status = 200,
+                            .body_chunks = {"data: event-1\n\n"},
+                            // Mismatched length keeps the chunked stream open;
+                            // body_tail_delay holds it silent until the cut.
+                            .advertised_content_length = 1000,
+                            .body_tail_delay = 1500ms,
+                            .chunked = true,
+                    },
+    };
+    std::promise<std::uint16_t> port_promise;
+    std::promise<TestHttpServer> server_promise;
+    auto port_future = port_promise.get_future();
+    auto server_future = server_promise.get_future();
+    fiber::async::spawn(group.at(0),
+                        [&]() { return start_server(&group.at(0), &upstream_state, &port_promise, &server_promise); });
+
+    TestHttpServer server = server_future.get();
+    ASSERT_NE(server.server, nullptr);
+    const std::uint16_t port = port_future.get();
+    ASSERT_NE(port, 0);
+
+    ServiceSelectorState selector_state{
+            .port = port,
+            .good_host_header = "127.0.0.1:" + std::to_string(port),
+            .bad_host_header = "127.0.0.2:" + std::to_string(port),
+            .good_connection_key = fiber::http::HttpConnectionGroupKey::make(
+                    "127.0.0.1", port, fiber::http::HttpConnectionGroupKey::Scheme::Http),
+            .bad_connection_key = fiber::http::HttpConnectionGroupKey::make(
+                    "127.0.0.2", port, fiber::http::HttpConnectionGroupKey::Scheme::Http),
+    };
+    fiber::access_server::RouteConfigStore store({}, fiber::access_server::ProxyAddressSelectorFactory{
+                                                             .context = &selector_state,
+                                                             .create_service = make_test_service_selector,
+                                                     });
+    auto config = service_project_config();
+    // 200ms route timeout over a 150ms floor: the cut fires well before the
+    // fixture's tail abort, and the whole test stays inside its budgets.
+    (**config.routes->begin()).timeout_millis = 200;
+    auto published = store.apply("orders", std::move(config));
+    ASSERT_TRUE(published) << published.error().message;
+
+    fiber::access_server::ProxyExecutor executor(
+            pool,
+            fiber::access_server::ProxyClusterMatcher{
+                    .context = &selector_state,
+                    .matches = never_match_gray,
+            },
+            {}, fiber::access_server::ProxyExecutorOptions{.body_read_idle_floor = 150ms});
+    std::string output;
+    std::promise<void> request_promise;
+    auto request_future = request_promise.get_future();
+    std::string request = "GET /proxy HTTP/1.1\r\n"
+                          "Host: api.example.com\r\n"
+                          "Connection: close\r\n\r\n";
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_downstream(&group.at(0), &store, executor.adapter(), std::move(request), &output, &request_promise);
+    });
+
+    ASSERT_EQ(request_future.wait_for(5s), std::future_status::ready);
+    EXPECT_NE(output.find("HTTP/1.1 200 OK\r\n"), std::string::npos);
+    EXPECT_NE(output.find("data: event-1"), std::string::npos);
+    EXPECT_EQ(output.find("READ_RESP_BODY"), std::string::npos);
+    EXPECT_EQ(count_status(output, "HTTP/1.1 "), 1U);
+    // The good instance already served the response head and a body chunk; the
+    // idle cut is gateway policy, not an upstream transport failure.
+    EXPECT_EQ(selector_state.reports, (std::vector<std::pair<std::uint64_t, bool>>{
+                                              {1, false},
+                                      }));
+
+    std::promise<void> shutdown_promise;
+    auto shutdown_future = shutdown_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() { return shutdown(&pool, &server, &shutdown_promise); });
+    ASSERT_EQ(shutdown_future.wait_for(5s), std::future_status::ready);
+    group.stop();
+    group.join();
+}
+
+TEST(ProxyExecutorTest, CutsIdleDownstreamRequestBodyWithoutChargingTheUpstream) {
+    fiber::event::EventLoopGroup group(1);
+    fiber::http::StealableHttp1ConnectionPoolSet pool(group);
+    ASSERT_TRUE(pool.init());
+    group.start();
+
+    UpstreamState upstream_state;
+    std::promise<std::uint16_t> port_promise;
+    std::promise<TestHttpServer> server_promise;
+    auto port_future = port_promise.get_future();
+    auto server_future = server_promise.get_future();
+    fiber::async::spawn(group.at(0),
+                        [&]() { return start_server(&group.at(0), &upstream_state, &port_promise, &server_promise); });
+
+    TestHttpServer server = server_future.get();
+    ASSERT_NE(server.server, nullptr);
+    const std::uint16_t port = port_future.get();
+    ASSERT_NE(port, 0);
+
+    ServiceSelectorState selector_state{
+            .port = port,
+            .good_host_header = "127.0.0.1:" + std::to_string(port),
+            .bad_host_header = "127.0.0.2:" + std::to_string(port),
+            .good_connection_key = fiber::http::HttpConnectionGroupKey::make(
+                    "127.0.0.1", port, fiber::http::HttpConnectionGroupKey::Scheme::Http),
+            .bad_connection_key = fiber::http::HttpConnectionGroupKey::make(
+                    "127.0.0.2", port, fiber::http::HttpConnectionGroupKey::Scheme::Http),
+    };
+    fiber::access_server::RouteConfigStore store({}, fiber::access_server::ProxyAddressSelectorFactory{
+                                                             .context = &selector_state,
+                                                             .create_service = make_test_service_selector,
+                                                     });
+    auto config = service_project_config();
+    (**config.routes->begin()).timeout_millis = 200;
+    auto published = store.apply("orders", std::move(config));
+    ASSERT_TRUE(published) << published.error().message;
+
+    fiber::access_server::ProxyExecutor executor(
+            pool,
+            fiber::access_server::ProxyClusterMatcher{
+                    .context = &selector_state,
+                    .matches = never_match_gray,
+            },
+            {}, fiber::access_server::ProxyExecutorOptions{.body_read_idle_floor = 150ms});
+    std::string output;
+    std::promise<void> request_promise;
+    auto request_future = request_promise.get_future();
+    // Five of the promised twenty body bytes, then the transport stalls.
+    std::string request = "POST /proxy HTTP/1.1\r\n"
+                          "Host: api.example.com\r\n"
+                          "Content-Length: 20\r\n"
+                          "Connection: close\r\n\r\n"
+                          "hello";
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_downstream(&group.at(0), &store, executor.adapter(), std::move(request), &output, &request_promise,
+                              nullptr, true);
+    });
+
+    ASSERT_EQ(request_future.wait_for(5s), std::future_status::ready);
+    // The idle read surfaces as a generic 500 io-error response (the Java
+    // body-size mapping only applies to malformed bodies), and the upstream
+    // that was already selected must not be charged for the client's stall.
+    EXPECT_NE(output.find("HTTP/1.1 500"), std::string::npos);
+    EXPECT_EQ(selector_state.reports, (std::vector<std::pair<std::uint64_t, bool>>{
+                                              {1, false},
                                       }));
 
     std::promise<void> shutdown_promise;

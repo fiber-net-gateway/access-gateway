@@ -501,7 +501,10 @@ service: report-service/stable
     <tr>
       <td><code>timeout</code></td>
       <td>PROXY</td>
-      <td>Response-header timeout; default 60000 ms, minimum 5 ms</td>
+      <td>
+        Response-header timeout; also floors the per-read body idle timeout in both directions
+        (<code>max(60s, timeout)</code>); default 60000 ms, minimum 5 ms
+      </td>
     </tr>
     <tr>
       <td><code>max_client_body_size</code></td>

@@ -127,6 +127,10 @@ void AccessServerMetrics::Worker::websocket_session_finished(AccessWebSocketSess
     websocket_sessions_[metric_index(result, AccessWebSocketSessionResult::Count)].inc();
 }
 
+void AccessServerMetrics::Worker::proxy_body_idle_timeout(AccessBodyIdleDirection direction) noexcept {
+    proxy_body_idle_timeouts_[metric_index(direction, AccessBodyIdleDirection::Count)].inc();
+}
+
 AccessServerMetrics::AccessServerMetrics(event::EventLoopGroup &workers, const AccessRuntimeMetrics *runtime_metrics) :
     runtime_metrics_(runtime_metrics) {
     valid_ = initialize(workers);
@@ -211,6 +215,12 @@ bool AccessServerMetrics::initialize(event::EventLoopGroup &worker_group) {
             "closed",
             "aborted",
     };
+    constexpr std::array<std::string_view, 2> kBodyIdleDirections{
+            "request_body",
+            "response_body",
+    };
+    constexpr std::array<std::string_view, 1> kDirectionLabel{"direction"};
+    static_assert(kBodyIdleDirections.size() == static_cast<std::size_t>(AccessBodyIdleDirection::Count));
     constexpr std::array<std::uint64_t, 15> kDurationBounds{
             1000,    5000,    10000,   25000,    50000,    100000,   250000,    500000,
             1000000, 2500000, 5000000, 10000000, 30000000, 60000000, 300000000,
@@ -263,13 +273,16 @@ bool AccessServerMetrics::initialize(event::EventLoopGroup &worker_group) {
                                                            "WebSocket proxy handshake outcomes.", kResultLabel);
     auto websocket_sessions = registry_.register_counter("access_server_websocket_sessions_total",
                                                          "Completed WebSocket proxy session outcomes.", kResultLabel);
+    auto proxy_body_idle_timeouts =
+            registry_.register_counter("access_server_proxy_body_idle_timeouts_total",
+                                       "Proxy body streams cut by the per-read inactivity timeout.", kDirectionLabel);
     auto websocket_sessions_inflight = registry_.register_gauge(
             "access_server_websocket_sessions_inflight", "Established WebSocket proxy sessions currently in flight.",
             prometheus::GaugeReduction::Sum);
     if (!requests || !response_compression || !duration || !inflight || !proxy_executions || !proxy_attempts ||
         !proxy_attempts_inflight || !proxy_failures || !proxy_pool_acquires || !proxy_dns_resolutions ||
         !proxy_connect_attempts || !proxy_connect_candidates || !happy_eyeballs || !websocket_handshakes ||
-        !websocket_sessions || !websocket_sessions_inflight) {
+        !websocket_sessions || !websocket_sessions_inflight || !proxy_body_idle_timeouts) {
         return false;
     }
 
@@ -284,6 +297,7 @@ bool AccessServerMetrics::initialize(event::EventLoopGroup &worker_group) {
     std::array<prometheus::SeriesId, kHappyEyeballsResults.size()> happy_eyeballs_series;
     std::array<prometheus::SeriesId, kWebSocketHandshakeResults.size()> websocket_handshake_series;
     std::array<prometheus::SeriesId, kWebSocketSessionResults.size()> websocket_session_series;
+    std::array<prometheus::SeriesId, kBodyIdleDirections.size()> proxy_body_idle_series;
     if (!register_labeled_series(registry_, *requests, kRequestResults, request_series) ||
         !register_labeled_series(registry_, *response_compression, kCompressionResults, compression_series) ||
         !register_labeled_series(registry_, *proxy_executions, kProxyExecutionResults, proxy_execution_series) ||
@@ -295,7 +309,8 @@ bool AccessServerMetrics::initialize(event::EventLoopGroup &worker_group) {
         !register_labeled_series(registry_, *happy_eyeballs, kHappyEyeballsResults, happy_eyeballs_series) ||
         !register_labeled_series(registry_, *websocket_handshakes, kWebSocketHandshakeResults,
                                  websocket_handshake_series) ||
-        !register_labeled_series(registry_, *websocket_sessions, kWebSocketSessionResults, websocket_session_series)) {
+        !register_labeled_series(registry_, *websocket_sessions, kWebSocketSessionResults, websocket_session_series) ||
+        !register_labeled_series(registry_, *proxy_body_idle_timeouts, kBodyIdleDirections, proxy_body_idle_series)) {
         return false;
     }
     auto duration_series = registry_.register_series(*duration);
@@ -338,7 +353,8 @@ bool AccessServerMetrics::initialize(event::EventLoopGroup &worker_group) {
             !bind_counters(*shard, proxy_connect_series, worker.proxy_connect_attempts_) ||
             !bind_counters(*shard, happy_eyeballs_series, worker.happy_eyeballs_) ||
             !bind_counters(*shard, websocket_handshake_series, worker.websocket_handshakes_) ||
-            !bind_counters(*shard, websocket_session_series, worker.websocket_sessions_)) {
+            !bind_counters(*shard, websocket_session_series, worker.websocket_sessions_) ||
+            !bind_counters(*shard, proxy_body_idle_series, worker.proxy_body_idle_timeouts_)) {
             return false;
         }
         auto duration_value = shard->histogram(*duration_series);

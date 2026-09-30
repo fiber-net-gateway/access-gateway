@@ -207,7 +207,7 @@ matcher 的结构优先级。
 | `status`               | RESPONSE              | 必填；native 接受 100–999，实际应使用标准 HTTP status      |
 | `body`                 | RESPONSE              | 可选；缺失表示空 body                                      |
 | `gzip`                 | RESPONSE/PROXY/SCRIPT | 可选；`true` 使用级别 6，`1`–`9` 指定级别，`false` 关闭    |
-| `timeout`              | PROXY                 | response header timeout；默认 60000 ms，配置值至少 5 ms    |
+| `timeout`              | PROXY                 | response header 超时，同时也是双向 body 读空闲超时的下限（实际取 `max(60s, timeout)`）；默认 60000 ms，配置值至少 5 ms |
 | `max_client_body_size` | RESPONSE/PROXY        | Route 请求体限制；缺失或数值 0 使用 server 默认值          |
 | `max_proxy_body_size`  | PROXY                 | 非零时覆盖 upstream response body 限制                     |
 | `websocket_timeout`    | PROXY                 | 大于 0 时允许 WebSocket tunnel，并作为隧道读写 timeout     |

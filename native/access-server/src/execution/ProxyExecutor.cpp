@@ -845,9 +845,14 @@ async::Task<Result<void>> UpstreamAttempt::run() noexcept {
         std::size_t received_request_body = 0;
         RequestBodyStatsScope request_body_stats(provider_, received_request_body);
         for (;;) {
-            auto body = co_await exchange_.read_body(options_.request_body_chunk_size);
+            auto body = co_await exchange_.read_body(
+                    options_.request_body_chunk_size,
+                    body_read_idle_timeout(proxy_.timeout_millis, options_.body_read_idle_floor));
             if (!body) {
                 (void) upstream.abort(body.error());
+                if (body.error() == common::IoErr::TimedOut) {
+                    telemetry_.record_proxy_body_idle_timeout(AccessBodyIdleDirection::RequestBody);
+                }
                 const ProxyFailure read_failure = failure(ProxyFailurePhase::ReadRequestBody,
                                                           "failed to read downstream request body", body.error());
                 record_provider_failure(provider_, telemetry_, attempt_metrics_, read_failure);
@@ -1120,7 +1125,7 @@ async::Task<Result<void>> UpstreamAttempt::run() noexcept {
             .low_water = proxy_.flush.value_or(false)
                                  ? http::kUnbufferedBodyPipeLowWater
                                  : std::min(options_.response_body_chunk_size, http::kDefaultBodyPipeLowWater),
-            .read_timeout = std::chrono::milliseconds::max(),
+            .read_timeout = body_read_idle_timeout(proxy_.timeout_millis, options_.body_read_idle_floor),
             .write_timeout = options_.downstream_write_timeout,
     };
     auto piped =
@@ -1136,7 +1141,15 @@ async::Task<Result<void>> UpstreamAttempt::run() noexcept {
             attempt_metrics_.aborted();
             provider_.fail("aborted", pipe_error.code);
         } else if (pipe_error.phase == http::HttpBodyPipePhase::Read) {
-            report_selection(false);
+            // A body-read idle timeout is gateway policy cutting a silent but
+            // plausibly healthy upstream (for example an SSE stream with no
+            // events inside the window); unlike a mid-body transport abort it
+            // must not charge the circuit breaker.
+            if (pipe_error.code == common::IoErr::TimedOut) {
+                telemetry_.record_proxy_body_idle_timeout(AccessBodyIdleDirection::ResponseBody);
+            } else {
+                report_selection(false);
+            }
             record_provider_failure(provider_, telemetry_, attempt_metrics_,
                                     failure(ProxyFailurePhase::ReadResponseBody,
                                             "failed to read upstream response body", pipe_error.code));
@@ -1160,6 +1173,14 @@ async::Task<Result<void>> UpstreamAttempt::run() noexcept {
 }
 
 } // namespace
+
+std::chrono::milliseconds body_read_idle_timeout(std::int32_t timeout_millis,
+                                                 std::chrono::milliseconds floor) noexcept {
+    if (timeout_millis < 0) {
+        return std::chrono::milliseconds::max();
+    }
+    return std::max(floor, std::chrono::milliseconds(timeout_millis));
+}
 
 ProxyExecutor::ProxyExecutor(http::StealableHttp1ConnectionPoolSet &pool, ProxyClusterMatcher cluster_matcher,
                              ProxyDnsResolver dns_resolver, ProxyExecutorOptions options) noexcept :

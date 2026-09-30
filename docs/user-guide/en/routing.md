@@ -220,7 +220,7 @@ matcher's structural priority.
 | `status`               | RESPONSE              | Required; native accepts 100–999; use standard HTTP statuses             |
 | `body`                 | RESPONSE              | Optional; missing means an empty body                                    |
 | `gzip`                 | RESPONSE/PROXY/SCRIPT | Optional; `true` uses level 6, `1`–`9` selects a level, `false` disables |
-| `timeout`              | PROXY                 | Response-header timeout; default 60000 ms, minimum 5 ms                  |
+| `timeout`              | PROXY                 | Response-header timeout; also floors the per-read body idle timeout in both directions (`max(60s, timeout)`); default 60000 ms, minimum 5 ms |
 | `max_client_body_size` | RESPONSE/PROXY        | Request limit; missing or numeric 0 uses the server default              |
 | `max_proxy_body_size`  | PROXY                 | Non-zero value overrides the upstream-response limit                     |
 | `websocket_timeout`    | PROXY                 | Positive value enables WebSocket tunneling and sets tunnel I/O timeout   |

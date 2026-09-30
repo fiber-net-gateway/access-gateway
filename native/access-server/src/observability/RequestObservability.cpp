@@ -271,6 +271,12 @@ void RequestObservability::record_websocket_session_finished(AccessWebSocketSess
     }
 }
 
+void RequestObservability::record_proxy_body_idle_timeout(AccessBodyIdleDirection direction) noexcept {
+    if (metrics_) {
+        metrics_->proxy_body_idle_timeout(direction);
+    }
+}
+
 void RequestObservability::set_project(ScriptExecutionContext &execution, std::string_view project,
                                        std::string_view effective_host, std::string_view context_cluster) noexcept {
     project_ = execution.copy_to_request_pool(project);

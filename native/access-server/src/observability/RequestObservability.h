@@ -79,6 +79,7 @@ public:
     void record_websocket_handshake(AccessWebSocketHandshakeResult result) noexcept;
     void record_websocket_session_started() noexcept;
     void record_websocket_session_finished(AccessWebSocketSessionResult result) noexcept;
+    void record_proxy_body_idle_timeout(AccessBodyIdleDirection direction) noexcept;
     void mark_io_error(ScriptExecutionContext &execution, common::IoErr error) noexcept;
     void set_upstream(ScriptExecutionContext &execution, const ProxyUpstreamEndpoint &endpoint) noexcept;
     void record_cluster_selection(const AccessClusterSelection &selection) noexcept;
