@@ -936,8 +936,11 @@ TEST(AccessRequestHandlerTest, MatchesRecordedConditionAndTemplateSyntaxSnapshot
                                              scripts.request_adapter(), options);
 
     EXPECT_TRUE(response.starts_with("HTTP/1.1 203 "));
+    // Java ExtClusterNameFetcher parity: the "_context-blue" host suffix selects the cluster and
+    // the exchange's Host header is rewritten to the stripped form, so $header.host observes
+    // api.example.com (both spellings) exactly as the Java gateway would expose it.
     EXPECT_EQ(response_body(response),
-              "tail=segment/rest;host=api_context-blue.example.com;host_case=api_context-blue.example.com;"
+              "tail=segment/rest;host=api.example.com;host_case=api.example.com;"
               "header_default=header-blue;context=context-blue;cookie=cookie-blue;query=/next;"
               "request_path=/corpus/segment/rest;request_query=redirect=%2Fnext;request_method=GET;"
               "origin=https://origin.example.test;forwarded_for=192.0.2.20;remote_addr=192.0.2.10");
@@ -1452,6 +1455,29 @@ TEST(AccessRequestHandlerTest, UsesTestTraceHeaderWhenHostHasNoCluster) {
     EXPECT_TRUE(response.starts_with("HTTP/1.1 200 OK\r\n"));
     EXPECT_EQ(capture.initial_context_cluster, "canary");
     EXPECT_TRUE(capture.origin_host.empty());
+}
+
+// Production mode never parses the "_cluster" host suffix: the underscore host matches the
+// project literally, $header.host keeps the raw value, and no cluster or origin host is
+// derived from it.
+TEST(AccessRequestHandlerTest, KeepsRawUnderscoreHostOutsideTestMode) {
+    AccessScriptRuntime scripts;
+    RouteConfig route = response_route("/raw", "host=${$header.host}");
+    ProjectConfig config;
+    config.version = 1;
+    config.hosts = std::vector<HostConfigEntry>{host("api_gray.example.com")};
+    config.routes = {std::move(route)};
+    RouteConfigStore store(scripts.compiler_adapter());
+    publish(store, std::move(config));
+
+    const std::string response = run_request(store,
+                                             "GET /raw HTTP/1.1\r\n"
+                                             "Host: api_gray.example.com\r\n"
+                                             "Connection: close\r\n\r\n",
+                                             scripts.request_adapter());
+
+    EXPECT_TRUE(response.starts_with("HTTP/1.1 200 OK\r\n"));
+    EXPECT_EQ(response_body(response), "host=api_gray.example.com");
 }
 
 } // namespace
