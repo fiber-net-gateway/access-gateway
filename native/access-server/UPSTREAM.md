@@ -10,7 +10,7 @@ HTTP, JSON/script, Nacos, CAT, and Prometheus modules are consumed from the pinn
 historical application import revision.
 
 The current reusable Fiber dependency is pinned at
-`270035b7707b8d3825e31eca2d1c67d1da1ef640` (upstream `master`, fetched 2026-09-27). The pinned
+`fab35402f3a5ddf4b78ade82d187a9d89972b244` (upstream `master`, fetched 2026-09-30). The pinned
 revision carries no repository-owned compatibility patches: the TLS dynamic-credential lifetime
 defect ([upstream issue #41](https://github.com/fiber-net-gateway/fiber-gateway-cpp/issues/41)),
 briefly patched against `f832d5458d3bfca1cefa45a4c7a6cb1cd0662f23`, is fixed upstream in `90ed153`
@@ -19,7 +19,13 @@ The repository-owned regression
 `ProxyExecutorTest.StreamsChunkedUpstreamWhoseFramingArrivesSeparatelyFromPayload` still guards
 the HTTP/1 chunked split-framing fix from the application side.
 The reviewed update range from the previous pin is
-`054b36878671ea77ec84ec2fd1fc790cb9b09623..270035b7707b8d3825e31eca2d1c67d1da1ef640`.
+`270035b7707b8d3825e31eca2d1c67d1da1ef640..fab35402f3a5ddf4b78ade82d187a9d89972b244`. It adds
+mutable request-phase accessors on `HttpExchange` (non-const `request_headers()`,
+`request_header_refs()`, `uri()`) with the documented contract — pool-copying `set()`/`add()`
+only, protocol-control names frozen, first-wins refs maintained by the caller — which
+access-server uses to rewrite the Host header to the cluster-stripped form in test mode, and
+caches an `accept-encoding` request-header ref used by gzip negotiation as an absent
+short-circuit.
 The complete reviewed range from the original import pin is
 `0fda7764bf94944aca4b674ab5ab311184703118..270035b7707b8d3825e31eca2d1c67d1da1ef640`.
 It removes the obsolete upstream `apps/access-server`, adds Nacos hostname and bounded service
