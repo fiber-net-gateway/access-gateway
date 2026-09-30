@@ -104,6 +104,12 @@ enum class AccessWebSocketSessionResult : std::uint8_t {
     Count,
 };
 
+enum class AccessBodyIdleDirection : std::uint8_t {
+    RequestBody,
+    ResponseBody,
+    Count,
+};
+
 class AccessServerMetrics final : public common::NonCopyable, public common::NonMovable {
 public:
     class Worker {
@@ -124,6 +130,7 @@ public:
         void websocket_handshake_finished(AccessWebSocketHandshakeResult result) noexcept;
         void websocket_session_started() noexcept;
         void websocket_session_finished(AccessWebSocketSessionResult result) noexcept;
+        void proxy_body_idle_timeout(AccessBodyIdleDirection direction) noexcept;
 
     private:
         friend class AccessServerMetrics;
@@ -145,6 +152,7 @@ public:
                 static_cast<std::size_t>(AccessWebSocketHandshakeResult::Count);
         static constexpr std::size_t kWebSocketSessionResultCount =
                 static_cast<std::size_t>(AccessWebSocketSessionResult::Count);
+        static constexpr std::size_t kBodyIdleDirectionCount = static_cast<std::size_t>(AccessBodyIdleDirection::Count);
 
         std::array<prometheus::CounterRef, kRequestResultCount> requests_;
         std::array<prometheus::CounterRef, kResponseCompressionResultCount> response_compression_;
@@ -158,6 +166,7 @@ public:
         std::array<prometheus::CounterRef, kHappyEyeballsResultCount> happy_eyeballs_;
         std::array<prometheus::CounterRef, kWebSocketHandshakeResultCount> websocket_handshakes_;
         std::array<prometheus::CounterRef, kWebSocketSessionResultCount> websocket_sessions_;
+        std::array<prometheus::CounterRef, kBodyIdleDirectionCount> proxy_body_idle_timeouts_;
         prometheus::HistogramRef request_duration_;
         prometheus::GaugeRef inflight_;
         prometheus::GaugeRef proxy_attempts_inflight_;

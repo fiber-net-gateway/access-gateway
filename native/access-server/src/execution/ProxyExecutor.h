@@ -19,10 +19,22 @@ struct ProxyExecutorOptions {
     std::size_t request_body_chunk_size = 64 * 1024;
     std::size_t response_body_chunk_size = 64 * 1024;
     std::chrono::milliseconds downstream_write_timeout{30000};
+    // Floor for body_read_idle_timeout; tests shrink it to keep idle-cut
+    // coverage fast.
+    std::chrono::milliseconds body_read_idle_floor{60000};
     // Java cluster-decider fallback policy; absent in tests which pin the
     // pre-decider behavior.
     ProxyClusterFallback cluster_fallback;
 };
+
+// Per-read inactivity timeout applied to both body directions: every body read
+// must make progress within at least the route timeout, floored at 60s, so a
+// silent peer cannot pin a proxied exchange (and its worker slot) forever.
+// Deliberate divergence from the Java gateway, whose requestTimer only guards
+// the exchange up to response-head arrival. A negative route timeout keeps
+// body reads unbounded, mirroring the header-side opt-out.
+[[nodiscard]] std::chrono::milliseconds body_read_idle_timeout(std::int32_t timeout_millis,
+                                                               std::chrono::milliseconds floor) noexcept;
 
 class ProxyExecutor final : public common::NonCopyable, public common::NonMovable {
 public:

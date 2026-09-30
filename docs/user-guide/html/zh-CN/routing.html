@@ -480,7 +480,10 @@ service: report-service/stable
     <tr>
       <td><code>timeout</code></td>
       <td>PROXY</td>
-      <td>response header timeout；默认 60000 ms，配置值至少 5 ms</td>
+      <td>
+        response header 超时，同时也是双向 body 读空闲超时的下限（实际取
+        <code>max(60s, timeout)</code>）；默认 60000 ms，配置值至少 5 ms
+      </td>
     </tr>
     <tr>
       <td><code>max_client_body_size</code></td>

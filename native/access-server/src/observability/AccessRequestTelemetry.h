@@ -84,6 +84,9 @@ public:
     void record_websocket_session_finished(AccessWebSocketSessionResult result) noexcept {
         observability_.record_websocket_session_finished(result);
     }
+    void record_proxy_body_idle_timeout(AccessBodyIdleDirection direction) noexcept {
+        observability_.record_proxy_body_idle_timeout(direction);
+    }
     void mark_io_error(common::IoErr error) noexcept { observability_.mark_io_error(execution_, error); }
     void set_upstream(const ProxyUpstreamEndpoint &endpoint) noexcept {
         observability_.set_upstream(execution_, endpoint);
