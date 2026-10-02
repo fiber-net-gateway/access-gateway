@@ -39,7 +39,7 @@ identity_digest(std::string_view certificate_pem, std::string_view private_key_p
 
 } // namespace
 
-UpstreamTlsClientIdentity::UpstreamTlsClientIdentity(std::unique_ptr<net::TlsCredential> credential,
+UpstreamTlsClientIdentity::UpstreamTlsClientIdentity(net::TlsCredential credential,
                                                      UpstreamTlsClientIdentityDigest digest) noexcept :
     credential_(std::move(credential)), digest_(digest) {}
 

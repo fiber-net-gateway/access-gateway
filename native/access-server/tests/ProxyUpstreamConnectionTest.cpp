@@ -311,7 +311,7 @@ ConnectionScenarioResult run_tls_scenario(const std::string &certificate_path, c
     std::unique_ptr<fiber::net::TrustStore> server_trust_store;
     fiber::net::TlsServerParam server_options;
     server_options.configure_callback = &fiber::net::configure_tls_with_credential;
-    server_options.configure_ctx = server_credential->get();
+    server_options.configure_ctx = &*server_credential;
     if (!client_ca_file.empty()) {
         auto trust_store =
                 fiber::net::TrustStore::create(fiber::net::TrustStoreOptions::from_file(std::string(client_ca_file)));

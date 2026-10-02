@@ -9,6 +9,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <expected>
 #include <functional>
 #include <future>
@@ -18,6 +19,7 @@
 #include <string_view>
 #include <sys/socket.h>
 #include <utility>
+#include <vector>
 
 #include <openssl/bio.h>
 #include <openssl/ec.h>
@@ -31,6 +33,8 @@
 #include <fiber/async/WaitGroup.h>
 #include <fiber/async/Watch.h>
 #include <fiber/async/Yield.h>
+#include <fiber/common/mem/IoBuf.h>
+#include <fiber/common/mem/IoBufChain.h>
 #include <fiber/event/EventLoop.h>
 #include <fiber/event/EventLoopGroup.h>
 #include <fiber/http/HttpTransport.h>
@@ -38,7 +42,10 @@
 #include <fiber/nacos/Subscription.h>
 #include <fiber/net/TlsCredential.h>
 #include <fiber/net/TlsServerHandshakeConfig.h>
-#include <fiber/tls/handshake/TlsClientHandshakeEngine.h>
+#include <fiber/tls/crypto/TlsKeyExchange.h>
+#include <fiber/tls/handshake/TlsCipherSuites.h>
+#include <fiber/tls/handshake/TlsHandshakeCodec.h>
+#include <fiber/tls/record/TlsRecord.h>
 
 #include "NacosSnapshotTestBuilder.h"
 #include "NacosSubscriptionStub.h"
@@ -243,15 +250,20 @@ struct RotateDuringTlsSelect {
     std::array<std::uintptr_t, 2> selected_credentials{};
     std::size_t calls = 0;
     bool commit_succeeded = false;
-    std::weak_ptr<const net::TlsCredential> selected_owner;
+    // A handle to the selected material kept past the callback: its use_count
+    // observes whether a handshake still holds the same material, the way the
+    // aliasing shared_ptr owner did before TlsCredential became refcounted.
+    net::TlsCredential held_credential{};
 };
 
 common::IoErr rotate_during_tls_select(void *context, net::TlsServerHandshakeConfig &config,
                                        const tls::TlsClientHelloView &input) noexcept {
     auto &state = *static_cast<RotateDuringTlsSelect *>(context);
     auto selected = state.store->select_credential(input.server_name);
-    state.selected_owner = selected;
-    common::IoErr result = selected ? config.add_credential(selected) : common::IoErr::Invalid;
+    common::IoErr result = selected ? config.add_credential(*selected) : common::IoErr::Invalid;
+    if (selected) {
+        state.held_credential = *selected;
+    }
     if (state.calls < state.selected_credentials.size()) {
         state.selected_credentials[state.calls] = reinterpret_cast<std::uintptr_t>(selected.get());
     }
@@ -333,12 +345,52 @@ async::Task<TlsHandshakePairResult> run_suspended_tls_handshake(event::EventLoop
     if (!server || !client) {
         co_return result;
     }
-    tls::TlsClientConfig config;
-    config.sni_host = "api.example.com";
-    config.verify_peer = false;
-    tls::TlsClientHandshakeEngine engine(config, nullptr);
-    EXPECT_FALSE(engine.failed());
-    auto output = engine.take_output();
+    // A hand-encoded ClientHello (SNI api.example.com, one X25519 share) as a
+    // single plaintext record: the server decodes it, runs the configure
+    // callback (which commits the rotation) and then waits for the client
+    // flight that never arrives, suspending the handshake exactly where the
+    // retired material must survive.
+    auto key_exchange = tls::TlsKeyExchange::create(tls::TlsNamedGroup::X25519);
+    if (!key_exchange || !(*key_exchange)->generate()) {
+        co_return result;
+    }
+    static constexpr std::uint16_t kCipherSuites[] = {0x1301, 0x1302, 0x1303};
+    static constexpr std::uint16_t kGroups[] = {0x001D, 0x0017};
+    static constexpr std::uint16_t kSignatureAlgorithms[] = {0x0403, 0x0503};
+    const std::array<std::uint8_t, 32> random{};
+    tls::TlsClientHelloInput hello{};
+    hello.random = random;
+    hello.cipher_suites = kCipherSuites;
+    hello.supported_groups = kGroups;
+    hello.signature_algorithms = kSignatureAlgorithms;
+    hello.key_share_group = 0x001D;
+    hello.key_share = (*key_exchange)->public_value().bytes();
+    hello.sni_host = "api.example.com";
+    const auto message_size = tls::tls_client_hello_size(hello);
+    if (!message_size) {
+        co_return result;
+    }
+    std::vector<std::uint8_t> wire(tls::kTlsRecordHeaderSize + *message_size);
+    const auto encoded = tls::tls_encode_client_hello(hello, {wire.data() + tls::kTlsRecordHeaderSize, *message_size});
+    if (!encoded) {
+        co_return result;
+    }
+    wire.resize(tls::kTlsRecordHeaderSize + encoded->len);
+    wire[0] = 22; // handshake
+    wire[1] = 0x03;
+    wire[2] = 0x01; // legacy_version
+    wire[3] = static_cast<std::uint8_t>(encoded->len >> 8);
+    wire[4] = static_cast<std::uint8_t>(encoded->len);
+    mem::IoBuf output_buffer = mem::IoBuf::allocate(wire.size());
+    if (!output_buffer.valid()) {
+        co_return result;
+    }
+    std::memcpy(output_buffer.writable_data(), wire.data(), wire.size());
+    output_buffer.commit(wire.size());
+    mem::IoBufChain output;
+    if (!output.append(std::move(output_buffer))) {
+        co_return result;
+    }
     EXPECT_GT(output.readable_bytes(), 0U);
     async::WaitGroup pending;
     bool finished = false;
@@ -367,11 +419,12 @@ async::Task<TlsHandshakePairResult> run_suspended_tls_handshake(event::EventLoop
     if (recorder.observation_count >= 2U) {
         EXPECT_EQ(recorder.observations[1].reclaimed_snapshots, 1U);
     }
-    EXPECT_FALSE(rotation.selected_owner.expired());
+    // The suspended handshake still holds a reference to the retired material.
+    EXPECT_GT(rotation.held_credential.use_count(), 1U);
     (*client)->close();
     result.client = common::IoErr::Canceled;
     co_await pending.join();
-    EXPECT_TRUE(rotation.selected_owner.expired());
+    EXPECT_EQ(rotation.held_credential.use_count(), 1U);
     (*server)->close();
     co_return result;
 }
@@ -680,7 +733,7 @@ void check_rotation_during_handshake(bool suspend_client) {
                     EXPECT_EQ(first.server, common::IoErr::None);
                     EXPECT_EQ(first.client, common::IoErr::None);
                 }
-                EXPECT_TRUE(rotation.selected_owner.expired());
+                EXPECT_EQ(rotation.held_credential.use_count(), 1U);
                 EXPECT_TRUE(rotation.commit_succeeded);
                 EXPECT_EQ(store.version(), 2U);
 

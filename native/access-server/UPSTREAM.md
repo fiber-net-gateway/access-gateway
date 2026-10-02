@@ -10,7 +10,7 @@ HTTP, JSON/script, Nacos, CAT, and Prometheus modules are consumed from the pinn
 historical application import revision.
 
 The current reusable Fiber dependency is pinned at
-`fab35402f3a5ddf4b78ade82d187a9d89972b244` (upstream `master`, fetched 2026-09-30). The pinned
+`f2e330bc16fbb6cf7499b824de9931b0ece60a13` (upstream `master`, fetched 2026-10-02). The pinned
 revision carries no repository-owned compatibility patches: the TLS dynamic-credential lifetime
 defect ([upstream issue #41](https://github.com/fiber-net-gateway/fiber-gateway-cpp/issues/41)),
 briefly patched against `f832d5458d3bfca1cefa45a4c7a6cb1cd0662f23`, is fixed upstream in `90ed153`
@@ -19,6 +19,41 @@ The repository-owned regression
 `ProxyExecutorTest.StreamsChunkedUpstreamWhoseFramingArrivesSeparatelyFromPayload` still guards
 the HTTP/1 chunked split-framing fix from the application side.
 The reviewed update range from the previous pin is
+`fab35402f3a5ddf4b78ade82d187a9d89972b244..f2e330bc16fbb6cf7499b824de9931b0ece60a13`. It lands
+the HTTP/2 send-lifetime fix for the coroutine-destruction assert on in-flight response-body
+writes (`0f71cc77`, with its root-cause report) and then rebuilds the H2 outbound path on top of
+it: sends are queued from the stream when an operation arms (`b3c35ebd`), reduced to shared
+frame-encoder operations with DATA sends shared per connection (`6cdf3fad`, `aa3db2a8`),
+withdrawn when close abandons them (`02e17bde`), encoded on the pump into the in-flight chain
+(`9f832500`) with the DATA end flag kept past encoding (`c213c158`), H2 I/O is driven from
+transport readiness (`760f320f`) and inbound is pumped before outbound (`f2e330bc`). The range
+also reworks the TLS data path: `TlsStreamFd` seals batches of records per write (`8b95cae0`,
+`72f49378`) and TLS 1.3 records without staging the plaintext (`be3f3097`), frames connected-phase
+records off one contiguous wire buffer and opens them in place (`c55b263`, `a4612e5d`), counts
+buffered plaintext as read readiness (`b41a6e3c`), releases unflushed output when closing
+(`b34e2b0d`), and drains its sealed output on its own (`03e290ee`) — the write side becomes
+self-draining, so no transport keeps a reference to a caller's chain past `try_writev` and
+`abandon_pending_io` disappears. `TlsCredential` becomes a refcounted handle with copy/move
+semantics (`f76f3f68`); `TlsServerHandshakeConfig::add_credential(TlsCredential)` takes the
+handle by value (the handshake holds its own reference — the replacement for the removed
+`shared_ptr` owning overload) and `add_borrowed_credential(const &)` is the explicit borrow.
+Handshake engine state is held by value (`90ea37b4`, `23a73445`), the handshake-phase split by
+role (`06c8569f`), and the engine headers leave the public include tree. The readiness API
+folds: `has_pending_read`/`has_pending_write` are removed in favor of pure-virtual
+`read_ready()`/`write_ready()` on `HttpTransport` (`1e57f2fd`, `4efc4af2`). QUIC stops using a
+peer stream the attach callback retired (`d4bdde31`) and releases the handshake engine after the
+handshake (`64d163fc`); dead `ServerHttp2Push` is deleted (`645899ea`).
+Access-server adapted to the handle model: `UpstreamTlsClientIdentity` holds its
+`net::TlsCredential` by value instead of `unique_ptr`, and `TlsCertificateStore` (plus the
+rotation test callback) stages the selected credential via `add_credential(*selected)` — the
+handshake keeps the material alive past snapshot reclamation exactly as the aliasing
+`shared_ptr` overload did, while the snapshot itself remains reclaimable. Static-credential
+tests pass `&*credential` to `configure_ctx`. The suspended-handshake rotation regression no
+longer includes the engine header that left the public tree; it encodes its ClientHello through
+the public codec (`tls_encode_client_hello` + `TlsKeyExchange` + a hand-built plaintext record)
+and observes material lifetime through the kept handle's `use_count()` instead of an aliasing
+`weak_ptr`.
+The previous reviewed range from its predecessor pin is
 `270035b7707b8d3825e31eca2d1c67d1da1ef640..fab35402f3a5ddf4b78ade82d187a9d89972b244`. It adds
 mutable request-phase accessors on `HttpExchange` (non-const `request_headers()`,
 `request_header_refs()`, `uri()`) with the documented contract — pool-copying `set()`/`add()`
