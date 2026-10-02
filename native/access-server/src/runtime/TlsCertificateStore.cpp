@@ -476,7 +476,7 @@ common::IoErr TlsCertificateStore::configure_handshake(void *context, net::TlsSe
                                                        const tls::TlsClientHelloView &client_hello) noexcept {
     auto &store = *static_cast<TlsCertificateStore *>(context);
     auto selected = store.select_credential(client_hello.server_name);
-    return selected ? config.add_credential(std::move(selected)) : common::IoErr::Invalid;
+    return selected ? config.add_credential(*selected) : common::IoErr::Invalid;
 }
 
 std::shared_ptr<const net::TlsCredential>

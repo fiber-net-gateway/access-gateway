@@ -26,14 +26,13 @@ public:
     [[nodiscard]] static std::expected<std::shared_ptr<const UpstreamTlsClientIdentity>, common::IoErr>
     create(std::string_view certificate_pem, std::string_view private_key_pem) noexcept;
 
-    [[nodiscard]] const net::TlsCredential &credential() const noexcept { return *credential_; }
+    [[nodiscard]] const net::TlsCredential &credential() const noexcept { return credential_; }
     [[nodiscard]] const UpstreamTlsClientIdentityDigest &digest() const noexcept { return digest_; }
 
 private:
-    UpstreamTlsClientIdentity(std::unique_ptr<net::TlsCredential> credential,
-                              UpstreamTlsClientIdentityDigest digest) noexcept;
+    UpstreamTlsClientIdentity(net::TlsCredential credential, UpstreamTlsClientIdentityDigest digest) noexcept;
 
-    std::unique_ptr<net::TlsCredential> credential_;
+    net::TlsCredential credential_{};
     UpstreamTlsClientIdentityDigest digest_{};
 };
 

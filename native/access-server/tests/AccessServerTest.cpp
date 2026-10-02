@@ -833,7 +833,7 @@ TEST(AccessServerTest, ServesWebSocketExtendedConnectOverHttp2Tls) {
     ASSERT_TRUE(credential);
     http::HttpServerTlsOptions tls{};
     tls.configure_callback = &net::configure_tls_with_credential;
-    tls.configure_ctx = credential->get();
+    tls.configure_ctx = &*credential;
 
     event::EventLoop accept_loop;
     event::EventLoopGroup workers(1);
