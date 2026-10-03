@@ -28,6 +28,97 @@ std::size_t request_result_index(const http::HttpResponseStats &response) noexce
     return 2;
 }
 
+std::size_t request_status_index(int status_code) noexcept {
+    switch (status_code) {
+        case 200:
+            return static_cast<std::size_t>(AccessResponseStatus::Code200);
+        case 201:
+            return static_cast<std::size_t>(AccessResponseStatus::Code201);
+        case 202:
+            return static_cast<std::size_t>(AccessResponseStatus::Code202);
+        case 204:
+            return static_cast<std::size_t>(AccessResponseStatus::Code204);
+        case 206:
+            return static_cast<std::size_t>(AccessResponseStatus::Code206);
+        case 301:
+            return static_cast<std::size_t>(AccessResponseStatus::Code301);
+        case 302:
+            return static_cast<std::size_t>(AccessResponseStatus::Code302);
+        case 303:
+            return static_cast<std::size_t>(AccessResponseStatus::Code303);
+        case 304:
+            return static_cast<std::size_t>(AccessResponseStatus::Code304);
+        case 307:
+            return static_cast<std::size_t>(AccessResponseStatus::Code307);
+        case 308:
+            return static_cast<std::size_t>(AccessResponseStatus::Code308);
+        case 400:
+            return static_cast<std::size_t>(AccessResponseStatus::Code400);
+        case 401:
+            return static_cast<std::size_t>(AccessResponseStatus::Code401);
+        case 403:
+            return static_cast<std::size_t>(AccessResponseStatus::Code403);
+        case 404:
+            return static_cast<std::size_t>(AccessResponseStatus::Code404);
+        case 405:
+            return static_cast<std::size_t>(AccessResponseStatus::Code405);
+        case 406:
+            return static_cast<std::size_t>(AccessResponseStatus::Code406);
+        case 408:
+            return static_cast<std::size_t>(AccessResponseStatus::Code408);
+        case 409:
+            return static_cast<std::size_t>(AccessResponseStatus::Code409);
+        case 410:
+            return static_cast<std::size_t>(AccessResponseStatus::Code410);
+        case 412:
+            return static_cast<std::size_t>(AccessResponseStatus::Code412);
+        case 413:
+            return static_cast<std::size_t>(AccessResponseStatus::Code413);
+        case 415:
+            return static_cast<std::size_t>(AccessResponseStatus::Code415);
+        case 416:
+            return static_cast<std::size_t>(AccessResponseStatus::Code416);
+        case 422:
+            return static_cast<std::size_t>(AccessResponseStatus::Code422);
+        case 426:
+            return static_cast<std::size_t>(AccessResponseStatus::Code426);
+        case 429:
+            return static_cast<std::size_t>(AccessResponseStatus::Code429);
+        case 499:
+            return static_cast<std::size_t>(AccessResponseStatus::Code499);
+        case 500:
+            return static_cast<std::size_t>(AccessResponseStatus::Code500);
+        case 501:
+            return static_cast<std::size_t>(AccessResponseStatus::Code501);
+        case 502:
+            return static_cast<std::size_t>(AccessResponseStatus::Code502);
+        case 503:
+            return static_cast<std::size_t>(AccessResponseStatus::Code503);
+        case 504:
+            return static_cast<std::size_t>(AccessResponseStatus::Code504);
+        case 505:
+            return static_cast<std::size_t>(AccessResponseStatus::Code505);
+        default:
+            break;
+    }
+    if (status_code >= 100 && status_code < 200) {
+        return static_cast<std::size_t>(AccessResponseStatus::Other1xx);
+    }
+    if (status_code >= 200 && status_code < 300) {
+        return static_cast<std::size_t>(AccessResponseStatus::Other2xx);
+    }
+    if (status_code >= 300 && status_code < 400) {
+        return static_cast<std::size_t>(AccessResponseStatus::Other3xx);
+    }
+    if (status_code >= 400 && status_code < 500) {
+        return static_cast<std::size_t>(AccessResponseStatus::Other4xx);
+    }
+    if (status_code >= 500 && status_code < 600) {
+        return static_cast<std::size_t>(AccessResponseStatus::Other5xx);
+    }
+    return static_cast<std::size_t>(AccessResponseStatus::Other);
+}
+
 template<std::size_t N>
 bool register_labeled_series(prometheus::MetricsRegistry &registry, prometheus::FamilyId family,
                              const std::array<std::string_view, N> &values,
@@ -70,6 +161,9 @@ void AccessServerMetrics::Worker::request_finished(const http::HttpResponseStats
                                                    std::chrono::microseconds duration) noexcept {
     inflight_.dec();
     requests_[request_result_index(response)].inc();
+    if (response.terminal_error == common::IoErr::None && response.completed) {
+        requests_by_status_[request_status_index(response.status_code)].inc();
+    }
     request_duration_.observe(static_cast<std::uint64_t>(std::max<std::int64_t>(duration.count(), 0)));
 }
 
@@ -141,12 +235,23 @@ AccessServerMetrics::~AccessServerMetrics() { FIBER_ASSERT(!valid_ || collecting
 bool AccessServerMetrics::initialize(event::EventLoopGroup &worker_group) {
     constexpr std::array<std::string_view, 1> kResultLabel{"result"};
     constexpr std::array<std::string_view, 1> kPhaseLabel{"phase"};
+    constexpr std::array<std::string_view, 1> kStatusCodeLabel{"status_code"};
     constexpr std::array<std::string_view, 4> kRequestResults{
             "success",
             "client_error",
             "server_error",
             "canceled",
     };
+    constexpr std::array<std::string_view, 40> kRequestStatusCodes{
+            "200",   "201", "202", "204", "206", //
+            "301",   "302", "303", "304", "307", "308", //
+            "400",   "401", "403", "404", "405", "406", "408", "409", "410", "412", "413", "415", "416", //
+            "422",   "426", "429", "499", //
+            "500",   "501", "502", "503", "504", "505", //
+            "1xx",   "2xx", "3xx", "4xx", "5xx", //
+            "other", //
+    };
+    static_assert(kRequestStatusCodes.size() == static_cast<std::size_t>(AccessResponseStatus::Count));
     constexpr std::array<std::string_view, 3> kCompressionResults{
             "gzip",
             "identity",
@@ -237,6 +342,9 @@ bool AccessServerMetrics::initialize(event::EventLoopGroup &worker_group) {
 
     auto requests = registry_.register_counter("access_server_requests_total", "Completed access-server requests.",
                                                kResultLabel);
+    auto requests_by_status =
+            registry_.register_counter("access_server_requests_by_status_total",
+                                       "Completed access-server requests by response status code.", kStatusCodeLabel);
     auto response_compression =
             registry_.register_counter("access_server_response_compression_total",
                                        "Negotiated outcomes for gzip-enabled RESPONSE routes.", kResultLabel);
@@ -279,14 +387,15 @@ bool AccessServerMetrics::initialize(event::EventLoopGroup &worker_group) {
     auto websocket_sessions_inflight = registry_.register_gauge(
             "access_server_websocket_sessions_inflight", "Established WebSocket proxy sessions currently in flight.",
             prometheus::GaugeReduction::Sum);
-    if (!requests || !response_compression || !duration || !inflight || !proxy_executions || !proxy_attempts ||
-        !proxy_attempts_inflight || !proxy_failures || !proxy_pool_acquires || !proxy_dns_resolutions ||
-        !proxy_connect_attempts || !proxy_connect_candidates || !happy_eyeballs || !websocket_handshakes ||
-        !websocket_sessions || !websocket_sessions_inflight || !proxy_body_idle_timeouts) {
+    if (!requests || !requests_by_status || !response_compression || !duration || !inflight || !proxy_executions ||
+        !proxy_attempts || !proxy_attempts_inflight || !proxy_failures || !proxy_pool_acquires ||
+        !proxy_dns_resolutions || !proxy_connect_attempts || !proxy_connect_candidates || !happy_eyeballs ||
+        !websocket_handshakes || !websocket_sessions || !websocket_sessions_inflight || !proxy_body_idle_timeouts) {
         return false;
     }
 
     std::array<prometheus::SeriesId, kRequestResults.size()> request_series;
+    std::array<prometheus::SeriesId, kRequestStatusCodes.size()> request_status_series;
     std::array<prometheus::SeriesId, kCompressionResults.size()> compression_series;
     std::array<prometheus::SeriesId, kProxyExecutionResults.size()> proxy_execution_series;
     std::array<prometheus::SeriesId, kProxyAttemptResults.size()> proxy_attempt_series;
@@ -299,6 +408,7 @@ bool AccessServerMetrics::initialize(event::EventLoopGroup &worker_group) {
     std::array<prometheus::SeriesId, kWebSocketSessionResults.size()> websocket_session_series;
     std::array<prometheus::SeriesId, kBodyIdleDirections.size()> proxy_body_idle_series;
     if (!register_labeled_series(registry_, *requests, kRequestResults, request_series) ||
+        !register_labeled_series(registry_, *requests_by_status, kRequestStatusCodes, request_status_series) ||
         !register_labeled_series(registry_, *response_compression, kCompressionResults, compression_series) ||
         !register_labeled_series(registry_, *proxy_executions, kProxyExecutionResults, proxy_execution_series) ||
         !register_labeled_series(registry_, *proxy_attempts, kProxyAttemptResults, proxy_attempt_series) ||
@@ -344,6 +454,7 @@ bool AccessServerMetrics::initialize(event::EventLoopGroup &worker_group) {
         }
         Worker &worker = workers_[worker_index];
         if (!bind_counters(*shard, request_series, worker.requests_) ||
+            !bind_counters(*shard, request_status_series, worker.requests_by_status_) ||
             !bind_counters(*shard, compression_series, worker.response_compression_) ||
             !bind_counters(*shard, proxy_execution_series, worker.proxy_executions_) ||
             !bind_counters(*shard, proxy_attempt_series, worker.proxy_attempts_) ||

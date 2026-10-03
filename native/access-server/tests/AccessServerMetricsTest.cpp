@@ -63,6 +63,46 @@ fiber::async::DetachedTask record_and_collect(fiber::access_server::AccessServer
     }
 }
 
+fiber::async::DetachedTask
+record_request_statuses_and_collect(fiber::access_server::AccessServerMetrics *metrics,
+                                    std::promise<fiber::common::IoResult<std::string>> *done) noexcept {
+    using namespace fiber::access_server;
+
+    AccessServerMetrics::Worker &worker = metrics->worker(fiber::event::EventLoop::current().group_index());
+    const auto finish = [&worker](fiber::http::HttpResponseStats response) {
+        worker.request_started();
+        worker.request_finished(response, 1ms);
+    };
+    finish({.status_code = 200, .completed = true});
+    finish({.status_code = 200, .completed = true});
+    finish({.status_code = 203, .completed = true});
+    finish({.status_code = 404, .completed = true});
+    finish({.status_code = 418, .completed = true});
+    finish({.status_code = 502, .completed = true});
+    finish({.status_code = 600, .completed = true});
+    finish({.terminal_error = fiber::common::IoErr::ConnReset, .completed = false});
+
+    auto collected = co_await metrics->collect();
+    fiber::common::IoErr error = fiber::common::IoErr::None;
+    std::string output;
+    if (!collected) {
+        error = collected.error();
+    } else {
+        while (fiber::mem::IoBuf *part = collected->first_readable()) {
+            output.append(reinterpret_cast<const char *>(part->readable_data()), part->readable());
+            collected->consume_and_compact(part->readable());
+        }
+    }
+
+    metrics->stop_collecting();
+    co_await metrics->wait_for_idle();
+    if (error != fiber::common::IoErr::None) {
+        done->set_value(std::unexpected(error));
+    } else {
+        done->set_value(std::move(output));
+    }
+}
+
 TEST(AccessServerMetricsTest, AggregatesOnlyFixedProxyAndWebSocketDimensions) {
     fiber::event::EventLoopGroup workers(1);
     fiber::access_server::AccessServerMetrics metrics(workers);
@@ -100,6 +140,37 @@ TEST(AccessServerMetricsTest, AggregatesOnlyFixedProxyAndWebSocketDimensions) {
     EXPECT_NE(collected->find("access_server_websocket_sessions_inflight 0"), std::string::npos);
     EXPECT_EQ(collected->find("project="), std::string::npos);
     EXPECT_EQ(collected->find("host="), std::string::npos);
+
+    workers.stop();
+    workers.join();
+}
+
+TEST(AccessServerMetricsTest, AggregatesCompletedRequestsByStatusCode) {
+    fiber::event::EventLoopGroup workers(1);
+    fiber::access_server::AccessServerMetrics metrics(workers);
+    ASSERT_TRUE(metrics.valid());
+
+    std::promise<fiber::common::IoResult<std::string>> promise;
+    auto future = promise.get_future();
+    workers.start();
+    fiber::async::spawn(workers.at(0), [&]() { return record_request_statuses_and_collect(&metrics, &promise); });
+
+    ASSERT_EQ(future.wait_for(2s), std::future_status::ready);
+    auto collected = future.get();
+    ASSERT_TRUE(collected);
+    EXPECT_NE(collected->find("access_server_requests_total{result=\"success\"} 3"), std::string::npos);
+    EXPECT_NE(collected->find("access_server_requests_total{result=\"client_error\"} 2"), std::string::npos);
+    EXPECT_NE(collected->find("access_server_requests_total{result=\"server_error\"} 2"), std::string::npos);
+    EXPECT_NE(collected->find("access_server_requests_total{result=\"canceled\"} 1"), std::string::npos);
+    EXPECT_NE(collected->find("access_server_requests_by_status_total{status_code=\"200\"} 2"), std::string::npos);
+    EXPECT_NE(collected->find("access_server_requests_by_status_total{status_code=\"2xx\"} 1"), std::string::npos);
+    EXPECT_NE(collected->find("access_server_requests_by_status_total{status_code=\"404\"} 1"), std::string::npos);
+    EXPECT_NE(collected->find("access_server_requests_by_status_total{status_code=\"4xx\"} 1"), std::string::npos);
+    EXPECT_NE(collected->find("access_server_requests_by_status_total{status_code=\"502\"} 1"), std::string::npos);
+    EXPECT_NE(collected->find("access_server_requests_by_status_total{status_code=\"other\"} 1"), std::string::npos);
+    EXPECT_NE(collected->find("access_server_requests_by_status_total{status_code=\"429\"} 0"), std::string::npos);
+    EXPECT_EQ(collected->find("status_code=\"600\""), std::string::npos);
+    EXPECT_EQ(collected->find("status_code=\"0\""), std::string::npos);
 
     workers.stop();
     workers.join();
