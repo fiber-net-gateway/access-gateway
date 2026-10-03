@@ -74,6 +74,12 @@ public:
     }
     [[nodiscard]] std::chrono::milliseconds initial_config_timeout() const noexcept { return initial_config_timeout_; }
     [[nodiscard]] std::size_t default_max_request_body_size() const noexcept { return default_max_request_body_size_; }
+    // Java unified-access's fiber.http.client.maxBodySize (600 MiB in the
+    // deployed Startup); caps proxied upstream response bodies when the route
+    // does not configure max_proxy_body_size. Zero disables the cap.
+    [[nodiscard]] std::size_t default_max_response_body_size() const noexcept {
+        return default_max_response_body_size_;
+    }
     [[nodiscard]] bool test_mode() const noexcept { return test_mode_; }
     [[nodiscard]] const ClientMetadataResolverOptions &client_metadata_options() const noexcept {
         return client_metadata_options_;
@@ -120,7 +126,8 @@ private:
                        AccessHttpListenerOptions plain_http_server_options, net::SocketAddress metrics_listen_address,
                        AccessActivationEndpointOptions activation_endpoint_options,
                        std::chrono::milliseconds initial_config_timeout, std::size_t default_max_request_body_size,
-                       bool test_mode, ClientMetadataResolverOptions client_metadata_options, std::string network_entry,
+                       std::size_t default_max_response_body_size, bool test_mode,
+                       ClientMetadataResolverOptions client_metadata_options, std::string network_entry,
                        std::string access_log_directory, UpstreamTlsClientPolicy upstream_tls_client_policy,
                        std::chrono::milliseconds upstream_connect_timeout,
                        ProxyHappyEyeballsPolicy happy_eyeballs_policy, AccessDnsMode dns_mode,
@@ -142,6 +149,7 @@ private:
     AccessActivationEndpointOptions activation_endpoint_options_;
     std::chrono::milliseconds initial_config_timeout_{60000};
     std::size_t default_max_request_body_size_ = 400U << 20U;
+    std::size_t default_max_response_body_size_ = 600U << 20U;
     bool test_mode_ = false;
     ClientMetadataResolverOptions client_metadata_options_;
     std::string network_entry_;

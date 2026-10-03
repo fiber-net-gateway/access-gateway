@@ -130,6 +130,7 @@ AccessRuntimeFactory::create(event::EventLoop &accept_loop, event::EventLoop &na
                                     .connect_timeout = config.upstream_connect_timeout(),
                                     .happy_eyeballs = config.happy_eyeballs_policy(),
                                     .upstream_tls = std::move(*upstream_tls_policy),
+                                    .default_max_response_body_size = config.default_max_response_body_size(),
                                     .cluster_fallback = control_plane->cluster_fallback(),
                             },
                     .default_max_request_body_size = config.default_max_request_body_size(),

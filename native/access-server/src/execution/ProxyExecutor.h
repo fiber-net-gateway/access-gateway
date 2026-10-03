@@ -22,6 +22,11 @@ struct ProxyExecutorOptions {
     // Floor for body_read_idle_timeout; tests shrink it to keep idle-cut
     // coverage fast.
     std::chrono::milliseconds body_read_idle_floor{60000};
+    // Response-body cap applied when the route does not configure
+    // max_proxy_body_size; mirrors Java unified-access's
+    // fiber.http.client.maxBodySize (600 MiB in the deployed Startup). Zero
+    // disables the cap. Tests shrink it to keep coverage fast.
+    std::size_t default_max_response_body_size = 600U << 20U;
     // Java cluster-decider fallback policy; absent in tests which pin the
     // pre-decider behavior.
     ProxyClusterFallback cluster_fallback;
