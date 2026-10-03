@@ -45,14 +45,15 @@ using ProxyRequestPlanResult = std::expected<void, ProxyRequestPlanError>;
 [[nodiscard]] http::HttpBodySpec
 select_proxy_request_body_spec(http::HttpBodySpec inbound, bool has_content_length_header, bool websocket) noexcept;
 [[nodiscard]] std::optional<std::uint64_t>
-normalize_proxy_response_body_limit(std::optional<std::int64_t> configured_limit) noexcept;
+normalize_proxy_response_body_limit(std::optional<std::int64_t> configured_limit, std::size_t server_default) noexcept;
 
 // Synchronous, request-owned plan. Template evaluation and header/target
 // materialization happen once; endpoint retries may only rebind an implicit
 // Host header.
 class ProxyRequestPlan final : public common::NonCopyable, public common::NonMovable {
 public:
-    ProxyRequestPlan(mem::BufPool &pool, const http::HttpExchange &exchange, const CompiledProxyRoute &proxy) noexcept;
+    ProxyRequestPlan(mem::BufPool &pool, const http::HttpExchange &exchange, const CompiledProxyRoute &proxy,
+                     std::size_t default_max_response_body_size) noexcept;
 
     [[nodiscard]] ProxyRequestPlanResult prepare(const ProxyUpstreamEndpoint &endpoint,
                                                  const http::HttpExchange &exchange, const CompiledProxyRoute &proxy,

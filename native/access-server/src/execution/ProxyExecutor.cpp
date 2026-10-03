@@ -1271,7 +1271,7 @@ async::Task<Result<void>> ProxyExecutor::execute_impl(http::HttpExchange &exchan
     const std::optional<std::string_view> fallback_cluster =
             cluster_fallback_target(*proxy.address_selector, cluster_override, options_.cluster_fallback);
 
-    ProxyRequestPlan request_plan(exchange.pool(), exchange, proxy);
+    ProxyRequestPlan request_plan(exchange.pool(), exchange, proxy, options_.default_max_response_body_size);
     WebSocketMetricScope websocket_metrics(telemetry, request_plan.websocket_upgrade());
 
     std::array<std::uint64_t, kMaxJavaAttempts> excluded_selection_tokens{};

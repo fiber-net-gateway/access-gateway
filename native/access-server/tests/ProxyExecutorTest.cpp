@@ -2486,6 +2486,198 @@ TEST(ProxyExecutorTest, AbortsCommittedChunkedResponseWhenDynamicLimitIsExceeded
     group.join();
 }
 
+TEST(ProxyExecutorTest, AppliesServerDefaultResponseBodyLimitWhenRouteOmitsIt) {
+    fiber::event::EventLoopGroup group(1);
+    fiber::http::StealableHttp1ConnectionPoolSet pool(group);
+    ASSERT_TRUE(pool.init());
+    group.start();
+
+    UpstreamState upstream_state{
+            .response =
+                    {
+                            .body = "hello",
+                    },
+    };
+    std::promise<std::uint16_t> port_promise;
+    std::promise<TestHttpServer> server_promise;
+    auto port_future = port_promise.get_future();
+    auto server_future = server_promise.get_future();
+    fiber::async::spawn(group.at(0),
+                        [&]() { return start_server(&group.at(0), &upstream_state, &port_promise, &server_promise); });
+
+    TestHttpServer server = server_future.get();
+    ASSERT_NE(server.server, nullptr);
+    const std::uint16_t port = port_future.get();
+    ASSERT_NE(port, 0);
+
+    fiber::access_server::RouteConfigStore store;
+    auto published = store.apply("orders", proxy_response_project_config(port, std::nullopt, false));
+    ASSERT_TRUE(published) << published.error().message;
+
+    fiber::access_server::ProxyExecutorOptions executor_options;
+    executor_options.default_max_response_body_size = 4;
+    fiber::access_server::ProxyExecutor executor(pool, {}, {}, executor_options);
+    std::string output;
+    std::promise<void> request_promise;
+    auto request_future = request_promise.get_future();
+    std::string request = "GET /proxy HTTP/1.1\r\n"
+                          "Host: api.example.com\r\n"
+                          "Connection: close\r\n\r\n";
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_downstream(&group.at(0), &store, executor.adapter(), std::move(request), &output, &request_promise);
+    });
+
+    ASSERT_EQ(request_future.wait_for(5s), std::future_status::ready);
+    EXPECT_NE(output.find("HTTP/1.1 500 Internal Server Error\r\n"), std::string::npos);
+    EXPECT_NE(output.find(R"("name":"READ_RESP_BODY")"), std::string::npos);
+    EXPECT_NE(output.find("body size is too big：5"), std::string::npos);
+    EXPECT_EQ(output.find("HTTP/1.1 201 Created\r\n"), std::string::npos);
+    EXPECT_EQ(count_status(output, "HTTP/1.1 "), 1U);
+
+    std::promise<void> shutdown_promise;
+    auto shutdown_future = shutdown_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() { return shutdown(&pool, &server, &shutdown_promise); });
+    ASSERT_EQ(shutdown_future.wait_for(2s), std::future_status::ready);
+    group.stop();
+    group.join();
+}
+
+TEST(ProxyExecutorTest, ServerDefaultResponseBodyLimitAllowsExactSizeAndZeroDisablesIt) {
+    fiber::event::EventLoopGroup group(1);
+    fiber::http::StealableHttp1ConnectionPoolSet pool(group);
+    ASSERT_TRUE(pool.init());
+    group.start();
+
+    UpstreamState upstream_state{
+            .response =
+                    {
+                            .body = "hello",
+                    },
+    };
+    std::promise<std::uint16_t> port_promise;
+    std::promise<TestHttpServer> server_promise;
+    auto port_future = port_promise.get_future();
+    auto server_future = server_promise.get_future();
+    fiber::async::spawn(group.at(0),
+                        [&]() { return start_server(&group.at(0), &upstream_state, &port_promise, &server_promise); });
+
+    TestHttpServer server = server_future.get();
+    ASSERT_NE(server.server, nullptr);
+    const std::uint16_t port = port_future.get();
+    ASSERT_NE(port, 0);
+
+    fiber::access_server::RouteConfigStore store;
+    auto published = store.apply("orders", proxy_response_project_config(port, std::nullopt, false));
+    ASSERT_TRUE(published) << published.error().message;
+
+    // Five received bytes against a default of exactly five must pass.
+    fiber::access_server::ProxyExecutorOptions exact_options;
+    exact_options.default_max_response_body_size = 5;
+    fiber::access_server::ProxyExecutor exact_executor(pool, {}, {}, exact_options);
+    std::string exact_output;
+    std::promise<void> exact_promise;
+    auto exact_future = exact_promise.get_future();
+    std::string request = "GET /proxy HTTP/1.1\r\n"
+                          "Host: api.example.com\r\n"
+                          "Connection: close\r\n\r\n";
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_downstream(&group.at(0), &store, exact_executor.adapter(), std::move(request), &exact_output,
+                              &exact_promise);
+    });
+
+    ASSERT_EQ(exact_future.wait_for(5s), std::future_status::ready);
+    EXPECT_NE(exact_output.find("HTTP/1.1 201 Created\r\n"), std::string::npos);
+    EXPECT_NE(exact_output.find("hello"), std::string::npos);
+    EXPECT_EQ(exact_output.find("READ_RESP_BODY"), std::string::npos);
+    EXPECT_EQ(count_status(exact_output, "HTTP/1.1 "), 1U);
+    ASSERT_EQ(upstream_state.requests.size(), 1U);
+
+    // Zero keeps the legacy unlimited behavior for routes without a limit.
+    fiber::access_server::ProxyExecutorOptions disabled_options;
+    disabled_options.default_max_response_body_size = 0;
+    fiber::access_server::ProxyExecutor disabled_executor(pool, {}, {}, disabled_options);
+    std::string disabled_output;
+    std::promise<void> disabled_promise;
+    auto disabled_future = disabled_promise.get_future();
+    std::string disabled_request = "GET /proxy HTTP/1.1\r\n"
+                                   "Host: api.example.com\r\n"
+                                   "Connection: close\r\n\r\n";
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_downstream(&group.at(0), &store, disabled_executor.adapter(), std::move(disabled_request),
+                              &disabled_output, &disabled_promise);
+    });
+
+    ASSERT_EQ(disabled_future.wait_for(5s), std::future_status::ready);
+    EXPECT_NE(disabled_output.find("HTTP/1.1 201 Created\r\n"), std::string::npos);
+    EXPECT_NE(disabled_output.find("hello"), std::string::npos);
+    EXPECT_EQ(disabled_output.find("READ_RESP_BODY"), std::string::npos);
+    EXPECT_EQ(count_status(disabled_output, "HTTP/1.1 "), 1U);
+    EXPECT_EQ(upstream_state.requests.size(), 2U);
+
+    std::promise<void> shutdown_promise;
+    auto shutdown_future = shutdown_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() { return shutdown(&pool, &server, &shutdown_promise); });
+    ASSERT_EQ(shutdown_future.wait_for(2s), std::future_status::ready);
+    group.stop();
+    group.join();
+}
+
+TEST(ProxyExecutorTest, AppliesServerDefaultResponseBodyLimitToChunkedResponses) {
+    fiber::event::EventLoopGroup group(1);
+    fiber::http::StealableHttp1ConnectionPoolSet pool(group);
+    ASSERT_TRUE(pool.init());
+    group.start();
+
+    UpstreamState upstream_state{
+            .response =
+                    {
+                            .body = "hello",
+                            .chunked = true,
+                    },
+    };
+    std::promise<std::uint16_t> port_promise;
+    std::promise<TestHttpServer> server_promise;
+    auto port_future = port_promise.get_future();
+    auto server_future = server_promise.get_future();
+    fiber::async::spawn(group.at(0),
+                        [&]() { return start_server(&group.at(0), &upstream_state, &port_promise, &server_promise); });
+
+    TestHttpServer server = server_future.get();
+    ASSERT_NE(server.server, nullptr);
+    const std::uint16_t port = port_future.get();
+    ASSERT_NE(port, 0);
+
+    fiber::access_server::RouteConfigStore store;
+    auto published = store.apply("orders", proxy_response_project_config(port, std::nullopt, false));
+    ASSERT_TRUE(published) << published.error().message;
+
+    fiber::access_server::ProxyExecutorOptions executor_options;
+    executor_options.default_max_response_body_size = 4;
+    fiber::access_server::ProxyExecutor executor(pool, {}, {}, executor_options);
+    std::string output;
+    std::promise<void> request_promise;
+    auto request_future = request_promise.get_future();
+    std::string request = "GET /proxy HTTP/1.1\r\n"
+                          "Host: api.example.com\r\n"
+                          "Connection: close\r\n\r\n";
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_downstream(&group.at(0), &store, executor.adapter(), std::move(request), &output, &request_promise);
+    });
+
+    ASSERT_EQ(request_future.wait_for(5s), std::future_status::ready);
+    EXPECT_NE(output.find("HTTP/1.1 201 Created\r\n"), std::string::npos);
+    EXPECT_EQ(output.find("hello"), std::string::npos);
+    EXPECT_EQ(output.find("READ_RESP_BODY"), std::string::npos);
+    EXPECT_EQ(count_status(output, "HTTP/1.1 "), 1U);
+
+    std::promise<void> shutdown_promise;
+    auto shutdown_future = shutdown_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() { return shutdown(&pool, &server, &shutdown_promise); });
+    ASSERT_EQ(shutdown_future.wait_for(2s), std::future_status::ready);
+    group.stop();
+    group.join();
+}
+
 TEST(ProxyExecutorTest, AbortsDownstreamAfterAnUpstreamBodyEndsEarly) {
     fiber::event::EventLoopGroup group(1);
     fiber::http::StealableHttp1ConnectionPoolSet pool(group);

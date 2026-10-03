@@ -22,14 +22,28 @@ TEST(ProxyRequestPlanTest, PreservesJavaRequestBodyFraming) {
 }
 
 TEST(ProxyRequestPlanTest, NormalizesJavaResponseBodyLimitSemantics) {
-    EXPECT_FALSE(normalize_proxy_response_body_limit(std::nullopt));
-    EXPECT_FALSE(normalize_proxy_response_body_limit(0));
+    constexpr std::size_t kServerDefault = 600U << 20U;
 
-    const std::optional<std::uint64_t> negative = normalize_proxy_response_body_limit(-1);
+    // Route not configured (absent or zero) falls back to the server default,
+    // which itself mirrors Java's fiber.http.client.maxBodySize.
+    const std::optional<std::uint64_t> absent = normalize_proxy_response_body_limit(std::nullopt, kServerDefault);
+    ASSERT_TRUE(absent);
+    EXPECT_EQ(*absent, 600U << 20U);
+    const std::optional<std::uint64_t> zero = normalize_proxy_response_body_limit(0, kServerDefault);
+    ASSERT_TRUE(zero);
+    EXPECT_EQ(*zero, 600U << 20U);
+
+    // Zero server default disables the cap entirely.
+    EXPECT_FALSE(normalize_proxy_response_body_limit(std::nullopt, 0));
+    EXPECT_FALSE(normalize_proxy_response_body_limit(0, 0));
+
+    // Negative route value stays an explicit opt-out even with a server default.
+    const std::optional<std::uint64_t> negative = normalize_proxy_response_body_limit(-1, kServerDefault);
     ASSERT_TRUE(negative);
     EXPECT_EQ(*negative, 0U);
 
-    const std::optional<std::uint64_t> positive = normalize_proxy_response_body_limit(4096);
+    // A configured route value wins over the server default.
+    const std::optional<std::uint64_t> positive = normalize_proxy_response_body_limit(4096, kServerDefault);
     ASSERT_TRUE(positive);
     EXPECT_EQ(*positive, 4096U);
 }

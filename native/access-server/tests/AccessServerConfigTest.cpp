@@ -32,6 +32,7 @@ TEST(AccessServerConfigTest, LoadsJavaServerDefaultsAndNacosSettings) {
     EXPECT_TRUE(config->activation_endpoint_options().bearer_token.empty());
     EXPECT_EQ(config->initial_config_timeout(), std::chrono::seconds(60));
     EXPECT_EQ(config->default_max_request_body_size(), 400U << 20U);
+    EXPECT_EQ(config->default_max_response_body_size(), 600U << 20U);
     EXPECT_FALSE(config->test_mode());
     EXPECT_EQ(config->client_metadata_options().mode, ClientMetadataMode::Direct);
     EXPECT_TRUE(config->client_metadata_options().trusted_proxy_cidrs.empty());
@@ -225,6 +226,7 @@ TEST(AccessServerConfigTest, LoadsExplicitRuntimeAndCompatibilityKeys) {
         ACCESS_SERVER_ACTIVATION_TOKEN=0123456789abcdef0123456789abcdef
         ACCESS_SERVER_INITIAL_CONFIG_TIMEOUT_MILLIS=2500
         ACCESS_SERVER_MAX_REQUEST_BODY_SIZE=12345
+        ACCESS_SERVER_MAX_RESPONSE_BODY_SIZE=629145600
         ACCESS_SERVER_TEST_MODE=true
         ACCESS_SERVER_CLIENT_METADATA_MODE=trusted_proxy
         ACCESS_SERVER_TRUSTED_PROXY_CIDRS=10.0.0.0/8,2001:db8::/32
@@ -256,6 +258,7 @@ TEST(AccessServerConfigTest, LoadsExplicitRuntimeAndCompatibilityKeys) {
     EXPECT_EQ(config->activation_endpoint_options().bearer_token, "0123456789abcdef0123456789abcdef");
     EXPECT_EQ(config->initial_config_timeout(), std::chrono::milliseconds(2500));
     EXPECT_EQ(config->default_max_request_body_size(), 12345U);
+    EXPECT_EQ(config->default_max_response_body_size(), 629145600U);
     EXPECT_TRUE(config->test_mode());
     EXPECT_EQ(config->client_metadata_options().mode, ClientMetadataMode::TrustedProxy);
     EXPECT_EQ(config->client_metadata_options().trusted_proxy_cidrs.size(), 2u);
@@ -276,6 +279,35 @@ TEST(AccessServerConfigTest, LoadsExplicitRuntimeAndCompatibilityKeys) {
     EXPECT_EQ(config->service_discovery_options().zone, "sh");
     EXPECT_EQ(config->nacos_config().username(), "user");
     EXPECT_EQ(config->nacos_config().password(), "pass");
+}
+
+TEST(AccessServerConfigTest, LoadsResponseBodyLimitOverrideAndDisable) {
+    auto overridden = AccessServerConfig::load_from_string("NACOS_SERVER_ADDRESSES=127.0.0.1\n"
+                                                           "ACCESS_SERVER_MAX_RESPONSE_BODY_SIZE=54321\n");
+    ASSERT_TRUE(overridden) << overridden.error().detail;
+    EXPECT_EQ(overridden->default_max_response_body_size(), 54321U);
+
+    auto disabled = AccessServerConfig::load_from_string("NACOS_SERVER_ADDRESSES=127.0.0.1\n"
+                                                         "ACCESS_SERVER_MAX_RESPONSE_BODY_SIZE=0\n");
+    ASSERT_TRUE(disabled) << disabled.error().detail;
+    EXPECT_EQ(disabled->default_max_response_body_size(), 0U);
+}
+
+TEST(AccessServerConfigTest, RejectsInvalidBodySizeSettings) {
+    const auto expect_invalid = [](std::string_view settings) {
+        std::string input = "NACOS_SERVER_ADDRESSES=127.0.0.1\n";
+        input.append(settings);
+        auto config = AccessServerConfig::load_from_string(input);
+        EXPECT_FALSE(config) << settings;
+        if (!config) {
+            EXPECT_EQ(config.error().code, AccessServerConfigErrorCode::InvalidValue);
+        }
+    };
+
+    expect_invalid("ACCESS_SERVER_MAX_REQUEST_BODY_SIZE=-1\n");
+    expect_invalid("ACCESS_SERVER_MAX_REQUEST_BODY_SIZE=abc\n");
+    expect_invalid("ACCESS_SERVER_MAX_RESPONSE_BODY_SIZE=-1\n");
+    expect_invalid("ACCESS_SERVER_MAX_RESPONSE_BODY_SIZE=abc\n");
 }
 
 TEST(AccessServerConfigTest, RejectsIncompleteOrUnexpectedActivationCredentials) {

@@ -187,10 +187,16 @@ http::HttpBodySpec select_proxy_request_body_spec(http::HttpBodySpec inbound, bo
     return http::HttpBodySpec::Chunked();
 }
 
-std::optional<std::uint64_t>
-normalize_proxy_response_body_limit(std::optional<std::int64_t> configured_limit) noexcept {
+std::optional<std::uint64_t> normalize_proxy_response_body_limit(std::optional<std::int64_t> configured_limit,
+                                                                 std::size_t server_default) noexcept {
     if (!configured_limit || *configured_limit == 0) {
-        return std::nullopt;
+        // Absent or zero means "not configured on the route": fall back to the
+        // server default (Java's fiber.http.client.maxBodySize), where zero
+        // disables the cap entirely.
+        if (server_default == 0) {
+            return std::nullopt;
+        }
+        return static_cast<std::uint64_t>(server_default);
     }
     if (*configured_limit < 0) {
         return 0;
@@ -199,13 +205,15 @@ normalize_proxy_response_body_limit(std::optional<std::int64_t> configured_limit
 }
 
 ProxyRequestPlan::ProxyRequestPlan(mem::BufPool &pool, const http::HttpExchange &exchange,
-                                   const CompiledProxyRoute &proxy) noexcept :
+                                   const CompiledProxyRoute &proxy, std::size_t default_max_response_body_size) noexcept
+    :
     headers_(pool), websocket_handshake_{.downstream = websocket_downstream(exchange, proxy)},
     upstream_method_(websocket_handshake_.active() ? http::HttpMethod::Get : exchange.method()) {
     body_spec_ = select_proxy_request_body_spec(
             exchange.request_body_spec(), !exchange.header("Content-Length").empty(), websocket_handshake_.active());
     request_end_stream_ = body_spec_.is_none() || (body_spec_.is_content_length() && body_spec_.content_length() == 0);
-    max_response_body_size_ = normalize_proxy_response_body_limit(proxy.max_response_body_size);
+    max_response_body_size_ =
+            normalize_proxy_response_body_limit(proxy.max_response_body_size, default_max_response_body_size);
     if (websocket_handshake_.active() && proxy.websocket_timeout_millis) {
         websocket_timeout_millis_ = *proxy.websocket_timeout_millis;
     }
