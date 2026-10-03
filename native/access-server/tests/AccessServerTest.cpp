@@ -478,6 +478,10 @@ TEST(AccessServerTest, ServesPublishedSnapshotAndShutsDownWorkerResources) {
     EXPECT_NE(metrics_response.find("HTTP/1.1 200"), std::string::npos);
     EXPECT_NE(metrics_response.find("access_server_requests_total{result=\"success\"} 3"), std::string::npos);
     EXPECT_NE(metrics_response.find("access_server_requests_total{result=\"client_error\"} 1"), std::string::npos);
+    EXPECT_NE(metrics_response.find("access_server_requests_by_status_total{status_code=\"200\"} 3"),
+              std::string::npos);
+    EXPECT_NE(metrics_response.find("access_server_requests_by_status_total{status_code=\"406\"} 1"),
+              std::string::npos);
     EXPECT_NE(metrics_response.find("access_server_request_duration_seconds_count 4"), std::string::npos);
     EXPECT_NE(metrics_response.find("access_server_response_compression_total{result=\"gzip\"} 2"), std::string::npos);
     EXPECT_NE(metrics_response.find("access_server_response_compression_total{result=\"identity\"} 1"),

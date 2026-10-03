@@ -15,6 +15,12 @@ The existing worker-sharded metrics are:
 
 - `access_server_requests_total{result}` with `success`, `client_error`, `server_error`, or
   `canceled`;
+- `access_server_requests_by_status_total{status_code}` with a compile-time table of common codes
+  (`200 201 202 204 206`, `301 302 303 304 307 308`,
+  `400 401 403 404 405 406 408 409 410 412 413 415 416 422 426 429 499`,
+  `500 501 502 503 504 505`) plus per-class fallback buckets (`1xx` through `5xx`) and `other` for
+  codes outside 100-599. Only responses that completed without a terminal error are counted;
+  `canceled` requests carry no status code and remain visible only in the `result` family;
 - `access_server_requests_inflight`;
 - `access_server_request_duration_seconds`;
 - `access_server_response_compression_total{result}` with `gzip`, `identity`, or

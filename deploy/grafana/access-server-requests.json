@@ -408,14 +408,77 @@
         }
       ]
     },
-    { "id": 101, "type": "row", "title": "Proxy / upstream", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 21 }, "panels": [] },
+    {
+      "id": 26,
+      "type": "timeseries",
+      "title": "Request rate by status code",
+      "description": "按状态码细分的请求速率:数字码为预注册常见码,1xx-5xx 为类内兜底桶,other=100-599 之外;canceled 只在 result family。",
+      "datasource": { "type": "prometheus", "uid": "prometheus-2" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 21 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "fillOpacity": 20,
+            "gradientMode": "none",
+            "spanNulls": true,
+            "showPoints": "never",
+            "stacking": { "group": "A", "mode": "normal" }
+          }
+        },
+        "overrides": [
+          { "matcher": { "id": "byRegexp", "options": "^2" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } }] },
+          { "matcher": { "id": "byRegexp", "options": "^3" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "blue" } }] },
+          { "matcher": { "id": "byRegexp", "options": "^4" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "yellow" } }] },
+          { "matcher": { "id": "byRegexp", "options": "^5" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }] }
+        ]
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "expr": "sum by (status_code) (rate(access_server_requests_by_status_total{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "{{status_code}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 27,
+      "type": "timeseries",
+      "title": "Error status codes",
+      "description": "4xx/5xx 各状态码速率(线图,不堆叠):区分 401/403/404/429/500/502/503/504 等;4xx/5xx 桶为类内未列出码的兜底。",
+      "datasource": { "type": "prometheus", "uid": "prometheus-2" },
+      "gridPos": { "h": 8, "w": 16, "x": 8, "y": 21 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": { "drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 2, "fillOpacity": 0, "spanNulls": true, "showPoints": "never" }
+        },
+        "overrides": [
+          { "matcher": { "id": "byRegexp", "options": "^5" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }] },
+          { "matcher": { "id": "byRegexp", "options": "^4" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "yellow" } }] }
+        ]
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "expr": "sum by (status_code) (rate(access_server_requests_by_status_total{instance=~\"$instance\",status_code=~\"[45].*\"}[$__rate_interval]))",
+          "legendFormat": "{{status_code}}",
+          "refId": "A"
+        }
+      ]
+    },
+    { "id": 101, "type": "row", "title": "Proxy / upstream", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 29 }, "panels": [] },
     {
       "id": 14,
       "type": "timeseries",
       "title": "Proxy executions by result",
       "description": "代理路由执行的终态:completed / failed / canceled。access_server_proxy_executions_total",
       "datasource": { "type": "prometheus", "uid": "prometheus-2" },
-      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 22 },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 30 },
       "fieldConfig": {
         "defaults": {
           "unit": "ops",
@@ -442,7 +505,7 @@
       "title": "Proxy attempts by result",
       "description": "已选定上游的代理尝试终态:completed / failed / aborted。access_server_proxy_attempts_total",
       "datasource": { "type": "prometheus", "uid": "prometheus-2" },
-      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 22 },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 30 },
       "fieldConfig": {
         "defaults": {
           "unit": "ops",
@@ -469,7 +532,7 @@
       "title": "Proxy failures by phase",
       "description": "按发现阶段的代理失败(no_upstream_hosts / connect / tls / read_response_body 等)。仅显示速率 >0 的阶段。access_server_proxy_failures_total",
       "datasource": { "type": "prometheus", "uid": "prometheus-2" },
-      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 22 },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 30 },
       "fieldConfig": {
         "defaults": {
           "unit": "ops",
@@ -492,7 +555,7 @@
       "title": "Upstream connection pool acquires by result",
       "description": "HTTP/1 上游连接池获取结果:hit / miss / shutdown。access_server_proxy_pool_acquires_total",
       "datasource": { "type": "prometheus", "uid": "prometheus-2" },
-      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 30 },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 38 },
       "fieldConfig": {
         "defaults": {
           "unit": "ops",
@@ -518,7 +581,7 @@
       "title": "Pool hit ratio",
       "description": "连接池命中占比(hit / 全部获取)。",
       "datasource": { "type": "prometheus", "uid": "prometheus-2" },
-      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 30 },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 38 },
       "fieldConfig": {
         "defaults": {
           "unit": "percentunit",
@@ -543,7 +606,7 @@
       "title": "Upstream DNS resolutions by result",
       "description": "上游域名解析结果:success / empty / failure / unavailable。access_server_proxy_dns_resolutions_total",
       "datasource": { "type": "prometheus", "uid": "prometheus-2" },
-      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 30 },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 38 },
       "fieldConfig": {
         "defaults": {
           "unit": "ops",
@@ -570,7 +633,7 @@
       "title": "Upstream connect attempts by result",
       "description": "新建上游传输连接结果:success / failure / tls_failure / create_failure。access_server_proxy_connect_attempts_total",
       "datasource": { "type": "prometheus", "uid": "prometheus-2" },
-      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 38 },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 46 },
       "fieldConfig": {
         "defaults": {
           "unit": "ops",
@@ -598,7 +661,7 @@
       "title": "Happy Eyeballs races by result",
       "description": "多地址上游连接竞速结果。access_server_proxy_happy_eyeballs_total",
       "datasource": { "type": "prometheus", "uid": "prometheus-2" },
-      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 38 },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 46 },
       "fieldConfig": {
         "defaults": {
           "unit": "ops",
@@ -624,7 +687,7 @@
       "title": "Connect address candidates observed",
       "description": "新连接观察到的地址候选数速率。access_server_proxy_connect_candidates_total",
       "datasource": { "type": "prometheus", "uid": "prometheus-2" },
-      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 38 },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 46 },
       "fieldConfig": {
         "defaults": {
           "unit": "ops",
@@ -641,14 +704,14 @@
         }
       ]
     },
-    { "id": 102, "type": "row", "title": "WebSocket", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 46 }, "panels": [] },
+    { "id": 102, "type": "row", "title": "WebSocket", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 54 }, "panels": [] },
     {
       "id": 23,
       "type": "timeseries",
       "title": "WebSocket handshakes by result",
       "description": "accepted / rejected / failed。access_server_websocket_handshakes_total",
       "datasource": { "type": "prometheus", "uid": "prometheus-2" },
-      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 47 },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 55 },
       "fieldConfig": {
         "defaults": {
           "unit": "ops",
@@ -675,7 +738,7 @@
       "title": "WebSocket sessions completed by result",
       "description": "closed(正常结束)/ aborted(异常中止)。access_server_websocket_sessions_total",
       "datasource": { "type": "prometheus", "uid": "prometheus-2" },
-      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 47 },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 55 },
       "fieldConfig": {
         "defaults": {
           "unit": "ops",
@@ -700,7 +763,7 @@
       "type": "timeseries",
       "title": "WebSocket sessions in-flight",
       "datasource": { "type": "prometheus", "uid": "prometheus-2" },
-      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 47 },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 55 },
       "fieldConfig": {
         "defaults": {
           "unit": "short",
@@ -751,6 +814,6 @@
   "timezone": "browser",
   "title": "Access Server · Request Handling",
   "uid": "access-server-requests",
-  "version": 1,
+  "version": 2,
   "weekStart": ""
 }

@@ -23,6 +23,50 @@ namespace fiber::access_server {
 
 class AccessRuntimeMetrics;
 
+enum class AccessResponseStatus : std::uint8_t {
+    Code200,
+    Code201,
+    Code202,
+    Code204,
+    Code206,
+    Code301,
+    Code302,
+    Code303,
+    Code304,
+    Code307,
+    Code308,
+    Code400,
+    Code401,
+    Code403,
+    Code404,
+    Code405,
+    Code406,
+    Code408,
+    Code409,
+    Code410,
+    Code412,
+    Code413,
+    Code415,
+    Code416,
+    Code422,
+    Code426,
+    Code429,
+    Code499,
+    Code500,
+    Code501,
+    Code502,
+    Code503,
+    Code504,
+    Code505,
+    Other1xx,
+    Other2xx,
+    Other3xx,
+    Other4xx,
+    Other5xx,
+    Other,
+    Count,
+};
+
 enum class AccessProxyExecutionResult : std::uint8_t {
     Completed,
     Failed,
@@ -136,6 +180,7 @@ public:
         friend class AccessServerMetrics;
 
         static constexpr std::size_t kRequestResultCount = 4;
+        static constexpr std::size_t kRequestStatusCodeCount = static_cast<std::size_t>(AccessResponseStatus::Count);
         static constexpr std::size_t kResponseCompressionResultCount = 3;
         static constexpr std::size_t kProxyExecutionResultCount =
                 static_cast<std::size_t>(AccessProxyExecutionResult::Count);
@@ -155,6 +200,7 @@ public:
         static constexpr std::size_t kBodyIdleDirectionCount = static_cast<std::size_t>(AccessBodyIdleDirection::Count);
 
         std::array<prometheus::CounterRef, kRequestResultCount> requests_;
+        std::array<prometheus::CounterRef, kRequestStatusCodeCount> requests_by_status_;
         std::array<prometheus::CounterRef, kResponseCompressionResultCount> response_compression_;
         std::array<prometheus::CounterRef, kProxyExecutionResultCount> proxy_executions_;
         std::array<prometheus::CounterRef, kProxyAttemptResultCount> proxy_attempts_;
