@@ -63,6 +63,13 @@ void AccessProviderTransaction::add_connection_reuse(std::uint64_t reuse_count) 
     add_integer(transaction_, "reuse_count", reuse_count);
 }
 
+void AccessProviderTransaction::add_connect(std::chrono::microseconds duration) noexcept {
+    if (!valid()) {
+        return;
+    }
+    add_integer(transaction_, "connect_us", std::max<std::int64_t>(duration.count(), 0));
+}
+
 void AccessProviderTransaction::add_request_body(std::uint64_t bytes, std::chrono::microseconds duration) noexcept {
     if (!valid()) {
         return;

@@ -31,6 +31,13 @@ public:
     void add_upstream(std::string_view upstream, std::size_t attempt) noexcept;
     void add_uri(std::string_view uri) noexcept;
     void add_connection_reuse(std::uint64_t reuse_count) noexcept;
+    // Fresh-connection acquisition latency from the provider transaction's
+    // start: pool wait, DNS, dialing, TLS handshake, and the ALPN check all
+    // fall inside. Unlike the Java ConnRecorder connect tag, which fires at TCP
+    // establishment while netty completes the handshake asynchronously, the
+    // native connect() resolves only after the handshake. Also recorded on the
+    // acquisition-failure path, before the transaction fails.
+    void add_connect(std::chrono::microseconds duration) noexcept;
     // Body-transfer accounting: bytes pulled in for the phase and the wall time
     // its forwarding took. Recorded before completion only — data added after
     // the transaction completes is dropped by the CAT client.

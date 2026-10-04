@@ -1296,6 +1296,11 @@ TEST(ProxyExecutorTest, StreamsJavaCompatibleRequestsAndReusesTheUpstreamConnect
     EXPECT_TRUE(wait_for_cat_frame(cat_capture, "Access.Provider", "&uri=/items%20/%3F%23?item=2"));
     EXPECT_TRUE(wait_for_cat_frame(cat_capture, "Access.Provider", "&req_body_bytes=5&req_body_us="));
     EXPECT_TRUE(wait_for_cat_frame(cat_capture, "Access.Provider", "&resp_body_bytes=10&resp_body_us="));
+    // Fresh-connection attempts carry the connect-acquisition latency between
+    // the uri and the reuse count; the reused attempt does not.
+    EXPECT_TRUE(wait_for_cat_frame(cat_capture, "Access.Provider", "?item=1&connect_us="));
+    EXPECT_TRUE(wait_for_cat_frame(cat_capture, "Access.Provider", "?item=2&reuse_count=1"));
+    EXPECT_FALSE(cat_capture.contains("?item=2&connect_us="));
     // Root data uses the space separator; the provider's own data is '&'-joined.
     EXPECT_FALSE(cat_capture.contains(" upstream="));
     EXPECT_FALSE(cat_capture.contains("connection_request_count="));
@@ -1362,6 +1367,9 @@ TEST(ProxyExecutorTest, StreamsJavaCompatibleRequestsAndReusesTheUpstreamConnect
     EXPECT_TRUE(wait_for_cat_pattern(cat_capture, provider_closed_failed, "CALL_ERROR"));
     EXPECT_TRUE(cat_capture.contains("CALL_ERROR", "HTTP_CLIENT_CONNECT_ERROR"));
     EXPECT_FALSE(cat_capture.contains("FiberException", "HTTP_CLIENT_CONNECT_ERROR"));
+    // The failed acquisition still reports the latency spent before failing,
+    // ahead of the CALL_ERROR path data.
+    EXPECT_TRUE(wait_for_cat_frame(cat_capture, "upstream=127.0.0.2:" + std::to_string(port), "&connect_us="));
 
     std::string response_failure_output;
     ASSERT_TRUE(run_additional_request(
