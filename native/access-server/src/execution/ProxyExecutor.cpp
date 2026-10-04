@@ -327,6 +327,10 @@ private:
     bool session_active_ = false;
 };
 
+[[nodiscard]] std::chrono::microseconds elapsed_since(const std::chrono::steady_clock::time_point started) noexcept {
+    return std::chrono::duration_cast<std::chrono::microseconds>(event::EventLoop::current().now() - started);
+}
+
 void record_provider_failure(AccessProviderTransaction &provider, AccessRequestTelemetry &telemetry,
                              ProxyAttemptMetricScope &attempt, const ProxyFailure &proxy_failure) noexcept {
     telemetry.record_proxy_failure(metric_failure_phase(proxy_failure.phase));
@@ -1362,9 +1366,17 @@ async::Task<Result<void>> ProxyExecutor::execute_impl(http::HttpExchange &exchan
         provider_transaction.add_uri(request_plan.request_head().target);
         ProxyAttemptMetricScope attempt_metrics(telemetry);
 
+        // Connect acquisition interval, per attempt: from the provider
+        // transaction's start (the Java ConnRecorder's tx.getTimeNano()) until
+        // the connection is usable — pool wait, DNS, happy-eyeballs/sequential
+        // dialing, TLS handshake, and the ALPN check all fall inside. The Java
+        // connect tag stops at TCP establishment (netty completes the
+        // handshake asynchronously), so this value is a superset of it.
+        const auto connect_started = event::EventLoop::current().now();
         auto connected = co_await acquire_proxy_upstream_connection(pool_, dns_resolver_, connection_key, tls_policy,
                                                                     options_.connect_timeout, options_.happy_eyeballs);
         if (!connected) {
+            provider_transaction.add_connect(elapsed_since(connect_started));
             telemetry.record_proxy_connection(connected.error().observation);
             ProxyFailure connect_failure = from_connect_error(connected.error());
             record_provider_failure(provider_transaction, telemetry, attempt_metrics, connect_failure);
@@ -1378,6 +1390,9 @@ async::Task<Result<void>> ProxyExecutor::execute_impl(http::HttpExchange &exchan
         // Java ConnRecorder: a reused connection reports the negated count of
         // requests it has served; a fresh one reports connect latency.
         const std::uint64_t served_requests = connected->connection->request_count();
+        if (served_requests == 0) {
+            provider_transaction.add_connect(elapsed_since(connect_started));
+        }
         access_log.set_connect_nano(served_requests > 0 ? -static_cast<std::int64_t>(served_requests)
                                                         : access_log.elapsed_nano());
         UpstreamAttempt upstream_attempt(exchange, proxy, input, telemetry, request_plan, *selected, *connected,
