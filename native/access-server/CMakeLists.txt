@@ -286,6 +286,7 @@ if (FIBER_BUILD_TESTS AND (GTest_FOUND OR TARGET GTest::gtest_main))
         "${CMAKE_CURRENT_LIST_DIR}/tests/CompiledTemplateTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/ClientMetadataTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/GrayConfigTest.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/tests/Http3EarlyResponseCancelTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/TempClusterConfigTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/NativeValidatorProtocolTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/NetworkEntryHeadersTest.cpp"
