@@ -10,7 +10,7 @@ HTTP, JSON/script, Nacos, CAT, and Prometheus modules are consumed from the pinn
 historical application import revision.
 
 The current reusable Fiber dependency is pinned at
-`feb9ae15600b5293623d6db3337db2066d595d23` (upstream `master`, fetched 2026-10-02). The pinned
+`512ef8a73a653d951ea80d9f3ccc095545577319` (upstream `master`, fetched 2026-10-12). The pinned
 revision carries no repository-owned compatibility patches: the TLS dynamic-credential lifetime
 defect ([upstream issue #41](https://github.com/fiber-net-gateway/fiber-gateway-cpp/issues/41)),
 briefly patched against `f832d5458d3bfca1cefa45a4c7a6cb1cd0662f23`, is fixed upstream in `90ed153`
@@ -19,6 +19,23 @@ The repository-owned regression
 `ProxyExecutorTest.StreamsChunkedUpstreamWhoseFramingArrivesSeparatelyFromPayload` still guards
 the HTTP/1 chunked split-framing fix from the application side.
 The reviewed update range from the previous pin is
+`feb9ae15600b5293623d6db3337db2066d595d23..512ef8a73a653d951ea80d9f3ccc095545577319`. Its
+behavioral core is the HTTP/3 early-response cancellation code change
+(`fix(http3): stop unread request bodies with H3_NO_ERROR`): when a handler finishes with a
+complete response and an unread request body remains, the STOP_SENDING now carries
+`H3_NO_ERROR` (256) instead of `H3_REQUEST_CANCELLED` (268), per RFC 9114 §4.1 semantics of
+preserving the complete response; the aborted-response path still resets the send direction with
+`H3_REQUEST_CANCELLED`. The range also lands QUIC transport fixes (Version Negotiation parsing
+without the fixed bit, in-flight packet tracking across congestion resets, handshake failure on
+out-of-order CRYPTO below an already-fed level, rejection of a QUIC ServerHello without
+supported_versions), QUIC performance rework (crypto input through buffer chains, connection-ID
+hash caching, intrusive output-frame lists with IoBuf-owned payloads), script GC heap
+statistics, and a repo-wide clang-tidy rollout (infrastructure plus per-module batches; no
+intended behavior change). Interop verification on this pin: Chrome QUIC receives
+STOP_SENDING(256) and resets with 256 within ~3ms, but the fetch/XHR hang itself persists —
+Chrome never surfaces the early response while the reset upload is unfinished, independent of
+the app error code. Access-server needed no source adaptation.
+The previous reviewed range from its predecessor pin is
 `f2e330bc16fbb6cf7499b824de9931b0ece60a13..feb9ae15600b5293623d6db3337db2066d595d23`. It fixes
 the CAT client's write-only collector transport — the root cause of the 2026-10-02 CAT blackout
 on 172.28.2.111, where a collector disconnect under benchmark load went unnoticed for hours
