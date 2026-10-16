@@ -118,6 +118,24 @@ void AccessProviderTransaction::call_error(const Exception &exception, std::stri
     fail(phase, error);
 }
 
+void AccessProviderTransaction::fail_with_event(std::string_view type, std::string_view name, std::string_view phase,
+                                                common::IoErr error) noexcept {
+    if (!valid()) {
+        return;
+    }
+    auto event = transaction_.start_event(type, name);
+    if (event) {
+        if (!phase.empty()) {
+            (void) event->add_data("phase", phase);
+        }
+        if (error != common::IoErr::None) {
+            (void) event->add_data("io_error", common::io_err_name(error));
+        }
+        (void) event->complete(cat::status::Fail);
+    }
+    fail(phase, error);
+}
+
 void AccessProviderTransaction::complete(int status_code) noexcept {
     if (!valid()) {
         return;

@@ -58,6 +58,9 @@ public:
     void record_response_error(common::IoErr error) noexcept {
         observability_.record_response_error(execution_, error);
     }
+    void record_error_response_failure(common::IoErr error) noexcept {
+        observability_.record_error_response_failure(execution_, error);
+    }
     void record_response_compression(bool compressed) noexcept {
         observability_.record_response_compression(compressed);
         response_compression_recorded_ = true;

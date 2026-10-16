@@ -340,6 +340,32 @@ void record_provider_failure(AccessProviderTransaction &provider, AccessRequestT
         attempt.aborted();
     }
     const std::string_view phase = proxy_failure_phase_name(proxy_failure.phase);
+    // Stage-attributed CAT events, decoupled from the client-visible mapped
+    // Exception: the header-transfer stages share the CALL_ERROR type with the
+    // connect family but name the stage (send_req/read_resp); body transfers
+    // get a direction+phase type with the io-error cause as the name. Only the
+    // connect/DNS/TLS family keeps the Java-exception-named CALL_ERROR.
+    switch (proxy_failure.phase) {
+        case ProxyFailurePhase::SendHeader:
+            provider.fail_with_event("CALL_ERROR", "send_req", phase, proxy_failure.io_error);
+            return;
+        case ProxyFailurePhase::ReadResponseHeader:
+            provider.fail_with_event("CALL_ERROR", "read_resp", phase, proxy_failure.io_error);
+            return;
+        case ProxyFailurePhase::ReadRequestBody:
+        case ProxyFailurePhase::RequestBodyTooLarge:
+        case ProxyFailurePhase::SendRequestBody:
+            provider.fail_with_event(proxy_failure.phase == ProxyFailurePhase::SendRequestBody ? "ReqBodyErr.Write"
+                                                                                               : "ReqBodyErr.Read",
+                                     common::io_err_name(proxy_failure.io_error), phase, proxy_failure.io_error);
+            return;
+        case ProxyFailurePhase::ReadResponseBody:
+            provider.fail_with_event("RespBodyErr.Read", common::io_err_name(proxy_failure.io_error), phase,
+                                     proxy_failure.io_error);
+            return;
+        default:
+            break;
+    }
     if (is_upstream_call_failure(proxy_failure.phase)) {
         provider.call_error(map_proxy_failure(proxy_failure), phase, proxy_failure.io_error);
     } else {
@@ -923,16 +949,45 @@ async::Task<Result<void>> UpstreamAttempt::run() noexcept {
 
     const http::Http1ResponseHead *upstream_head = nullptr;
     for (;;) {
-        auto received = co_await upstream.read_header(response_header_timeout(proxy_.timeout_millis));
-        if (!received) {
+        // Waiting on the upstream response head is one of the two windows where
+        // a downstream close is otherwise invisible: no downstream write is
+        // pending, so nothing surfaces until headers arrive. Racing the
+        // exchange's channel-closed waiter here attributes the abort to this
+        // stage. The read stays arm 0 so a same-turn tie still prefers
+        // delivering the response.
+        auto received = co_await async::when_any(
+                [&upstream, this]() {
+                    return upstream.read_header(response_header_timeout(proxy_.timeout_millis)).select();
+                },
+                [this]() { return exchange_.wait_response_channel_closed(); });
+        if (received.is<1>()) {
+            auto closed = std::move(received).get<1>();
+            if (!closed && !exchange_.response_channel_closed()) {
+                // Waiter registration failed without a real close; treat it as
+                // a stage failure the way the retired whole-execute race did.
+                (void) upstream.abort(closed.error());
+                attempt_metrics_.aborted();
+                provider_.fail("canceled", closed.error());
+                co_return std::unexpected(Err::from_error(closed.error()));
+            }
+            // Client abort: no failure-phase metric (a cancel is not a stage
+            // defect), the access log commits its 001 line on scope exit, and
+            // the in-flight upstream exchange is torn down rather than pooled.
+            (void) upstream.abort(common::IoErr::Canceled);
+            attempt_metrics_.aborted();
+            provider_.fail_with_event("CALL_ERROR", "client_abort", "read_response_header", common::IoErr::Canceled);
+            co_return std::unexpected(Err::from_error(common::IoErr::Canceled));
+        }
+        auto head = std::move(received).get<0>();
+        if (!head) {
             const ProxyFailure response_failure = failure(ProxyFailurePhase::ReadResponseHeader,
-                                                          "failed to read upstream response header", received.error());
+                                                          "failed to read upstream response header", head.error());
             record_provider_failure(provider_, telemetry_, attempt_metrics_, response_failure);
             report_selection(false);
             co_return proxy_failure_result(response_failure);
         }
-        if ((*received)->status_code == 101 || !(*received)->is_informational()) {
-            upstream_head = *received;
+        if ((*head)->status_code == 101 || !(*head)->is_informational()) {
+            upstream_head = *head;
             break;
         }
     }
@@ -1001,7 +1056,8 @@ async::Task<Result<void>> UpstreamAttempt::run() noexcept {
         (void) upstream.abort(common::IoErr::MessageTooLarge);
         telemetry_.record_proxy_failure(AccessProxyFailurePhase::ResponseBodyTooLarge);
         attempt_metrics_.aborted();
-        provider_.fail("aborted", common::IoErr::MessageTooLarge);
+        provider_.fail_with_event("RespBodyErr.Read", common::io_err_name(common::IoErr::MessageTooLarge),
+                                  "response_body_too_large", common::IoErr::MessageTooLarge);
         auto exception = response_body_too_large(exchange_.pool(), content_length);
         if (!exception) {
             co_return std::unexpected(Err::from_error(exception.error()));
@@ -1056,7 +1112,10 @@ async::Task<Result<void>> UpstreamAttempt::run() noexcept {
             (void) upstream.abort(sent_header.error());
             telemetry_.record_proxy_failure(AccessProxyFailurePhase::SendResponseHeader);
             attempt_metrics_.aborted();
-            provider_.fail("aborted", sent_header.error());
+            // The websocket provider transaction already completed after the
+            // validated upstream 101, so this event only lands when the CAT
+            // tree still accepts it; the root keeps the response-error mark.
+            provider_.fail_with_event("CALL_ERROR", "write_resp", "send_response_header", sent_header.error());
             telemetry_.record_response_error(sent_header.error());
             co_return std::unexpected(Err::from_error(sent_header.error()));
         }
@@ -1093,7 +1152,7 @@ async::Task<Result<void>> UpstreamAttempt::run() noexcept {
         (void) upstream.abort(sent_response_header.error());
         telemetry_.record_proxy_failure(AccessProxyFailurePhase::SendResponseHeader);
         attempt_metrics_.aborted();
-        provider_.fail("aborted", sent_response_header.error());
+        provider_.fail_with_event("CALL_ERROR", "write_resp", "send_response_header", sent_response_header.error());
         telemetry_.record_response_error(sent_response_header.error());
         co_return std::unexpected(Err::from_error(sent_response_header.error()));
     }
@@ -1132,18 +1191,50 @@ async::Task<Result<void>> UpstreamAttempt::run() noexcept {
             .read_timeout = body_read_idle_timeout(proxy_.timeout_millis, options_.body_read_idle_floor),
             .write_timeout = options_.downstream_write_timeout,
     };
-    auto piped =
-            co_await http::pipe_http_body(http::make_http_body_pipe_reader(body_reader),
-                                          http::make_http_body_pipe_writer(telemetry_.response_writer()), pipe_options);
+    // The response-body pipe is the second window where a downstream close is
+    // otherwise invisible between writes: while the pipe waits on the upstream
+    // for the next chunk. Racing the channel-closed waiter here attributes the
+    // abort to the pipe stage; the pipe stays arm 0 so a same-turn tie still
+    // prefers the completed transfer.
+    auto piped = co_await async::when_any(
+            [&]() {
+                return http::pipe_http_body(http::make_http_body_pipe_reader(body_reader),
+                                            http::make_http_body_pipe_writer(telemetry_.response_writer()),
+                                            pipe_options)
+                        .select();
+            },
+            [this]() { return exchange_.wait_response_channel_closed(); });
     // Flush before the terminal provider calls below; data added after the
-    // transaction completes is dropped.
+    // transaction completes is dropped. The stats are readable after either
+    // arm wins: the abort arm destroys the pipe task first, and the pipe's
+    // abort guard tears down both endpoints without touching the reader's
+    // byte accounting.
     response_body_stats.record();
-    if (!piped) {
-        const http::HttpBodyPipeError pipe_error = piped.error();
+    if (piped.is<1>()) {
+        auto closed = std::move(piped).get<1>();
+        if (!closed && !exchange_.response_channel_closed()) {
+            // Waiter registration failed without a real close; treat it as a
+            // stage failure the way the retired whole-execute race did.
+            attempt_metrics_.aborted();
+            provider_.fail("canceled", closed.error());
+            co_return std::unexpected(Err::from_error(closed.error()));
+        }
+        // Client abort mid-stream: the destroyed pipe task already aborted
+        // both pipe endpoints, so the upstream connection is not pooled.
+        // Canceled is not a stage defect, so no failure-phase metric and no
+        // circuit-breaker charge.
+        attempt_metrics_.aborted();
+        provider_.fail_with_event("RespBodyErr.Read", "client_abort", "read_response_body", common::IoErr::Canceled);
+        co_return std::unexpected(Err::from_error(common::IoErr::Canceled));
+    }
+    auto piped_result = std::move(piped).get<0>();
+    if (!piped_result) {
+        const http::HttpBodyPipeError pipe_error = piped_result.error();
         if (body_reader.limit_exceeded()) {
             telemetry_.record_proxy_failure(AccessProxyFailurePhase::ResponseBodyTooLarge);
             attempt_metrics_.aborted();
-            provider_.fail("aborted", pipe_error.code);
+            provider_.fail_with_event("RespBodyErr.Read", common::io_err_name(pipe_error.code),
+                                      "response_body_too_large", pipe_error.code);
         } else if (pipe_error.phase == http::HttpBodyPipePhase::Read) {
             // A body-read idle timeout is gateway policy cutting a silent but
             // plausibly healthy upstream (for example an SSE stream with no
@@ -1158,12 +1249,14 @@ async::Task<Result<void>> UpstreamAttempt::run() noexcept {
                                     failure(ProxyFailurePhase::ReadResponseBody,
                                             "failed to read upstream response body", pipe_error.code));
         } else {
-            telemetry_.record_proxy_failure(pipe_error.phase == http::HttpBodyPipePhase::Write
-                                                    ? AccessProxyFailurePhase::WriteResponseBody
-                                                    : AccessProxyFailurePhase::BuildResponseHeaders);
+            const bool write_phase = pipe_error.phase == http::HttpBodyPipePhase::Write;
+            telemetry_.record_proxy_failure(write_phase ? AccessProxyFailurePhase::WriteResponseBody
+                                                        : AccessProxyFailurePhase::BuildResponseHeaders);
             attempt_metrics_.aborted();
-            provider_.fail("aborted", pipe_error.code);
-            if (pipe_error.phase == http::HttpBodyPipePhase::Write) {
+            provider_.fail_with_event(write_phase ? "RespBodyErr.Write" : "RespBodyErr.Invalid",
+                                      common::io_err_name(pipe_error.code),
+                                      write_phase ? "write_response_body" : "build_response_headers", pipe_error.code);
+            if (write_phase) {
                 telemetry_.record_response_error(pipe_error.code);
             }
         }
@@ -1218,28 +1311,20 @@ async::Task<Result<void>> ProxyExecutor::execute(http::HttpExchange &exchange, c
         co_return Result<void>{};
     }
 
-    // The relay task is the first alternative on purpose: when_any breaks a
-    // same-turn tie (a relay finishing closes the response channel in the same
-    // stack) in favor of the lower index, so a completed relay is recorded as
-    // Completed instead of Canceled. The channel-closed awaiter alone still
-    // wins a real client abort.
-    auto completed =
-            co_await async::when_any([&]() { return execute_impl(exchange, proxy, input, telemetry).select(); },
-                                     [&exchange]() { return exchange.wait_response_channel_closed(); });
-    if (completed.is<0>()) {
-        auto result = std::move(completed).get<0>();
-        telemetry.record_proxy_execution(result ? AccessProxyExecutionResult::Completed
-                                                : AccessProxyExecutionResult::Failed);
-        co_return result;
-    }
-
-    auto closed = std::move(completed).get<1>();
-    if (!closed && !exchange.response_channel_closed()) {
-        telemetry.record_proxy_execution(AccessProxyExecutionResult::Failed);
-        co_return std::unexpected(Err::from_error(closed.error()));
-    }
-    telemetry.record_proxy_execution(AccessProxyExecutionResult::Canceled);
-    co_return Result<void>{};
+    // No whole-execute race: the exchange's channel-closed waiter slot is
+    // single-occupancy and is reserved for the stage-level races inside
+    // UpstreamAttempt::run (the upstream response-head wait and the
+    // response-body pipe), the two windows where a client abort is otherwise
+    // invisible. Every other stage either writes downstream or reads the
+    // client, so a close surfaces as that operation's own error. An error
+    // result with the channel already closed classifies as Canceled: the
+    // client cannot observe anything this exchange could still do.
+    auto result = co_await execute_impl(exchange, proxy, input, telemetry);
+    telemetry.record_proxy_execution(result ? AccessProxyExecutionResult::Completed
+                                            : (exchange.response_channel_closed()
+                                                       ? AccessProxyExecutionResult::Canceled
+                                                       : AccessProxyExecutionResult::Failed));
+    co_return result;
 }
 
 async::Task<Result<void>> ProxyExecutor::execute_impl(http::HttpExchange &exchange, const CompiledProxyRoute &proxy,
@@ -1286,6 +1371,12 @@ async::Task<Result<void>> ProxyExecutor::execute_impl(http::HttpExchange &exchan
             effective_upstream_tls_client_policy(options_.upstream_tls, tls_profile);
 
     for (std::size_t attempt = 0; attempt < kMaxJavaAttempts; ++attempt) {
+        if (attempt > 0 && exchange.response_channel_closed()) {
+            // The retired whole-execute race no longer cancels between connect
+            // retries; stop dialing new upstreams for a client that is gone.
+            // execute() classifies this Canceled from the closed channel.
+            co_return std::unexpected(Err::from_error(common::IoErr::Canceled));
+        }
         // Java allocates the AccessLog line before loadBalance: one line per
         // proxy attempt, timestamped at the attempt start. Attempts that fail
         // before a usable plan exists leave it unarmed (no line); connect and

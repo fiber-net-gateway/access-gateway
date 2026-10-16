@@ -80,7 +80,7 @@ struct Err {
     enum class Kind : std::uint8_t {
         Error, // Raw IO/memory failure without a public Exception payload.
         Exception, // AccessRequestHandler owns the FiberException event.
-        UpstreamException, // Proxy attempt already owns the CALL_ERROR event.
+        UpstreamException, // Proxy attempt already owns its terminal stage event (CALL_ERROR / body error).
     };
 
     [[nodiscard]] static constexpr Err from_error(common::IoErr error) noexcept {

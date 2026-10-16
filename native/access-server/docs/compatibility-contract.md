@@ -659,10 +659,14 @@ service+cluster 未列入 `ploto.test.temp-cluster-apps` 白名单（DEFAULT_GRO
 service→cluster 集合的 JSON map；空或 `null` 内容清空白名单，与 gray 规则的保留语义不同；
 非法内容保留旧快照）时，用配置 cluster 重新选择；production 对无实例和熔断
 （S_CIRCUIT_BROKEN）均无条件回退。静态 addresses selector 无配置 cluster，不参与回退；
-access log 的 ultimate cluster 列记录最终实际使用的 cluster。`ProxyExecutor` 在选择/连接 upstream、转发 request/response
-以及 tunnel 期间监视 downstream response channel；downstream 关闭会销毁未完成的 proxy
-coroutine，并使 active upstream exchange 退出 pool 复用。RESPONSE、redirect 和错误响应
-直接等待 downstream IO，由相应读写操作返回 channel 关闭错误。上述组件已在
+access log 的 ultimate cluster 列记录最终实际使用的 cluster。`ProxyExecutor` 在两个下游关闭不可见的窗口——等待 upstream
+response head 与 response body pipe 等待 upstream chunk——分别以 stage 级 `when_any`
+监视 downstream response channel（`HttpExchange` 的 channel-closed 等待槽单人，由这两
+个阶段依次占用；工作 arm 在 index 0，同回合平局优先交付响应）。downstream 关闭按所在
+阶段记录 `client_abort` 事件并中止 active upstream exchange（退出 pool 复用）；connect
+重试轮次之间用 closed 标志短路不再拨号；其余阶段的下游关闭由相应读写操作自身返回错
+误。RESPONSE、redirect 和错误响应直接等待 downstream IO，由相应读写操作返回 channel
+关闭错误。上述组件已在
 `AccessServerRuntime` 完成进程级装配：每个 request worker 使用自己的 DNS resolver
 和 local pool shard；项目列表首值及每个 desired project 的当前订阅首值均处理完成前不绑定
 listener。订阅暂态失败采用封顶指数退避，非法首值被记录为 rejected 并保留旧快照或空快照，
@@ -681,9 +685,15 @@ listener。订阅暂态失败采用封顶指数退避，非法首值被记录为
   当前只属于 W3C header 契约，不覆盖 CAT router 的独立采样决策；
 - `tracestate` 的解码、route context 更新和 upstream 重建独立于 CAT client 可用性；
   `MessageTrace context` 是同步的观测镜像，不是传播状态的唯一 owner；
-- 每次真实 upstream attempt 失败由对应 `Access.Provider` 记录 `CALL_ERROR`；最终错误返回
-  handler 时使用 `Err::UpstreamException`，只标记根事务失败，不再重复记录
-  `FiberException`。路由、模板、无可用地址和熔断等本地失败记录 `FiberException`；
+- 每次真实 upstream attempt 失败由对应 `Access.Provider` 记录阶段化错误事件：连接/DNS/TLS
+  族保持 `CALL_ERROR`（事件名为 Java 异常名）；发送请求头、读响应头、写响应头失败为
+  `CALL_ERROR`，事件名分别为 `send_req`/`read_resp`/`write_resp`；request/response body
+  转发失败为 `ReqBodyErr.Read|Write` 与 `RespBodyErr.Read|Write|Invalid`（事件名为 io 错
+  误名，如 `timed_out`、`conn_reset`、`message_too_large`）；下游在两个阻塞窗口关闭时
+  事件名为 `client_abort`。事件 status 为 `-1`，data 携带 `phase` 与 `io_error`；客户端可
+  见的 Exception name/status 与事件名解耦。最终错误返回 handler 时使用
+  `Err::UpstreamException`，只标记根事务失败，不再重复记录 `FiberException`。路由、模
+  板、无可用地址和熔断等本地失败记录 `FiberException`；
 - `Access.Provider` 的 CAT status 只表示 upstream HTTP 流程是否完成：完整收到 upstream
   响应（含 5xx 状态码，HTTP code 只进 data `status`）与 websocket 握手验证通过即完成且
   置成功 `0`；连接、发送、读取、握手或取消等流程失败才置 `-1`。websocket 在 upstream
@@ -696,8 +706,10 @@ listener。订阅暂态失败采用封顶指数退避，非法首值被记录为
   同一 event 内且先于 `Access.Provider` 完成；静态 addresses selector 无 Java
   HostSource 对应，不记录。Java 的 `circuit_break`/`empty_service` 计数由既有 proxy
   failure 指标承担，不新增计数器；
-- 原始错误之后若错误响应本身写入失败，独立记录 `ResponseError`，不覆盖也不重复原始
-  `CALL_ERROR`/`FiberException`；
+- 原始错误之后若错误响应本身写入失败，在根事务独立记录 `CALL_ERROR`（`write_resp`，
+  phase=`error_responder`），不覆盖也不重复原始 `CALL_ERROR`/`FiberException`；根级
+  `ResponseError` 事件已随阶段化事件退役，response 写失败仍标记根事务
+  `error=RESPONSE_ERROR`；
 - project、route、context cluster、稳定 `Exception.name` 和最终
   response completion 进入 CAT 根事务 data；实际 upstream 只进 access log，
   CAT 根事务 data 不再记录 `upstream`，改为记录客户端连接协议 `protocol=h1/h2/h3`；每次
@@ -779,7 +791,8 @@ tunnel，保留 upstream `Sec-WebSocket-Accept` 和非 hop-by-hop header，并�
 
 RESPONSE、PROXY、脚本和路由中间层只返回 `Result<T>`：`Err::Exception` 携带由 handler
 记录 `FiberException` 的可渲染业务错误，`Err::UpstreamException` 携带已经由 proxy
-记录 `CALL_ERROR` 的 HTTP client 错误，`Err::Error` 保留底层 IO/内存错误。只有请求 handler 最外层调用
+attempt 记录终态阶段事件（`CALL_ERROR` 或 body 转发错误事件）的 HTTP client 错误，
+`Err::Error` 保留底层 IO/内存错误。只有请求 handler 最外层调用
 `ErrorResponder`：response header 尚未提交且 channel 可用时，Exception 按原错误发送，
 Error 统一映射为 `ACCESS_UNKNOWN_ERROR` 500；header 已提交或 channel 已关闭时不再写入
 第二份响应，只终止 exchange。
