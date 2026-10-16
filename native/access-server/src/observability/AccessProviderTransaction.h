@@ -45,6 +45,14 @@ public:
     void add_response_body(std::uint64_t bytes, std::chrono::microseconds duration) noexcept;
     void fail(std::string_view phase, common::IoErr error) noexcept;
     void call_error(const Exception &exception, std::string_view phase, common::IoErr error) noexcept;
+    // Stage-attributed terminal error event: the type carries the failure family
+    // (CALL_ERROR / ReqBodyErr.Read|Write / RespBodyErr.Read|Write|Invalid), the
+    // name the stage token or io-error cause (send_req, read_resp, write_resp,
+    // client_abort, timed_out, ...). The event completes with Fail and the
+    // transaction then finishes through fail(), which appends the same
+    // phase/io_error data before its own completion.
+    void fail_with_event(std::string_view type, std::string_view name, std::string_view phase,
+                         common::IoErr error) noexcept;
     void complete(int status_code) noexcept;
 
 private:

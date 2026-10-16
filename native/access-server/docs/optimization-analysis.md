@@ -1209,8 +1209,9 @@ owner-loop start time 和 `request_started`，再初始化 trace，保持原先 
 `AccessRequestTelemetryTest` 锁定 64-bit façade 的 912-byte 基线和非多态组件，分别覆盖 CAT
 禁用及 CAT wrong-loop 创建失败、W3C 常量 bind、context update/remove、tracestate upstream 注入、
 无 CAT 时的 header 行为和 request-pool storage。原 Handler/Proxy 集成测试继续覆盖真实 CAT root、
-`Access.Provider`、`RemoteCall`、`CALL_ERROR`、`FiberException`、`ResponseError`、指标、代理 header
-和脚本结果。
+`Access.Provider`、`RemoteCall`、`CALL_ERROR`（含 `send_req`/`read_resp`/`write_resp` 与
+`client_abort` 阶段归因）、`ReqBodyErr`/`RespBodyErr` body 转发事件、`FiberException`、
+指标、代理 header 和脚本结果。
 
 更新 Fiber 后，`ScriptExchangeCtx` 新增显式 `HttpResponseWriter` 与有界 `ScriptRequestBody` 值适配，
 使 `ScriptExecutionContext` 从 432 增至 480 bytes；其余三个成员仍为 112、184、136 bytes，四者

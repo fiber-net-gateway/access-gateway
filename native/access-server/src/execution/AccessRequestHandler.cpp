@@ -276,7 +276,7 @@ AccessRequestHandler::handle_and_finalize(http::HttpExchange &exchange,
     }
     auto sent = co_await error_responder_.send(exchange, telemetry, response_error);
     if (!sent) {
-        telemetry.record_response_error(sent.error());
+        telemetry.record_error_response_failure(sent.error());
     }
     co_return sent;
 }

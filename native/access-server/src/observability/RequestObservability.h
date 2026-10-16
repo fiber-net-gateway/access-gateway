@@ -68,7 +68,13 @@ public:
     void set_route(ScriptExecutionContext &execution, const CompiledRoute &route) noexcept;
     void record_exception(ScriptExecutionContext &execution, const Exception &exception) noexcept;
     void record_upstream_exception(ScriptExecutionContext &execution, const Exception &exception) noexcept;
+    // Failure mark only; the retired root-level ResponseError event is
+    // superseded by the stage-attributed CALL_ERROR / ReqBodyErr / RespBodyErr
+    // events on the provider transaction.
     void record_response_error(ScriptExecutionContext &execution, common::IoErr error) noexcept;
+    // The error responder itself failing to deliver its page: a root-level
+    // CALL_ERROR/write_resp event with the error_responder phase.
+    void record_error_response_failure(ScriptExecutionContext &execution, common::IoErr error) noexcept;
     void record_response_compression(bool compressed) noexcept;
     void record_response_compression_not_acceptable() noexcept;
     void record_proxy_execution(AccessProxyExecutionResult result) noexcept;
@@ -108,7 +114,6 @@ private:
     bool execution_failed_ = false;
     bool failure_recorded_ = false;
     bool exception_recorded_ = false;
-    bool response_error_recorded_ = false;
     bool finished_ = false;
 };
 

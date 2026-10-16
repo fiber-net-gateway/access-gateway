@@ -326,19 +326,28 @@ void RequestObservability::record_upstream_exception(ScriptExecutionContext &exe
 }
 
 void RequestObservability::record_response_error(ScriptExecutionContext &execution, common::IoErr error) noexcept {
+    // Mark-only: the stage-attributed provider events (CALL_ERROR /
+    // ReqBodyErr / RespBodyErr) carry the stage and io-error detail; the root
+    // keeps the shared RESPONSE_ERROR outcome marker.
+    (void) error;
     mark_failed(execution, "RESPONSE_ERROR");
-    if (response_error_recorded_) {
-        return;
-    }
-    response_error_recorded_ = true;
+}
+
+void RequestObservability::record_error_response_failure(ScriptExecutionContext &execution,
+                                                         common::IoErr error) noexcept {
+    mark_failed(execution, "RESPONSE_ERROR");
     if (!root_.valid()) {
         return;
     }
-    const std::string_view error_name = common::io_err_name(error);
-    auto event = root_.start_event("ResponseError", error_name);
+    // The error responder failing to deliver the error page is almost always
+    // the client going away mid-render; record it with the same write_resp
+    // stage attribution the proxy path uses, on the root transaction (no
+    // provider attempt is active on this path).
+    auto event = root_.start_event("CALL_ERROR", "write_resp");
     if (event) {
-        (void) event->add_data("io_error", error_name);
-        (void) event->complete(cat::status::Error);
+        (void) event->add_data("phase", "error_responder");
+        (void) event->add_data("io_error", common::io_err_name(error));
+        (void) event->complete(cat::status::Fail);
     }
 }
 
