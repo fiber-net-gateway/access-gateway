@@ -26,10 +26,11 @@ AccessWorkerResources::AccessWorkerResources(event::EventLoopGroup &workers, con
                   .max_idle_total = 20000,
           }),
     script_http_services_(pool_, dns_.adapter(), options.executor.upstream_tls, options.executor.happy_eyeballs),
-    executor_(pool_, cluster_matcher, dns_.adapter(), std::move(options.executor)),
+    executor_(pool_, dns_.adapter(), std::move(options.executor)),
     handler_(config_store.snapshot_provider(), options.script_adapter,
              AccessRequestHandlerOptions{
                      .default_max_request_body_size = options.default_max_request_body_size,
+                     .gray_matcher = cluster_matcher,
                      .test_mode = options.test_mode,
              },
              executor_.adapter()),

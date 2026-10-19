@@ -280,7 +280,6 @@ void RequestObservability::record_proxy_body_idle_timeout(AccessBodyIdleDirectio
 void RequestObservability::set_project(ScriptExecutionContext &execution, std::string_view project,
                                        std::string_view effective_host, std::string_view context_cluster) noexcept {
     project_ = execution.copy_to_request_pool(project);
-    cluster_ = execution.copy_to_request_pool(context_cluster);
     add_root_data("project", project);
     add_root_data("effectiveHost", effective_host);
     if (!context_cluster.empty()) {

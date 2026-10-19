@@ -1155,12 +1155,6 @@ ProjectSnapshotResult ProjectConfigCompiler::compile(std::string_view project, c
             route.path_constant_indices.push_back(snapshot.const_package_->find(http_script::ConstType::Path, name));
         }
     }
-    for (const http_script::ConstPackage::Entry &entry:
-         snapshot.const_package_->entries(http_script::ConstType::Context)) {
-        if (entry.name() == "cluster" || entry.name() == "hi_trace_cluster") {
-            snapshot.context_cluster_indices_.push_back(entry.index);
-        }
-    }
 
     std::vector<HostPattern> patterns;
     patterns.reserve(config.hosts->size());
