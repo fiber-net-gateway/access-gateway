@@ -1106,12 +1106,6 @@ async::Task<Result<void>> UpstreamAttempt::run() noexcept {
         provider_.call_error(exception, "websocket_accept", common::IoErr::Invalid);
         co_return std::unexpected(Err::from_upstream_exception(exception));
     }
-    if (websocket_response) {
-        // The upstream finished its HTTP flow with the validated upgrade; the
-        // tunnel session is recorded as an Access.WebSocket event, so a later
-        // tunnel abort must not mark this provider transaction failed.
-        provider_.complete(upstream_head->status_code);
-    }
 
     auto custom_headers = prepare_proxy_response_headers(proxy_.response_headers, input_.template_evaluator);
     if (!custom_headers) {
@@ -1201,14 +1195,19 @@ async::Task<Result<void>> UpstreamAttempt::run() noexcept {
             (void) upstream.abort(sent_header.error());
             telemetry_.record_proxy_failure(AccessProxyFailurePhase::SendResponseHeader);
             attempt_metrics_.aborted();
-            // The websocket provider transaction already completed after the
-            // validated upstream 101, so this event only lands when the CAT
-            // tree still accepts it; the root keeps the response-error mark.
             provider_.fail_with_event("CALL_ERROR", "write_resp", "send_response_header", sent_header.error());
             telemetry_.record_response_error(sent_header.error());
             co_return std::unexpected(Err::from_error(sent_header.error()));
         }
 
+        // Complete only after the handshake head reached the client, matching
+        // the non-upgrade flow: the failure paths above (custom headers,
+        // raw-stream switch, response headers, this send) fail the provider
+        // with their stage events instead of dropping them on a completed
+        // transaction. The tunnel session itself is an Access.WebSocket event,
+        // so a later tunnel abort must not mark this provider transaction
+        // failed.
+        provider_.complete(upstream_head->status_code);
         websocket_metrics_.accepted();
         telemetry_.start_websocket_session(endpoint_.provider_name.empty() ? endpoint_.host_header
                                                                            : endpoint_.provider_name,
