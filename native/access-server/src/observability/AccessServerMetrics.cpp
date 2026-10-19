@@ -119,6 +119,27 @@ std::size_t request_status_index(int status_code) noexcept {
     return static_cast<std::size_t>(AccessResponseStatus::Other);
 }
 
+constexpr std::array<std::string_view, 40> kRequestStatusLabelValues{
+        "200",   "201", "202", "204", "206", //
+        "301",   "302", "303", "304", "307", "308", //
+        "400",   "401", "403", "404", "405", "406", "408", "409", "410", "412", "413", "415", "416", //
+        "422",   "426", "429", "499", //
+        "500",   "501", "502", "503", "504", "505", //
+        "1xx",   "2xx", "3xx", "4xx", "5xx", //
+        "other", //
+};
+static_assert(kRequestStatusLabelValues.size() == static_cast<std::size_t>(AccessResponseStatus::Count));
+
+constexpr std::string_view kRouteUnmatchedLabel = "unmatched";
+
+// Hard caps for the dynamic LRU families. The route family is bounded by
+// configured host patterns x route paths x observed statuses; provider
+// families churn with discovery instances and get the largest allowance.
+constexpr std::size_t kRouteRequestSeriesLimit = 8192;
+constexpr std::size_t kProviderResponseSeriesLimit = 16384;
+constexpr std::size_t kProxyErrorSeriesLimit = 2048;
+constexpr std::size_t kCircuitRejectionSeriesLimit = 1024;
+
 template<std::size_t N>
 bool register_labeled_series(prometheus::MetricsRegistry &registry, prometheus::FamilyId family,
                              const std::array<std::string_view, N> &values,
@@ -225,6 +246,49 @@ void AccessServerMetrics::Worker::proxy_body_idle_timeout(AccessBodyIdleDirectio
     proxy_body_idle_timeouts_[metric_index(direction, AccessBodyIdleDirection::Count)].inc();
 }
 
+void AccessServerMetrics::Worker::route_request_finished(std::string_view host_pattern, std::string_view route_path,
+                                                         std::string_view status_label) noexcept {
+    if (!route_requests_dynamic_ || status_label.empty()) {
+        return;
+    }
+    // The matched configuration pattern, not the client-controlled Host value,
+    // keeps this family bounded by the published route model. Requests that
+    // never matched a host or route keep a visible bucket instead of silently
+    // diverging from access_server_requests_total.
+    const std::array<std::string_view, 3> labels{
+            host_pattern.empty() ? kRouteUnmatchedLabel : host_pattern,
+            route_path.empty() ? kRouteUnmatchedLabel : route_path,
+            status_label,
+    };
+    (void) route_requests_dynamic_->inc(labels);
+}
+
+void AccessServerMetrics::Worker::provider_response_received(std::string_view app, std::string_view ip_port,
+                                                             std::string_view status_label) noexcept {
+    if (!provider_responses_dynamic_) {
+        return;
+    }
+    const std::array<std::string_view, 3> labels{app, ip_port, status_label};
+    (void) provider_responses_dynamic_->inc(labels);
+}
+
+void AccessServerMetrics::Worker::proxy_transport_error(std::string_view app, std::string_view ip_port,
+                                                        std::string_view error_label) noexcept {
+    if (!proxy_errors_dynamic_ || error_label.empty()) {
+        return;
+    }
+    const std::array<std::string_view, 3> labels{app, ip_port, error_label};
+    (void) proxy_errors_dynamic_->inc(labels);
+}
+
+void AccessServerMetrics::Worker::upstream_circuit_rejected(std::string_view app) noexcept {
+    if (!circuit_rejections_dynamic_ || app.empty()) {
+        return;
+    }
+    const std::array<std::string_view, 1> labels{app};
+    (void) circuit_rejections_dynamic_->inc(labels);
+}
+
 AccessServerMetrics::AccessServerMetrics(event::EventLoopGroup &workers, const AccessRuntimeMetrics *runtime_metrics) :
     runtime_metrics_(runtime_metrics) {
     valid_ = initialize(workers);
@@ -242,16 +306,6 @@ bool AccessServerMetrics::initialize(event::EventLoopGroup &worker_group) {
             "server_error",
             "canceled",
     };
-    constexpr std::array<std::string_view, 40> kRequestStatusCodes{
-            "200",   "201", "202", "204", "206", //
-            "301",   "302", "303", "304", "307", "308", //
-            "400",   "401", "403", "404", "405", "406", "408", "409", "410", "412", "413", "415", "416", //
-            "422",   "426", "429", "499", //
-            "500",   "501", "502", "503", "504", "505", //
-            "1xx",   "2xx", "3xx", "4xx", "5xx", //
-            "other", //
-    };
-    static_assert(kRequestStatusCodes.size() == static_cast<std::size_t>(AccessResponseStatus::Count));
     constexpr std::array<std::string_view, 3> kCompressionResults{
             "gzip",
             "identity",
@@ -387,15 +441,54 @@ bool AccessServerMetrics::initialize(event::EventLoopGroup &worker_group) {
     auto websocket_sessions_inflight = registry_.register_gauge(
             "access_server_websocket_sessions_inflight", "Established WebSocket proxy sessions currently in flight.",
             prometheus::GaugeReduction::Sum);
+    // Dynamic LRU families: label values arrive at request time and are capped
+    // per family; eviction resets the evicted series (see bounded-metrics.md).
+    constexpr std::array<std::string_view, 3> kRouteRequestLabels{"host", "path", "status_code"};
+    constexpr std::array<std::string_view, 3> kProviderResponseLabels{"app", "ip_port", "status_code"};
+    constexpr std::array<std::string_view, 3> kProxyErrorLabels{"app", "ip_port", "error"};
+    constexpr std::array<std::string_view, 1> kCircuitRejectionLabels{"app"};
+    const prometheus::SeriesOptions route_request_options{
+            .mode = prometheus::SeriesMode::Lru,
+            .max_series = kRouteRequestSeriesLimit,
+    };
+    const prometheus::SeriesOptions provider_response_options{
+            .mode = prometheus::SeriesMode::Lru,
+            .max_series = kProviderResponseSeriesLimit,
+    };
+    const prometheus::SeriesOptions proxy_error_options{
+            .mode = prometheus::SeriesMode::Lru,
+            .max_series = kProxyErrorSeriesLimit,
+    };
+    const prometheus::SeriesOptions circuit_rejection_options{
+            .mode = prometheus::SeriesMode::Lru,
+            .max_series = kCircuitRejectionSeriesLimit,
+    };
+    auto route_requests = registry_.register_counter(
+            "access_server_route_requests_total",
+            "Completed requests by matched host pattern, route path pattern, and final status code.",
+            kRouteRequestLabels, route_request_options);
+    auto provider_responses = registry_.register_counter(
+            "access_server_provider_responses_total",
+            "Upstream response heads received by provider app, upstream address, and status.", kProviderResponseLabels,
+            provider_response_options);
+    auto proxy_errors = registry_.register_counter(
+            "access_server_proxy_errors_total",
+            "Upstream transport failures by provider app, upstream address, and coarse error class.", kProxyErrorLabels,
+            proxy_error_options);
+    auto circuit_rejections =
+            registry_.register_counter("access_server_upstream_circuit_rejections_total",
+                                       "Upstream selections rejected because the endpoint circuit breaker was open.",
+                                       kCircuitRejectionLabels, circuit_rejection_options);
     if (!requests || !requests_by_status || !response_compression || !duration || !inflight || !proxy_executions ||
         !proxy_attempts || !proxy_attempts_inflight || !proxy_failures || !proxy_pool_acquires ||
         !proxy_dns_resolutions || !proxy_connect_attempts || !proxy_connect_candidates || !happy_eyeballs ||
-        !websocket_handshakes || !websocket_sessions || !websocket_sessions_inflight || !proxy_body_idle_timeouts) {
+        !websocket_handshakes || !websocket_sessions || !websocket_sessions_inflight || !proxy_body_idle_timeouts ||
+        !route_requests || !provider_responses || !proxy_errors || !circuit_rejections) {
         return false;
     }
 
     std::array<prometheus::SeriesId, kRequestResults.size()> request_series;
-    std::array<prometheus::SeriesId, kRequestStatusCodes.size()> request_status_series;
+    std::array<prometheus::SeriesId, kRequestStatusLabelValues.size()> request_status_series;
     std::array<prometheus::SeriesId, kCompressionResults.size()> compression_series;
     std::array<prometheus::SeriesId, kProxyExecutionResults.size()> proxy_execution_series;
     std::array<prometheus::SeriesId, kProxyAttemptResults.size()> proxy_attempt_series;
@@ -408,7 +501,7 @@ bool AccessServerMetrics::initialize(event::EventLoopGroup &worker_group) {
     std::array<prometheus::SeriesId, kWebSocketSessionResults.size()> websocket_session_series;
     std::array<prometheus::SeriesId, kBodyIdleDirections.size()> proxy_body_idle_series;
     if (!register_labeled_series(registry_, *requests, kRequestResults, request_series) ||
-        !register_labeled_series(registry_, *requests_by_status, kRequestStatusCodes, request_status_series) ||
+        !register_labeled_series(registry_, *requests_by_status, kRequestStatusLabelValues, request_status_series) ||
         !register_labeled_series(registry_, *response_compression, kCompressionResults, compression_series) ||
         !register_labeled_series(registry_, *proxy_executions, kProxyExecutionResults, proxy_execution_series) ||
         !register_labeled_series(registry_, *proxy_attempts, kProxyAttemptResults, proxy_attempt_series) ||
@@ -443,6 +536,15 @@ bool AccessServerMetrics::initialize(event::EventLoopGroup &worker_group) {
         shard_ids.push_back(*shard);
     }
     if (!registry_.freeze()) {
+        return false;
+    }
+
+    auto route_requests_dynamic = registry_.dynamic_counter(*route_requests);
+    auto provider_responses_dynamic = registry_.dynamic_counter(*provider_responses);
+    auto proxy_errors_dynamic = registry_.dynamic_counter(*proxy_errors);
+    auto circuit_rejections_dynamic = registry_.dynamic_counter(*circuit_rejections);
+    if (!route_requests_dynamic || !provider_responses_dynamic || !proxy_errors_dynamic ||
+        !circuit_rejections_dynamic) {
         return false;
     }
 
@@ -482,6 +584,10 @@ bool AccessServerMetrics::initialize(event::EventLoopGroup &worker_group) {
         worker.proxy_attempts_inflight_ = *proxy_attempts_inflight_value;
         worker.proxy_connect_candidates_ = *proxy_connect_candidates_value;
         worker.websocket_sessions_inflight_ = *websocket_sessions_inflight_value;
+        worker.route_requests_dynamic_ = *route_requests_dynamic;
+        worker.provider_responses_dynamic_ = *provider_responses_dynamic;
+        worker.proxy_errors_dynamic_ = *proxy_errors_dynamic;
+        worker.circuit_rejections_dynamic_ = *circuit_rejections_dynamic;
     }
     return true;
 }

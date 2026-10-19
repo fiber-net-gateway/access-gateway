@@ -2900,10 +2900,111 @@ TEST(ProxyExecutorTest, AppliesServerDefaultResponseBodyLimitToChunkedResponses)
     EXPECT_EQ(metric_text->find("access_server_proxy_executions_total{result=\"canceled\"} 1"), std::string::npos);
     EXPECT_NE(metric_text->find("access_server_proxy_failures_total{phase=\"response_body_too_large\"} 1"),
               std::string::npos);
+    // Dynamic series: the provider head arrived (recorded at header time, before
+    // the body cut), and the route series keeps the delivered status even though
+    // the gateway truncated the body. The addresses route carries the metrics-only
+    // <project>.project app label.
+    EXPECT_NE(metric_text->find("access_server_provider_responses_total{app=\"orders.project\",ip_port=\"127.0.0.1:" +
+                                std::to_string(port) + "\",status_code=\"201\"} 1"),
+              std::string::npos);
+    EXPECT_NE(metric_text->find("access_server_route_requests_total{host=\"api.example.com\",path=\"/proxy\","
+                                "status_code=\"201\"} 1"),
+              std::string::npos);
+    // The cut is gateway policy, not an upstream transport error: no proxy_error
+    // series and no circuit rejection may exist (empty LRU families emit nothing).
+    EXPECT_EQ(metric_text->find("access_server_proxy_errors_total"), std::string::npos);
+    EXPECT_EQ(metric_text->find("access_server_upstream_circuit_rejections_total"), std::string::npos);
 
     std::promise<void> shutdown_promise;
     auto shutdown_future = shutdown_promise.get_future();
     fiber::async::spawn(group.at(0), [&]() { return shutdown(&pool, &server, &shutdown_promise); });
+    ASSERT_EQ(shutdown_future.wait_for(2s), std::future_status::ready);
+    group.stop();
+    group.join();
+}
+
+TEST(ProxyExecutorTest, RecordsProviderErrorSeriesWhenTheUpstreamRefusesConnections) {
+    fiber::event::EventLoopGroup group(1);
+    fiber::access_server::AccessServerMetrics metrics(group);
+    ASSERT_TRUE(metrics.valid());
+    fiber::http::StealableHttp1ConnectionPoolSet pool(group);
+    ASSERT_TRUE(pool.init());
+    group.start();
+
+    UpstreamState upstream_state;
+    std::promise<std::uint16_t> port_promise;
+    std::promise<TestHttpServer> server_promise;
+    auto port_future = port_promise.get_future();
+    auto server_future = server_promise.get_future();
+    fiber::async::spawn(group.at(0),
+                        [&]() { return start_server(&group.at(0), &upstream_state, &port_promise, &server_promise); });
+
+    TestHttpServer server = server_future.get();
+    ASSERT_NE(server.server, nullptr);
+    const std::uint16_t port = port_future.get();
+    ASSERT_NE(port, 0);
+
+    // Stop the fixture to free the port: the route's only address now refuses
+    // connections, so the proxy dials once, retries selection, and exhausts the
+    // static selector (exclusion of the only instance surfaces as CircuitOpen).
+    std::promise<void> dead_promise;
+    auto dead_future = dead_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
+        server.server->stop();
+        co_await server.server->stop_and_wait();
+        co_await server.serve_tasks->join();
+        delete server.server;
+        server.server = nullptr;
+        dead_promise.set_value();
+    });
+    ASSERT_EQ(dead_future.wait_for(2s), std::future_status::ready);
+
+    fiber::access_server::RouteConfigStore store;
+    auto published = store.apply("orders", proxy_response_project_config(port, std::nullopt, false));
+    ASSERT_TRUE(published) << published.error().message;
+
+    fiber::access_server::ProxyExecutor executor(pool);
+    std::string output;
+    std::promise<void> request_promise;
+    auto request_future = request_promise.get_future();
+    std::string request = "GET /proxy HTTP/1.1\r\n"
+                          "Host: api.example.com\r\n"
+                          "Connection: close\r\n\r\n";
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_downstream(&group.at(0), &store, executor.adapter(), std::move(request), &output, &request_promise,
+                              nullptr, false, nullptr, {}, {}, false, {}, nullptr, &metrics.worker(0));
+    });
+
+    ASSERT_EQ(request_future.wait_for(5s), std::future_status::ready);
+    EXPECT_NE(output.find("HTTP/1.1 502 Bad Gateway\r\n"), std::string::npos);
+    EXPECT_NE(output.find(R"("name":"HTTP_CLIENT_CONNECT_ERROR")"), std::string::npos);
+
+    std::promise<fiber::common::IoResult<std::string>> metrics_promise;
+    auto metrics_future = metrics_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() { return collect_access_metrics(&metrics, &metrics_promise); });
+    ASSERT_EQ(metrics_future.wait_for(2s), std::future_status::ready);
+    auto metric_text = metrics_future.get();
+    ASSERT_TRUE(metric_text);
+    const std::string address = "127.0.0.1:" + std::to_string(port);
+    // The refused dial is a connect-class transport failure against the only
+    // upstream address, and the follow-up selection surfaces the exhausted
+    // selector as a circuit rejection; no provider response head ever arrived.
+    EXPECT_NE(metric_text->find("access_server_proxy_errors_total{app=\"orders.project\",ip_port=\"" + address +
+                                "\",error=\"connect\"} 1"),
+              std::string::npos);
+    EXPECT_NE(metric_text->find("access_server_upstream_circuit_rejections_total{app=\"orders.project\"} 1"),
+              std::string::npos);
+    EXPECT_NE(metric_text->find("access_server_route_requests_total{host=\"api.example.com\",path=\"/proxy\","
+                                "status_code=\"502\"} 1"),
+              std::string::npos);
+    EXPECT_EQ(metric_text->find("access_server_provider_responses_total"), std::string::npos);
+
+    std::promise<void> shutdown_promise;
+    auto shutdown_future = shutdown_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
+        co_await pool.shutdown_async();
+        shutdown_promise.set_value();
+    });
     ASSERT_EQ(shutdown_future.wait_for(2s), std::future_status::ready);
     group.stop();
     group.join();
@@ -3532,7 +3633,15 @@ TEST(ProxyExecutorTest, RelaysWebSocketUpgradeAndRawBytesInBothDirections) {
     EXPECT_NE(metric_text->find("access_server_websocket_handshakes_total{result=\"accepted\"} 1"), std::string::npos);
     EXPECT_NE(metric_text->find("access_server_websocket_sessions_total{result=\"closed\"} 1"), std::string::npos);
     EXPECT_NE(metric_text->find("access_server_websocket_sessions_inflight 0"), std::string::npos);
-    EXPECT_EQ(metric_text->find("api.example.com"), std::string::npos);
+    // The route family carries the configured host pattern (not the raw client
+    // Host), and both dynamic families record the exact 101 status under the
+    // metrics-only <project>.project app label.
+    EXPECT_NE(metric_text->find("access_server_route_requests_total{host=\"api.example.com\",path=\"/proxy\","
+                                "status_code=\"101\"} 1"),
+              std::string::npos);
+    EXPECT_NE(metric_text->find("access_server_provider_responses_total{app=\"orders.project\",ip_port=\"127.0.0.1:" +
+                                std::to_string(port) + "\",status_code=\"101\"} 1"),
+              std::string::npos);
 
     // The upstream finished its HTTP flow with the 101 handshake, so the
     // provider transaction succeeds regardless of the tunnel that follows.

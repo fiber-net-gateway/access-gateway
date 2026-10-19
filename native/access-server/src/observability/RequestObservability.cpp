@@ -139,10 +139,8 @@ void RequestObservability::finish(http::HttpExchange &exchange) noexcept {
     const auto finished = event::EventLoop::current().now();
     const auto duration = std::chrono::duration_cast<std::chrono::microseconds>(finished - started_);
     const http::HttpResponseStats &response = exchange.response_stats();
-    if (metrics_) {
-        metrics_->request_finished(response, duration);
-    }
-
+    // Exact status text shared by the root transaction data and the dynamic
+    // route series: the delivered code, with the aborted bucket rendered as 0.
     std::array<char, std::numeric_limits<int>::digits10 + 3> status_buffer{};
     const auto status =
             std::to_chars(status_buffer.data(), status_buffer.data() + status_buffer.size(), response.status_code);
@@ -150,6 +148,11 @@ void RequestObservability::finish(http::HttpExchange &exchange) noexcept {
             status.ec == std::errc{} ? std::string_view(status_buffer.data(),
                                                         static_cast<std::size_t>(status.ptr - status_buffer.data()))
                                      : std::string_view("0");
+    if (metrics_) {
+        metrics_->request_finished(response, duration);
+        metrics_->route_request_finished(host_pattern_, route_, status_text);
+    }
+
     add_root_data("status", status_text);
     if (response.terminal_error != common::IoErr::None) {
         add_root_data("io_error", common::io_err_name(response.terminal_error));
@@ -277,9 +280,38 @@ void RequestObservability::record_proxy_body_idle_timeout(AccessBodyIdleDirectio
     }
 }
 
+void RequestObservability::record_provider_response(const ProxyUpstreamEndpoint &endpoint, int status_code) noexcept {
+    if (metrics_ == nullptr) {
+        return;
+    }
+    std::array<char, 12> status_buffer{};
+    const std::string_view status_text = integer_text(status_buffer.data(), status_buffer.size(), status_code);
+    if (status_text.empty()) {
+        return;
+    }
+    metrics_->provider_response_received(proxy_metric_app(endpoint), endpoint.host_header, status_text);
+}
+
+void RequestObservability::record_proxy_transport_error(std::string_view app, std::string_view ip_port,
+                                                        std::string_view error_label) noexcept {
+    if (metrics_) {
+        metrics_->proxy_transport_error(app, ip_port, error_label);
+    }
+}
+
+void RequestObservability::record_circuit_rejection(std::string_view app) noexcept {
+    if (metrics_) {
+        metrics_->upstream_circuit_rejected(app);
+    }
+}
+
 void RequestObservability::set_project(ScriptExecutionContext &execution, std::string_view project,
-                                       std::string_view effective_host, std::string_view context_cluster) noexcept {
+                                       std::string_view effective_host, std::string_view context_cluster,
+                                       std::string_view host_pattern) noexcept {
     project_ = execution.copy_to_request_pool(project);
+    // The configured pattern outlives the request only as long as the pinned
+    // snapshot; copy it with the other request-scoped route fields.
+    host_pattern_ = execution.copy_to_request_pool(host_pattern);
     add_root_data("project", project);
     add_root_data("effectiveHost", effective_host);
     if (!context_cluster.empty()) {

@@ -95,6 +95,27 @@ ProxyFailure from_select_error(const ProxyAddressSelectError &select_error) noex
     return failure(phase, select_error.message, select_error.io_error);
 }
 
+// Coarse SRE-facing classification for the dynamic proxy-error series. Empty
+// means the phase is not an upstream transport failure (downstream-origin,
+// gateway policy, or pre-selection) and must not charge the app dimension.
+std::string_view proxy_error_label(ProxyFailurePhase phase, common::IoErr io_error) noexcept {
+    switch (phase) {
+        case ProxyFailurePhase::ResolveUpstream:
+        case ProxyFailurePhase::Connect:
+        case ProxyFailurePhase::Tls:
+            // Dialing the endpoint includes name resolution; a connect-stage
+            // timeout stays in the connect bucket rather than request_timeout.
+            return "connect";
+        case ProxyFailurePhase::SendHeader:
+        case ProxyFailurePhase::SendRequestBody:
+        case ProxyFailurePhase::ReadResponseHeader:
+        case ProxyFailurePhase::ReadResponseBody:
+            return io_error == common::IoErr::TimedOut ? "request_timeout" : "io_err";
+        default:
+            return {};
+    }
+}
+
 AccessProxyFailurePhase metric_failure_phase(ProxyFailurePhase phase) noexcept {
     switch (phase) {
         case ProxyFailurePhase::NoUpstreamHosts:
@@ -332,8 +353,13 @@ private:
 }
 
 void record_provider_failure(AccessProviderTransaction &provider, AccessRequestTelemetry &telemetry,
-                             ProxyAttemptMetricScope &attempt, const ProxyFailure &proxy_failure) noexcept {
+                             ProxyAttemptMetricScope &attempt, const ProxyFailure &proxy_failure,
+                             const ProxyUpstreamEndpoint &endpoint) noexcept {
     telemetry.record_proxy_failure(metric_failure_phase(proxy_failure.phase));
+    const std::string_view error_label = proxy_error_label(proxy_failure.phase, proxy_failure.io_error);
+    if (!error_label.empty()) {
+        telemetry.record_proxy_transport_error(proxy_metric_app(endpoint), endpoint.host_header, error_label);
+    }
     if (is_upstream_call_failure(proxy_failure.phase)) {
         attempt.failed();
     } else {
@@ -959,7 +985,7 @@ async::Task<Result<void>> UpstreamAttempt::run() noexcept {
     if (!upstream.valid()) {
         const ProxyFailure exchange_failure =
                 failure(ProxyFailurePhase::Connect, "failed to create upstream HTTP exchange", common::IoErr::Busy);
-        record_provider_failure(provider_, telemetry_, attempt_metrics_, exchange_failure);
+        record_provider_failure(provider_, telemetry_, attempt_metrics_, exchange_failure, endpoint_);
         co_return proxy_failure_result(exchange_failure);
     }
 
@@ -968,7 +994,7 @@ async::Task<Result<void>> UpstreamAttempt::run() noexcept {
     if (!sent_request_header) {
         const ProxyFailure send_failure = failure(
                 ProxyFailurePhase::SendHeader, "failed to send upstream request header", sent_request_header.error());
-        record_provider_failure(provider_, telemetry_, attempt_metrics_, send_failure);
+        record_provider_failure(provider_, telemetry_, attempt_metrics_, send_failure, endpoint_);
         report_selection(false);
         co_return proxy_failure_result(send_failure);
     }
@@ -1027,7 +1053,7 @@ async::Task<Result<void>> UpstreamAttempt::run() noexcept {
                 report_selection(false);
             }
             const ProxyFailure body_failure = failure(phase, message, pipe_error.code);
-            record_provider_failure(provider_, telemetry_, attempt_metrics_, body_failure);
+            record_provider_failure(provider_, telemetry_, attempt_metrics_, body_failure, endpoint_);
             co_return proxy_failure_result(body_failure);
         }
     } else {
@@ -1071,7 +1097,7 @@ async::Task<Result<void>> UpstreamAttempt::run() noexcept {
         if (!head) {
             const ProxyFailure response_failure = failure(ProxyFailurePhase::ReadResponseHeader,
                                                           "failed to read upstream response header", head.error());
-            record_provider_failure(provider_, telemetry_, attempt_metrics_, response_failure);
+            record_provider_failure(provider_, telemetry_, attempt_metrics_, response_failure, endpoint_);
             report_selection(false);
             co_return proxy_failure_result(response_failure);
         }
@@ -1084,6 +1110,10 @@ async::Task<Result<void>> UpstreamAttempt::run() noexcept {
     // Java commits the access-log line when sendForResp's Single completes at
     // response-head arrival; later body or tunnel failures leave it unchanged.
     access_log_.mark_response(upstream_head->status_code);
+    // Dynamic provider series commit at the same point: the upstream proved it
+    // is serving. Body transfers that fail afterwards belong to the proxy-error
+    // family, not to this one.
+    telemetry_.record_provider_response(endpoint_, upstream_head->status_code);
 
     // A received response head proves the upstream is serving. Business-level
     // 5xx does not charge the circuit breaker (deliberate divergence from the
@@ -1120,7 +1150,8 @@ async::Task<Result<void>> UpstreamAttempt::run() noexcept {
                 report_selection(false);
                 record_provider_failure(provider_, telemetry_, attempt_metrics_,
                                         failure(ProxyFailurePhase::ReadResponseBody,
-                                                "failed to discard upstream response body", discarded.error()));
+                                                "failed to discard upstream response body", discarded.error()),
+                                        endpoint_);
                 (void) upstream.abort(discarded.error());
             } else {
                 report_selection(true);
@@ -1254,7 +1285,8 @@ async::Task<Result<void>> UpstreamAttempt::run() noexcept {
                 report_selection(false);
                 record_provider_failure(provider_, telemetry_, attempt_metrics_,
                                         failure(ProxyFailurePhase::ReadResponseBody,
-                                                "failed to discard upstream response body", discarded.error()));
+                                                "failed to discard upstream response body", discarded.error()),
+                                        endpoint_);
                 (void) upstream.abort(discarded.error());
             } else {
                 report_selection(true);
@@ -1335,7 +1367,8 @@ async::Task<Result<void>> UpstreamAttempt::run() noexcept {
             }
             record_provider_failure(provider_, telemetry_, attempt_metrics_,
                                     failure(ProxyFailurePhase::ReadResponseBody,
-                                            "failed to read upstream response body", pipe_error.code));
+                                            "failed to read upstream response body", pipe_error.code),
+                                    endpoint_);
         } else {
             const bool write_phase = pipe_error.phase == http::HttpBodyPipePhase::Write;
             telemetry_.record_proxy_failure(write_phase ? AccessProxyFailurePhase::WriteResponseBody
@@ -1443,6 +1476,19 @@ async::Task<Result<void>> ProxyExecutor::execute_impl(http::HttpExchange &exchan
 
     ProxyRequestPlan request_plan(exchange.pool(), exchange, proxy, options_.default_max_response_body_size);
     WebSocketMetricScope websocket_metrics(telemetry, request_plan.websocket_upgrade());
+    // App identity for circuit-rejection series: selection failures have no
+    // endpoint yet, so the selector's metrics-only name (static addresses)
+    // or the service name (discovery) stands in for the app dimension.
+    const std::string_view selector_metric_app = proxy.address_selector->metric_app();
+    const std::string_view circuit_metric_app =
+            !selector_metric_app.empty() ? selector_metric_app : proxy.address_selector->service_name();
+    const auto record_circuit_rejection =
+            [&telemetry, circuit_metric_app](
+                    const std::expected<ProxyUpstreamEndpoint, ProxyAddressSelectError> &outcome) noexcept {
+                if (!outcome && outcome.error().code == ProxyAddressSelectErrorCode::CircuitOpen) {
+                    telemetry.record_circuit_rejection(circuit_metric_app);
+                }
+            };
 
     std::array<std::uint64_t, kMaxJavaAttempts> excluded_selection_tokens{};
     std::size_t excluded_selection_token_count = 0;
@@ -1466,6 +1512,7 @@ async::Task<Result<void>> ProxyExecutor::execute_impl(http::HttpExchange &exchan
         auto selected = proxy.address_selector->select_address(
                 cluster_override,
                 std::span<const std::uint64_t>(excluded_selection_tokens.data(), excluded_selection_token_count));
+        record_circuit_rejection(selected);
         bool fell_back = false;
         if (!selected && fallback_cluster &&
             options_.cluster_fallback.should_fallback(options_.cluster_fallback.context,
@@ -1478,6 +1525,7 @@ async::Task<Result<void>> ProxyExecutor::execute_impl(http::HttpExchange &exchan
             auto fallback_selected = proxy.address_selector->select_address(
                     std::nullopt,
                     std::span<const std::uint64_t>(excluded_selection_tokens.data(), excluded_selection_token_count));
+            record_circuit_rejection(fallback_selected);
             if (fallback_selected) {
                 access_log_request.ultimate_cluster = *fallback_cluster;
                 selected = std::move(fallback_selected);
@@ -1551,7 +1599,7 @@ async::Task<Result<void>> ProxyExecutor::execute_impl(http::HttpExchange &exchan
             provider_transaction.add_connect(elapsed_since(connect_started));
             telemetry.record_proxy_connection(connected.error().observation);
             ProxyFailure connect_failure = from_connect_error(connected.error());
-            record_provider_failure(provider_transaction, telemetry, attempt_metrics, connect_failure);
+            record_provider_failure(provider_transaction, telemetry, attempt_metrics, connect_failure, *selected);
             proxy.address_selector->report_address(*selected, false);
             FIBER_ASSERT(excluded_selection_token_count < excluded_selection_tokens.size());
             excluded_selection_tokens[excluded_selection_token_count++] = selected->selection_token;

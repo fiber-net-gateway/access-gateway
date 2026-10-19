@@ -1,13 +1,18 @@
 # Bounded access-server metrics
 
-`access-server` exposes Prometheus text on its dedicated metrics listener. Every label value is
-selected from a compile-time table. Project names, routes, clusters, hosts, Data IDs, MD5 values,
-service names, headers, addresses, and request data are never used as metric labels.
+`access-server` exposes Prometheus text on its dedicated metrics listener. Almost every label value
+is selected from a compile-time table. The deliberate exception is the four request-labeled dynamic
+families (see [Request-labeled dynamic series](#request-labeled-dynamic-series)), whose label
+values arrive at request time and are bounded per family by an LRU eviction cap rather than by an
+enumerated schema. Outside those four families, project names, routes, clusters, hosts, Data IDs,
+MD5 values, headers, and request data are never used as metric labels.
 
 The `/metrics` route has no application-layer authentication. Bind the status listener to an
 operational network with deployment-level access controls. The same listener can expose the
 separately authenticated `/v1/activation-evidence` route, but enabling that route does not protect
-`/metrics`. The aggregates documented here do not contain configuration identifiers or secrets.
+`/metrics`. The dynamic families expose configuration identifiers (host patterns, route path
+patterns, service or Project-derived app names, upstream host:port values); the fixed families
+documented below contain no configuration identifiers and no secrets.
 
 ## Request metrics
 
@@ -26,8 +31,48 @@ The existing worker-sharded metrics are:
 - `access_server_response_compression_total{result}` with `gzip`, `identity`, or
   `not_acceptable`.
 
-Request workers update pre-bound Fiber Prometheus references. No label registration or allocation
-occurs in the request path.
+Request workers update pre-bound Fiber Prometheus references. The fixed families perform no label
+registration or allocation in the request path; the dynamic families below are the documented
+exception.
+
+## Request-labeled dynamic series
+
+Four families use Fiber's dynamic LRU counters because their label values are only known at request
+time. Each family is capped; when a family is full, recording a new label combination evicts the
+least-recently-recorded series and restarts that counter from zero, so a low-volume series can
+silently disappear after heavy churn. A family with no recorded series emits nothing at all.
+
+- `access_server_route_requests_total{host, path, status_code}` (cap 8192) counts every completed
+  request exactly once. `host` is the **matched configuration pattern** (for example
+  `api.example.com` or `*.example.com`), never the client-supplied Host value, so the family stays
+  bounded by the published route model. A request that matched no host or no route records
+  `unmatched` in the corresponding label instead of diverging from `access_server_requests_total`.
+  `status_code` is the exact status the downstream saw, matching the access log: a body cut after
+  committed headers keeps the committed status, and a request that never delivered a response head
+  records `0`.
+- `access_server_provider_responses_total{app, ip_port, status_code}` (cap 16384) commits at
+  **upstream response-head arrival**, at the same point the Java-compatible access log fixes its
+  line - not at body completion. Body or tunnel failures that happen afterwards do not change it.
+  Each proxy attempt records its own endpoint, so a request that fails over across instances counts
+  each responding endpoint. `app` is the discovery service name for service routes and
+  `<project-name>.project` for addresses routes; that `.project` suffix is a metrics-only naming
+  rule and does not change the CAT provider transaction or access-log names. `ip_port` is the
+  upstream endpoint's `host:port`.
+- `access_server_proxy_errors_total{app, ip_port, error}` (cap 2048) counts upstream transport
+  failures per attempt with a coarse error class: `connect` covers everything before the connection
+  is usable (name resolution, TCP dial and dial timeouts, TLS handshake); `request_timeout` covers
+  timeouts after the connection is established (header/body send and response read); `io_err` covers
+  other upstream-side I/O failures. Downstream-origin failures (client aborts), gateway policy
+  (body limits), and pre-selection failures are deliberately absent - they never dial an upstream.
+- `access_server_upstream_circuit_rejections_total{app}` (cap 1024) counts address selections
+  rejected as circuit-open. For discovery routes the shared per-endpoint `AccessUpstreamCircuit` is
+  the authority; for static addresses the SWRR-internal breaker and the exhaustion of instances
+  excluded by earlier failed attempts in the same request both surface here, because both map to
+  the same `CircuitOpen` selection error.
+
+Recording these series takes a family-wide mutex and may allocate when a label combination is first
+seen; steady hits on an existing series increment a sharded counter with no allocation. Eviction
+diagnostics are not yet exported.
 
 ## Proxy transport and WebSocket metrics
 
@@ -85,9 +130,10 @@ means the surrounding proxy coroutine was canceled after acceptance. The pinned 
 no typed peer/timeout/error cause, so access-server does not infer a more specific close reason.
 
 Project, route, cluster, Host, upstream address, DNS name, error message, header, and request data
-are absent from every label. Recording performs direct integer increments and copies one bounded
-POD observation; it adds no registration, string construction, lock, atomic shared ownership, or
-cross-loop post to the request path.
+are absent from every label of the fixed proxy/WebSocket families (the four dynamic families above
+are the scoped exception). Recording the fixed families performs direct integer increments and
+copies one bounded POD observation; it adds no registration, string construction, lock, atomic
+shared ownership, or cross-loop post to the request path.
 
 ## Asynchronous logging and CAT pipeline metrics
 
@@ -293,6 +339,15 @@ only during the short interval in which a real retirement is pending.
 
 ## Concurrency and cost
 
+The four dynamic request-labeled families serialize on a per-family mutex inside Fiber's LRU
+counter. A first-seen label combination allocates its series; steady-state hits increment a shared
+counter and allocate nothing. Each request performs at most two dynamic increments (one route
+series, plus per-attempt provider/error series), so contention scales with the request rate across
+all workers - measured upstream at roughly 5M increments per second on one core with single-digit
+microsecond p99 tail latency under eight contending threads. A scrape takes one additional locked
+snapshot copy per family. The LRU caps (8192/16384/2048/1024 series) bound worst-case memory to a
+few MiB even under label churn, at the cost of resetting evicted counters to zero.
+
 The Nacos owner EventLoop is the sole writer for configuration snapshots, Nacos component
 lifecycle, transport status, service aggregates, and TLS retirement aggregates. Events use fixed
 atomic arrays. Configuration, transport/discovery, and TLS aggregates use sequence-checked groups
@@ -325,7 +380,9 @@ the process logger remains alive until the runtime and EventLoops have been dest
 The implemented increments cover Project List/route outcomes, route readiness and snapshot
 size/age, bounded DNS configuration/health, application-owned Nacos lifecycle, typed Nacos
 transport/reconnect state, service/endpoint/cluster/selector aggregates, TLS rotation/reclamation,
-worker-sharded proxy/DNS/pool/WebSocket outcomes, and async logging/CAT backlog and loss. O-02 has
-no remaining schema item. Typed, authenticated, per-instance activation evidence is implemented
-separately from these metrics; see
+worker-sharded proxy/DNS/pool/WebSocket outcomes, async logging/CAT backlog and loss, and the four
+request-labeled dynamic families (route status, provider response status, proxy transport error
+class, and circuit rejections). O-02 has no remaining schema item. Dynamic-series eviction
+diagnostics (how many series a family evicted) are a known follow-up. Typed, authenticated,
+per-instance activation evidence is implemented separately from these metrics; see
 [`../../../docs/activation-evidence.md`](../../../docs/activation-evidence.md).

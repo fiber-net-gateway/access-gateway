@@ -318,7 +318,8 @@ async::Task<Result<void>> AccessRequestHandler::handle_impl(http::HttpExchange &
     if (!host_match) {
         co_return std::unexpected(Err::from_exception(Exception::router_not_found()));
     }
-    telemetry.set_project(host_match.project->project(), request_host.effective_host);
+    telemetry.set_project(host_match.project->project(), request_host.effective_host,
+                          host_match.host != nullptr ? host_match.host->pattern : std::string_view{});
     if (!telemetry.response_headers().set_view(kStrictTransportSecurity, kStrictTransportSecurityValue,
                                                kStrictTransportSecurityLowcase.data(), kStrictTransportSecurityHash)) {
         co_return std::unexpected(Err::from_error(common::IoErr::NoMem));

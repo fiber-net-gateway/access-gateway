@@ -15,9 +15,13 @@
 #include <fiber/event/EventLoopGroup.h>
 #include <fiber/http/HttpExchange.h>
 #include <fiber/prometheus/Counter.h>
+#include <fiber/prometheus/DynamicCounter.h>
 #include <fiber/prometheus/Gauge.h>
 #include <fiber/prometheus/Histogram.h>
 #include <fiber/prometheus/MetricsRegistry.h>
+
+#include <optional>
+#include <string_view>
 
 namespace fiber::access_server {
 
@@ -176,6 +180,19 @@ public:
         void websocket_session_finished(AccessWebSocketSessionResult result) noexcept;
         void proxy_body_idle_timeout(AccessBodyIdleDirection direction) noexcept;
 
+        // Dynamic LRU series (labels known only at request time). Unlike the
+        // pre-bound series above, these take a family-wide lock and may
+        // allocate when a label combination is seen for the first time; a full
+        // family evicts its least-recently-recorded series and restarts the
+        // evicted counters from zero.
+        void route_request_finished(std::string_view host_pattern, std::string_view route_path,
+                                    std::string_view status_label) noexcept;
+        void provider_response_received(std::string_view app, std::string_view ip_port,
+                                        std::string_view status_label) noexcept;
+        void proxy_transport_error(std::string_view app, std::string_view ip_port,
+                                   std::string_view error_label) noexcept;
+        void upstream_circuit_rejected(std::string_view app) noexcept;
+
     private:
         friend class AccessServerMetrics;
 
@@ -213,6 +230,11 @@ public:
         std::array<prometheus::CounterRef, kWebSocketHandshakeResultCount> websocket_handshakes_;
         std::array<prometheus::CounterRef, kWebSocketSessionResultCount> websocket_sessions_;
         std::array<prometheus::CounterRef, kBodyIdleDirectionCount> proxy_body_idle_timeouts_;
+        // Family-wide handles shared by every worker copy; bound after freeze().
+        std::optional<prometheus::DynamicCounter> route_requests_dynamic_;
+        std::optional<prometheus::DynamicCounter> provider_responses_dynamic_;
+        std::optional<prometheus::DynamicCounter> proxy_errors_dynamic_;
+        std::optional<prometheus::DynamicCounter> circuit_rejections_dynamic_;
         prometheus::HistogramRef request_duration_;
         prometheus::GaugeRef inflight_;
         prometheus::GaugeRef proxy_attempts_inflight_;

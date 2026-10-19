@@ -64,7 +64,7 @@ public:
     void finish(http::HttpExchange &exchange) noexcept;
 
     void set_project(ScriptExecutionContext &execution, std::string_view project, std::string_view effective_host,
-                     std::string_view context_cluster) noexcept;
+                     std::string_view context_cluster, std::string_view host_pattern) noexcept;
     void set_route(ScriptExecutionContext &execution, const CompiledRoute &route) noexcept;
     void record_exception(ScriptExecutionContext &execution, const Exception &exception) noexcept;
     void record_upstream_exception(ScriptExecutionContext &execution, const Exception &exception) noexcept;
@@ -86,6 +86,14 @@ public:
     void record_websocket_session_started() noexcept;
     void record_websocket_session_finished(AccessWebSocketSessionResult result) noexcept;
     void record_proxy_body_idle_timeout(AccessBodyIdleDirection direction) noexcept;
+    // Dynamic-series recorders. The response metric fires at upstream
+    // response-head arrival (per attempt); the transport-error label is the
+    // coarse connect/request_timeout/io_err classification computed by the
+    // proxy executor; circuit rejections fire per failed address selection.
+    void record_provider_response(const ProxyUpstreamEndpoint &endpoint, int status_code) noexcept;
+    void record_proxy_transport_error(std::string_view app, std::string_view ip_port,
+                                      std::string_view error_label) noexcept;
+    void record_circuit_rejection(std::string_view app) noexcept;
     void mark_io_error(ScriptExecutionContext &execution, common::IoErr error) noexcept;
     void set_upstream(ScriptExecutionContext &execution, const ProxyUpstreamEndpoint &endpoint) noexcept;
     void record_cluster_selection(const AccessClusterSelection &selection) noexcept;
@@ -106,6 +114,7 @@ private:
     cat::Event websocket_event_;
     std::chrono::steady_clock::time_point websocket_started_{};
     std::string_view project_;
+    std::string_view host_pattern_;
     std::string_view route_;
     std::string_view upstream_;
     std::string_view response_compression_;

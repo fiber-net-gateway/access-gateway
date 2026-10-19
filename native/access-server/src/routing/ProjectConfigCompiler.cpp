@@ -15,6 +15,7 @@ namespace {
 
 constexpr std::string_view kDefaultServiceCluster = "default";
 constexpr std::string_view kCallSourceSuffix = ".unifiedAccess";
+constexpr std::string_view kMetricAppSuffix = ".project";
 
 std::string route_path(std::size_t route_index, std::string_view field) {
     std::string path = "routes[";
@@ -714,8 +715,8 @@ std::expected<std::vector<Cidr>, AccessConfigError> compile_cidr_list(const std:
     return result;
 }
 
-std::expected<CompiledRoute, AccessConfigError> compile_route(const RouteConfig &source, std::size_t route_index,
-                                                              PendingRouteCompile &pending,
+std::expected<CompiledRoute, AccessConfigError> compile_route(std::string_view project, const RouteConfig &source,
+                                                              std::size_t route_index, PendingRouteCompile &pending,
                                                               ProjectCompileBudget &budget) {
     if (!source.path || source.path->empty()) {
         return std::unexpected(route_error(AccessConfigErrorCode::InvalidField, route_index, "path", "path is empty"));
@@ -915,7 +916,15 @@ std::expected<CompiledRoute, AccessConfigError> compile_route(const RouteConfig 
                 }
                 addresses.push_back(std::move(*compiled_address));
             }
-            proxy.address_selector = make_static_proxy_address_selector(std::move(addresses));
+            // Metrics-only app identity for static addresses: the project name
+            // distinguishes direct-address routes in the app label dimension
+            // the way the service name does for discovery, without touching
+            // the CAT provider name (which keeps the address authority).
+            std::string metric_app;
+            metric_app.reserve(project.size() + kMetricAppSuffix.size());
+            metric_app.append(project);
+            metric_app.append(kMetricAppSuffix);
+            proxy.address_selector = make_static_proxy_address_selector(std::move(addresses), std::move(metric_app));
         } else {
             return std::unexpected(route_error(AccessConfigErrorCode::InvalidCombination, route_index, "service",
                                                "no service or addresses"));
@@ -1115,7 +1124,7 @@ ProjectSnapshotResult ProjectConfigCompiler::compile(std::string_view project, c
             return std::unexpected(route_error(AccessConfigErrorCode::InvalidField, i, {}, "route entry is null"));
         }
         PendingRouteCompile &route_pending = pending.emplace_back();
-        auto route = compile_route(*source, i, route_pending, budget);
+        auto route = compile_route(project, *source, i, route_pending, budget);
         if (!route) {
             return std::unexpected(std::move(route.error()));
         }
