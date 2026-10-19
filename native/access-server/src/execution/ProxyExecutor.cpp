@@ -714,7 +714,8 @@ public:
         }
         received_body_ += body_bytes;
         // Counts bytes accepted toward the upstream Content-Length budget at
-        // read time; the sink re-checks the same budget per write.
+        // read time; the sink re-checks the same budget per write, so buffered
+        // aggregation (which regroups the writes) cannot desync it.
         forward_state_.record_write(body_bytes);
         if (complete && content_length_ && !forward_state_.complete()) {
             length_short_ = true;
@@ -945,13 +946,19 @@ async::Task<Result<void>> UpstreamAttempt::run() noexcept {
         ProxyRequestBodyReader body_reader(exchange_, request_body, input_.max_request_body_size);
         RequestBodyStatsScope request_body_stats(provider_, body_reader);
         ProxyRequestBodyWriter body_writer(upstream);
-        // Unbuffered: each downstream body read is forwarded as soon as it
-        // returns, preserving the delivery granularity of the retired manual
-        // loop. The write timeout stays unbounded — a bounded upstream-write
-        // timeout would be a separate policy change.
+        // The route flush knob is bidirectional, mirroring the response-body
+        // pipe: flush:true forwards each downstream body read as soon as it
+        // returns (the delivery granularity of the retired manual loop, needed
+        // by streaming uploads — the read itself may still coalesce wire
+        // chunks that arrive buffered together), while the default aggregates
+        // small reads up to the low-water mark so trickling uploads become
+        // fewer, larger upstream writes. The write timeout stays unbounded —
+        // a bounded upstream-write timeout would be a separate policy change.
         const http::HttpBodyPipeOptions pipe_options{
                 .buffer_size = options_.request_body_chunk_size,
-                .low_water = http::kUnbufferedBodyPipeLowWater,
+                .low_water = proxy_.flush.value_or(false)
+                                     ? http::kUnbufferedBodyPipeLowWater
+                                     : std::min(options_.request_body_chunk_size, http::kDefaultBodyPipeLowWater),
                 .read_timeout = body_read_idle_timeout(proxy_.timeout_millis, options_.body_read_idle_floor),
                 .write_timeout = std::chrono::milliseconds::max(),
         };
