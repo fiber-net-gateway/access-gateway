@@ -10,7 +10,7 @@ HTTP, JSON/script, Nacos, CAT, and Prometheus modules are consumed from the pinn
 historical application import revision.
 
 The current reusable Fiber dependency is pinned at
-`512ef8a73a653d951ea80d9f3ccc095545577319` (upstream `master`, fetched 2026-10-12). The pinned
+`47e71f6cb34b01d20ff866dc3c274be16a368fe1` (upstream `master`, fetched 2026-10-19). The pinned
 revision carries no repository-owned compatibility patches: the TLS dynamic-credential lifetime
 defect ([upstream issue #41](https://github.com/fiber-net-gateway/fiber-gateway-cpp/issues/41)),
 briefly patched against `f832d5458d3bfca1cefa45a4c7a6cb1cd0662f23`, is fixed upstream in `90ed153`
@@ -18,6 +18,39 @@ briefly patched against `f832d5458d3bfca1cefa45a4c7a6cb1cd0662f23`, is fixed ups
 The repository-owned regression
 `ProxyExecutorTest.StreamsChunkedUpstreamWhoseFramingArrivesSeparatelyFromPayload` still guards
 the HTTP/1 chunked split-framing fix from the application side.
+The reviewed update range from the previous pin is
+`512ef8a73a653d951ea80d9f3ccc095545577319..47e71f6cb34b01d20ff866dc3c274be16a368fe1`. Its
+behavioral core is a pair of HTTP/1 data-plane fixes. The header parse buffer now tracks view
+lifetime per storage (`193d189f`): a head larger than the initial arena that forced a grow freed
+the storage still backing parsed header/method/URI views — a use-after-free reachable from one
+crafted request — and a line ending exactly at the arena boundary aborted the process at a
+non-NDEBUG assertion (deterministic remote DoS); the removed `retain_prefix` API is replaced by
+`note_view`/`pin_viewed_storage`, both unused by access-server. The post-response unread-body
+drain on HTTP/1 server connections is now bounded by `header_timeout` instead of waiting forever
+(`73d22ebf`) — the exact window access-server's early-response paths (route-level 404/502, script
+errors) leave open on a stalled client. The script engine eliminates its int64 UB with Java-parity
+semantics (`2a778af0`: `INT64_MIN % -1` SIGFPE-killed the process from a one-line config script;
+`math.floor`/`substring`/`repeat` now saturate like Java's `(long)double` through the new
+`script/Numeric.h` helper) and bounds `http.request` response bodies at `maxResponseSize`
+(default 8 MiB) plus a 16-run informational-response cap, both surfaced as catchable script
+errors (`a6cbe76e`). QUIC stream teardown now derives its terminal `IoErr` from the close source
+(`ba4cb2e6`, `cae1351a`: peer close/stateless reset → ConnReset, idle timeout → TimedOut, local →
+Canceled) so parked and late IO report one label; access-server's canceled/failed classification
+keys on its own `when_any` ordering rather than these codes, so only the error codes carried in
+stage events become more accurate. The h3 client no longer aborts the whole request when a write
+fails on a peer STOP_SENDING (`47e71f6c`): writes reject with BrokenPipe while the response stays
+readable — the upstream half of the fix behind this repo's `Http3EarlyResponseCancelTest` flake
+(the write path previously discarded an already-arrived head). The residual ~6% race was in this
+repo's test, which tore the exchange down before its detached reader was joined; the test now
+joins the reader with a `WaitGroup` before the exchange leaves scope (300 consecutive runs green;
+the pre-fix pin flaked ~15/100, the intermediate pin ~6-7/100). The range also lands a TLS
+reassembly fix for handshake headers split across records (`3ec85182`), Prometheus dynamic
+series with strict family LRU behind an additive registry API (PR #44, `cafbb05b`; access-server
+uses plain series), response-trailer ordering assertions (`bf4efc4e`), QUIC crypto-input
+buffer-chain perf (`0689d1af`), and QUIC congestion/teardown test coverage. Public headers move
++80/−5 with the one removal unused here; `QuicStream::close`/`QuicStreamRecvQueue::stop_receiving`
+gained defaulted terminal-error parameters. Access-server needed no source adaptation for this
+update.
 The reviewed update range from the previous pin is
 `feb9ae15600b5293623d6db3337db2066d595d23..512ef8a73a653d951ea80d9f3ccc095545577319`. Its
 behavioral core is the HTTP/3 early-response cancellation code change
