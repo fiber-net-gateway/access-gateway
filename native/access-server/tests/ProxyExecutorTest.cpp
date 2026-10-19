@@ -2910,10 +2910,110 @@ TEST(ProxyExecutorTest, AppliesServerDefaultResponseBodyLimitToChunkedResponses)
     EXPECT_NE(metric_text->find("access_server_route_requests_total{host=\"api.example.com\",path=\"/proxy\","
                                 "status_code=\"201\"} 1"),
               std::string::npos);
+    // Body-transfer accounting: the oversize chunk counts on the upstream leg
+    // (the response reader accounts it before rejecting), nothing reached the
+    // client, and both bodyless directions of the route series stay absent.
+    EXPECT_NE(metric_text->find("access_server_response_body_bytes_total{side=\"upstream\"} 5"), std::string::npos);
+    EXPECT_NE(metric_text->find("access_server_response_body_bytes_total{side=\"downstream\"} 0"), std::string::npos);
+    EXPECT_NE(metric_text->find("access_server_request_body_bytes_total{side=\"downstream\"} 0"), std::string::npos);
+    EXPECT_NE(metric_text->find("access_server_provider_body_bytes_total{app=\"orders.project\",ip_port=\"127.0.0.1:" +
+                                std::to_string(port) + "\",direction=\"response\"} 5"),
+              std::string::npos);
+    EXPECT_NE(metric_text->find("access_server_response_body_size_bytes_count 1"), std::string::npos);
+    EXPECT_EQ(metric_text->find("access_server_route_body_bytes_total"), std::string::npos);
     // The cut is gateway policy, not an upstream transport error: no proxy_error
     // series and no circuit rejection may exist (empty LRU families emit nothing).
     EXPECT_EQ(metric_text->find("access_server_proxy_errors_total"), std::string::npos);
     EXPECT_EQ(metric_text->find("access_server_upstream_circuit_rejections_total"), std::string::npos);
+
+    std::promise<void> shutdown_promise;
+    auto shutdown_future = shutdown_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() { return shutdown(&pool, &server, &shutdown_promise); });
+    ASSERT_EQ(shutdown_future.wait_for(2s), std::future_status::ready);
+    group.stop();
+    group.join();
+}
+
+TEST(ProxyExecutorTest, AccountsBodyTransferBytesAcrossAllProxyLegs) {
+    fiber::event::EventLoopGroup group(1);
+    fiber::access_server::AccessServerMetrics metrics(group);
+    ASSERT_TRUE(metrics.valid());
+    fiber::http::StealableHttp1ConnectionPoolSet pool(group);
+    ASSERT_TRUE(pool.init());
+    group.start();
+
+    UpstreamState upstream_state{
+            .response =
+                    {
+                            .status = 200,
+                            .body = "bridge-body",
+                    },
+    };
+    std::promise<std::uint16_t> port_promise;
+    std::promise<TestHttpServer> server_promise;
+    auto port_future = port_promise.get_future();
+    auto server_future = server_promise.get_future();
+    fiber::async::spawn(group.at(0),
+                        [&]() { return start_server(&group.at(0), &upstream_state, &port_promise, &server_promise); });
+
+    TestHttpServer server = server_future.get();
+    ASSERT_NE(server.server, nullptr);
+    const std::uint16_t port = port_future.get();
+    ASSERT_NE(port, 0);
+
+    fiber::access_server::RouteConfigStore store;
+    auto published = store.apply("orders", proxy_response_project_config(port));
+    ASSERT_TRUE(published) << published.error().message;
+
+    fiber::access_server::ProxyExecutor executor(pool);
+    std::string output;
+    std::promise<void> request_promise;
+    auto request_future = request_promise.get_future();
+    std::string request = "POST /proxy HTTP/1.1\r\n"
+                          "Host: api.example.com\r\n"
+                          "Content-Length: 5\r\n"
+                          "Connection: close\r\n\r\n"
+                          "hello";
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_downstream(&group.at(0), &store, executor.adapter(), std::move(request), &output, &request_promise,
+                              nullptr, false, nullptr, {}, {}, false, {}, nullptr, &metrics.worker(0));
+    });
+
+    ASSERT_EQ(request_future.wait_for(5s), std::future_status::ready);
+    EXPECT_NE(output.find("HTTP/1.1 200"), std::string::npos);
+    EXPECT_NE(output.find("bridge-body"), std::string::npos);
+
+    std::promise<fiber::common::IoResult<std::string>> metrics_promise;
+    auto metrics_future = metrics_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() { return collect_access_metrics(&metrics, &metrics_promise); });
+    ASSERT_EQ(metrics_future.wait_for(2s), std::future_status::ready);
+    auto metric_text = metrics_future.get();
+    ASSERT_TRUE(metric_text);
+    // All four legs of a complete proxied exchange agree with the payload
+    // sizes: 5 request bytes from the client and to the upstream, 11 response
+    // bytes from the upstream and to the client.
+    EXPECT_NE(metric_text->find("access_server_request_body_bytes_total{side=\"downstream\"} 5"), std::string::npos);
+    EXPECT_NE(metric_text->find("access_server_request_body_bytes_total{side=\"upstream\"} 5"), std::string::npos);
+    EXPECT_NE(metric_text->find("access_server_response_body_bytes_total{side=\"upstream\"} 11"), std::string::npos);
+    EXPECT_NE(metric_text->find("access_server_response_body_bytes_total{side=\"downstream\"} 11"), std::string::npos);
+    EXPECT_NE(metric_text->find("access_server_request_body_size_bytes_count 1"), std::string::npos);
+    EXPECT_NE(metric_text->find("access_server_response_body_size_bytes_count 1"), std::string::npos);
+    // Route attribution uses the matched host pattern and route path with a
+    // request/response direction label per leg.
+    EXPECT_NE(metric_text->find("access_server_route_body_bytes_total{host=\"api.example.com\",path=\"/proxy\","
+                                "direction=\"request\"} 5"),
+              std::string::npos);
+    EXPECT_NE(metric_text->find("access_server_route_body_bytes_total{host=\"api.example.com\",path=\"/proxy\","
+                                "direction=\"response\"} 11"),
+              std::string::npos);
+    // Provider attribution carries the static-route metrics-only app label and
+    // the upstream endpoint, per attempt and per direction.
+    EXPECT_NE(metric_text->find("access_server_provider_body_bytes_total{app=\"orders.project\",ip_port=\"127.0.0.1:" +
+                                std::to_string(port) + "\",direction=\"request\"} 5"),
+              std::string::npos);
+    EXPECT_NE(metric_text->find("access_server_provider_body_bytes_total{app=\"orders.project\",ip_port=\"127.0.0.1:" +
+                                std::to_string(port) + "\",direction=\"response\"} 11"),
+              std::string::npos);
 
     std::promise<void> shutdown_promise;
     auto shutdown_future = shutdown_promise.get_future();

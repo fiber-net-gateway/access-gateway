@@ -1,10 +1,10 @@
 # Bounded access-server metrics
 
 `access-server` exposes Prometheus text on its dedicated metrics listener. Almost every label value
-is selected from a compile-time table. The deliberate exception is the four request-labeled dynamic
+is selected from a compile-time table. The deliberate exception is the six request-labeled dynamic
 families (see [Request-labeled dynamic series](#request-labeled-dynamic-series)), whose label
 values arrive at request time and are bounded per family by an LRU eviction cap rather than by an
-enumerated schema. Outside those four families, project names, routes, clusters, hosts, Data IDs,
+enumerated schema. Outside those six families, project names, routes, clusters, hosts, Data IDs,
 MD5 values, headers, and request data are never used as metric labels.
 
 The `/metrics` route has no application-layer authentication. Bind the status listener to an
@@ -31,13 +31,40 @@ The existing worker-sharded metrics are:
 - `access_server_response_compression_total{result}` with `gzip`, `identity`, or
   `not_acceptable`.
 
+Body-transfer byte accounting complements the request counts, because request-rate panels cannot
+see chunked uploads whose cost scales with bytes:
+
+- `access_server_request_body_bytes_total{side}` with `downstream` (bytes accepted from the
+  client) and `upstream` (bytes written to the provider). A persistent gap between the two is
+  request body discarded mid-transfer — aborted or limit-cut uploads.
+- `access_server_response_body_bytes_total{side}` with `upstream` (bytes read from the provider)
+  and `downstream` (wire bytes written to the client, post-compression, including static and error
+  bodies). The gap between the two decomposes into compression savings plus truncated or aborted
+  response bodies; the `response_body_too_large`/`write_response_body` failure phases distinguish
+  gateway-policy cuts from client aborts.
+- `access_server_request_body_size_bytes` and `access_server_response_body_size_bytes` histograms
+  with byte buckets from 1 KiB to 1 GiB. Only transfers that moved bytes are observed, so
+  bodyless requests never skew the distribution; long streams are observed once, at completion.
+- `access_server_response_compression_bytes_total{stream}` with `raw` (bytes fed into the gzip
+  path) and `compressed` (its wire output), read from the gzip writer's own accounting. Bypassed
+  writers report nothing.
+
+Counted semantics: every family counts bytes that actually crossed a leg (accepted reads and
+completed writes), is monotonic, and keeps partial transfers on abort, cancel, or limit cut. Two
+asymmetries are inherited from the transfer readers and match the CAT transaction data: a
+request-body chunk that breaches the route limit is rejected before being counted, while a
+response-body chunk that breaches the limit is counted before being rejected. Excluded bodies:
+request bodies discarded by non-proxy executors (static RESPONSE routes, error pages), upstream
+response bodies drained through the discard path (no-body statuses, header-build failures), and
+WebSocket tunnel frames (the pinned relay API reports no byte counts).
+
 Request workers update pre-bound Fiber Prometheus references. The fixed families perform no label
 registration or allocation in the request path; the dynamic families below are the documented
 exception.
 
 ## Request-labeled dynamic series
 
-Four families use Fiber's dynamic LRU counters because their label values are only known at request
+Six families use Fiber's dynamic LRU counters because their label values are only known at request
 time. Each family is capped; when a family is full, recording a new label combination evicts the
 least-recently-recorded series and restarts that counter from zero, so a low-volume series can
 silently disappear after heavy churn. A family with no recorded series emits nothing at all.
@@ -69,10 +96,24 @@ silently disappear after heavy churn. A family with no recorded series emits not
   the authority; for static addresses the SWRR-internal breaker and the exhaustion of instances
   excluded by earlier failed attempts in the same request both surface here, because both map to
   the same `CircuitOpen` selection error.
+- `access_server_route_body_bytes_total{host, path, direction}` (cap 8192) attributes body bytes to
+  the client edge: `direction="request"` counts request bodies received from the client and
+  `direction="response"` counts response wire bytes written to the client (the same leg semantics
+  as the fixed byte families, attributed with the same matched-pattern `host`/`path` labels and
+  `unmatched` placeholders as `access_server_route_requests_total`). Recorded once per request at
+  finish; a direction that moved no bytes records no series.
+- `access_server_provider_body_bytes_total{app, ip_port, direction}` (cap 16384) attributes body
+  bytes to the upstream edge per attempt: `direction="request"` counts bytes written to that
+  endpoint and `direction="response"` counts bytes read from it. Unlike
+  `access_server_provider_responses_total`, which commits at response-head arrival, the byte series
+  record when the attempt's body-transfer scope ends — the byte totals only exist then — matching
+  the CAT `req_body_bytes`/`resp_body_bytes` commit points, including partial transfers on failure
+  or cancellation.
 
 Recording these series takes a family-wide mutex and may allocate when a label combination is first
-seen; steady hits on an existing series increment a sharded counter with no allocation. Eviction
-diagnostics are not yet exported.
+seen; steady hits on an existing series increment a sharded counter with no allocation. Zero-byte
+recordings are dropped from the dynamic byte families so bodyless traffic cannot churn the LRU
+caps. Eviction diagnostics are not yet exported.
 
 ## Proxy transport and WebSocket metrics
 
@@ -339,14 +380,18 @@ only during the short interval in which a real retirement is pending.
 
 ## Concurrency and cost
 
-The four dynamic request-labeled families serialize on a per-family mutex inside Fiber's LRU
+The six dynamic request-labeled families serialize on a per-family mutex inside Fiber's LRU
 counter. A first-seen label combination allocates its series; steady-state hits increment a shared
-counter and allocate nothing. Each request performs at most two dynamic increments (one route
-series, plus per-attempt provider/error series), so contention scales with the request rate across
-all workers - measured upstream at roughly 5M increments per second on one core with single-digit
-microsecond p99 tail latency under eight contending threads. A scrape takes one additional locked
-snapshot copy per family. The LRU caps (8192/16384/2048/1024 series) bound worst-case memory to a
-few MiB even under label churn, at the cost of resetting evicted counters to zero.
+counter and allocate nothing. Each request performs at most four dynamic increments (the route
+request series, up to two nonzero route body directions, plus per-attempt provider/error and
+provider-body series), so contention scales with the request rate across all workers - measured
+upstream at roughly 5M increments per second on one core with single-digit microsecond p99 tail
+latency under eight contending threads. A scrape takes one additional locked snapshot copy per
+family. The LRU caps (8192/16384/2048/1024/8192/16384 series) bound worst-case memory to a few MiB
+even under label churn, at the cost of resetting evicted counters to zero. The fixed body
+accounting adds a handful of pre-bound integer adds per request and per body chunk; the
+request-body pipe's upstream writer co_awaits one additional thin coroutine frame per chunk to
+accumulate its byte count.
 
 The Nacos owner EventLoop is the sole writer for configuration snapshots, Nacos component
 lifecycle, transport status, service aggregates, and TLS retirement aggregates. Events use fixed
@@ -380,9 +425,10 @@ the process logger remains alive until the runtime and EventLoops have been dest
 The implemented increments cover Project List/route outcomes, route readiness and snapshot
 size/age, bounded DNS configuration/health, application-owned Nacos lifecycle, typed Nacos
 transport/reconnect state, service/endpoint/cluster/selector aggregates, TLS rotation/reclamation,
-worker-sharded proxy/DNS/pool/WebSocket outcomes, async logging/CAT backlog and loss, and the four
-request-labeled dynamic families (route status, provider response status, proxy transport error
-class, and circuit rejections). O-02 has no remaining schema item. Dynamic-series eviction
-diagnostics (how many series a family evicted) are a known follow-up. Typed, authenticated,
-per-instance activation evidence is implemented separately from these metrics; see
+worker-sharded proxy/DNS/pool/WebSocket outcomes, async logging/CAT backlog and loss, body-transfer
+byte/histogram/compression accounting, and the six request-labeled dynamic families (route status,
+provider response status, proxy transport error class, circuit rejections, and the route/provider
+body-byte attributions). O-02 has no remaining schema item. Dynamic-series eviction diagnostics
+(how many series a family evicted) are a known follow-up. Typed, authenticated, per-instance
+activation evidence is implemented separately from these metrics; see
 [`../../../docs/activation-evidence.md`](../../../docs/activation-evidence.md).

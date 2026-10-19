@@ -151,6 +151,22 @@ void RequestObservability::finish(http::HttpExchange &exchange) noexcept {
     if (metrics_) {
         metrics_->request_finished(response, duration);
         metrics_->route_request_finished(host_pattern_, route_, status_text);
+        // Body-transfer families. The downstream response bytes are the wire
+        // bytes Fiber already accounted (post-compression, including truncated
+        // transfers and static/error bodies); the other three legs come from the
+        // proxy executor's accumulated reader/writer counts. Zero-byte legs stay
+        // absent from the histograms and the dynamic series so bodyless traffic
+        // neither skews the size distribution nor churns the LRU caps.
+        metrics_->request_body_transferred(AccessBodySide::Downstream, request_body_downstream_bytes_);
+        metrics_->request_body_transferred(AccessBodySide::Upstream, request_body_upstream_bytes_);
+        metrics_->response_body_transferred(AccessBodySide::Upstream, response_body_upstream_bytes_);
+        metrics_->response_body_transferred(AccessBodySide::Downstream, response.body_bytes_sent);
+        metrics_->request_body_size(request_body_downstream_bytes_);
+        metrics_->response_body_size(response_body_upstream_bytes_);
+        metrics_->route_body_transferred(host_pattern_, route_, AccessBodyDirection::Request,
+                                         request_body_downstream_bytes_);
+        metrics_->route_body_transferred(host_pattern_, route_, AccessBodyDirection::Response,
+                                         response.body_bytes_sent);
     }
 
     add_root_data("status", status_text);
@@ -302,6 +318,31 @@ void RequestObservability::record_proxy_transport_error(std::string_view app, st
 void RequestObservability::record_circuit_rejection(std::string_view app) noexcept {
     if (metrics_) {
         metrics_->upstream_circuit_rejected(app);
+    }
+}
+
+void RequestObservability::record_request_body_transfer(std::uint64_t downstream_bytes,
+                                                        std::uint64_t upstream_bytes) noexcept {
+    request_body_downstream_bytes_ += downstream_bytes;
+    request_body_upstream_bytes_ += upstream_bytes;
+}
+
+void RequestObservability::record_response_body_upstream(std::uint64_t bytes) noexcept {
+    response_body_upstream_bytes_ += bytes;
+}
+
+void RequestObservability::record_provider_body_transfer(const ProxyUpstreamEndpoint &endpoint,
+                                                         AccessBodyDirection direction, std::uint64_t bytes) noexcept {
+    if (metrics_ != nullptr && bytes != 0) {
+        metrics_->provider_body_transferred(proxy_metric_app(endpoint), endpoint.host_header, direction, bytes);
+    }
+}
+
+void RequestObservability::record_response_compression_bytes(std::uint64_t raw_bytes,
+                                                             std::uint64_t compressed_bytes) noexcept {
+    if (metrics_ != nullptr) {
+        metrics_->response_compression_bytes(AccessCompressionStream::Raw, raw_bytes);
+        metrics_->response_compression_bytes(AccessCompressionStream::Compressed, compressed_bytes);
     }
 }
 

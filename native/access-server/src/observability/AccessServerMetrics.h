@@ -158,6 +158,30 @@ enum class AccessBodyIdleDirection : std::uint8_t {
     Count,
 };
 
+// Which leg of a body transfer a byte family counts. Request bodies count
+// downstream (received from the client) and upstream (written to the provider);
+// response bodies count upstream (received from the provider) and downstream
+// (written to the client, post-compression wire bytes).
+enum class AccessBodySide : std::uint8_t {
+    Downstream,
+    Upstream,
+    Count,
+};
+
+// Body dimension of the request-labeled dynamic byte families: the request
+// body or the response body of the recorded request/attempt.
+enum class AccessBodyDirection : std::uint8_t {
+    Request,
+    Response,
+    Count,
+};
+
+enum class AccessCompressionStream : std::uint8_t {
+    Raw,
+    Compressed,
+    Count,
+};
+
 class AccessServerMetrics final : public common::NonCopyable, public common::NonMovable {
 public:
     class Worker {
@@ -180,6 +204,15 @@ public:
         void websocket_session_finished(AccessWebSocketSessionResult result) noexcept;
         void proxy_body_idle_timeout(AccessBodyIdleDirection direction) noexcept;
 
+        // Body-transfer byte families. The fixed sides are direct integer adds;
+        // the size histograms observe only transfers that moved bytes, so
+        // bodyless requests never pollute the distribution.
+        void request_body_transferred(AccessBodySide side, std::uint64_t bytes) noexcept;
+        void response_body_transferred(AccessBodySide side, std::uint64_t bytes) noexcept;
+        void request_body_size(std::uint64_t bytes) noexcept;
+        void response_body_size(std::uint64_t bytes) noexcept;
+        void response_compression_bytes(AccessCompressionStream stream, std::uint64_t bytes) noexcept;
+
         // Dynamic LRU series (labels known only at request time). Unlike the
         // pre-bound series above, these take a family-wide lock and may
         // allocate when a label combination is seen for the first time; a full
@@ -192,6 +225,12 @@ public:
         void proxy_transport_error(std::string_view app, std::string_view ip_port,
                                    std::string_view error_label) noexcept;
         void upstream_circuit_rejected(std::string_view app) noexcept;
+        // Zero-byte recordings are dropped so bodyless traffic cannot churn the
+        // LRU caps; a direction whose transfer moved nothing simply stays absent.
+        void route_body_transferred(std::string_view host_pattern, std::string_view route_path,
+                                    AccessBodyDirection direction, std::uint64_t bytes) noexcept;
+        void provider_body_transferred(std::string_view app, std::string_view ip_port, AccessBodyDirection direction,
+                                       std::uint64_t bytes) noexcept;
 
     private:
         friend class AccessServerMetrics;
@@ -215,6 +254,9 @@ public:
         static constexpr std::size_t kWebSocketSessionResultCount =
                 static_cast<std::size_t>(AccessWebSocketSessionResult::Count);
         static constexpr std::size_t kBodyIdleDirectionCount = static_cast<std::size_t>(AccessBodyIdleDirection::Count);
+        static constexpr std::size_t kBodySideCount = static_cast<std::size_t>(AccessBodySide::Count);
+        static constexpr std::size_t kBodyDirectionCount = static_cast<std::size_t>(AccessBodyDirection::Count);
+        static constexpr std::size_t kCompressionStreamCount = static_cast<std::size_t>(AccessCompressionStream::Count);
 
         std::array<prometheus::CounterRef, kRequestResultCount> requests_;
         std::array<prometheus::CounterRef, kRequestStatusCodeCount> requests_by_status_;
@@ -230,12 +272,19 @@ public:
         std::array<prometheus::CounterRef, kWebSocketHandshakeResultCount> websocket_handshakes_;
         std::array<prometheus::CounterRef, kWebSocketSessionResultCount> websocket_sessions_;
         std::array<prometheus::CounterRef, kBodyIdleDirectionCount> proxy_body_idle_timeouts_;
+        std::array<prometheus::CounterRef, kBodySideCount> request_body_bytes_;
+        std::array<prometheus::CounterRef, kBodySideCount> response_body_bytes_;
+        std::array<prometheus::CounterRef, kCompressionStreamCount> response_compression_bytes_;
         // Family-wide handles shared by every worker copy; bound after freeze().
         std::optional<prometheus::DynamicCounter> route_requests_dynamic_;
         std::optional<prometheus::DynamicCounter> provider_responses_dynamic_;
         std::optional<prometheus::DynamicCounter> proxy_errors_dynamic_;
         std::optional<prometheus::DynamicCounter> circuit_rejections_dynamic_;
+        std::optional<prometheus::DynamicCounter> route_body_bytes_dynamic_;
+        std::optional<prometheus::DynamicCounter> provider_body_bytes_dynamic_;
         prometheus::HistogramRef request_duration_;
+        prometheus::HistogramRef request_body_size_;
+        prometheus::HistogramRef response_body_size_;
         prometheus::GaugeRef inflight_;
         prometheus::GaugeRef proxy_attempts_inflight_;
         prometheus::GaugeRef websocket_sessions_inflight_;

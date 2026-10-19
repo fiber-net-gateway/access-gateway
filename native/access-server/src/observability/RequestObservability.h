@@ -94,6 +94,18 @@ public:
     void record_proxy_transport_error(std::string_view app, std::string_view ip_port,
                                       std::string_view error_label) noexcept;
     void record_circuit_rejection(std::string_view app) noexcept;
+    // Body-transfer accounting. The two accumulate request-scoped totals that
+    // finish() feeds into the fixed byte families, the size histograms, and the
+    // route-labeled dynamic series; the per-attempt recorder emits the
+    // provider-labeled dynamic series immediately (each attempt owns its own
+    // endpoint labels). Zero-byte transfers record nothing.
+    void record_request_body_transfer(std::uint64_t downstream_bytes, std::uint64_t upstream_bytes) noexcept;
+    void record_response_body_upstream(std::uint64_t bytes) noexcept;
+    void record_provider_body_transfer(const ProxyUpstreamEndpoint &endpoint, AccessBodyDirection direction,
+                                       std::uint64_t bytes) noexcept;
+    // Raw input versus compressed wire output of the gzip response path, read
+    // from the gzip writer stats when the telemetry is destroyed.
+    void record_response_compression_bytes(std::uint64_t raw_bytes, std::uint64_t compressed_bytes) noexcept;
     void mark_io_error(ScriptExecutionContext &execution, common::IoErr error) noexcept;
     void set_upstream(ScriptExecutionContext &execution, const ProxyUpstreamEndpoint &endpoint) noexcept;
     void record_cluster_selection(const AccessClusterSelection &selection) noexcept;
@@ -119,6 +131,12 @@ private:
     std::string_view upstream_;
     std::string_view response_compression_;
     std::string_view error_;
+    // Request-scoped body byte totals accumulated by the proxy executor; fed
+    // into the metrics families once at finish(), where the delivered response
+    // stats and the route labels are all known.
+    std::uint64_t request_body_downstream_bytes_ = 0;
+    std::uint64_t request_body_upstream_bytes_ = 0;
+    std::uint64_t response_body_upstream_bytes_ = 0;
     bool execution_failed_ = false;
     bool failure_recorded_ = false;
     bool exception_recorded_ = false;
