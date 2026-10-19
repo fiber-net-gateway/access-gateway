@@ -214,6 +214,15 @@ struct CatFrameCapture {
     }
 };
 
+// Scripted downstream input for tests that need the request to arrive in
+// staged pieces: each segment becomes available after its delay, so a read
+// parked at a segment boundary blocks exactly as it would behind a pausing
+// client.
+struct PacedInput {
+    std::chrono::milliseconds delay{0};
+    std::string data;
+};
+
 class RecordingTransport final : public fiber::test::HttpTransportStub {
 public:
     RecordingTransport(fiber::event::EventLoop &loop, std::string input, std::string &output,
@@ -221,6 +230,9 @@ public:
                        std::string_view observed_output = {}, std::promise<void> *output_observed = nullptr) :
         loop_(loop), input_(std::move(input)), output_(output), hold_open_after_input_(hold_open_after_input),
         fail_writes_(fail_writes), observed_output_(observed_output), output_observed_(output_observed) {}
+
+    RecordingTransport(fiber::event::EventLoop &loop, std::vector<PacedInput> paced_input, std::string &output) :
+        loop_(loop), output_(output), paced_input_(std::move(paced_input)) {}
 
     fiber::async::Task<fiber::common::IoResult<void>> shutdown(std::chrono::milliseconds) override {
         co_return fiber::common::IoResult<void>{};
@@ -232,6 +244,34 @@ public:
 
     fiber::async::Task<fiber::common::IoResult<std::size_t>> readv(std::size_t size, fiber::mem::IoBufChain &out,
                                                                    std::chrono::milliseconds timeout) override {
+        if (paced_input_) {
+            if (paced_segment_ < paced_input_->size()) {
+                const PacedInput &segment = (*paced_input_)[paced_segment_];
+                if (paced_offset_ == 0 && segment.delay > std::chrono::milliseconds::zero()) {
+                    co_await fiber::async::sleep(segment.delay);
+                }
+                const std::size_t count = std::min(size, segment.data.size() - paced_offset_);
+                if (count == 0) {
+                    co_return static_cast<std::size_t>(0);
+                }
+                auto buffer = fiber::mem::IoBuf::allocate(count);
+                if (!buffer) {
+                    co_return std::unexpected(fiber::common::IoErr::NoMem);
+                }
+                std::memcpy(buffer.writable_data(), segment.data.data() + paced_offset_, count);
+                buffer.commit(count);
+                if (!out.append(std::move(buffer))) {
+                    co_return std::unexpected(fiber::common::IoErr::NoMem);
+                }
+                paced_offset_ += count;
+                if (paced_offset_ == segment.data.size()) {
+                    ++paced_segment_;
+                    paced_offset_ = 0;
+                }
+                co_return count;
+            }
+            co_return static_cast<std::size_t>(0);
+        }
         if (input_offset_ == input_.size()) {
             if (hold_open_after_input_) {
                 // Mirror real transports: a held-open read fails with TimedOut
@@ -306,6 +346,9 @@ private:
     std::string &output_;
     fiber::net::SocketAddress remote_addr_{};
     std::size_t input_offset_ = 0;
+    std::optional<std::vector<PacedInput>> paced_input_;
+    std::size_t paced_segment_ = 0;
+    std::size_t paced_offset_ = 0;
     bool closed_ = false;
     bool hold_open_after_input_ = false;
     bool fail_writes_ = false;
@@ -678,6 +721,30 @@ run_downstream(fiber::event::EventLoop *loop, const fiber::access_server::RouteC
                                                     fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
         fiber::access_server::AccessRequestTelemetry telemetry(exchange, metrics, cat_client,
                                                                &client_metadata_resolver);
+        co_await handler.handle(exchange, telemetry);
+    };
+    fiber::http::Http1Connection connection(std::move(transport), http_handler, {});
+    co_await connection.run();
+    done->set_value();
+}
+
+// Same handler wiring as run_downstream, but feeds the connection staged
+// request input so tests can observe how the proxy paces upstream delivery
+// while the downstream body is still arriving.
+fiber::async::DetachedTask run_paced_downstream(fiber::event::EventLoop *loop,
+                                                const fiber::access_server::RouteConfigStore *store,
+                                                fiber::access_server::AccessProxyAdapter proxy_adapter,
+                                                std::vector<PacedInput> paced_input, std::string *output,
+                                                std::promise<void> *done) {
+    auto transport = std::make_unique<RecordingTransport>(*loop, std::move(paced_input), *output);
+    fiber::access_server::AccessRequestHandler handler(store->snapshot_provider(), {}, {}, proxy_adapter);
+    fiber::access_server::ClientMetadataResolver client_metadata_resolver(
+            fiber::access_server::ClientMetadataResolverOptions{
+                    .mode = fiber::access_server::ClientMetadataMode::LegacyHeaders,
+            });
+    fiber::http::HttpHandler http_handler =
+            [&handler, &client_metadata_resolver](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+        fiber::access_server::AccessRequestTelemetry telemetry(exchange, nullptr, nullptr, &client_metadata_resolver);
         co_await handler.handle(exchange, telemetry);
     };
     fiber::http::Http1Connection connection(std::move(transport), http_handler, {});
@@ -2178,6 +2245,177 @@ TEST(ProxyExecutorTest, FlushControlsCrossReadResponseBodyAggregation) {
     std::promise<void> shutdown_promise;
     auto shutdown_future = shutdown_promise.get_future();
     fiber::async::spawn(group.at(0), [&]() { return shutdown(&pool, &server, &shutdown_promise); });
+    ASSERT_EQ(shutdown_future.wait_for(2s), std::future_status::ready);
+    group.stop();
+    group.join();
+}
+
+// Raw HTTP/1 upstream for request-direction pacing tests: it accumulates the
+// raw request bytes as they arrive, signals head_received once the request
+// head is drained and first_body_byte the moment any byte lands after the
+// head's blank line, then answers a fixed response once the terminal chunk
+// arrives (or the read side ends). Every promise is satisfied on every exit
+// path so a failed accept cannot hang the test futures.
+fiber::async::DetachedTask serve_request_timing_upstream(fiber::net::TcpListener *listener,
+                                                         std::promise<void> *head_received,
+                                                         std::promise<void> *first_body_byte,
+                                                         std::promise<std::string> *raw_request,
+                                                         std::promise<void> *done) noexcept {
+    bool head_signalled = false;
+    bool body_signalled = false;
+    const auto signal_head = [&]() {
+        if (!head_signalled) {
+            head_signalled = true;
+            head_received->set_value();
+        }
+    };
+    const auto signal_body = [&]() {
+        if (!body_signalled) {
+            body_signalled = true;
+            first_body_byte->set_value();
+        }
+    };
+
+    auto accepted = co_await listener->accept();
+    if (!accepted) {
+        signal_head();
+        signal_body();
+        raw_request->set_value({});
+        done->set_value();
+        co_return;
+    }
+    listener->close();
+    fiber::net::TcpStream stream(fiber::event::EventLoop::current(), accepted->release_fd(), accepted->take_peer());
+
+    std::string raw;
+    std::size_t head_end = std::string::npos;
+    for (;;) {
+        std::array<std::uint8_t, 4096> buffer{};
+        auto read = co_await stream.read(buffer.data(), buffer.size(), 5s);
+        if (!read || *read == 0) {
+            break;
+        }
+        raw.append(reinterpret_cast<const char *>(buffer.data()), *read);
+        if (head_end == std::string::npos) {
+            head_end = raw.find("\r\n\r\n");
+            if (head_end != std::string::npos) {
+                signal_head();
+            }
+        }
+        if (head_end != std::string::npos && raw.size() > head_end + 4) {
+            signal_body();
+        }
+        if (head_end != std::string::npos && raw.find("0\r\n\r\n", head_end + 4) != std::string::npos) {
+            break;
+        }
+    }
+
+    const std::string_view response = "HTTP/1.1 200 OK\r\n"
+                                      "Content-Type: text/plain\r\n"
+                                      "Content-Length: 2\r\n"
+                                      "Connection: close\r\n"
+                                      "\r\nok";
+    (void) co_await stream.write(response.data(), response.size(), 5s);
+    co_await fiber::async::sleep(50ms);
+    stream.close();
+    signal_head();
+    signal_body();
+    raw_request->set_value(std::move(raw));
+    done->set_value();
+}
+
+// The route flush knob also governs request-body forwarding, mirroring the
+// response pipe: with the default (aggregating) mode a paused downloader
+// below the low-water mark delivers nothing upstream until the body
+// completes, and separate downstream chunks coalesce into one upstream
+// chunked frame; with flush:true each downstream chunk is framed and
+// forwarded as soon as it arrives.
+TEST(ProxyExecutorTest, FlushControlsCrossReadRequestBodyAggregation) {
+    fiber::event::EventLoopGroup group(1);
+    fiber::http::StealableHttp1ConnectionPoolSet pool(group);
+    ASSERT_TRUE(pool.init());
+    group.start();
+
+    fiber::access_server::ProxyExecutor executor(pool);
+    for (const bool flush: {false, true}) {
+        fiber::net::TcpListener listener(group.at(0));
+        ASSERT_TRUE(listener.bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), {}));
+        auto port = bound_port(listener.fd());
+        ASSERT_TRUE(port);
+
+        std::promise<void> head_received_promise;
+        std::promise<void> first_body_byte_promise;
+        std::promise<std::string> raw_request_promise;
+        std::promise<void> upstream_done_promise;
+        auto head_received = head_received_promise.get_future();
+        auto first_body_byte = first_body_byte_promise.get_future();
+        auto raw_request = raw_request_promise.get_future();
+        auto upstream_done = upstream_done_promise.get_future();
+        fiber::async::spawn(group.at(0), [&]() {
+            return serve_request_timing_upstream(&listener, &head_received_promise, &first_body_byte_promise,
+                                                 &raw_request_promise, &upstream_done_promise);
+        });
+
+        auto config = project_config(*port);
+        auto &route = **config.routes->begin();
+        route.flush = flush;
+        fiber::access_server::RouteConfigStore store;
+        auto published = store.apply("orders", std::move(config));
+        ASSERT_TRUE(published) << published.error().message;
+
+        std::string output;
+        std::promise<void> request_promise;
+        auto request_done = request_promise.get_future();
+        // The first body chunk lands in its own transport read shortly after
+        // the head so the downstream read_body returns it alone, while the
+        // second half and its terminal chunk only become readable 600ms
+        // later. The flush:false window below then observes the pipe parked
+        // in a read with buffered data below the low-water mark. Keeping the
+        // first chunk in the head's segment would instead park inside the
+        // downstream read_body itself, which aggregates up to one transport
+        // read per call regardless of the flush knob.
+        std::vector<PacedInput> paced_input = {
+                PacedInput{.delay = 0ms,
+                           .data = "POST /proxy HTTP/1.1\r\n"
+                                   "Host: api.example.com\r\n"
+                                   "Transfer-Encoding: chunked\r\n"
+                                   "Connection: close\r\n"
+                                   "\r\n"},
+                PacedInput{.delay = 50ms, .data = "5\r\nhello\r\n"},
+                PacedInput{.delay = 600ms, .data = "6\r\nworld!\r\n0\r\n\r\n"},
+        };
+        fiber::async::spawn(group.at(0), [&]() {
+            return run_paced_downstream(&group.at(0), &store, executor.adapter(), std::move(paced_input), &output,
+                                        &request_promise);
+        });
+
+        ASSERT_EQ(head_received.wait_for(2s), std::future_status::ready);
+        if (flush) {
+            EXPECT_EQ(first_body_byte.wait_for(300ms), std::future_status::ready);
+        } else {
+            EXPECT_EQ(first_body_byte.wait_for(300ms), std::future_status::timeout);
+        }
+        ASSERT_EQ(request_done.wait_for(5s), std::future_status::ready);
+        EXPECT_NE(output.find("HTTP/1.1 200 OK\r\n"), std::string::npos) << output;
+
+        ASSERT_EQ(upstream_done.wait_for(5s), std::future_status::ready);
+        const std::string raw = raw_request.get();
+        EXPECT_NE(raw.find("hello"), std::string::npos) << raw;
+        EXPECT_NE(raw.find("world!"), std::string::npos) << raw;
+        if (flush) {
+            EXPECT_NE(raw.find("5\r\nhello\r\n"), std::string::npos) << raw;
+        } else {
+            EXPECT_EQ(raw.find("5\r\nhello\r\n"), std::string::npos) << raw;
+            EXPECT_NE(raw.find("b\r\nhelloworld!\r\n0\r\n\r\n"), std::string::npos) << raw;
+        }
+    }
+
+    std::promise<void> shutdown_promise;
+    auto shutdown_future = shutdown_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
+        co_await pool.shutdown_async();
+        shutdown_promise.set_value();
+    });
     ASSERT_EQ(shutdown_future.wait_for(2s), std::future_status::ready);
     group.stop();
     group.join();

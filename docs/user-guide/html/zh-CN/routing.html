@@ -503,7 +503,10 @@ service: report-service/stable
     <tr>
       <td><code>flush</code></td>
       <td>PROXY</td>
-      <td><code>true</code> 开启低延迟 body flush，并写 <code>X-Accel-Buffering: no</code></td>
+      <td>
+        <code>true</code> 双向开启低延迟 body flush（请求与响应），并写
+        <code>X-Accel-Buffering: no</code>
+      </td>
     </tr>
     <tr>
       <td><code>allows</code></td>
@@ -787,11 +790,11 @@ timeout: 20s
   普通连接失败只会在 upstream request header 尚未开始发送时安全重选，最多尝试 4 个选择（含首选）。
   一旦 header 已开始发送便不重试，避免重复提交非幂等请求。
 </p>
-<h3 id="8-4-flush-和流式响应">
-  8.4 Flush 和流式响应<a
+<h3 id="8-4-flush-和流式传输">
+  8.4 Flush 和流式传输<a
     class="documentation-heading-anchor"
-    href="#8-4-flush-和流式响应"
-    aria-label="Link to 8.4 Flush 和流式响应"
+    href="#8-4-flush-和流式传输"
+    aria-label="Link to 8.4 Flush 和流式传输"
     >#</a
   >
 </h3>
@@ -799,6 +802,13 @@ timeout: 20s
   <code>flush: true</code> 用于 SSE、流式 JSON 和其他低延迟分块响应。它减少 access-server 本地响应
   body 聚合，并 添加 <code>X-Accel-Buffering: no</code>。它不会自动关闭客户端和 access-server 之外的
   CDN、Ingress、浏览器或 协议栈缓冲；端到端仍需单独配置和验证。
+</p>
+<p>
+  同一个开关也作用于请求方向：默认模式下 access-server 会把小的请求 body 读片段聚合到约 48 KiB
+  再发往 upstream（少量更大的写），<code>flush: true</code> 则在每次读到请求 body
+  片段后立即分帧转发，适配客户端慢速
+  持续上传的场景。注意粒度是&quot;每次读取&quot;——一次读取内已随连接缓冲到达的多个分块仍可能合并转发，该行为与
+  聚合模式无关。
 </p>
 <h3 id="8-5-websocket">
   8.5 WebSocket<a

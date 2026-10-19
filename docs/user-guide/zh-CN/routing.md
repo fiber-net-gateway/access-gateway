@@ -211,7 +211,7 @@ matcher 的结构优先级。
 | `max_client_body_size` | RESPONSE/PROXY        | Route 请求体限制；缺失或数值 0 使用 server 默认值          |
 | `max_proxy_body_size`  | PROXY                 | 非零时覆盖 upstream response body 限制                     |
 | `websocket_timeout`    | PROXY                 | 大于 0 时允许 WebSocket tunnel，并作为隧道读写 timeout     |
-| `flush`                | PROXY                 | `true` 开启低延迟 body flush，并写 `X-Accel-Buffering: no` |
+| `flush`                | PROXY                 | `true` 双向开启低延迟 body flush（请求与响应），并写 `X-Accel-Buffering: no` |
 | `allows`               | 全部                  | CIDR allow/deny sequence；`!` 前缀表示 deny                |
 | `upstream_tls`         | PROXY                 | native-only 不可变出站 TLS transport profile               |
 
@@ -402,11 +402,16 @@ Native Validator 必须禁止发布。Console 的 rnacos readback 也不等于�
 普通连接失败只会在 upstream request header 尚未开始发送时安全重选，最多尝试 4 个选择（含首选）。
 一旦 header 已开始发送便不重试，避免重复提交非幂等请求。
 
-### 8.4 Flush 和流式响应
+### 8.4 Flush 和流式传输
 
 `flush: true` 用于 SSE、流式 JSON 和其他低延迟分块响应。它减少 access-server 本地响应 body 聚合，并
 添加 `X-Accel-Buffering: no`。它不会自动关闭客户端和 access-server 之外的 CDN、Ingress、浏览器或
 协议栈缓冲；端到端仍需单独配置和验证。
+
+同一个开关也作用于请求方向：默认模式下 access-server 会把小的请求 body 读片段聚合到约 48 KiB 再发往
+upstream（少量更大的写），`flush: true` 则在每次读到请求 body 片段后立即分帧转发，适配客户端慢速
+持续上传的场景。注意粒度是"每次读取"——一次读取内已随连接缓冲到达的多个分块仍可能合并转发，该行为与
+聚合模式无关。
 
 ### 8.5 WebSocket
 
