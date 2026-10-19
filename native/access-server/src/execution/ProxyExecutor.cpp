@@ -681,6 +681,95 @@ bool response_limit_exceeded(const std::optional<std::uint64_t> &limit, std::siz
     return limit && *limit > 0 && size > *limit;
 }
 
+// Request-direction pipe source. Every classification that must stay at the
+// read boundary lives here so the pipe's Write phase cannot reclassify it: a
+// Content-Length mismatch or a route-limit breach keeps the Java-compat
+// read-side mapping (500 HTTP_CLIENT_ERROR_BODY_SIZE / 413, no
+// circuit-breaker charge) instead of surfacing as SEND_REQUEST_ERROR from the
+// sink's own framing checks.
+class ProxyRequestBodyReader {
+public:
+    ProxyRequestBodyReader(http::HttpExchange &exchange, const http::HttpBodySpec &body_spec,
+                           std::size_t max_request_body_size) noexcept :
+        exchange_(exchange), forward_state_(body_spec), content_length_(body_spec.is_content_length()),
+        max_request_body_size_(max_request_body_size) {}
+
+    async::Task<common::IoResult<mem::IoBufChain>> read_body(std::size_t max_bytes,
+                                                             std::chrono::milliseconds timeout) noexcept {
+        auto body = co_await exchange_.read_body(max_bytes, timeout);
+        if (!body) {
+            co_return std::unexpected(body.error());
+        }
+
+        const bool complete = body->complete();
+        const std::size_t body_bytes = body->readable_bytes();
+        if (!forward_state_.accepts(body_bytes)) {
+            length_mismatch_ = true;
+            co_return std::unexpected(common::IoErr::Invalid);
+        }
+        if (max_request_body_size_ != 0 &&
+            body_bytes > max_request_body_size_ - std::min(received_body_, max_request_body_size_)) {
+            limit_exceeded_ = true;
+            co_return std::unexpected(common::IoErr::MessageTooLarge);
+        }
+        received_body_ += body_bytes;
+        // Counts bytes accepted toward the upstream Content-Length budget at
+        // read time; the sink re-checks the same budget per write.
+        forward_state_.record_write(body_bytes);
+        if (complete && content_length_ && !forward_state_.complete()) {
+            length_short_ = true;
+            co_return std::unexpected(common::IoErr::Invalid);
+        }
+        co_return std::move(*body);
+    }
+
+    // Neutral by design. The pipe aborts both endpoints on failure, but this
+    // source is the downstream exchange whose response channel must survive so
+    // the executor can still deliver the mapped error response; the upstream
+    // sink abort is the one that matters and stays live.
+    common::IoResult<void> abort(common::IoErr /*reason*/) noexcept { return {}; }
+
+    [[nodiscard]] bool limit_exceeded() const noexcept { return limit_exceeded_; }
+    [[nodiscard]] bool length_mismatch() const noexcept { return length_mismatch_; }
+    [[nodiscard]] bool length_short() const noexcept { return length_short_; }
+    [[nodiscard]] std::size_t received_body() const noexcept { return received_body_; }
+
+private:
+    http::HttpExchange &exchange_;
+    http::proxy_core::RequestBodyForwardState forward_state_;
+    bool content_length_ = false;
+    std::size_t max_request_body_size_ = 0;
+    std::size_t received_body_ = 0;
+    bool limit_exceeded_ = false;
+    bool length_mismatch_ = false;
+    bool length_short_ = false;
+};
+
+// ClientHttp1Exchange satisfies the pipe writer contract through write()
+// (partial writes consume the chain in place; the terminal marker is taken by
+// clearing the chain's complete flag) but has no flush: upstream writes go
+// straight to transport writev with nothing buffered. The pipe only calls
+// flush in unbuffered mode, where the no-op keeps the forward-promptly
+// semantics of the retired manual loop.
+class ProxyRequestBodyWriter {
+public:
+    explicit ProxyRequestBodyWriter(http::ClientHttp1Exchange &upstream) noexcept : upstream_(upstream) {}
+
+    async::Task<common::IoResult<std::size_t>> write(mem::IoBufChain &buffer,
+                                                     std::chrono::milliseconds timeout) noexcept {
+        return upstream_.write(buffer, timeout);
+    }
+
+    async::Task<common::IoResult<void>> flush(std::chrono::milliseconds /*timeout*/) noexcept {
+        co_return common::IoResult<void>{};
+    }
+
+    common::IoResult<void> abort(common::IoErr reason) noexcept { return upstream_.abort(reason); }
+
+private:
+    http::ClientHttp1Exchange &upstream_;
+};
+
 // Body-transfer stats flush into the provider transaction when the forwarding
 // scope ends — including failure co_returns and coroutine cancellation — so a
 // partial transfer still reports how far it got. Data added after the
@@ -689,8 +778,8 @@ bool response_limit_exceeded(const std::optional<std::uint64_t> &limit, std::siz
 // request-body scope always does because its block ends well before completion.
 class RequestBodyStatsScope final {
 public:
-    RequestBodyStatsScope(AccessProviderTransaction &provider, const std::size_t &received) noexcept :
-        provider_(provider), received_(received), started_(std::chrono::steady_clock::now()) {}
+    RequestBodyStatsScope(AccessProviderTransaction &provider, const ProxyRequestBodyReader &reader) noexcept :
+        provider_(provider), reader_(reader), started_(std::chrono::steady_clock::now()) {}
 
     RequestBodyStatsScope(const RequestBodyStatsScope &) = delete;
     RequestBodyStatsScope &operator=(const RequestBodyStatsScope &) = delete;
@@ -698,13 +787,13 @@ public:
     RequestBodyStatsScope &operator=(RequestBodyStatsScope &&) = delete;
 
     ~RequestBodyStatsScope() noexcept {
-        provider_.add_request_body(received_, std::chrono::duration_cast<std::chrono::microseconds>(
-                                                      std::chrono::steady_clock::now() - started_));
+        provider_.add_request_body(reader_.received_body(), std::chrono::duration_cast<std::chrono::microseconds>(
+                                                                    std::chrono::steady_clock::now() - started_));
     }
 
 private:
     AccessProviderTransaction &provider_;
-    const std::size_t &received_;
+    const ProxyRequestBodyReader &reader_;
     std::chrono::steady_clock::time_point started_;
 };
 
@@ -853,75 +942,54 @@ async::Task<Result<void>> UpstreamAttempt::run() noexcept {
 
     const http::HttpBodySpec &request_body = request_plan_.body_spec();
     if (!request_plan_.request_end_stream()) {
-        http::proxy_core::RequestBodyForwardState forward_state(request_body);
-        std::size_t received_request_body = 0;
-        RequestBodyStatsScope request_body_stats(provider_, received_request_body);
-        for (;;) {
-            auto body = co_await exchange_.read_body(
-                    options_.request_body_chunk_size,
-                    body_read_idle_timeout(proxy_.timeout_millis, options_.body_read_idle_floor));
-            if (!body) {
-                (void) upstream.abort(body.error());
-                if (body.error() == common::IoErr::TimedOut) {
+        ProxyRequestBodyReader body_reader(exchange_, request_body, input_.max_request_body_size);
+        RequestBodyStatsScope request_body_stats(provider_, body_reader);
+        ProxyRequestBodyWriter body_writer(upstream);
+        // Unbuffered: each downstream body read is forwarded as soon as it
+        // returns, preserving the delivery granularity of the retired manual
+        // loop. The write timeout stays unbounded — a bounded upstream-write
+        // timeout would be a separate policy change.
+        const http::HttpBodyPipeOptions pipe_options{
+                .buffer_size = options_.request_body_chunk_size,
+                .low_water = http::kUnbufferedBodyPipeLowWater,
+                .read_timeout = body_read_idle_timeout(proxy_.timeout_millis, options_.body_read_idle_floor),
+                .write_timeout = std::chrono::milliseconds::max(),
+        };
+        // No channel-closed race is needed here, unlike the response-body pipe:
+        // this pipe's source is the downstream client, so a close surfaces as
+        // the read's own error. The pipe's abort guard tears down the upstream
+        // on every failure path.
+        auto piped = co_await http::pipe_http_body(http::make_http_body_pipe_reader(body_reader),
+                                                   http::make_http_body_pipe_writer(body_writer), pipe_options);
+        if (!piped) {
+            const http::HttpBodyPipeError pipe_error = piped.error();
+            ProxyFailurePhase phase = ProxyFailurePhase::ReadRequestBody;
+            const char *message = "failed to read downstream request body";
+            if (body_reader.limit_exceeded()) {
+                phase = ProxyFailurePhase::RequestBodyTooLarge;
+                message = "downstream request body exceeds route limit";
+            } else if (body_reader.length_mismatch()) {
+                message = "downstream request body does not match Content-Length";
+            } else if (body_reader.length_short()) {
+                message = "downstream request body ended before Content-Length";
+            } else if (pipe_error.phase == http::HttpBodyPipePhase::Read) {
+                // A body-read idle timeout is gateway policy cutting a silent
+                // uploader; like the retired loop's read failures it must not
+                // charge the upstream, so selection stays unreported.
+                if (pipe_error.code == common::IoErr::TimedOut) {
                     telemetry_.record_proxy_body_idle_timeout(AccessBodyIdleDirection::RequestBody);
                 }
-                const ProxyFailure read_failure = failure(ProxyFailurePhase::ReadRequestBody,
-                                                          "failed to read downstream request body", body.error());
-                record_provider_failure(provider_, telemetry_, attempt_metrics_, read_failure);
-                co_return proxy_failure_result(read_failure);
+            } else {
+                phase = ProxyFailurePhase::SendRequestBody;
+                message =
+                        pipe_error.phase == http::HttpBodyPipePhase::Write && pipe_error.code == common::IoErr::Invalid
+                                ? "upstream request body write was incomplete"
+                                : "failed to send upstream request body";
+                report_selection(false);
             }
-            const bool complete = body->complete();
-            const std::size_t body_bytes = body->readable_bytes();
-            if (!forward_state.accepts(body_bytes)) {
-                (void) upstream.abort(common::IoErr::Invalid);
-                const ProxyFailure read_failure =
-                        failure(ProxyFailurePhase::ReadRequestBody,
-                                "downstream request body does not match Content-Length", common::IoErr::Invalid);
-                record_provider_failure(provider_, telemetry_, attempt_metrics_, read_failure);
-                co_return proxy_failure_result(read_failure);
-            }
-            if (input_.max_request_body_size != 0 &&
-                body_bytes >
-                        input_.max_request_body_size - std::min(received_request_body, input_.max_request_body_size)) {
-                (void) upstream.abort(common::IoErr::MessageTooLarge);
-                const ProxyFailure limit_failure =
-                        failure(ProxyFailurePhase::RequestBodyTooLarge, "downstream request body exceeds route limit",
-                                common::IoErr::MessageTooLarge);
-                record_provider_failure(provider_, telemetry_, attempt_metrics_, limit_failure);
-                co_return proxy_failure_result(limit_failure);
-            }
-            received_request_body += body_bytes;
-            if (forward_state.should_write(body_bytes)) {
-                auto written = co_await upstream.write_all(std::move(*body));
-                if (!written) {
-                    const ProxyFailure send_failure = failure(ProxyFailurePhase::SendRequestBody,
-                                                              "failed to send upstream request body", written.error());
-                    record_provider_failure(provider_, telemetry_, attempt_metrics_, send_failure);
-                    report_selection(false);
-                    co_return proxy_failure_result(send_failure);
-                }
-                if (*written != body_bytes) {
-                    (void) upstream.abort(common::IoErr::Invalid);
-                    const ProxyFailure send_failure =
-                            failure(ProxyFailurePhase::SendRequestBody, "upstream request body write was incomplete",
-                                    common::IoErr::Invalid);
-                    record_provider_failure(provider_, telemetry_, attempt_metrics_, send_failure);
-                    report_selection(false);
-                    co_return proxy_failure_result(send_failure);
-                }
-                forward_state.record_write(*written);
-            }
-            if (complete) {
-                if (request_body.is_content_length() && !forward_state.complete()) {
-                    (void) upstream.abort(common::IoErr::Invalid);
-                    const ProxyFailure read_failure =
-                            failure(ProxyFailurePhase::ReadRequestBody,
-                                    "downstream request body ended before Content-Length", common::IoErr::Invalid);
-                    record_provider_failure(provider_, telemetry_, attempt_metrics_, read_failure);
-                    co_return proxy_failure_result(read_failure);
-                }
-                break;
-            }
+            const ProxyFailure body_failure = failure(phase, message, pipe_error.code);
+            record_provider_failure(provider_, telemetry_, attempt_metrics_, body_failure);
+            co_return proxy_failure_result(body_failure);
         }
     } else {
         // No request body to forward; keep the 0/0 record so the provider data
