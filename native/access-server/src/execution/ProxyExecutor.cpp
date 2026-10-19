@@ -373,16 +373,13 @@ void record_provider_failure(AccessProviderTransaction &provider, AccessRequestT
     }
 }
 
-Result<std::optional<std::string>> evaluate_proxy_context(std::span<const CompiledTemplateEntry> context,
-                                                          TemplateEvaluator evaluator,
-                                                          std::string_view initial_context_cluster,
-                                                          AccessRequestTelemetry &telemetry) {
-    std::optional<std::string> cluster;
+Result<std::optional<std::string_view>> evaluate_proxy_context(std::span<const CompiledTemplateEntry> context,
+                                                               TemplateEvaluator evaluator,
+                                                               AccessRequestTelemetry &telemetry) {
+    std::optional<std::string_view> cluster;
     const std::optional<std::string_view> propagated_cluster = telemetry.trace_context(kTraceCluster);
     if (propagated_cluster && !propagated_cluster->empty()) {
-        cluster.emplace(*propagated_cluster);
-    } else if (!initial_context_cluster.empty()) {
-        cluster.emplace(initial_context_cluster);
+        cluster = *propagated_cluster;
     }
     for (const CompiledTemplateEntry &entry: context) {
         auto value = evaluate_template(entry.value, evaluator);
@@ -399,11 +396,9 @@ Result<std::optional<std::string>> evaluate_proxy_context(std::span<const Compil
             }
         }
         if (entry.name == kTraceCluster) {
-            if (value_view.empty()) {
-                cluster.reset();
-            } else {
-                cluster = std::move(*value).into_string();
-            }
+            // The evaluated template dies with the loop iteration; the put above copied
+            // its value into the request pool, so read that copy back instead.
+            cluster = telemetry.trace_context(kTraceCluster);
         }
     }
     return cluster;
@@ -451,17 +446,6 @@ struct CompatAccessLogRequest {
     std::string generated_client_ip;
 };
 
-// Mirrors resolve_request_host's test-mode host rule: a host of the shape
-// "<prefix>_<cluster>." carried its cluster in the Host header.
-bool host_encoded_cluster(std::string_view origin_host) noexcept {
-    const std::size_t underscore = origin_host.find('_');
-    if (underscore == std::string_view::npos || underscore == 0) {
-        return false;
-    }
-    const std::size_t dot = origin_host.find('.', underscore);
-    return dot != std::string_view::npos && dot > underscore;
-}
-
 void generate_b3_trace_id(std::array<char, 16> &output) noexcept {
     constexpr char kHex[] = "0123456789abcdef";
     std::array<unsigned char, 8> random{};
@@ -476,8 +460,7 @@ void generate_b3_trace_id(std::array<char, 16> &output) noexcept {
 }
 
 void init_compat_access_log_request(CompatAccessLogRequest &state, http::HttpExchange &exchange,
-                                    AccessRequestTelemetry &telemetry, const ProxyExecutionInput &input,
-                                    const CompiledProxyRoute &proxy, bool gray_matched,
+                                    AccessRequestTelemetry &telemetry, const CompiledProxyRoute &proxy,
                                     const std::optional<std::string_view> &cluster_override) {
     state.trace_id = exchange.header(kB3TraceIdHeader);
     if (state.trace_id.empty()) {
@@ -492,19 +475,18 @@ void init_compat_access_log_request(CompatAccessLogRequest &state, http::HttpExc
         state.client_ip = state.generated_client_ip;
     }
 
-    const bool host_encoded = host_encoded_cluster(input.origin_host);
     const std::optional<std::string_view> configured = proxy.address_selector->configured_cluster();
     const std::string_view default_cluster =
             configured.has_value() && !configured->empty() ? *configured : std::string_view("default");
-    // Java decider semantics: gwCluster is the cluster before request-driven
-    // overrides, ctxCluster the request-specified cluster (gray tag or trace
-    // header), ultimateCluster the cluster finally used for selection.
-    state.gw_cluster =
-            host_encoded && !input.initial_context_cluster.empty() ? input.initial_context_cluster : default_cluster;
-    if (!host_encoded && !input.initial_context_cluster.empty()) {
-        state.ctx_cluster = input.initial_context_cluster;
-    } else if (gray_matched) {
-        state.ctx_cluster = "gray";
+    // Java decider semantics: the access-log cluster fields read the same trace
+    // userData the deciders see at selection time — after context templates and
+    // the gray tag applied their puts/removes. gwCluster is the configured
+    // cluster (ctx.cluster at decider entry), ctxCluster the trace-context
+    // cluster, ultimateCluster the cluster finally used for selection.
+    state.gw_cluster = default_cluster;
+    const std::optional<std::string_view> trace_cluster = telemetry.trace_context(kTraceCluster);
+    if (trace_cluster.has_value() && !trace_cluster->empty()) {
+        state.ctx_cluster = *trace_cluster;
     }
     state.ultimate_cluster = cluster_override.has_value() ? *cluster_override : default_cluster;
 }
@@ -1279,9 +1261,9 @@ std::chrono::milliseconds body_read_idle_timeout(std::int32_t timeout_millis,
     return std::max(floor, std::chrono::milliseconds(timeout_millis));
 }
 
-ProxyExecutor::ProxyExecutor(http::StealableHttp1ConnectionPoolSet &pool, ProxyClusterMatcher cluster_matcher,
-                             ProxyDnsResolver dns_resolver, ProxyExecutorOptions options) noexcept :
-    pool_(pool), cluster_matcher_(cluster_matcher), dns_resolver_(dns_resolver), options_(options) {
+ProxyExecutor::ProxyExecutor(http::StealableHttp1ConnectionPoolSet &pool, ProxyDnsResolver dns_resolver,
+                             ProxyExecutorOptions options) noexcept :
+    pool_(pool), dns_resolver_(dns_resolver), options_(options) {
     if (options_.request_body_chunk_size == 0) {
         options_.request_body_chunk_size = 64 * 1024;
     }
@@ -1332,8 +1314,7 @@ async::Task<Result<void>> ProxyExecutor::execute_impl(http::HttpExchange &exchan
                                                       AccessRequestTelemetry &telemetry) noexcept {
     FIBER_ASSERT(proxy.address_selector != nullptr);
 
-    auto context_cluster =
-            evaluate_proxy_context(proxy.context, input.template_evaluator, input.initial_context_cluster, telemetry);
+    auto context_cluster = evaluate_proxy_context(proxy.context, input.template_evaluator, telemetry);
     if (!context_cluster) {
         telemetry.record_proxy_failure(AccessProxyFailurePhase::EvaluateContext);
         co_return std::unexpected(context_cluster.error());
@@ -1342,21 +1323,9 @@ async::Task<Result<void>> ProxyExecutor::execute_impl(http::HttpExchange &exchan
     if (*context_cluster) {
         cluster_override = **context_cluster;
     }
-    const bool gray_matched =
-            cluster_matcher_.matches != nullptr &&
-            cluster_matcher_.matches(cluster_matcher_.context, exchange.header("X-Entry"), telemetry.client_metadata());
-    if (gray_matched) {
-        cluster_override = std::string_view("gray");
-        auto stored = telemetry.put_trace_context(kTraceCluster, "gray");
-        if (!stored) {
-            telemetry.record_proxy_failure(AccessProxyFailurePhase::EvaluateContext);
-            co_return std::unexpected(Err::from_error(stored.error()));
-        }
-    }
 
     CompatAccessLogRequest access_log_request;
-    init_compat_access_log_request(access_log_request, exchange, telemetry, input, proxy, gray_matched,
-                                   cluster_override);
+    init_compat_access_log_request(access_log_request, exchange, telemetry, proxy, cluster_override);
     const std::optional<std::string_view> fallback_cluster =
             cluster_fallback_target(*proxy.address_selector, cluster_override, options_.cluster_fallback);
 

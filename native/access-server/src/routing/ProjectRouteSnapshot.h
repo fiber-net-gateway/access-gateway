@@ -110,9 +110,6 @@ public:
     [[nodiscard]] const std::vector<CompiledHost> &hosts() const noexcept { return hosts_; }
     [[nodiscard]] const std::vector<CompiledRoute> &routes() const noexcept { return routes_; }
     [[nodiscard]] const http_script::ConstPackage &const_package() const noexcept { return *const_package_; }
-    [[nodiscard]] std::span<const http_script::ConstIndex> context_cluster_indices() const noexcept {
-        return context_cluster_indices_;
-    }
     [[nodiscard]] std::size_t max_path_variable_count() const noexcept { return path_matcher_.max_path_var_count(); }
     [[nodiscard]] std::size_t estimated_memory_bytes() const noexcept { return estimated_memory_bytes_; }
     [[nodiscard]] std::size_t static_response_bytes() const noexcept { return static_response_bytes_; }
@@ -139,7 +136,6 @@ private:
     std::vector<CompiledHost> hosts_;
     std::vector<CompiledRoute> routes_;
     std::shared_ptr<const http_script::ConstPackage> const_package_;
-    std::vector<http_script::ConstIndex> context_cluster_indices_;
     HostMatcher host_matcher_;
     util::RoutePathMatcher<std::uint32_t> path_matcher_;
     std::size_t estimated_memory_bytes_ = 0;

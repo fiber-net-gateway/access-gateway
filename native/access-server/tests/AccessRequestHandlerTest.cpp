@@ -394,7 +394,7 @@ struct CapturedProxyRequest {
     std::string service;
     std::optional<std::string> cluster;
     std::string call_source;
-    std::string initial_context_cluster;
+    std::string trace_cluster;
     std::string origin_host;
     fiber::http::HttpMethod method = fiber::http::HttpMethod::Unknown;
     std::string received_body;
@@ -425,7 +425,9 @@ capture_proxy_request(void *context, fiber::http::HttpExchange &exchange,
         capture.cluster.reset();
     }
     capture.call_source.assign(input.call_source);
-    capture.initial_context_cluster.assign(input.initial_context_cluster);
+    if (const std::optional<std::string_view> trace_cluster = telemetry.trace_context("HI-TRACE-CLUSTER")) {
+        capture.trace_cluster.assign(*trace_cluster);
+    }
     capture.origin_host.assign(input.origin_host);
     capture.method = exchange.method();
     capture.max_request_body_size = input.max_request_body_size;
@@ -1322,7 +1324,7 @@ TEST(AccessRequestHandlerTest, PassesPinnedProxyRouteAndExecutionInputToAdapter)
     ASSERT_TRUE(capture.cluster);
     EXPECT_EQ(*capture.cluster, "stable");
     EXPECT_EQ(capture.call_source, "orders.unifiedAccess");
-    EXPECT_TRUE(capture.initial_context_cluster.empty());
+    EXPECT_TRUE(capture.trace_cluster.empty());
     EXPECT_TRUE(capture.origin_host.empty());
     EXPECT_EQ(capture.method, fiber::http::HttpMethod::Post);
     EXPECT_EQ(capture.received_body, "body");
@@ -1414,11 +1416,14 @@ TEST(AccessRequestHandlerTest, PinsRouteSnapshotAcrossSuspendedProxyExecutionDur
     EXPECT_EQ(current.timeout_millis, 222);
 }
 
+// Java parity: RouteExecutionBuilder.buildContextMap renames a declared "cluster" context key
+// to HI-TRACE-CLUSTER at route-build time, and no Java reader exposes $context.cluster — only
+// $context.hi_trace_cluster resolves, via the trace-context slot the entry-time put binds.
 TEST(AccessRequestHandlerTest, PassesJavaTestHostClusterAndOriginHostToProxyExecutor) {
     AccessScriptRuntime scripts;
     RouteConfig route = proxy_route("/cluster");
     route.proxy_headers = {
-            StringConfigEntry{.name = "X-Request-Cluster", .value = "${$context.cluster}"},
+            StringConfigEntry{.name = "X-Request-Cluster", .value = "${$context.hi_trace_cluster}"},
     };
     RouteConfigStore store(scripts.compiler_adapter());
     publish(store, project({}, {std::move(route)}));
@@ -1433,7 +1438,7 @@ TEST(AccessRequestHandlerTest, PassesJavaTestHostClusterAndOriginHostToProxyExec
                                              scripts.request_adapter(), options, proxy_adapter(capture));
 
     EXPECT_TRUE(response.starts_with("HTTP/1.1 200 OK\r\n"));
-    EXPECT_EQ(capture.initial_context_cluster, "gray");
+    EXPECT_EQ(capture.trace_cluster, "gray");
     EXPECT_EQ(capture.origin_host, "api_gray.example.com");
 }
 
@@ -1453,8 +1458,55 @@ TEST(AccessRequestHandlerTest, UsesTestTraceHeaderWhenHostHasNoCluster) {
                                              {}, options, proxy_adapter(capture));
 
     EXPECT_TRUE(response.starts_with("HTTP/1.1 200 OK\r\n"));
-    EXPECT_EQ(capture.initial_context_cluster, "canary");
+    EXPECT_EQ(capture.trace_cluster, "canary");
     EXPECT_TRUE(capture.origin_host.empty());
+}
+
+bool always_gray(void *, std::string_view, const fiber::access_server::ClientMetadata &) noexcept { return true; }
+
+// Java UnifiedAccessModule parity: production installs InternalIpGrayInterceptor (order 10,
+// before routing) instead of HeaderToCtxInterceptor. A match only writes
+// HI-TRACE-CLUSTER=gray into the trace context — the single source of truth every later
+// reader (cluster selection, access log, encoded tracestate) observes. Route context
+// templates still apply after it (ProxyExecutorTest covers that step), so a declared
+// cluster context overrides the gray value exactly as ProxyRouteExecution.exec does in Java.
+TEST(AccessRequestHandlerTest, WritesGrayClusterToTraceContextInProduction) {
+    RouteConfig route = proxy_route("/cluster", "orders/stable");
+    RouteConfigStore store;
+    publish(store, project({}, {std::move(route)}));
+
+    CapturedProxyRequest capture;
+    AccessRequestHandlerOptions options;
+    options.gray_matcher = fiber::access_server::ProxyClusterMatcher{.matches = always_gray};
+    const std::string response = run_request(store,
+                                             "GET /cluster HTTP/1.1\r\n"
+                                             "Host: api.example.com\r\n"
+                                             "Connection: close\r\n\r\n",
+                                             {}, options, proxy_adapter(capture));
+
+    EXPECT_TRUE(response.starts_with("HTTP/1.1 200 OK\r\n"));
+    EXPECT_EQ(capture.trace_cluster, "gray");
+}
+
+// The two Java interceptors are mutually exclusive by environment: test mode runs
+// HeaderToCtxInterceptor only, so the gray matcher must not even be consulted.
+TEST(AccessRequestHandlerTest, SkipsGrayMatcherInTestMode) {
+    RouteConfig route = proxy_route("/cluster", "orders/stable");
+    RouteConfigStore store;
+    publish(store, project({}, {std::move(route)}));
+
+    CapturedProxyRequest capture;
+    AccessRequestHandlerOptions options;
+    options.test_mode = true;
+    options.gray_matcher = fiber::access_server::ProxyClusterMatcher{.matches = always_gray};
+    const std::string response = run_request(store,
+                                             "GET /cluster HTTP/1.1\r\n"
+                                             "Host: api.example.com\r\n"
+                                             "Connection: close\r\n\r\n",
+                                             {}, options, proxy_adapter(capture));
+
+    EXPECT_TRUE(response.starts_with("HTTP/1.1 200 OK\r\n"));
+    EXPECT_TRUE(capture.trace_cluster.empty());
 }
 
 // Production mode never parses the "_cluster" host suffix: the underscore host matches the

@@ -107,7 +107,6 @@ private:
     std::chrono::steady_clock::time_point websocket_started_{};
     std::string_view project_;
     std::string_view route_;
-    std::string_view cluster_;
     std::string_view upstream_;
     std::string_view response_compression_;
     std::string_view error_;

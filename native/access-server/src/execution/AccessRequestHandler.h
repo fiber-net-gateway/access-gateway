@@ -3,6 +3,7 @@
 
 #include <fiber/async/Task.h>
 #include "../routing/AccessRouteSnapshot.h"
+#include "../routing/ProxyAddressSelector.h"
 #include "AccessResult.h"
 #include "ErrorResponder.h"
 #include "ResponseExecutor.h"
@@ -46,12 +47,18 @@ struct AccessRequestHandlerOptions {
     // Matches fiber-net-gateway ServerConfig.DEF_MAX_BODY_SIZE.
     std::size_t default_max_request_body_size = 4U << 20U;
     ResponseExecutorOptions response{};
+    // Internal-IP gray matcher (Java InternalIpGrayInterceptor). Production only: Java
+    // installs HeaderToCtxInterceptor in test mode and the gray interceptor in production,
+    // never both. A match only writes HI-TRACE-CLUSTER=gray into the trace context — route
+    // conditions read it, route context templates may override it, and cluster selection
+    // and the compat access log read the final value back from there.
+    ProxyClusterMatcher gray_matcher{};
     bool test_mode = false;
 };
 
 struct ProxyExecutionInput {
     std::string_view call_source;
-    std::string_view initial_context_cluster;
+    // Original Host header, non-empty only when the test-mode "_<cluster>" rewrite happened.
     std::string_view origin_host;
     TemplateEvaluator template_evaluator;
     std::size_t max_request_body_size = 0;

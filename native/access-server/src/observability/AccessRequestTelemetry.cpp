@@ -84,12 +84,12 @@ common::IoResult<void> AccessRequestTelemetry::enable_response_compression(std::
     return {};
 }
 
-void AccessRequestTelemetry::set_project(std::string_view project, std::string_view effective_host,
-                                         std::string_view context_cluster) noexcept {
-    observability_.set_project(execution_, project, effective_host, context_cluster);
-    if (!context_cluster.empty()) {
-        (void) trace_.put_trace_context(execution_, observability_.root_transaction(), kTraceCluster, context_cluster);
-    }
+void AccessRequestTelemetry::set_project(std::string_view project, std::string_view effective_host) noexcept {
+    // The trace context is the single source of truth after the entry-time put: the value is
+    // the request-specified cluster when present and the tracestate-propagated one otherwise,
+    // matching the Java gateway's root "cluster" data.
+    const std::optional<std::string_view> context_cluster = trace_.trace_context(kTraceCluster);
+    observability_.set_project(execution_, project, effective_host, context_cluster.value_or(std::string_view{}));
 }
 
 } // namespace fiber::access_server

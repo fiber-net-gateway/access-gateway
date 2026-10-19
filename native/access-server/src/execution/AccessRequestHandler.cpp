@@ -14,6 +14,7 @@ namespace fiber::access_server {
 namespace {
 
 constexpr std::string_view kTraceCluster = "HI-TRACE-CLUSTER";
+constexpr std::string_view kGrayCluster = "gray"; // Java PlotoConstants.GRAY_CLUSTER.
 constexpr std::string_view kOriginHostHeader = "ploto-origin-host";
 constexpr std::string_view kHostHeaderName = "host";
 constexpr std::string_view kHostHeaderLowcase = "host";
@@ -26,9 +27,9 @@ constexpr std::string_view kStrictTransportSecurityValue = "max-age=31536000";
 struct RequestHostContext {
     std::string normalized_host;
     std::string_view effective_host;
+    // Non-empty only when the test-mode host rewrite happened; gates the outbound
+    // ploto-origin-host header.
     std::string_view origin_host;
-    std::string_view cluster;
-    bool extracted_cluster = false;
 };
 
 struct RequestEvaluationContext {
@@ -152,33 +153,48 @@ common::IoResult<RouteMatch> match_route(const ProjectRouteSnapshot &project, ht
 // stays in RequestHostContext::origin_host for the outbound ploto-origin-host header.
 // The rewrite uses the pool-copying set() overload and reseats the first-wins host ref, per
 // the upstream mutable-request-phase contract; it must run before the first $header access.
-std::expected<RequestHostContext, Err> resolve_request_host(http::HttpExchange &exchange, bool test_mode) noexcept {
+//
+// request_cluster mirrors Java HeaderToCtxInterceptor: the test-mode request-specified
+// cluster (host suffix wins over the HI-TRACE-CLUSTER request header; empty in production)
+// is written into the trace context here, once, before host matching — every later reader
+// (cluster selection, CAT root data, the compat access log) looks it up there, exactly as
+// the Java gateway reads the same key from trace userData.
+std::expected<RequestHostContext, Err> resolve_request_host(http::HttpExchange &exchange, bool test_mode,
+                                                            AccessRequestTelemetry &telemetry) noexcept {
     RequestHostContext result;
-    result.origin_host = exchange.header("Host");
-    result.effective_host = result.origin_host;
-    if (!test_mode) {
-        return result;
-    }
-
-    const std::size_t underscore = result.origin_host.find('_');
-    const std::size_t dot =
-            underscore == std::string_view::npos ? std::string_view::npos : result.origin_host.find('.', underscore);
-    if (underscore > 0 && underscore != std::string_view::npos && dot > underscore && dot != std::string_view::npos) {
-        result.normalized_host.reserve(result.origin_host.size() - (dot - underscore));
-        result.normalized_host.append(result.origin_host.substr(0, underscore));
-        result.normalized_host.append(result.origin_host.substr(dot));
-        result.effective_host = result.normalized_host;
-        result.cluster = result.origin_host.substr(underscore + 1, dot - underscore - 1);
-        result.extracted_cluster = true;
-        http::HttpHeaders::HeaderField *const host_field = exchange.request_headers().set(
-                kHostHeaderName, result.normalized_host, kHostHeaderLowcase.data(), kHostHeaderHash);
-        if (host_field == nullptr) {
-            return std::unexpected(Err::from_error(common::IoErr::NoMem));
+    const std::string_view origin_host = exchange.header("Host");
+    result.effective_host = origin_host;
+    std::string_view request_cluster;
+    if (test_mode) {
+        const std::size_t underscore = origin_host.find('_');
+        const std::size_t dot =
+                underscore == std::string_view::npos ? std::string_view::npos : origin_host.find('.', underscore);
+        if (underscore > 0 && underscore != std::string_view::npos && dot > underscore &&
+            dot != std::string_view::npos) {
+            result.normalized_host.reserve(origin_host.size() - (dot - underscore));
+            result.normalized_host.append(origin_host.substr(0, underscore));
+            result.normalized_host.append(origin_host.substr(dot));
+            result.effective_host = result.normalized_host;
+            result.origin_host = origin_host;
+            request_cluster = origin_host.substr(underscore + 1, dot - underscore - 1);
+            http::HttpHeaders::HeaderField *const host_field = exchange.request_headers().set(
+                    kHostHeaderName, result.normalized_host, kHostHeaderLowcase.data(), kHostHeaderHash);
+            if (host_field == nullptr) {
+                return std::unexpected(Err::from_error(common::IoErr::NoMem));
+            }
+            exchange.request_header_refs().host = host_field;
+        } else {
+            request_cluster = exchange.header(kTraceCluster);
         }
-        exchange.request_header_refs().host = host_field;
-        return result;
     }
-    result.cluster = exchange.header(kTraceCluster);
+    // The put is guarded: an empty value would re-seat a propagated entry to empty and
+    // corrupt the encoded tracestate.
+    if (!request_cluster.empty()) {
+        auto stored = telemetry.put_trace_context(kTraceCluster, request_cluster);
+        if (!stored) {
+            return std::unexpected(Err::from_error(stored.error()));
+        }
+    }
     return result;
 }
 
@@ -284,16 +300,30 @@ AccessRequestHandler::handle_and_finalize(http::HttpExchange &exchange,
 async::Task<Result<void>> AccessRequestHandler::handle_impl(http::HttpExchange &exchange,
                                                             AccessRequestTelemetry &telemetry) const noexcept {
     const std::shared_ptr<const AccessRouteSnapshot> snapshot = snapshot_provider_.pin(snapshot_provider_.context);
-    const std::expected<RequestHostContext, Err> resolved_host = resolve_request_host(exchange, options_.test_mode);
+    const std::expected<RequestHostContext, Err> resolved_host =
+            resolve_request_host(exchange, options_.test_mode, telemetry);
     if (!resolved_host) {
         co_return std::unexpected(resolved_host.error());
     }
     RequestHostContext request_host = std::move(*resolved_host);
+    // Java InternalIpGrayInterceptor (order 10, before routing — production only; test mode
+    // installs HeaderToCtxInterceptor instead, and resolve_request_host above is its native
+    // counterpart, so the two never coexist). A match only writes the trace context: route
+    // conditions read it, route context templates may override it, and cluster selection and
+    // the compat access log read the final value back from there.
+    if (!options_.test_mode && options_.gray_matcher.matches != nullptr &&
+        options_.gray_matcher.matches(options_.gray_matcher.context, exchange.header("X-Entry"),
+                                      telemetry.client_metadata())) {
+        auto gray_stored = telemetry.put_trace_context(kTraceCluster, kGrayCluster);
+        if (!gray_stored) {
+            co_return std::unexpected(Err::from_error(gray_stored.error()));
+        }
+    }
     const ProjectHostMatch host_match = snapshot->match_host(request_host.effective_host);
     if (!host_match) {
         co_return std::unexpected(Err::from_exception(Exception::router_not_found()));
     }
-    telemetry.set_project(host_match.project->project(), request_host.effective_host, request_host.cluster);
+    telemetry.set_project(host_match.project->project(), request_host.effective_host);
     if (!telemetry.response_headers().set_view(kStrictTransportSecurity, kStrictTransportSecurityValue,
                                                kStrictTransportSecurityLowcase.data(), kStrictTransportSecurityHash)) {
         co_return std::unexpected(Err::from_error(common::IoErr::NoMem));
@@ -320,13 +350,6 @@ async::Task<Result<void>> AccessRequestHandler::handle_impl(http::HttpExchange &
     auto trace_context_ready = telemetry.bind_trace_context(host_match.project->const_package());
     if (!trace_context_ready) {
         co_return std::unexpected(Err::from_error(trace_context_ready.error()));
-    }
-    if (!request_host.cluster.empty()) {
-        for (http_script::ConstIndex index: host_match.project->context_cluster_indices()) {
-            if (!telemetry.script_context().bind_constant(index, request_host.cluster)) {
-                co_return std::unexpected(Err::from_error(common::IoErr::Invalid));
-            }
-        }
     }
 
     RequestEvaluationContext evaluation{
@@ -389,14 +412,15 @@ async::Task<Result<void>> AccessRequestHandler::handle_impl(http::HttpExchange &
         if (!proxy_adapter_.execute) {
             co_return std::unexpected(Err::from_exception(Exception::unknown("proxy executor is not configured")));
         }
+        // origin_host is non-empty only when the test-mode host rewrite happened, so its
+        // presence here is the extracted-cluster marker.
         const std::string_view origin_host =
-                request_host.extracted_cluster && !route.proxy->proxy_headers.contains(kOriginHostHeader)
+                !request_host.origin_host.empty() && !route.proxy->proxy_headers.contains(kOriginHostHeader)
                         ? request_host.origin_host
                         : std::string_view{};
         co_return co_await proxy_adapter_.execute(proxy_adapter_.context, exchange, *route.proxy,
                                                   ProxyExecutionInput{
                                                           .call_source = host_match.project->call_source(),
-                                                          .initial_context_cluster = request_host.cluster,
                                                           .origin_host = origin_host,
                                                           .template_evaluator = template_evaluator,
                                                           .max_request_body_size = body_limit,

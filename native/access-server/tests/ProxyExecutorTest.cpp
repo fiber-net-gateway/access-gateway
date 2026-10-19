@@ -111,7 +111,6 @@ struct ServiceSelectorState {
     std::optional<fiber::http::HttpConnectionGroupKey> good_connection_key;
     std::optional<fiber::http::HttpConnectionGroupKey> bad_connection_key;
     std::size_t select_count = 0;
-    std::size_t cluster_match_count = 0;
     std::optional<std::string> expected_cluster_override;
     std::optional<fiber::access_server::ProxyAddressSelectErrorCode> select_error;
     // When set, selections carrying a cluster override fail with this code and
@@ -130,11 +129,6 @@ resolve_proxy_addresses(void *context, std::string_view) noexcept {
     auto &state = *static_cast<ProxyResolverState *>(context);
     ++state.calls;
     co_return state.addresses;
-}
-
-bool never_match_gray(void *context, std::string_view, const fiber::access_server::ClientMetadata &) noexcept {
-    ++static_cast<ServiceSelectorState *>(context)->cluster_match_count;
-    return false;
 }
 
 struct FallbackPolicyState {
@@ -1101,7 +1095,7 @@ TEST(ProxyExecutorTest, ReturnsStableRedactedTlsErrorForTrustStoreFailure) {
             .verification = fiber::access_server::UpstreamTlsVerificationMode::CustomCa,
             .ca_file = std::string(kMissingCaPath),
     };
-    fiber::access_server::ProxyExecutor executor(pool, {}, {}, std::move(options));
+    fiber::access_server::ProxyExecutor executor(pool, {}, std::move(options));
 
     std::promise<void> request_promise;
     auto request_done = request_promise.get_future();
@@ -1518,10 +1512,6 @@ TEST(ProxyExecutorTest, RetriesAServiceSelectionBeforeSendingRequestHeaders) {
     fiber::access_server::ProxyExecutorOptions executor_options;
     executor_options.happy_eyeballs.connection_attempt_delay = 10ms;
     fiber::access_server::ProxyExecutor executor(pool,
-                                                 fiber::access_server::ProxyClusterMatcher{
-                                                         .context = &selector_state,
-                                                         .matches = never_match_gray,
-                                                 },
                                                  fiber::access_server::ProxyDnsResolver{
                                                          .context = &resolver,
                                                          .resolve = resolve_proxy_addresses,
@@ -1545,7 +1535,6 @@ TEST(ProxyExecutorTest, RetriesAServiceSelectionBeforeSendingRequestHeaders) {
 
     ASSERT_EQ(request_future.wait_for(5s), std::future_status::ready);
     EXPECT_EQ(selector_state.select_count, 2U);
-    EXPECT_EQ(selector_state.cluster_match_count, 1U);
     EXPECT_EQ(resolver.calls, 1U);
     EXPECT_EQ(template_state.count, 1U);
     EXPECT_EQ(selector_state.reports, (std::vector<std::pair<std::uint64_t, bool>>{
@@ -1588,10 +1577,7 @@ TEST(ProxyExecutorTest, PreservesPreConnectSelectionFailureKinds) {
     auto published = store.apply("orders", service_project_config());
     ASSERT_TRUE(published) << published.error().message;
 
-    fiber::access_server::ProxyExecutor executor(pool, fiber::access_server::ProxyClusterMatcher{
-                                                               .context = &selector_state,
-                                                               .matches = never_match_gray,
-                                                       });
+    fiber::access_server::ProxyExecutor executor(pool);
     const auto send_request = [&](fiber::access_server::ProxyAddressSelectErrorCode error_code, std::string &output) {
         selector_state.select_error = error_code;
         std::promise<void> request_promise;
@@ -1677,12 +1663,7 @@ TEST(ProxyExecutorTest, FallsBackToConfiguredClusterWhenOverrideSelectionFails) 
             .context = &policy_state,
             .should_fallback = capture_fallback_policy,
     };
-    fiber::access_server::ProxyExecutor executor(pool,
-                                                 fiber::access_server::ProxyClusterMatcher{
-                                                         .context = &selector_state,
-                                                         .matches = never_match_gray,
-                                                 },
-                                                 {}, executor_options);
+    fiber::access_server::ProxyExecutor executor(pool, {}, executor_options);
     std::string output;
     std::promise<void> request_promise;
     auto request_future = request_promise.get_future();
@@ -1739,12 +1720,7 @@ TEST(ProxyExecutorTest, KeepsOverrideFailureWhenFallbackPolicyDeclines) {
             .context = &policy_state,
             .should_fallback = capture_fallback_policy,
     };
-    fiber::access_server::ProxyExecutor executor(pool,
-                                                 fiber::access_server::ProxyClusterMatcher{
-                                                         .context = &selector_state,
-                                                         .matches = never_match_gray,
-                                                 },
-                                                 {}, executor_options);
+    fiber::access_server::ProxyExecutor executor(pool, {}, executor_options);
     std::string output;
     std::promise<void> request_promise;
     auto request_future = request_promise.get_future();
@@ -1864,12 +1840,7 @@ TEST(ProxyExecutorTest, RecordsJavaLoadBalanceEventsForClusterSelections) {
             .context = &policy_state,
             .should_fallback = capture_fallback_policy,
     };
-    fiber::access_server::ProxyExecutor executor(pool,
-                                                 fiber::access_server::ProxyClusterMatcher{
-                                                         .context = &selector_state,
-                                                         .matches = never_match_gray,
-                                                 },
-                                                 {}, executor_options);
+    fiber::access_server::ProxyExecutor executor(pool, {}, executor_options);
 
     // First request: the override selection fails with NoHosts and the decider
     // falls back to the configured cluster — one event, all three tags, SUC.
@@ -1962,10 +1933,7 @@ TEST(ProxyExecutorTest, StopsBeforeConnectionAcquisitionWhenRequestHeadPreparati
     auto published = store.apply("orders", std::move(config));
     ASSERT_TRUE(published) << published.error().message;
 
-    fiber::access_server::ProxyExecutor executor(pool, fiber::access_server::ProxyClusterMatcher{
-                                                               .context = &selector_state,
-                                                               .matches = never_match_gray,
-                                                       });
+    fiber::access_server::ProxyExecutor executor(pool);
     std::string output;
     std::promise<void> request_promise;
     auto request_future = request_promise.get_future();
@@ -2037,10 +2005,7 @@ TEST(ProxyExecutorTest, DoesNotPenalizeUpstreamForDownstreamRequestBodyLimit) {
     auto published = store.apply("orders", std::move(config));
     ASSERT_TRUE(published) << published.error().message;
 
-    fiber::access_server::ProxyExecutor executor(pool, fiber::access_server::ProxyClusterMatcher{
-                                                               .context = &selector_state,
-                                                               .matches = never_match_gray,
-                                                       });
+    fiber::access_server::ProxyExecutor executor(pool);
     std::string output;
     std::promise<void> request_promise;
     auto request_future = request_promise.get_future();
@@ -2528,7 +2493,7 @@ TEST(ProxyExecutorTest, AppliesServerDefaultResponseBodyLimitWhenRouteOmitsIt) {
 
     fiber::access_server::ProxyExecutorOptions executor_options;
     executor_options.default_max_response_body_size = 4;
-    fiber::access_server::ProxyExecutor executor(pool, {}, {}, executor_options);
+    fiber::access_server::ProxyExecutor executor(pool, {}, executor_options);
     std::string output;
     std::promise<void> request_promise;
     auto request_future = request_promise.get_future();
@@ -2585,7 +2550,7 @@ TEST(ProxyExecutorTest, ServerDefaultResponseBodyLimitAllowsExactSizeAndZeroDisa
     // Five received bytes against a default of exactly five must pass.
     fiber::access_server::ProxyExecutorOptions exact_options;
     exact_options.default_max_response_body_size = 5;
-    fiber::access_server::ProxyExecutor exact_executor(pool, {}, {}, exact_options);
+    fiber::access_server::ProxyExecutor exact_executor(pool, {}, exact_options);
     std::string exact_output;
     std::promise<void> exact_promise;
     auto exact_future = exact_promise.get_future();
@@ -2607,7 +2572,7 @@ TEST(ProxyExecutorTest, ServerDefaultResponseBodyLimitAllowsExactSizeAndZeroDisa
     // Zero keeps the legacy unlimited behavior for routes without a limit.
     fiber::access_server::ProxyExecutorOptions disabled_options;
     disabled_options.default_max_response_body_size = 0;
-    fiber::access_server::ProxyExecutor disabled_executor(pool, {}, {}, disabled_options);
+    fiber::access_server::ProxyExecutor disabled_executor(pool, {}, disabled_options);
     std::string disabled_output;
     std::promise<void> disabled_promise;
     auto disabled_future = disabled_promise.get_future();
@@ -2665,7 +2630,7 @@ TEST(ProxyExecutorTest, AppliesServerDefaultResponseBodyLimitToChunkedResponses)
 
     fiber::access_server::ProxyExecutorOptions executor_options;
     executor_options.default_max_response_body_size = 4;
-    fiber::access_server::ProxyExecutor executor(pool, {}, {}, executor_options);
+    fiber::access_server::ProxyExecutor executor(pool, {}, executor_options);
     std::string output;
     std::promise<void> request_promise;
     auto request_future = request_promise.get_future();
@@ -2731,10 +2696,7 @@ TEST(ProxyExecutorTest, AbortsDownstreamAfterAnUpstreamBodyEndsEarly) {
     auto published = store.apply("orders", service_project_config());
     ASSERT_TRUE(published) << published.error().message;
 
-    fiber::access_server::ProxyExecutor executor(pool, fiber::access_server::ProxyClusterMatcher{
-                                                               .context = &selector_state,
-                                                               .matches = never_match_gray,
-                                                       });
+    fiber::access_server::ProxyExecutor executor(pool);
     std::string output;
     std::promise<void> request_promise;
     auto request_future = request_promise.get_future();
@@ -2825,12 +2787,7 @@ TEST(ProxyExecutorTest, CutsIdleUpstreamResponseBodyWithoutChargingTheUpstream) 
     ASSERT_TRUE(published) << published.error().message;
 
     fiber::access_server::ProxyExecutor executor(
-            pool,
-            fiber::access_server::ProxyClusterMatcher{
-                    .context = &selector_state,
-                    .matches = never_match_gray,
-            },
-            {}, fiber::access_server::ProxyExecutorOptions{.body_read_idle_floor = 150ms});
+            pool, {}, fiber::access_server::ProxyExecutorOptions{.body_read_idle_floor = 150ms});
     std::string output;
     std::promise<void> request_promise;
     auto request_future = request_promise.get_future();
@@ -2898,12 +2855,7 @@ TEST(ProxyExecutorTest, CutsIdleDownstreamRequestBodyWithoutChargingTheUpstream)
     ASSERT_TRUE(published) << published.error().message;
 
     fiber::access_server::ProxyExecutor executor(
-            pool,
-            fiber::access_server::ProxyClusterMatcher{
-                    .context = &selector_state,
-                    .matches = never_match_gray,
-            },
-            {}, fiber::access_server::ProxyExecutorOptions{.body_read_idle_floor = 150ms});
+            pool, {}, fiber::access_server::ProxyExecutorOptions{.body_read_idle_floor = 150ms});
     std::string output;
     std::promise<void> request_promise;
     auto request_future = request_promise.get_future();
@@ -2981,7 +2933,7 @@ TEST(ProxyExecutorTest, CancelsUpstreamWhenDownstreamClosesBeforeResponseHeaders
     };
     fiber::access_server::ProxyExecutorOptions options;
     options.happy_eyeballs.connection_attempt_delay = 10ms;
-    fiber::access_server::ProxyExecutor executor(pool, {},
+    fiber::access_server::ProxyExecutor executor(pool,
                                                  fiber::access_server::ProxyDnsResolver{
                                                          .context = &resolver,
                                                          .resolve = resolve_proxy_addresses,
@@ -3122,7 +3074,7 @@ TEST(ProxyExecutorTest, RecordsClientAbortCatEventsAtTheBlockedStages) {
     };
     fiber::access_server::ProxyExecutorOptions options;
     options.happy_eyeballs.connection_attempt_delay = 10ms;
-    fiber::access_server::ProxyExecutor executor(pool, {},
+    fiber::access_server::ProxyExecutor executor(pool,
                                                  fiber::access_server::ProxyDnsResolver{
                                                          .context = &resolver,
                                                          .resolve = resolve_proxy_addresses,

@@ -46,8 +46,7 @@ public:
                            bool connection_secure = false) noexcept;
     ~AccessRequestTelemetry() noexcept;
 
-    void set_project(std::string_view project, std::string_view effective_host,
-                     std::string_view context_cluster) noexcept;
+    void set_project(std::string_view project, std::string_view effective_host) noexcept;
     void set_route(const CompiledRoute &route) noexcept { observability_.set_route(execution_, route); }
     void record_exception(const Exception &exception) noexcept {
         observability_.record_exception(execution_, exception);
