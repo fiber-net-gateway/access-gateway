@@ -30,6 +30,7 @@
 #include <fiber/async/Sleep.h>
 #include <fiber/async/Spawn.h>
 #include <fiber/async/Task.h>
+#include <fiber/async/WaitGroup.h>
 #include <fiber/common/mem/BufPool.h>
 #include <fiber/event/EventLoop.h>
 #include <fiber/event/EventLoopGroup.h>
@@ -193,9 +194,15 @@ DetachedTask run_upload_client(fiber::event::EventLoop *loop, fiber::net::Socket
         fiber::http::ClientHttp3Exchange exchange = connection.open_exchange(pool);
 
         // Response reader racing the upload: the 502 must be readable while
-        // the body write is still blocked on flow control.
+        // the body write is still blocked on flow control. Joined before the
+        // exchange leaves scope below: dropping the last stream lease tears a
+        // still-parked read_header down as Canceled, discarding an
+        // already-arrived head — a client-side lifecycle race that would fail
+        // the concurrent-reader assertions below without a server defect.
         const auto started_at = std::chrono::steady_clock::now();
-        fiber::async::spawn(*loop, [&exchange, &outcome, started_at]() -> DetachedTask {
+        fiber::async::WaitGroup reader_done;
+        reader_done.add();
+        fiber::async::spawn(*loop, [&exchange, &outcome, started_at, &reader_done]() -> DetachedTask {
             auto head = co_await exchange.read_header(10s);
             outcome.concurrent_head_latency = std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::steady_clock::now() - started_at);
@@ -204,6 +211,7 @@ DetachedTask run_upload_client(fiber::event::EventLoop *loop, fiber::net::Socket
             } else {
                 outcome.concurrent_status = (*head)->status_code;
             }
+            reader_done.done();
         });
 
         fiber::http::HttpHeaders headers(pool);
@@ -237,12 +245,10 @@ DetachedTask run_upload_client(fiber::event::EventLoop *loop, fiber::net::Socket
             }
             outcome.write_completed = outcome.written == kUploadTotal;
 
-            auto head = co_await exchange.read_header(5s);
-            if (!head || *head == nullptr) {
-                outcome.head_error = head ? fiber::common::IoErr::Invalid : head.error();
-            } else {
-                outcome.status = (*head)->status_code;
-            }
+            // The racing reader owns the response-head observation. Wait for
+            // it to settle (head read, error, or its own 10s timeout) before
+            // the block scope drops the exchange.
+            co_await reader_done.join();
         }
     }
 
