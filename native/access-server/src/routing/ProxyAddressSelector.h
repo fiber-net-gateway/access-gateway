@@ -69,6 +69,11 @@ struct ProxyUpstreamEndpoint {
     const http::HttpConnectionGroupKey *connection_key = nullptr;
     std::string_view host_header;
     std::string_view provider_name;
+    // Metrics-only app identity ("<project>.project" for static addresses).
+    // Deliberately disjoint from provider_name, which keeps feeding the CAT
+    // provider transaction and access log with its Java-compatible value (the
+    // service name for discovery, the authority for static addresses).
+    std::string_view metric_app;
     AccessUpstreamSwrr::Selection selection;
     AccessUpstreamCircuit::Permit circuit_permit;
     std::uint64_t selection_token = 0;
@@ -76,19 +81,28 @@ struct ProxyUpstreamEndpoint {
     void report(bool success) noexcept;
 };
 
-[[nodiscard]] inline ProxyUpstreamEndpoint
-make_proxy_upstream_endpoint(AccessUpstreamSwrr::Selection selection, std::string_view provider_name,
-                             AccessUpstreamCircuit::Permit permit = {}) noexcept {
+[[nodiscard]] inline ProxyUpstreamEndpoint make_proxy_upstream_endpoint(AccessUpstreamSwrr::Selection selection,
+                                                                        std::string_view provider_name,
+                                                                        AccessUpstreamCircuit::Permit permit = {},
+                                                                        std::string_view metric_app = {}) noexcept {
     const std::uint64_t selection_token = selection.selection_token();
     const AccessUpstreamInstance &instance = selection.instance();
     return ProxyUpstreamEndpoint{
             .connection_key = &instance.connection_key(),
             .host_header = instance.authority(),
             .provider_name = provider_name,
+            .metric_app = metric_app,
             .selection = std::move(selection),
             .circuit_permit = permit,
             .selection_token = selection_token,
     };
+}
+
+// Dynamic metric label for the selected endpoint's app dimension: the
+// metrics-only name when the selector provides one, otherwise the provider
+// (service) name.
+[[nodiscard]] inline std::string_view proxy_metric_app(const ProxyUpstreamEndpoint &endpoint) noexcept {
+    return endpoint.metric_app.empty() ? endpoint.provider_name : endpoint.metric_app;
 }
 
 class ProxyAddressSelector {
@@ -110,6 +124,11 @@ public:
     // control-plane metadata used to reconcile Nacos subscriptions.
     [[nodiscard]] virtual std::string_view service_name() const noexcept { return {}; }
     [[nodiscard]] virtual std::optional<std::string_view> configured_cluster() const noexcept { return std::nullopt; }
+    // Metrics-only app identity for circuit-rejection series recorded when
+    // selection fails (no endpoint exists yet). Disjoint from service_name(),
+    // which keeps its control-plane meaning; discovery selectors leave this
+    // empty and fall back to their service name at the recording site.
+    [[nodiscard]] virtual std::string_view metric_app() const noexcept { return {}; }
 };
 
 struct ProxyAddressSelectorFactory {
@@ -146,7 +165,7 @@ struct ProxyClusterFallback {
 };
 
 [[nodiscard]] std::shared_ptr<ProxyAddressSelector>
-make_static_proxy_address_selector(std::vector<AccessUpstreamInstance> addresses);
+make_static_proxy_address_selector(std::vector<AccessUpstreamInstance> addresses, std::string metric_app = {});
 
 [[nodiscard]] std::shared_ptr<ProxyAddressSelector> make_unavailable_service_address_selector(std::string service,
                                                                                               std::string cluster);

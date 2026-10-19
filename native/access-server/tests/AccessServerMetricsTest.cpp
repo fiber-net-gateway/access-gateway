@@ -176,4 +176,105 @@ TEST(AccessServerMetricsTest, AggregatesCompletedRequestsByStatusCode) {
     workers.join();
 }
 
+fiber::async::DetachedTask
+record_dynamic_series_and_collect(fiber::access_server::AccessServerMetrics *metrics,
+                                  std::promise<fiber::common::IoResult<std::string>> *done) noexcept {
+    using namespace fiber::access_server;
+
+    AccessServerMetrics::Worker &worker = metrics->worker(fiber::event::EventLoop::current().group_index());
+    worker.route_request_finished("api.example.com", "/proxy", "200");
+    worker.route_request_finished("api.example.com", "/proxy", "200");
+    worker.route_request_finished("*.wild.example.com", "/orders/:id", "502");
+    // The status is the exact delivered code; the caller derives it the same
+    // way RequestObservability::finish does.
+    worker.route_request_finished("api.example.com", "/proxy", "101");
+    worker.route_request_finished({}, {}, "0");
+    worker.route_request_finished({}, "/fallback", "404");
+
+    worker.provider_response_received("inventory", "10.0.0.1:8080", "200");
+    worker.provider_response_received("loan.project", "[::1]:9001", "503");
+
+    worker.proxy_transport_error("inventory", "10.0.0.1:8080", "connect");
+    worker.proxy_transport_error("inventory", "10.0.0.1:8080", "request_timeout");
+    worker.proxy_transport_error("inventory", "10.0.0.1:8080", "io_err");
+    // Downstream-origin failures classify to no error label and are dropped.
+    worker.proxy_transport_error("inventory", "10.0.0.1:8080", {});
+
+    worker.upstream_circuit_rejected("inventory");
+    worker.upstream_circuit_rejected({});
+
+    auto collected = co_await metrics->collect();
+    fiber::common::IoErr error = fiber::common::IoErr::None;
+    std::string output;
+    if (!collected) {
+        error = collected.error();
+    } else {
+        while (fiber::mem::IoBuf *part = collected->first_readable()) {
+            output.append(reinterpret_cast<const char *>(part->readable_data()), part->readable());
+            collected->consume_and_compact(part->readable());
+        }
+    }
+
+    metrics->stop_collecting();
+    co_await metrics->wait_for_idle();
+    if (error != fiber::common::IoErr::None) {
+        done->set_value(std::unexpected(error));
+    } else {
+        done->set_value(std::move(output));
+    }
+}
+
+TEST(AccessServerMetricsTest, ExposesRequestLabeledDynamicSeries) {
+    fiber::event::EventLoopGroup workers(1);
+    fiber::access_server::AccessServerMetrics metrics(workers);
+    ASSERT_TRUE(metrics.valid());
+
+    std::promise<fiber::common::IoResult<std::string>> promise;
+    auto future = promise.get_future();
+    workers.start();
+    fiber::async::spawn(workers.at(0), [&]() { return record_dynamic_series_and_collect(&metrics, &promise); });
+
+    ASSERT_EQ(future.wait_for(2s), std::future_status::ready);
+    auto collected = future.get();
+    ASSERT_TRUE(collected);
+    EXPECT_NE(collected->find("access_server_route_requests_total{host=\"api.example.com\",path=\"/proxy\","
+                              "status_code=\"200\"} 2"),
+              std::string::npos);
+    EXPECT_NE(collected->find("access_server_route_requests_total{host=\"*.wild.example.com\",path=\"/orders/:id\","
+                              "status_code=\"502\"} 1"),
+              std::string::npos);
+    EXPECT_NE(collected->find("access_server_route_requests_total{host=\"api.example.com\",path=\"/proxy\","
+                              "status_code=\"101\"} 1"),
+              std::string::npos);
+    EXPECT_NE(collected->find("access_server_route_requests_total{host=\"unmatched\",path=\"unmatched\","
+                              "status_code=\"0\"} 1"),
+              std::string::npos);
+    EXPECT_NE(collected->find("access_server_route_requests_total{host=\"unmatched\",path=\"/fallback\","
+                              "status_code=\"404\"} 1"),
+              std::string::npos);
+    EXPECT_NE(collected->find("access_server_provider_responses_total{app=\"inventory\",ip_port=\"10.0.0.1:8080\","
+                              "status_code=\"200\"} 1"),
+              std::string::npos);
+    EXPECT_NE(collected->find("access_server_provider_responses_total{app=\"loan.project\",ip_port=\"[::1]:9001\","
+                              "status_code=\"503\"} 1"),
+              std::string::npos);
+    EXPECT_NE(collected->find("access_server_proxy_errors_total{app=\"inventory\",ip_port=\"10.0.0.1:8080\","
+                              "error=\"connect\"} 1"),
+              std::string::npos);
+    EXPECT_NE(collected->find("access_server_proxy_errors_total{app=\"inventory\",ip_port=\"10.0.0.1:8080\","
+                              "error=\"request_timeout\"} 1"),
+              std::string::npos);
+    EXPECT_NE(collected->find("access_server_proxy_errors_total{app=\"inventory\",ip_port=\"10.0.0.1:8080\","
+                              "error=\"io_err\"} 1"),
+              std::string::npos);
+    EXPECT_NE(collected->find("access_server_upstream_circuit_rejections_total{app=\"inventory\"} 1"),
+              std::string::npos);
+    // Guarded recorders never emit empty label values.
+    EXPECT_EQ(collected->find("app=\"\""), std::string::npos);
+    EXPECT_EQ(collected->find("error=\"\""), std::string::npos);
+
+    workers.stop();
+    workers.join();
+}
+
 } // namespace

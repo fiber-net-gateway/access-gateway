@@ -46,7 +46,8 @@ public:
                            bool connection_secure = false) noexcept;
     ~AccessRequestTelemetry() noexcept;
 
-    void set_project(std::string_view project, std::string_view effective_host) noexcept;
+    void set_project(std::string_view project, std::string_view effective_host,
+                     std::string_view host_pattern = {}) noexcept;
     void set_route(const CompiledRoute &route) noexcept { observability_.set_route(execution_, route); }
     void record_exception(const Exception &exception) noexcept {
         observability_.record_exception(execution_, exception);
@@ -95,6 +96,15 @@ public:
     void record_proxy_body_idle_timeout(AccessBodyIdleDirection direction) noexcept {
         observability_.record_proxy_body_idle_timeout(direction);
     }
+    // Dynamic-series recorders; see RequestObservability for the semantics.
+    void record_provider_response(const ProxyUpstreamEndpoint &endpoint, int status_code) noexcept {
+        observability_.record_provider_response(endpoint, status_code);
+    }
+    void record_proxy_transport_error(std::string_view app, std::string_view ip_port,
+                                      std::string_view error_label) noexcept {
+        observability_.record_proxy_transport_error(app, ip_port, error_label);
+    }
+    void record_circuit_rejection(std::string_view app) noexcept { observability_.record_circuit_rejection(app); }
     void mark_io_error(common::IoErr error) noexcept { observability_.mark_io_error(execution_, error); }
     void set_upstream(const ProxyUpstreamEndpoint &endpoint) noexcept {
         observability_.set_upstream(execution_, endpoint);

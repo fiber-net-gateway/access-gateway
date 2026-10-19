@@ -60,7 +60,8 @@ ProxyAddressSelectError unavailable_error(ProxyAddressSelectErrorCode code, cons
 
 class StaticProxyAddressSelector final : public ProxyAddressSelector {
 public:
-    explicit StaticProxyAddressSelector(std::vector<AccessUpstreamInstance> addresses) {
+    StaticProxyAddressSelector(std::vector<AccessUpstreamInstance> addresses, std::string metric_app) :
+        metric_app_(std::move(metric_app)) {
         std::vector<AccessUpstreamSwrr::WeightedInstance> weighted;
         weighted.reserve(addresses.size());
         std::uint64_t selection_token = 0;
@@ -89,11 +90,14 @@ public:
             return std::unexpected(unavailable_error(code, message));
         }
         const std::string_view provider_name = selected->instance().authority();
-        return make_proxy_upstream_endpoint(std::move(*selected), provider_name);
+        return make_proxy_upstream_endpoint(std::move(*selected), provider_name, {}, metric_app_);
     }
+
+    [[nodiscard]] std::string_view metric_app() const noexcept override { return metric_app_; }
 
 private:
     AccessUpstreamSwrr swrr_;
+    std::string metric_app_;
 };
 
 class UnavailableServiceAddressSelector final : public ProxyAddressSelector {
@@ -120,9 +124,9 @@ private:
 
 } // namespace
 
-std::shared_ptr<ProxyAddressSelector>
-make_static_proxy_address_selector(std::vector<AccessUpstreamInstance> addresses) {
-    return std::make_shared<StaticProxyAddressSelector>(std::move(addresses));
+std::shared_ptr<ProxyAddressSelector> make_static_proxy_address_selector(std::vector<AccessUpstreamInstance> addresses,
+                                                                         std::string metric_app) {
+    return std::make_shared<StaticProxyAddressSelector>(std::move(addresses), std::move(metric_app));
 }
 
 std::shared_ptr<ProxyAddressSelector> make_unavailable_service_address_selector(std::string service,
