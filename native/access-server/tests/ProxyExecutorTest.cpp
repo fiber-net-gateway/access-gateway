@@ -2839,6 +2839,8 @@ TEST(ProxyExecutorTest, ServerDefaultResponseBodyLimitAllowsExactSizeAndZeroDisa
 
 TEST(ProxyExecutorTest, AppliesServerDefaultResponseBodyLimitToChunkedResponses) {
     fiber::event::EventLoopGroup group(1);
+    fiber::access_server::AccessServerMetrics metrics(group);
+    ASSERT_TRUE(metrics.valid());
     fiber::http::StealableHttp1ConnectionPoolSet pool(group);
     ASSERT_TRUE(pool.init());
     group.start();
@@ -2876,7 +2878,8 @@ TEST(ProxyExecutorTest, AppliesServerDefaultResponseBodyLimitToChunkedResponses)
                           "Host: api.example.com\r\n"
                           "Connection: close\r\n\r\n";
     fiber::async::spawn(group.at(0), [&]() {
-        return run_downstream(&group.at(0), &store, executor.adapter(), std::move(request), &output, &request_promise);
+        return run_downstream(&group.at(0), &store, executor.adapter(), std::move(request), &output, &request_promise,
+                              nullptr, false, nullptr, {}, {}, false, {}, nullptr, &metrics.worker(0));
     });
 
     ASSERT_EQ(request_future.wait_for(5s), std::future_status::ready);
@@ -2884,6 +2887,19 @@ TEST(ProxyExecutorTest, AppliesServerDefaultResponseBodyLimitToChunkedResponses)
     EXPECT_EQ(output.find("hello"), std::string::npos);
     EXPECT_EQ(output.find("READ_RESP_BODY"), std::string::npos);
     EXPECT_EQ(count_status(output, "HTTP/1.1 "), 1U);
+
+    std::promise<fiber::common::IoResult<std::string>> metrics_promise;
+    auto metrics_future = metrics_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() { return collect_access_metrics(&metrics, &metrics_promise); });
+    ASSERT_EQ(metrics_future.wait_for(2s), std::future_status::ready);
+    auto metric_text = metrics_future.get();
+    ASSERT_TRUE(metric_text);
+    // The truncation teardown closes a healthy downstream channel, but it is
+    // the gateway's own act: the execution is a failure, not a cancellation.
+    EXPECT_NE(metric_text->find("access_server_proxy_executions_total{result=\"failed\"} 1"), std::string::npos);
+    EXPECT_EQ(metric_text->find("access_server_proxy_executions_total{result=\"canceled\"} 1"), std::string::npos);
+    EXPECT_NE(metric_text->find("access_server_proxy_failures_total{phase=\"response_body_too_large\"} 1"),
+              std::string::npos);
 
     std::promise<void> shutdown_promise;
     auto shutdown_future = shutdown_promise.get_future();

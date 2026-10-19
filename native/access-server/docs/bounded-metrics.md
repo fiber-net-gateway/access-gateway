@@ -37,7 +37,9 @@ metrics are mutually exclusive within their respective scope:
 - `access_server_proxy_executions_total{result}` uses `completed`, `failed`, and `canceled`.
   `completed` means the proxy coroutine returned successfully, including a fully relayed upstream
   HTTP error response; `failed` means it returned an application or I/O error; `canceled` means the
-  downstream response channel closed first.
+  downstream response channel closed first by the client. Gateway-policy teardowns of a still-open
+  downstream (response-body limit overrun, body idle timeout, mid-body upstream reset) also end with
+  a closed channel, but that close is the gateway's own act and counts as `failed`.
 - `access_server_proxy_attempts_total{result}` uses `completed`, `failed`, and `aborted`. An attempt
   begins only after a valid upstream selection. `completed` means its upstream response was fully
   handled, `failed` identifies an upstream-side failure, and `aborted` covers local policy,

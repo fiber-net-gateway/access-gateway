@@ -771,6 +771,38 @@ private:
     http::ClientHttp1Exchange &upstream_;
 };
 
+// The response-body pipe's abort guard tears down both endpoints on every
+// failure exit, including gateway-policy ones (body limit, read idle timeout,
+// upstream mid-body reset) where the downstream channel is still healthy. A
+// raw channel-closed check cannot tell that self-inflicted teardown from a
+// client abort, so the sink latches the distinction before delegating: an
+// abort of a still-open channel is the gateway's own act.
+class ProxyResponseBodyWriter {
+public:
+    ProxyResponseBodyWriter(http::HttpExchange &exchange, AccessRequestTelemetry &telemetry) noexcept :
+        exchange_(exchange), telemetry_(telemetry) {}
+
+    async::Task<common::IoResult<std::size_t>> write(mem::IoBufChain &buffer,
+                                                     std::chrono::milliseconds timeout) noexcept {
+        return telemetry_.response_writer().write(buffer, timeout);
+    }
+
+    async::Task<common::IoResult<void>> flush(std::chrono::milliseconds timeout) noexcept {
+        return telemetry_.response_writer().flush(timeout);
+    }
+
+    common::IoResult<void> abort(common::IoErr reason) noexcept {
+        if (!exchange_.response_channel_closed()) {
+            telemetry_.mark_response_channel_self_abort();
+        }
+        return telemetry_.response_writer().abort(reason);
+    }
+
+private:
+    http::HttpExchange &exchange_;
+    AccessRequestTelemetry &telemetry_;
+};
+
 // Body-transfer stats flush into the provider transaction when the forwarding
 // scope ends — including failure co_returns and coroutine cancellation — so a
 // partial transfer still reports how far it got. Data added after the
@@ -1239,6 +1271,7 @@ async::Task<Result<void>> UpstreamAttempt::run() noexcept {
     }
 
     ProxyResponseBodyReader body_reader(upstream, request_plan_.max_response_body_size());
+    ProxyResponseBodyWriter body_writer(exchange_, telemetry_);
     ResponseBodyStatsScope response_body_stats(provider_, body_reader);
     const http::HttpBodyPipeOptions pipe_options{
             .buffer_size = options_.response_body_chunk_size,
@@ -1256,8 +1289,7 @@ async::Task<Result<void>> UpstreamAttempt::run() noexcept {
     auto piped = co_await async::when_any(
             [&]() {
                 return http::pipe_http_body(http::make_http_body_pipe_reader(body_reader),
-                                            http::make_http_body_pipe_writer(telemetry_.response_writer()),
-                                            pipe_options)
+                                            http::make_http_body_pipe_writer(body_writer), pipe_options)
                         .select();
             },
             [this]() { return exchange_.wait_response_channel_closed(); });
@@ -1375,12 +1407,18 @@ async::Task<Result<void>> ProxyExecutor::execute(http::HttpExchange &exchange, c
     // invisible. Every other stage either writes downstream or reads the
     // client, so a close surfaces as that operation's own error. An error
     // result with the channel already closed classifies as Canceled: the
-    // client cannot observe anything this exchange could still do.
+    // client cannot observe anything this exchange could still do — unless
+    // the close was the gateway's own act. The response-body pipe aborts a
+    // still-healthy downstream itself on gateway-policy failures (body limit,
+    // read idle timeout, upstream mid-body reset), latching
+    // response_channel_self_abort so those classify as Failed instead of
+    // vanishing into the canceled bucket.
     auto result = co_await execute_impl(exchange, proxy, input, telemetry);
-    telemetry.record_proxy_execution(result ? AccessProxyExecutionResult::Completed
-                                            : (exchange.response_channel_closed()
-                                                       ? AccessProxyExecutionResult::Canceled
-                                                       : AccessProxyExecutionResult::Failed));
+    telemetry.record_proxy_execution(
+            result ? AccessProxyExecutionResult::Completed
+                   : (exchange.response_channel_closed() && !telemetry.response_channel_self_abort()
+                              ? AccessProxyExecutionResult::Canceled
+                              : AccessProxyExecutionResult::Failed));
     co_return result;
 }
 
