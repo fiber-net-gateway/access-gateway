@@ -241,11 +241,6 @@ AccessRequestHandler::AccessRequestHandler(AccessRouteSnapshotProvider snapshot_
 
 async::Task<void> AccessRequestHandler::handle(http::HttpExchange &exchange,
                                                AccessRequestTelemetry &telemetry) const noexcept {
-    if (exchange.response_channel_closed()) {
-        telemetry.record_response_error(common::IoErr::Canceled);
-        co_return;
-    }
-
     auto result = co_await handle_and_finalize(exchange, telemetry);
     if (!result) {
         (void) exchange.abort(result.error());
