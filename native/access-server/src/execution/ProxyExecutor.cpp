@@ -777,14 +777,20 @@ private:
 // clearing the chain's complete flag) but has no flush: upstream writes go
 // straight to transport writev with nothing buffered. The pipe only calls
 // flush in unbuffered mode, where the no-op keeps the forward-promptly
-// semantics of the retired manual loop.
+// semantics of the retired manual loop. The co_await wrapper (rather than
+// returning the inner task directly) exists so accepted writes can accumulate
+// the upstream-leg byte count for the body-transfer metrics.
 class ProxyRequestBodyWriter {
 public:
     explicit ProxyRequestBodyWriter(http::ClientHttp1Exchange &upstream) noexcept : upstream_(upstream) {}
 
     async::Task<common::IoResult<std::size_t>> write(mem::IoBufChain &buffer,
                                                      std::chrono::milliseconds timeout) noexcept {
-        return upstream_.write(buffer, timeout);
+        auto written = co_await upstream_.write(buffer, timeout);
+        if (written) {
+            written_bytes_ += *written;
+        }
+        co_return written;
     }
 
     async::Task<common::IoResult<void>> flush(std::chrono::milliseconds /*timeout*/) noexcept {
@@ -793,8 +799,11 @@ public:
 
     common::IoResult<void> abort(common::IoErr reason) noexcept { return upstream_.abort(reason); }
 
+    [[nodiscard]] std::uint64_t written_bytes() const noexcept { return written_bytes_; }
+
 private:
     http::ClientHttp1Exchange &upstream_;
+    std::uint64_t written_bytes_ = 0;
 };
 
 // The response-body pipe's abort guard tears down both endpoints on every
@@ -835,10 +844,17 @@ private:
 // transaction completes is dropped by the CAT client, so request-side stats
 // must flush before the attempt reaches any terminal provider call; the
 // request-body scope always does because its block ends well before completion.
+// The same flush feeds the body-transfer metrics: the request-scoped legs
+// accumulate in the telemetry for finish(), while the upstream-leg bytes emit
+// the per-attempt provider series here, where this attempt's endpoint labels
+// still apply.
 class RequestBodyStatsScope final {
 public:
-    RequestBodyStatsScope(AccessProviderTransaction &provider, const ProxyRequestBodyReader &reader) noexcept :
-        provider_(provider), reader_(reader), started_(std::chrono::steady_clock::now()) {}
+    RequestBodyStatsScope(AccessProviderTransaction &provider, const ProxyRequestBodyReader &reader,
+                          AccessRequestTelemetry &telemetry, const ProxyRequestBodyWriter &writer,
+                          const ProxyUpstreamEndpoint &endpoint) noexcept :
+        provider_(provider), reader_(reader), telemetry_(telemetry), writer_(writer), endpoint_(endpoint),
+        started_(std::chrono::steady_clock::now()) {}
 
     RequestBodyStatsScope(const RequestBodyStatsScope &) = delete;
     RequestBodyStatsScope &operator=(const RequestBodyStatsScope &) = delete;
@@ -848,11 +864,16 @@ public:
     ~RequestBodyStatsScope() noexcept {
         provider_.add_request_body(reader_.received_body(), std::chrono::duration_cast<std::chrono::microseconds>(
                                                                     std::chrono::steady_clock::now() - started_));
+        telemetry_.record_request_body_transfer(reader_.received_body(), writer_.written_bytes());
+        telemetry_.record_provider_body_transfer(endpoint_, AccessBodyDirection::Request, writer_.written_bytes());
     }
 
 private:
     AccessProviderTransaction &provider_;
     const ProxyRequestBodyReader &reader_;
+    AccessRequestTelemetry &telemetry_;
+    const ProxyRequestBodyWriter &writer_;
+    const ProxyUpstreamEndpoint &endpoint_;
     std::chrono::steady_clock::time_point started_;
 };
 
@@ -897,11 +918,15 @@ private:
 // Same flush-on-scope-end contract as RequestBodyStatsScope, but the piped
 // response body spans the rest of the attempt, so record() must be called
 // before complete()/fail() and the destructor only covers cancellation while
-// the pipe is still running.
+// the pipe is still running. The upstream-leg bytes also emit the per-attempt
+// provider body series here; the downstream leg is the exchange's own wire
+// accounting, read back at request finish.
 class ResponseBodyStatsScope final {
 public:
-    ResponseBodyStatsScope(AccessProviderTransaction &provider, ProxyResponseBodyReader &reader) noexcept :
-        provider_(provider), reader_(reader), started_(std::chrono::steady_clock::now()) {}
+    ResponseBodyStatsScope(AccessProviderTransaction &provider, ProxyResponseBodyReader &reader,
+                           AccessRequestTelemetry &telemetry, const ProxyUpstreamEndpoint &endpoint) noexcept :
+        provider_(provider), reader_(reader), telemetry_(telemetry), endpoint_(endpoint),
+        started_(std::chrono::steady_clock::now()) {}
 
     ResponseBodyStatsScope(const ResponseBodyStatsScope &) = delete;
     ResponseBodyStatsScope &operator=(const ResponseBodyStatsScope &) = delete;
@@ -917,11 +942,15 @@ public:
         recorded_ = true;
         provider_.add_response_body(reader_.received_body(), std::chrono::duration_cast<std::chrono::microseconds>(
                                                                      std::chrono::steady_clock::now() - started_));
+        telemetry_.record_response_body_upstream(reader_.received_body());
+        telemetry_.record_provider_body_transfer(endpoint_, AccessBodyDirection::Response, reader_.received_body());
     }
 
 private:
     AccessProviderTransaction &provider_;
     ProxyResponseBodyReader &reader_;
+    AccessRequestTelemetry &telemetry_;
+    const ProxyUpstreamEndpoint &endpoint_;
     std::chrono::steady_clock::time_point started_;
     bool recorded_ = false;
 };
@@ -1002,8 +1031,8 @@ async::Task<Result<void>> UpstreamAttempt::run() noexcept {
     const http::HttpBodySpec &request_body = request_plan_.body_spec();
     if (!request_plan_.request_end_stream()) {
         ProxyRequestBodyReader body_reader(exchange_, request_body, input_.max_request_body_size);
-        RequestBodyStatsScope request_body_stats(provider_, body_reader);
         ProxyRequestBodyWriter body_writer(upstream);
+        RequestBodyStatsScope request_body_stats(provider_, body_reader, telemetry_, body_writer, endpoint_);
         // The route flush knob is bidirectional, mirroring the response-body
         // pipe: flush:true forwards each downstream body read as soon as it
         // returns (the delivery granularity of the retired manual loop, needed
@@ -1303,7 +1332,7 @@ async::Task<Result<void>> UpstreamAttempt::run() noexcept {
 
     ProxyResponseBodyReader body_reader(upstream, request_plan_.max_response_body_size());
     ProxyResponseBodyWriter body_writer(exchange_, telemetry_);
-    ResponseBodyStatsScope response_body_stats(provider_, body_reader);
+    ResponseBodyStatsScope response_body_stats(provider_, body_reader, telemetry_, endpoint_);
     const http::HttpBodyPipeOptions pipe_options{
             .buffer_size = options_.response_body_chunk_size,
             .low_water = proxy_.flush.value_or(false)

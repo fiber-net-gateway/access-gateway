@@ -132,6 +132,12 @@ static_assert(kRequestStatusLabelValues.size() == static_cast<std::size_t>(Acces
 
 constexpr std::string_view kRouteUnmatchedLabel = "unmatched";
 
+constexpr std::array<std::string_view, 2> kBodyDirectionValues{
+        "request",
+        "response",
+};
+static_assert(kBodyDirectionValues.size() == static_cast<std::size_t>(AccessBodyDirection::Count));
+
 // Hard caps for the dynamic LRU families. The route family is bounded by
 // configured host patterns x route paths x observed statuses; provider
 // families churn with discovery instances and get the largest allowance.
@@ -139,6 +145,8 @@ constexpr std::size_t kRouteRequestSeriesLimit = 8192;
 constexpr std::size_t kProviderResponseSeriesLimit = 16384;
 constexpr std::size_t kProxyErrorSeriesLimit = 2048;
 constexpr std::size_t kCircuitRejectionSeriesLimit = 1024;
+constexpr std::size_t kRouteBodySeriesLimit = 8192;
+constexpr std::size_t kProviderBodySeriesLimit = 16384;
 
 template<std::size_t N>
 bool register_labeled_series(prometheus::MetricsRegistry &registry, prometheus::FamilyId family,
@@ -246,6 +254,37 @@ void AccessServerMetrics::Worker::proxy_body_idle_timeout(AccessBodyIdleDirectio
     proxy_body_idle_timeouts_[metric_index(direction, AccessBodyIdleDirection::Count)].inc();
 }
 
+void AccessServerMetrics::Worker::request_body_transferred(AccessBodySide side, std::uint64_t bytes) noexcept {
+    if (bytes != 0) {
+        request_body_bytes_[metric_index(side, AccessBodySide::Count)].add(bytes);
+    }
+}
+
+void AccessServerMetrics::Worker::response_body_transferred(AccessBodySide side, std::uint64_t bytes) noexcept {
+    if (bytes != 0) {
+        response_body_bytes_[metric_index(side, AccessBodySide::Count)].add(bytes);
+    }
+}
+
+void AccessServerMetrics::Worker::request_body_size(std::uint64_t bytes) noexcept {
+    if (bytes != 0) {
+        request_body_size_.observe(bytes);
+    }
+}
+
+void AccessServerMetrics::Worker::response_body_size(std::uint64_t bytes) noexcept {
+    if (bytes != 0) {
+        response_body_size_.observe(bytes);
+    }
+}
+
+void AccessServerMetrics::Worker::response_compression_bytes(AccessCompressionStream stream,
+                                                             std::uint64_t bytes) noexcept {
+    if (bytes != 0) {
+        response_compression_bytes_[metric_index(stream, AccessCompressionStream::Count)].add(bytes);
+    }
+}
+
 void AccessServerMetrics::Worker::route_request_finished(std::string_view host_pattern, std::string_view route_path,
                                                          std::string_view status_label) noexcept {
     if (!route_requests_dynamic_ || status_label.empty()) {
@@ -287,6 +326,30 @@ void AccessServerMetrics::Worker::upstream_circuit_rejected(std::string_view app
     }
     const std::array<std::string_view, 1> labels{app};
     (void) circuit_rejections_dynamic_->inc(labels);
+}
+
+void AccessServerMetrics::Worker::route_body_transferred(std::string_view host_pattern, std::string_view route_path,
+                                                         AccessBodyDirection direction, std::uint64_t bytes) noexcept {
+    if (!route_body_bytes_dynamic_ || bytes == 0) {
+        return;
+    }
+    const std::array<std::string_view, 3> labels{
+            host_pattern.empty() ? kRouteUnmatchedLabel : host_pattern,
+            route_path.empty() ? kRouteUnmatchedLabel : route_path,
+            kBodyDirectionValues[metric_index(direction, AccessBodyDirection::Count)],
+    };
+    (void) route_body_bytes_dynamic_->add(labels, bytes);
+}
+
+void AccessServerMetrics::Worker::provider_body_transferred(std::string_view app, std::string_view ip_port,
+                                                            AccessBodyDirection direction,
+                                                            std::uint64_t bytes) noexcept {
+    if (!provider_body_bytes_dynamic_ || bytes == 0 || app.empty()) {
+        return;
+    }
+    const std::array<std::string_view, 3> labels{
+            app, ip_port, kBodyDirectionValues[metric_index(direction, AccessBodyDirection::Count)]};
+    (void) provider_body_bytes_dynamic_->add(labels, bytes);
 }
 
 AccessServerMetrics::AccessServerMetrics(event::EventLoopGroup &workers, const AccessRuntimeMetrics *runtime_metrics) :
@@ -380,6 +443,23 @@ bool AccessServerMetrics::initialize(event::EventLoopGroup &worker_group) {
     };
     constexpr std::array<std::string_view, 1> kDirectionLabel{"direction"};
     static_assert(kBodyIdleDirections.size() == static_cast<std::size_t>(AccessBodyIdleDirection::Count));
+    constexpr std::array<std::string_view, 2> kBodySides{
+            "downstream",
+            "upstream",
+    };
+    static_assert(kBodySides.size() == static_cast<std::size_t>(AccessBodySide::Count));
+    constexpr std::array<std::string_view, 2> kCompressionStreams{
+            "raw",
+            "compressed",
+    };
+    static_assert(kCompressionStreams.size() == static_cast<std::size_t>(AccessCompressionStream::Count));
+    constexpr std::array<std::string_view, 1> kSideLabel{"side"};
+    constexpr std::array<std::string_view, 1> kStreamLabel{"stream"};
+    // Byte-scale buckets spanning API-sized payloads (KiB) through dataset
+    // uploads and the configured response-body ceilings (hundreds of MiB).
+    constexpr std::array<std::uint64_t, 11> kBodySizeBounds{
+            1024, 4096, 16384, 65536, 262144, 1048576, 4194304, 16777216, 67108864, 268435456, 1073741824,
+    };
     constexpr std::array<std::uint64_t, 15> kDurationBounds{
             1000,    5000,    10000,   25000,    50000,    100000,   250000,    500000,
             1000000, 2500000, 5000000, 10000000, 30000000, 60000000, 300000000,
@@ -441,12 +521,31 @@ bool AccessServerMetrics::initialize(event::EventLoopGroup &worker_group) {
     auto websocket_sessions_inflight = registry_.register_gauge(
             "access_server_websocket_sessions_inflight", "Established WebSocket proxy sessions currently in flight.",
             prometheus::GaugeReduction::Sum);
+    auto request_body_bytes = registry_.register_counter("access_server_request_body_bytes_total",
+                                                         "Request body bytes by transfer leg: downstream accepted from "
+                                                         "the client, upstream written to the provider.",
+                                                         kSideLabel);
+    auto response_body_bytes = registry_.register_counter(
+            "access_server_response_body_bytes_total",
+            "Response body bytes by transfer leg: upstream read from the provider, downstream written to the client.",
+            kSideLabel);
+    auto response_compression_bytes = registry_.register_counter(
+            "access_server_response_compression_bytes_total",
+            "Bytes fed through the gzip response path, raw versus the compressed wire output.", kStreamLabel);
+    auto request_body_size = registry_.register_histogram("access_server_request_body_size_bytes",
+                                                          "Request body sizes for transfers that moved bytes.",
+                                                          kBodySizeBounds, prometheus::HistogramUnit::Raw);
+    auto response_body_size = registry_.register_histogram("access_server_response_body_size_bytes",
+                                                           "Response body sizes for transfers that moved bytes.",
+                                                           kBodySizeBounds, prometheus::HistogramUnit::Raw);
     // Dynamic LRU families: label values arrive at request time and are capped
     // per family; eviction resets the evicted series (see bounded-metrics.md).
     constexpr std::array<std::string_view, 3> kRouteRequestLabels{"host", "path", "status_code"};
     constexpr std::array<std::string_view, 3> kProviderResponseLabels{"app", "ip_port", "status_code"};
     constexpr std::array<std::string_view, 3> kProxyErrorLabels{"app", "ip_port", "error"};
     constexpr std::array<std::string_view, 1> kCircuitRejectionLabels{"app"};
+    constexpr std::array<std::string_view, 3> kRouteBodyLabels{"host", "path", "direction"};
+    constexpr std::array<std::string_view, 3> kProviderBodyLabels{"app", "ip_port", "direction"};
     const prometheus::SeriesOptions route_request_options{
             .mode = prometheus::SeriesMode::Lru,
             .max_series = kRouteRequestSeriesLimit,
@@ -462,6 +561,14 @@ bool AccessServerMetrics::initialize(event::EventLoopGroup &worker_group) {
     const prometheus::SeriesOptions circuit_rejection_options{
             .mode = prometheus::SeriesMode::Lru,
             .max_series = kCircuitRejectionSeriesLimit,
+    };
+    const prometheus::SeriesOptions route_body_options{
+            .mode = prometheus::SeriesMode::Lru,
+            .max_series = kRouteBodySeriesLimit,
+    };
+    const prometheus::SeriesOptions provider_body_options{
+            .mode = prometheus::SeriesMode::Lru,
+            .max_series = kProviderBodySeriesLimit,
     };
     auto route_requests = registry_.register_counter(
             "access_server_route_requests_total",
@@ -479,11 +586,23 @@ bool AccessServerMetrics::initialize(event::EventLoopGroup &worker_group) {
             registry_.register_counter("access_server_upstream_circuit_rejections_total",
                                        "Upstream selections rejected because the endpoint circuit breaker was open.",
                                        kCircuitRejectionLabels, circuit_rejection_options);
+    auto route_body_bytes = registry_.register_counter(
+            "access_server_route_body_bytes_total",
+            "Body bytes by matched host pattern and route path pattern: request bodies received from the client and "
+            "response body wire bytes written to the client.",
+            kRouteBodyLabels, route_body_options);
+    auto provider_body_bytes = registry_.register_counter("access_server_provider_body_bytes_total",
+                                                          "Per-attempt body bytes by provider app and upstream "
+                                                          "address: request bodies written to and response bodies "
+                                                          "read from that endpoint.",
+                                                          kProviderBodyLabels, provider_body_options);
     if (!requests || !requests_by_status || !response_compression || !duration || !inflight || !proxy_executions ||
         !proxy_attempts || !proxy_attempts_inflight || !proxy_failures || !proxy_pool_acquires ||
         !proxy_dns_resolutions || !proxy_connect_attempts || !proxy_connect_candidates || !happy_eyeballs ||
         !websocket_handshakes || !websocket_sessions || !websocket_sessions_inflight || !proxy_body_idle_timeouts ||
-        !route_requests || !provider_responses || !proxy_errors || !circuit_rejections) {
+        !route_requests || !provider_responses || !proxy_errors || !circuit_rejections || !request_body_bytes ||
+        !response_body_bytes || !response_compression_bytes || !request_body_size || !response_body_size ||
+        !route_body_bytes || !provider_body_bytes) {
         return false;
     }
 
@@ -500,6 +619,9 @@ bool AccessServerMetrics::initialize(event::EventLoopGroup &worker_group) {
     std::array<prometheus::SeriesId, kWebSocketHandshakeResults.size()> websocket_handshake_series;
     std::array<prometheus::SeriesId, kWebSocketSessionResults.size()> websocket_session_series;
     std::array<prometheus::SeriesId, kBodyIdleDirections.size()> proxy_body_idle_series;
+    std::array<prometheus::SeriesId, kBodySides.size()> request_body_series;
+    std::array<prometheus::SeriesId, kBodySides.size()> response_body_series;
+    std::array<prometheus::SeriesId, kCompressionStreams.size()> response_compression_series;
     if (!register_labeled_series(registry_, *requests, kRequestResults, request_series) ||
         !register_labeled_series(registry_, *requests_by_status, kRequestStatusLabelValues, request_status_series) ||
         !register_labeled_series(registry_, *response_compression, kCompressionResults, compression_series) ||
@@ -513,7 +635,11 @@ bool AccessServerMetrics::initialize(event::EventLoopGroup &worker_group) {
         !register_labeled_series(registry_, *websocket_handshakes, kWebSocketHandshakeResults,
                                  websocket_handshake_series) ||
         !register_labeled_series(registry_, *websocket_sessions, kWebSocketSessionResults, websocket_session_series) ||
-        !register_labeled_series(registry_, *proxy_body_idle_timeouts, kBodyIdleDirections, proxy_body_idle_series)) {
+        !register_labeled_series(registry_, *proxy_body_idle_timeouts, kBodyIdleDirections, proxy_body_idle_series) ||
+        !register_labeled_series(registry_, *request_body_bytes, kBodySides, request_body_series) ||
+        !register_labeled_series(registry_, *response_body_bytes, kBodySides, response_body_series) ||
+        !register_labeled_series(registry_, *response_compression_bytes, kCompressionStreams,
+                                 response_compression_series)) {
         return false;
     }
     auto duration_series = registry_.register_series(*duration);
@@ -521,8 +647,10 @@ bool AccessServerMetrics::initialize(event::EventLoopGroup &worker_group) {
     auto proxy_attempts_inflight_series = registry_.register_series(*proxy_attempts_inflight);
     auto proxy_connect_candidates_series = registry_.register_series(*proxy_connect_candidates);
     auto websocket_sessions_inflight_series = registry_.register_series(*websocket_sessions_inflight);
+    auto request_body_size_series = registry_.register_series(*request_body_size);
+    auto response_body_size_series = registry_.register_series(*response_body_size);
     if (!duration_series || !inflight_series || !proxy_attempts_inflight_series || !proxy_connect_candidates_series ||
-        !websocket_sessions_inflight_series) {
+        !websocket_sessions_inflight_series || !request_body_size_series || !response_body_size_series) {
         return false;
     }
 
@@ -543,8 +671,10 @@ bool AccessServerMetrics::initialize(event::EventLoopGroup &worker_group) {
     auto provider_responses_dynamic = registry_.dynamic_counter(*provider_responses);
     auto proxy_errors_dynamic = registry_.dynamic_counter(*proxy_errors);
     auto circuit_rejections_dynamic = registry_.dynamic_counter(*circuit_rejections);
+    auto route_body_bytes_dynamic = registry_.dynamic_counter(*route_body_bytes);
+    auto provider_body_bytes_dynamic = registry_.dynamic_counter(*provider_body_bytes);
     if (!route_requests_dynamic || !provider_responses_dynamic || !proxy_errors_dynamic ||
-        !circuit_rejections_dynamic) {
+        !circuit_rejections_dynamic || !route_body_bytes_dynamic || !provider_body_bytes_dynamic) {
         return false;
     }
 
@@ -567,7 +697,10 @@ bool AccessServerMetrics::initialize(event::EventLoopGroup &worker_group) {
             !bind_counters(*shard, happy_eyeballs_series, worker.happy_eyeballs_) ||
             !bind_counters(*shard, websocket_handshake_series, worker.websocket_handshakes_) ||
             !bind_counters(*shard, websocket_session_series, worker.websocket_sessions_) ||
-            !bind_counters(*shard, proxy_body_idle_series, worker.proxy_body_idle_timeouts_)) {
+            !bind_counters(*shard, proxy_body_idle_series, worker.proxy_body_idle_timeouts_) ||
+            !bind_counters(*shard, request_body_series, worker.request_body_bytes_) ||
+            !bind_counters(*shard, response_body_series, worker.response_body_bytes_) ||
+            !bind_counters(*shard, response_compression_series, worker.response_compression_bytes_)) {
             return false;
         }
         auto duration_value = shard->histogram(*duration_series);
@@ -575,8 +708,10 @@ bool AccessServerMetrics::initialize(event::EventLoopGroup &worker_group) {
         auto proxy_attempts_inflight_value = shard->gauge(*proxy_attempts_inflight_series);
         auto proxy_connect_candidates_value = shard->counter(*proxy_connect_candidates_series);
         auto websocket_sessions_inflight_value = shard->gauge(*websocket_sessions_inflight_series);
+        auto request_body_size_value = shard->histogram(*request_body_size_series);
+        auto response_body_size_value = shard->histogram(*response_body_size_series);
         if (!duration_value || !inflight_value || !proxy_attempts_inflight_value || !proxy_connect_candidates_value ||
-            !websocket_sessions_inflight_value) {
+            !websocket_sessions_inflight_value || !request_body_size_value || !response_body_size_value) {
             return false;
         }
         worker.request_duration_ = *duration_value;
@@ -584,10 +719,14 @@ bool AccessServerMetrics::initialize(event::EventLoopGroup &worker_group) {
         worker.proxy_attempts_inflight_ = *proxy_attempts_inflight_value;
         worker.proxy_connect_candidates_ = *proxy_connect_candidates_value;
         worker.websocket_sessions_inflight_ = *websocket_sessions_inflight_value;
+        worker.request_body_size_ = *request_body_size_value;
+        worker.response_body_size_ = *response_body_size_value;
         worker.route_requests_dynamic_ = *route_requests_dynamic;
         worker.provider_responses_dynamic_ = *provider_responses_dynamic;
         worker.proxy_errors_dynamic_ = *proxy_errors_dynamic;
         worker.circuit_rejections_dynamic_ = *circuit_rejections_dynamic;
+        worker.route_body_bytes_dynamic_ = *route_body_bytes_dynamic;
+        worker.provider_body_bytes_dynamic_ = *provider_body_bytes_dynamic;
     }
     return true;
 }

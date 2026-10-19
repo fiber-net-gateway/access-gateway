@@ -567,14 +567,125 @@
         }
       ]
     },
-    { "id": 101, "type": "row", "title": "Proxy / upstream", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 37 }, "panels": [] },
+        {
+      "id": 37,
+      "type": "timeseries",
+      "title": "Body bytes by host & direction",
+      "description": "按匹配 host pattern 细分的 body 传输速率:request=客户端上行请求体,response=写往客户端的响应体线上字节(压缩后);219 分块上传这类“请求数不可见、字节数主导 CPU”的流量在这里可见。",
+      "datasource": { "type": "prometheus", "uid": "prometheus-2" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 37 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "fillOpacity": 20,
+            "gradientMode": "none",
+            "spanNulls": true,
+            "showPoints": "never",
+            "stacking": { "group": "A", "mode": "normal" }
+          }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "expr": "sum by (host, direction) (rate(access_server_route_body_bytes_total{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "{{host}} {{direction}}",
+          "refId": "A"
+        }
+      ]
+    },
+        {
+      "id": 38,
+      "type": "timeseries",
+      "title": "Top 10 routes by egress body bytes",
+      "description": "按响应体出向字节排序的 Top 10 路由(host × path),定位大响应/大下载占用出口带宽的路由。",
+      "datasource": { "type": "prometheus", "uid": "prometheus-2" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 37 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "spanNulls": true,
+            "showPoints": "never",
+            "stacking": { "group": "A", "mode": "none" }
+          }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "expr": "topk(10, sum by (host, path) (rate(access_server_route_body_bytes_total{instance=~\"$instance\",direction=\"response\"}[$__rate_interval])))",
+          "legendFormat": "{{host}}{{path}}",
+          "refId": "A"
+        }
+      ]
+    },
+        {
+      "id": 39,
+      "type": "timeseries",
+      "title": "Body transfer legs (total)",
+      "description": "四条传输腿的总量:request downstream/upstream 差值≈中断或限额丢弃的请求体;response upstream/downstream 差值≈压缩节省+截断丢弃(response_body_too_large/write_response_body 相位用于区分成因)。",
+      "datasource": { "type": "prometheus", "uid": "prometheus-2" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 37 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "spanNulls": true,
+            "showPoints": "never",
+            "stacking": { "group": "A", "mode": "none" }
+          }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "expr": "sum(rate(access_server_request_body_bytes_total{instance=~\"$instance\",side=\"downstream\"}[$__rate_interval]))",
+          "legendFormat": "req from client",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(access_server_request_body_bytes_total{instance=~\"$instance\",side=\"upstream\"}[$__rate_interval]))",
+          "legendFormat": "req to upstream",
+          "refId": "B"
+        },
+        {
+          "expr": "sum(rate(access_server_response_body_bytes_total{instance=~\"$instance\",side=\"upstream\"}[$__rate_interval]))",
+          "legendFormat": "resp from upstream",
+          "refId": "C"
+        },
+        {
+          "expr": "sum(rate(access_server_response_body_bytes_total{instance=~\"$instance\",side=\"downstream\"}[$__rate_interval]))",
+          "legendFormat": "resp to client",
+          "refId": "D"
+        }
+      ]
+    },
+    { "id": 101, "type": "row", "title": "Proxy / upstream", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 45 }, "panels": [] },
     {
       "id": 14,
       "type": "timeseries",
       "title": "Proxy executions by result",
       "description": "代理路由执行的终态:completed / failed / canceled。access_server_proxy_executions_total",
       "datasource": { "type": "prometheus", "uid": "prometheus-2" },
-      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 38 },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 46 },
       "fieldConfig": {
         "defaults": {
           "unit": "ops",
@@ -601,7 +712,7 @@
       "title": "Proxy attempts by result",
       "description": "已选定上游的代理尝试终态:completed / failed / aborted。access_server_proxy_attempts_total",
       "datasource": { "type": "prometheus", "uid": "prometheus-2" },
-      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 38 },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 46 },
       "fieldConfig": {
         "defaults": {
           "unit": "ops",
@@ -628,7 +739,7 @@
       "title": "Proxy failures by phase",
       "description": "按发现阶段的代理失败(no_upstream_hosts / connect / tls / read_response_body 等)。仅显示速率 >0 的阶段。access_server_proxy_failures_total",
       "datasource": { "type": "prometheus", "uid": "prometheus-2" },
-      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 38 },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 46 },
       "fieldConfig": {
         "defaults": {
           "unit": "ops",
@@ -651,7 +762,7 @@
       "title": "Upstream connection pool acquires by result",
       "description": "HTTP/1 上游连接池获取结果:hit / miss / shutdown。access_server_proxy_pool_acquires_total",
       "datasource": { "type": "prometheus", "uid": "prometheus-2" },
-      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 46 },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 54 },
       "fieldConfig": {
         "defaults": {
           "unit": "ops",
@@ -677,7 +788,7 @@
       "title": "Pool hit ratio",
       "description": "连接池命中占比(hit / 全部获取)。",
       "datasource": { "type": "prometheus", "uid": "prometheus-2" },
-      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 46 },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 54 },
       "fieldConfig": {
         "defaults": {
           "unit": "percentunit",
@@ -702,7 +813,7 @@
       "title": "Upstream DNS resolutions by result",
       "description": "上游域名解析结果:success / empty / failure / unavailable。access_server_proxy_dns_resolutions_total",
       "datasource": { "type": "prometheus", "uid": "prometheus-2" },
-      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 46 },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 54 },
       "fieldConfig": {
         "defaults": {
           "unit": "ops",
@@ -729,7 +840,7 @@
       "title": "Upstream connect attempts by result",
       "description": "新建上游传输连接结果:success / failure / tls_failure / create_failure。access_server_proxy_connect_attempts_total",
       "datasource": { "type": "prometheus", "uid": "prometheus-2" },
-      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 54 },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 62 },
       "fieldConfig": {
         "defaults": {
           "unit": "ops",
@@ -757,7 +868,7 @@
       "title": "Happy Eyeballs races by result",
       "description": "多地址上游连接竞速结果。access_server_proxy_happy_eyeballs_total",
       "datasource": { "type": "prometheus", "uid": "prometheus-2" },
-      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 54 },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 62 },
       "fieldConfig": {
         "defaults": {
           "unit": "ops",
@@ -783,7 +894,7 @@
       "title": "Connect address candidates observed",
       "description": "新连接观察到的地址候选数速率。access_server_proxy_connect_candidates_total",
       "datasource": { "type": "prometheus", "uid": "prometheus-2" },
-      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 54 },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 62 },
       "fieldConfig": {
         "defaults": {
           "unit": "ops",
@@ -806,7 +917,7 @@
       "title": "Provider responses by app",
       "description": "按 app 的上游响应头到达速率(记录于响应头到达时刻,与 access log 提交点一致,每 attempt 记一次);服务发现路由为服务名,addresses 路由为 <project>.project。",
       "datasource": { "type": "prometheus", "uid": "prometheus-2" },
-      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 62 },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 70 },
       "fieldConfig": {
         "defaults": {
           "unit": "reqps",
@@ -838,7 +949,7 @@
       "title": "Provider 5xx ratio by app",
       "description": "各 app 上游 5xx 响应头占比(%):分子为 5xx 头到达速率,分母为全部头到达速率;无流量的时段不画线。",
       "datasource": { "type": "prometheus", "uid": "prometheus-2" },
-      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 62 },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 70 },
       "fieldConfig": {
         "defaults": {
           "unit": "percent",
@@ -872,7 +983,7 @@
       "title": "Top provider 5xx endpoints",
       "description": "5xx 响应头最多的 app×ip_port 组合,定位异常实例(同样是服务在报错,哪个实例报得多)。",
       "datasource": { "type": "prometheus", "uid": "prometheus-2" },
-      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 62 },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 70 },
       "fieldConfig": {
         "defaults": {
           "unit": "reqps",
@@ -904,7 +1015,7 @@
       "title": "Upstream transport errors by app & class",
       "description": "上游传输失败按 app 与粗类:connect(含解析/拨号/TLS 及其超时)、request_timeout(建连后超时)、io_err(其他上游侧 IO);客户端中止、网关策略(限流/体积上限)与选路前失败不计入。",
       "datasource": { "type": "prometheus", "uid": "prometheus-2" },
-      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 70 },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 78 },
       "fieldConfig": {
         "defaults": {
           "unit": "reqps",
@@ -938,7 +1049,7 @@
       "title": "Top transport error endpoints",
       "description": "传输失败最多的 app×ip_port 组合(每 attempt 记一次,含重试),定位连不上的实例。",
       "datasource": { "type": "prometheus", "uid": "prometheus-2" },
-      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 70 },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 78 },
       "fieldConfig": {
         "defaults": {
           "unit": "reqps",
@@ -970,7 +1081,7 @@
       "title": "Circuit breaker rejections by app",
       "description": "选路被熔断拒绝的速率:服务发现路由为共享端点熔断(AccessUpstreamCircuit);静态地址含 SWRR 内部熔断与同请求重试排除耗尽。",
       "datasource": { "type": "prometheus", "uid": "prometheus-2" },
-      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 70 },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 78 },
       "fieldConfig": {
         "defaults": {
           "unit": "reqps",
@@ -996,14 +1107,125 @@
         }
       ]
     },
-    { "id": 102, "type": "row", "title": "WebSocket", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 78 }, "panels": [] },
+        {
+      "id": 40,
+      "type": "timeseries",
+      "title": "Provider body bytes by app & direction",
+      "description": "按上游应用细分的 body 传输速率:request=写往该上游的请求体,response=从该上游读到的响应体;发现大流量上游的入口。",
+      "datasource": { "type": "prometheus", "uid": "prometheus-2" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 86 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "fillOpacity": 20,
+            "gradientMode": "none",
+            "spanNulls": true,
+            "showPoints": "never",
+            "stacking": { "group": "A", "mode": "normal" }
+          }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "expr": "sum by (app, direction) (rate(access_server_provider_body_bytes_total{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "{{app}} {{direction}}",
+          "refId": "A"
+        }
+      ]
+    },
+        {
+      "id": 41,
+      "type": "timeseries",
+      "title": "Top provider body endpoints",
+      "description": "按双向 body 字节排序的 Top 10 上游端点(app × ip:port)。",
+      "datasource": { "type": "prometheus", "uid": "prometheus-2" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 86 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "spanNulls": true,
+            "showPoints": "never",
+            "stacking": { "group": "A", "mode": "none" }
+          }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "expr": "topk(10, sum by (app, ip_port) (rate(access_server_provider_body_bytes_total{instance=~\"$instance\"}[$__rate_interval])))",
+          "legendFormat": "{{app}} {{ip_port}}",
+          "refId": "A"
+        }
+      ]
+    },
+        {
+      "id": 42,
+      "type": "timeseries",
+      "title": "Body size quantiles",
+      "description": "请求体/响应体大小分位(仅统计有 body 的传输):直方图在传输结束时观测,长流(SSE 等)在结束前不进入分布。",
+      "datasource": { "type": "prometheus", "uid": "prometheus-2" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 86 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "spanNulls": true,
+            "showPoints": "never",
+            "stacking": { "group": "A", "mode": "none" }
+          }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(access_server_response_body_size_bytes_bucket{instance=~\"$instance\"}[$__rate_interval])))",
+          "legendFormat": "resp p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(access_server_response_body_size_bytes_bucket{instance=~\"$instance\"}[$__rate_interval])))",
+          "legendFormat": "resp p95",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(access_server_response_body_size_bytes_bucket{instance=~\"$instance\"}[$__rate_interval])))",
+          "legendFormat": "resp p99",
+          "refId": "C"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(access_server_request_body_size_bytes_bucket{instance=~\"$instance\"}[$__rate_interval])))",
+          "legendFormat": "req p95",
+          "refId": "D"
+        }
+      ]
+    },
+    { "id": 102, "type": "row", "title": "WebSocket", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 94 }, "panels": [] },
     {
       "id": 23,
       "type": "timeseries",
       "title": "WebSocket handshakes by result",
       "description": "accepted / rejected / failed。access_server_websocket_handshakes_total",
       "datasource": { "type": "prometheus", "uid": "prometheus-2" },
-      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 79 },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 95 },
       "fieldConfig": {
         "defaults": {
           "unit": "ops",
@@ -1030,7 +1252,7 @@
       "title": "WebSocket sessions completed by result",
       "description": "closed(正常结束)/ aborted(异常中止)。access_server_websocket_sessions_total",
       "datasource": { "type": "prometheus", "uid": "prometheus-2" },
-      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 79 },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 95 },
       "fieldConfig": {
         "defaults": {
           "unit": "ops",
@@ -1055,7 +1277,7 @@
       "type": "timeseries",
       "title": "WebSocket sessions in-flight",
       "datasource": { "type": "prometheus", "uid": "prometheus-2" },
-      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 79 },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 95 },
       "fieldConfig": {
         "defaults": {
           "unit": "short",

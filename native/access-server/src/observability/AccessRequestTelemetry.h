@@ -105,6 +105,17 @@ public:
         observability_.record_proxy_transport_error(app, ip_port, error_label);
     }
     void record_circuit_rejection(std::string_view app) noexcept { observability_.record_circuit_rejection(app); }
+    // Body-transfer accounting; see RequestObservability for the semantics.
+    void record_request_body_transfer(std::uint64_t downstream_bytes, std::uint64_t upstream_bytes) noexcept {
+        observability_.record_request_body_transfer(downstream_bytes, upstream_bytes);
+    }
+    void record_response_body_upstream(std::uint64_t bytes) noexcept {
+        observability_.record_response_body_upstream(bytes);
+    }
+    void record_provider_body_transfer(const ProxyUpstreamEndpoint &endpoint, AccessBodyDirection direction,
+                                       std::uint64_t bytes) noexcept {
+        observability_.record_provider_body_transfer(endpoint, direction, bytes);
+    }
     void mark_io_error(common::IoErr error) noexcept { observability_.mark_io_error(execution_, error); }
     void set_upstream(const ProxyUpstreamEndpoint &endpoint) noexcept {
         observability_.set_upstream(execution_, endpoint);

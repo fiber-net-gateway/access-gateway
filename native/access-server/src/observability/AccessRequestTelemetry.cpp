@@ -42,18 +42,28 @@ AccessRequestTelemetry::AccessRequestTelemetry(http::HttpExchange &exchange, Acc
     trace_(exchange.pool()), observability_(exchange, metrics, cat_client, client_metadata_, trace_) {}
 
 AccessRequestTelemetry::~AccessRequestTelemetry() noexcept {
-    if (gzip_writer_ && !response_compression_recorded_) {
-        switch (gzip_writer_->stats().decision) {
-            case http::GzipResponseDecision::Active:
-            case http::GzipResponseDecision::Completed:
-                observability_.record_response_compression(true);
-                break;
-            case http::GzipResponseDecision::Bypassed:
-                observability_.record_response_compression(false);
-                break;
-            case http::GzipResponseDecision::Undecided:
-            case http::GzipResponseDecision::Failed:
-                break;
+    if (gzip_writer_) {
+        // Byte accounting is independent of the decision recording below: a
+        // bypassed writer reports zeros for both streams and stays silent, and
+        // an explicitly recorded decision (static RESPONSE routes) must not
+        // suppress the compression byte counters.
+        const http::GzipResponseWriterStats &gzip_stats = gzip_writer_->stats();
+        if (gzip_stats.input_bytes != 0 || gzip_stats.output_bytes != 0) {
+            observability_.record_response_compression_bytes(gzip_stats.input_bytes, gzip_stats.output_bytes);
+        }
+        if (!response_compression_recorded_) {
+            switch (gzip_stats.decision) {
+                case http::GzipResponseDecision::Active:
+                case http::GzipResponseDecision::Completed:
+                    observability_.record_response_compression(true);
+                    break;
+                case http::GzipResponseDecision::Bypassed:
+                    observability_.record_response_compression(false);
+                    break;
+                case http::GzipResponseDecision::Undecided:
+                case http::GzipResponseDecision::Failed:
+                    break;
+            }
         }
     }
     observability_.finish(execution_.exchange());
