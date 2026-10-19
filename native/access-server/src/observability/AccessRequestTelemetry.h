@@ -71,6 +71,12 @@ public:
     void record_proxy_execution(AccessProxyExecutionResult result) noexcept {
         observability_.record_proxy_execution(result);
     }
+    // The response-body pipe tears down a still-open downstream channel itself
+    // on gateway-policy failures (body limit, idle timeout, upstream mid-body
+    // reset). The latch lets the final execution-result classification tell
+    // that self-inflicted teardown apart from a client-initiated close.
+    void mark_response_channel_self_abort() noexcept { response_channel_self_abort_ = true; }
+    [[nodiscard]] bool response_channel_self_abort() const noexcept { return response_channel_self_abort_; }
     void record_proxy_attempt_started() noexcept { observability_.record_proxy_attempt_started(); }
     void record_proxy_attempt_finished(AccessProxyAttemptResult result) noexcept {
         observability_.record_proxy_attempt_finished(result);
@@ -144,6 +150,7 @@ private:
     http::HttpResponseWriter response_writer_;
     std::optional<http::GzipResponseWriter> gzip_writer_;
     bool response_compression_recorded_ = false;
+    bool response_channel_self_abort_ = false;
     ClientMetadata client_metadata_;
     TracePropagation trace_;
     RequestObservability observability_;
