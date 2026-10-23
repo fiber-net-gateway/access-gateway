@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <expected>
 #include <optional>
 #include <type_traits>
@@ -28,7 +29,9 @@ using fiber::access_server::AccessServerRuntimeState;
 
 enum class LifecycleEvent {
     ControlStart,
+    DataPrepare,
     DataBind,
+    DataDrain,
     ControlRegister,
     DataServe,
     ControlDeregister,
@@ -49,6 +52,7 @@ struct FakeControlPlane {
                 .context = this,
                 .start = &start,
                 .register_instance = &register_instance,
+                .register_background = &register_background,
                 .deregister_instance = &deregister_instance,
                 .shutdown = &shutdown,
         };
@@ -62,6 +66,10 @@ struct FakeControlPlane {
             co_return std::unexpected(*self.register_error);
         }
         co_return std::expected<void, AccessServerRuntimeError>{};
+    }
+
+    static void register_background(void *context, fiber::access_server::AccessBoundEndpoint) noexcept {
+        static_cast<FakeControlPlane *>(context)->events->push_back(LifecycleEvent::ControlRegister);
     }
 
     [[nodiscard]] static fiber::async::Task<void> deregister_instance(void *context) noexcept {
@@ -103,15 +111,26 @@ struct FakeDataPlane {
     [[nodiscard]] AccessDataPlaneLifecycle lifecycle() noexcept {
         return AccessDataPlaneLifecycle{
                 .context = this,
+                .prepare = &prepare,
                 .bind = &bind,
+                .begin_drain = &begin_drain,
                 .serve = &serve,
                 .shutdown = &shutdown,
         };
     }
 
+    [[nodiscard]] static fiber::async::Task<std::expected<void, AccessServerRuntimeError>>
+    prepare(void *context, AccessControlPlaneReady) noexcept {
+        static_cast<FakeDataPlane *>(context)->events->push_back(LifecycleEvent::DataPrepare);
+        co_return std::expected<void, AccessServerRuntimeError>{};
+    }
+    static void begin_drain(void *context) noexcept {
+        static_cast<FakeDataPlane *>(context)->events->push_back(LifecycleEvent::DataDrain);
+    }
+
     [[nodiscard]] static fiber::async::Task<
             std::expected<fiber::access_server::AccessBoundEndpoint, AccessServerRuntimeError>>
-    bind(void *context, AccessControlPlaneReady) noexcept {
+    bind(void *context) noexcept {
         auto &self = *static_cast<FakeDataPlane *>(context);
         self.events->push_back(LifecycleEvent::DataBind);
         if (self.suspend_start) {
@@ -189,10 +208,10 @@ TEST(AccessRuntimeCoordinatorTest, StartsInOrderAndCoalescesConcurrentShutdown) 
         EXPECT_EQ(coordinator.state(), AccessServerRuntimeState::Stopped);
     });
 
-    EXPECT_EQ(events, (std::vector<LifecycleEvent>{LifecycleEvent::ControlStart, LifecycleEvent::DataBind,
-                                                   LifecycleEvent::ControlRegister, LifecycleEvent::DataServe,
-                                                   LifecycleEvent::ControlDeregister, LifecycleEvent::DataShutdown,
-                                                   LifecycleEvent::ControlShutdown}));
+    EXPECT_EQ(events, (std::vector<LifecycleEvent>{LifecycleEvent::ControlStart, LifecycleEvent::DataPrepare,
+                                                   LifecycleEvent::DataBind, LifecycleEvent::ControlRegister,
+                                                   LifecycleEvent::DataServe, LifecycleEvent::ControlDeregister,
+                                                   LifecycleEvent::DataShutdown, LifecycleEvent::ControlShutdown}));
 }
 
 TEST(AccessRuntimeCoordinatorTest, RollsBackControlPlaneFailureWithoutStartingDataPlane) {
@@ -238,8 +257,9 @@ TEST(AccessRuntimeCoordinatorTest, RollsBackDataPlaneFailureInReverseOrder) {
         EXPECT_EQ(coordinator.state(), AccessServerRuntimeState::Stopped);
     });
 
-    EXPECT_EQ(events, (std::vector<LifecycleEvent>{LifecycleEvent::ControlStart, LifecycleEvent::DataBind,
-                                                   LifecycleEvent::DataShutdown, LifecycleEvent::ControlShutdown}));
+    EXPECT_EQ(events, (std::vector<LifecycleEvent>{LifecycleEvent::ControlStart, LifecycleEvent::DataPrepare,
+                                                   LifecycleEvent::DataBind, LifecycleEvent::DataShutdown,
+                                                   LifecycleEvent::ControlShutdown}));
 }
 
 TEST(AccessRuntimeCoordinatorTest, RegistrationFailureClosesBoundListenersBeforeControlPlaneShutdown) {
@@ -262,9 +282,10 @@ TEST(AccessRuntimeCoordinatorTest, RegistrationFailureClosesBoundListenersBefore
         EXPECT_EQ(coordinator.state(), AccessServerRuntimeState::Stopped);
     });
 
-    EXPECT_EQ(events, (std::vector<LifecycleEvent>{LifecycleEvent::ControlStart, LifecycleEvent::DataBind,
-                                                   LifecycleEvent::ControlRegister, LifecycleEvent::ControlDeregister,
-                                                   LifecycleEvent::DataShutdown, LifecycleEvent::ControlShutdown}));
+    EXPECT_EQ(events, (std::vector<LifecycleEvent>{LifecycleEvent::ControlStart, LifecycleEvent::DataPrepare,
+                                                   LifecycleEvent::DataBind, LifecycleEvent::ControlRegister,
+                                                   LifecycleEvent::ControlDeregister, LifecycleEvent::DataShutdown,
+                                                   LifecycleEvent::ControlShutdown}));
 }
 
 TEST(AccessRuntimeCoordinatorTest, SignalRaceCancelsControlPlaneStartupBeforeRollback) {
@@ -320,15 +341,16 @@ TEST(AccessRuntimeCoordinatorTest, SignalRaceCancelsDataPlaneStartupBeforeRevers
         }
         std::move(startup).get<1>();
 
-        EXPECT_EQ(coordinator.state(), AccessServerRuntimeState::Starting);
+        EXPECT_EQ(coordinator.state(), AccessServerRuntimeState::Activating);
         EXPECT_FALSE(data.start_resumed);
         co_await coordinator.shutdown();
         co_await coordinator.shutdown();
         EXPECT_EQ(coordinator.state(), AccessServerRuntimeState::Stopped);
     });
 
-    EXPECT_EQ(events, (std::vector<LifecycleEvent>{LifecycleEvent::ControlStart, LifecycleEvent::DataBind,
-                                                   LifecycleEvent::DataShutdown, LifecycleEvent::ControlShutdown}));
+    EXPECT_EQ(events, (std::vector<LifecycleEvent>{LifecycleEvent::ControlStart, LifecycleEvent::DataPrepare,
+                                                   LifecycleEvent::DataBind, LifecycleEvent::DataShutdown,
+                                                   LifecycleEvent::ControlShutdown}));
     EXPECT_FALSE(data.start_resumed);
 }
 
@@ -344,6 +366,48 @@ TEST(AccessRuntimeCoordinatorTest, ShutdownBeforeStartReleasesOwnedControlPlaneO
     });
 
     EXPECT_EQ(events, (std::vector<LifecycleEvent>{LifecycleEvent::ControlShutdown}));
+}
+
+TEST(AccessRuntimeCoordinatorTest, PrepareNeverBindsAndUpgradeServesBeforeStartingRegistration) {
+    std::vector<LifecycleEvent> events;
+    FakeControlPlane control{.events = &events};
+    FakeDataPlane data{.events = &events};
+    run_on_loop([&]() -> fiber::async::Task<void> {
+        AccessRuntimeCoordinator coordinator(control.lifecycle(), data.lifecycle());
+        auto prepared = co_await coordinator.prepare();
+        EXPECT_TRUE(prepared);
+        EXPECT_EQ(coordinator.state(), AccessServerRuntimeState::Prepared);
+        EXPECT_EQ(events, (std::vector<LifecycleEvent>{LifecycleEvent::ControlStart, LifecycleEvent::DataPrepare}));
+        auto active = co_await coordinator.activate(true);
+        EXPECT_TRUE(active);
+        EXPECT_EQ(coordinator.state(), AccessServerRuntimeState::Running);
+        EXPECT_EQ(events, (std::vector<LifecycleEvent>{LifecycleEvent::ControlStart, LifecycleEvent::DataPrepare,
+                                                       LifecycleEvent::DataBind, LifecycleEvent::DataServe,
+                                                       LifecycleEvent::ControlRegister}));
+        auto released = co_await coordinator.release();
+        EXPECT_TRUE(released);
+        EXPECT_EQ(coordinator.state(), AccessServerRuntimeState::Draining);
+        EXPECT_EQ(events.back(), LifecycleEvent::DataDrain);
+        EXPECT_EQ(std::count(events.begin(), events.end(), LifecycleEvent::DataShutdown), 0);
+        EXPECT_TRUE(co_await coordinator.release());
+        EXPECT_EQ(std::count(events.begin(), events.end(), LifecycleEvent::DataDrain), 1);
+        co_await coordinator.shutdown();
+        EXPECT_EQ(events[events.size() - 2], LifecycleEvent::DataShutdown);
+        EXPECT_EQ(events.back(), LifecycleEvent::ControlShutdown);
+    });
+}
+
+TEST(AccessRuntimeCoordinatorTest, CancellingAnIdlePrewarmReleasesNeverBoundResources) {
+    std::vector<LifecycleEvent> events;
+    FakeControlPlane control{.events = &events};
+    FakeDataPlane data{.events = &events};
+    run_on_loop([&]() -> fiber::async::Task<void> {
+        AccessRuntimeCoordinator coordinator(control.lifecycle(), data.lifecycle());
+        EXPECT_TRUE(co_await coordinator.prepare());
+        co_await coordinator.shutdown();
+        EXPECT_EQ(events, (std::vector<LifecycleEvent>{LifecycleEvent::ControlStart, LifecycleEvent::DataPrepare,
+                                                       LifecycleEvent::DataShutdown, LifecycleEvent::ControlShutdown}));
+    });
 }
 
 } // namespace

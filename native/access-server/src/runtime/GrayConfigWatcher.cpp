@@ -53,7 +53,10 @@ GrayConfigWatcher::GrayConfigWatcher(event::EventLoop &loop, nacos::ConfigServic
                                      GrayMatchStore &store, GrayConfigWatcherOptions options,
                                      AccessGrayActivationEvidenceObserver observer) :
     loop_(&loop), config_service_(&config_service), store_(&store), options_(std::move(options)), observer_(observer),
-    subscription_(loop) {}
+    subscription_(loop) {
+    readiness_publisher_ = readiness_.acquire_publisher();
+    FIBER_ASSERT(readiness_publisher_);
+}
 
 GrayConfigWatcher::~GrayConfigWatcher() noexcept {
     FIBER_ASSERT(state_ == GrayConfigWatcherState::Created || state_ == GrayConfigWatcherState::Stopped);
@@ -85,6 +88,7 @@ async::Task<void> GrayConfigWatcher::shutdown() noexcept {
         co_return;
     }
     if (state_ == GrayConfigWatcherState::Created) {
+        readiness_publisher_->publish(false);
         subscription_.stop();
         state_ = GrayConfigWatcherState::Stopped;
         publish_evidence();
@@ -93,6 +97,7 @@ async::Task<void> GrayConfigWatcher::shutdown() noexcept {
     if (state_ == GrayConfigWatcherState::Running) {
         state_ = GrayConfigWatcherState::Stopping;
     }
+    readiness_publisher_->publish(false);
     subscription_.stop();
     state_ = GrayConfigWatcherState::Stopped;
     publish_evidence();
@@ -108,6 +113,7 @@ void GrayConfigWatcher::on_notify(void *context, const nacos::SubscriptionResult
                     .message = "gray configuration subscription closed before shutdown",
             });
             owner.state_ = GrayConfigWatcherState::Failed;
+            owner.readiness_publisher_->publish(false);
             ++owner.failed_updates_;
             owner.last_failure_ = GrayConfigWatcherFailure{
                     .stage = "subscription",
@@ -155,6 +161,7 @@ void GrayConfigWatcher::apply(const nacos::ConfigData &data) {
     }
     auto updated = store_->apply(*parsed);
     FIBER_ASSERT(updated.has_value());
+    readiness_publisher_->publish(true);
     if (*updated == GrayMatchUpdateStatus::Published) {
         ++successful_updates_;
         active_md5_ = observed_md5_;

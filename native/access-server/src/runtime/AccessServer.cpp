@@ -156,11 +156,26 @@ async::DetachedTask AccessServer::serve() {
 
 async::DetachedTask AccessServer::serve_metrics() { return metrics_endpoint_.serve(); }
 
-async::Task<void> AccessServer::shutdown_and_wait() noexcept {
+bool AccessServer::serving() const noexcept {
+    return (!main_bound_ || server_.state() == http::Server::State::Serving) &&
+           (!plain_bound_ || plain_server_.state() == http::Server::State::Serving) && metrics_endpoint_.serving();
+}
+
+void AccessServer::begin_drain() noexcept {
     FIBER_ASSERT(accept_loop_->in_loop());
-    co_await metrics_endpoint_.shutdown_and_wait();
+    metrics_endpoint_.begin_drain();
     server_.stop();
     plain_server_.stop();
+    // Endpoint storage may be reclaimed as soon as the stop tasks run.
+    tls_endpoint_ = nullptr;
+    plain_endpoint_ = nullptr;
+    http3_endpoint_ = nullptr;
+}
+
+async::Task<void> AccessServer::shutdown_and_wait() noexcept {
+    FIBER_ASSERT(accept_loop_->in_loop());
+    begin_drain();
+    co_await metrics_endpoint_.shutdown_and_wait();
     co_await server_.stop_and_wait();
     co_await plain_server_.stop_and_wait();
     co_await serve_tasks_.join();

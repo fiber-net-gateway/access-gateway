@@ -22,7 +22,10 @@ class TlsBootstrapIdentity;
 enum class AccessServerRuntimeState : std::uint8_t {
     Created,
     Starting,
+    Prepared,
+    Activating,
     Running,
+    Draining,
     Stopping,
     Stopped,
 };
@@ -53,18 +56,22 @@ struct AccessControlPlaneLifecycle {
     void *context = nullptr;
     StartFunction start = nullptr;
     RegisterFunction register_instance = nullptr;
+    void (*register_background)(void *, AccessBoundEndpoint) noexcept = nullptr;
     ShutdownFunction deregister_instance = nullptr;
     ShutdownFunction shutdown = nullptr;
 };
 
 struct AccessDataPlaneLifecycle {
-    using BindFunction = async::Task<std::expected<AccessBoundEndpoint, AccessServerRuntimeError>> (*)(
+    using PrepareFunction = async::Task<std::expected<void, AccessServerRuntimeError>> (*)(
             void *context, AccessControlPlaneReady ready) noexcept;
+    using BindFunction = async::Task<std::expected<AccessBoundEndpoint, AccessServerRuntimeError>> (*)(void *) noexcept;
     using ServeFunction = async::Task<std::expected<void, AccessServerRuntimeError>> (*)(void *context) noexcept;
     using ShutdownFunction = async::Task<void> (*)(void *context) noexcept;
 
     void *context = nullptr;
+    PrepareFunction prepare = nullptr;
     BindFunction bind = nullptr;
+    void (*begin_drain)(void *) noexcept = nullptr;
     ServeFunction serve = nullptr;
     ShutdownFunction shutdown = nullptr;
 };
@@ -75,6 +82,10 @@ public:
     ~AccessRuntimeCoordinator() noexcept;
 
     [[nodiscard]] async::Task<std::expected<void, AccessServerRuntimeError>> start() noexcept;
+    [[nodiscard]] async::Task<std::expected<void, AccessServerRuntimeError>> prepare() noexcept;
+    [[nodiscard]] async::Task<std::expected<void, AccessServerRuntimeError>>
+    activate(bool background_registration) noexcept;
+    [[nodiscard]] async::Task<std::expected<void, AccessServerRuntimeError>> release() noexcept;
     [[nodiscard]] async::Task<void> shutdown() noexcept;
 
     [[nodiscard]] AccessServerRuntimeState state() const noexcept { return state_; }
@@ -87,6 +98,8 @@ private:
     AccessServerRuntimeState state_ = AccessServerRuntimeState::Created;
     bool data_plane_bind_attempted_ = false;
     bool registration_attempted_ = false;
+    bool listeners_released_ = false;
+    bool shutdown_started_ = false;
     bool control_plane_shutdown_required_ = true;
 };
 

@@ -22,6 +22,7 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <string_view>
 
 #include <fiber/async/Task.h>
 #include <fiber/async/WaitGroup.h>
@@ -63,6 +64,8 @@ struct AccessControlPlaneDependencies {
 
 struct AccessControlPlaneOptions {
     std::chrono::milliseconds initial_config_timeout{0};
+    std::chrono::milliseconds registration_retry_initial_delay{100};
+    std::chrono::milliseconds registration_retry_max_delay{5000};
     AccessActivationEndpointOptions activation_endpoint;
     AccessConfigWatcherOptions config_watcher;
     GrayConfigWatcherOptions gray_watcher;
@@ -90,6 +93,9 @@ public:
     [[nodiscard]] async::Task<std::expected<AccessControlPlaneReady, AccessServerRuntimeError>> start() noexcept;
     [[nodiscard]] async::Task<std::expected<void, AccessServerRuntimeError>>
     register_instance(AccessBoundEndpoint endpoint) noexcept;
+    void register_background(AccessBoundEndpoint endpoint) noexcept;
+    [[nodiscard]] std::string_view registration_state() noexcept;
+    [[nodiscard]] bool upgrade_ready() noexcept;
     [[nodiscard]] async::Task<void> deregister_instance() noexcept;
     [[nodiscard]] async::Task<void> shutdown() noexcept;
 
@@ -126,6 +132,8 @@ private:
 
     struct InstanceRegistrationStatus {
         bool success = false;
+        bool retrying = false;
+        bool stopped = false;
         AccessServerRuntimeError error;
     };
 
@@ -135,6 +143,9 @@ private:
     [[nodiscard]] static async::Task<std::expected<void, AccessServerRuntimeError>>
     register_instance_lifecycle(void *context, AccessBoundEndpoint endpoint) noexcept;
     [[nodiscard]] static async::Task<void> deregister_instance_lifecycle(void *context) noexcept;
+    static void register_background_lifecycle(void *context, AccessBoundEndpoint endpoint) noexcept;
+    [[nodiscard]] async::DetachedTask background_registration_on_owner(AccessBoundEndpoint endpoint) noexcept;
+    [[nodiscard]] async::Task<void> maintain_registration(AccessBoundEndpoint endpoint) noexcept;
 
     [[nodiscard]] async::DetachedTask start_nacos_on_owner() noexcept;
     [[nodiscard]] async::DetachedTask start_cat_on_owner() noexcept;
@@ -153,6 +164,8 @@ private:
     event::EventLoop *nacos_loop_ = nullptr;
     event::EventLoop *cat_loop_ = nullptr;
     std::chrono::milliseconds initial_config_timeout_{0};
+    std::chrono::milliseconds registration_retry_initial_delay_;
+    std::chrono::milliseconds registration_retry_max_delay_;
     std::unique_ptr<cat::CatClient> cat_client_;
     std::unique_ptr<nacos::NacosClient> nacos_client_;
     std::unique_ptr<nacos::ConfigService> config_service_;
@@ -182,6 +195,8 @@ private:
     std::optional<async::Watch<CatStartStatus>::Publisher> cat_start_publisher_;
     async::Watch<InstanceRegistrationStatus> instance_registration_status_;
     std::optional<async::Watch<InstanceRegistrationStatus>::Publisher> instance_registration_publisher_;
+    async::Watch<bool> registration_stop_{false};
+    std::optional<async::Watch<bool>::Publisher> registration_stop_publisher_;
     async::Watch<bool> instance_deregistered_{false};
     std::optional<async::Watch<bool>::Publisher> instance_deregistered_publisher_;
     async::Watch<bool> nacos_stopped_{false};

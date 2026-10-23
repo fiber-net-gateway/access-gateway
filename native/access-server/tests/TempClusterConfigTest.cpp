@@ -216,15 +216,21 @@ TEST(TempClusterConfigTest, WatcherAppliesRetainsAndClears) {
 
     fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
         EXPECT_TRUE(watcher.start());
+        auto readiness = watcher.subscribe_readiness();
+        EXPECT_FALSE(*readiness.current().value);
+        service.push("{", "first-invalid");
+        co_await yield_updates();
+        EXPECT_FALSE(*readiness.current().value);
         service.push(R"({"orders":["temp-1"]})", "v1");
         co_await yield_updates();
         EXPECT_EQ(watcher.successful_updates(), 1u);
+        EXPECT_TRUE(*readiness.current().value);
         EXPECT_TRUE(store.contains("orders", "temp-1"));
 
         service.push(R"({"orders":{"cluster":"temp-1"}})", "invalid");
         co_await yield_updates();
         EXPECT_TRUE(store.contains("orders", "temp-1"));
-        EXPECT_EQ(watcher.failed_updates(), 1u);
+        EXPECT_EQ(watcher.failed_updates(), 2u);
         EXPECT_TRUE(watcher.last_failure());
         if (watcher.last_failure()) {
             EXPECT_EQ(watcher.last_failure()->stage, "decode");
@@ -236,10 +242,12 @@ TEST(TempClusterConfigTest, WatcherAppliesRetainsAndClears) {
         EXPECT_FALSE(store.contains("orders", "temp-1"));
         EXPECT_EQ(watcher.successful_updates(), 2u);
 
+        EXPECT_TRUE(*readiness.current().value);
         service.close();
         co_await yield_updates();
         EXPECT_EQ(watcher.state(), fiber::access_server::TempClusterConfigWatcherState::Failed);
 
+        EXPECT_FALSE(*readiness.current().value);
         co_await watcher.shutdown();
         completed = true;
         loop.stop();

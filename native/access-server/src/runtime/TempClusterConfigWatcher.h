@@ -10,6 +10,7 @@
 #include <string>
 
 #include <fiber/async/Task.h>
+#include <fiber/async/Watch.h>
 #include <fiber/common/NonCopyable.h>
 #include <fiber/common/NonMovable.h>
 #include <fiber/event/EventLoop.h>
@@ -48,6 +49,7 @@ public:
 
     [[nodiscard]] std::expected<void, nacos::ConfigServiceError> start();
     [[nodiscard]] async::Task<void> shutdown() noexcept;
+    [[nodiscard]] async::Watch<bool>::Subscriber subscribe_readiness() { return readiness_.subscribe(); }
 
     [[nodiscard]] TempClusterConfigWatcherState state() const noexcept { return state_; }
     [[nodiscard]] std::uint64_t successful_updates() const noexcept { return successful_updates_; }
@@ -60,6 +62,8 @@ private:
     static void on_notify(void *context, const nacos::SubscriptionResult<nacos::ConfigData> &result) noexcept;
     void apply(const nacos::ConfigData &data);
 
+    async::Watch<bool> readiness_{false};
+    std::optional<async::Watch<bool>::Publisher> readiness_publisher_;
     event::EventLoop *loop_ = nullptr;
     nacos::ConfigService *config_service_ = nullptr;
     TempClusterStore *store_ = nullptr;

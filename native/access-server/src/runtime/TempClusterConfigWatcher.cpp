@@ -12,7 +12,10 @@ namespace fiber::access_server {
 TempClusterConfigWatcher::TempClusterConfigWatcher(event::EventLoop &loop, nacos::ConfigService &config_service,
                                                    TempClusterStore &store,
                                                    TempClusterConfigWatcherOptions options) noexcept :
-    loop_(&loop), config_service_(&config_service), store_(&store), options_(std::move(options)), subscription_(loop) {}
+    loop_(&loop), config_service_(&config_service), store_(&store), options_(std::move(options)), subscription_(loop) {
+    readiness_publisher_ = readiness_.acquire_publisher();
+    FIBER_ASSERT(readiness_publisher_);
+}
 
 TempClusterConfigWatcher::~TempClusterConfigWatcher() noexcept {
     FIBER_ASSERT(state_ == TempClusterConfigWatcherState::Created || state_ == TempClusterConfigWatcherState::Stopped);
@@ -45,6 +48,7 @@ async::Task<void> TempClusterConfigWatcher::shutdown() noexcept {
     if (state_ == TempClusterConfigWatcherState::Running) {
         state_ = TempClusterConfigWatcherState::Stopping;
     }
+    readiness_publisher_->publish(false);
     subscription_.stop();
     state_ = TempClusterConfigWatcherState::Stopped;
     co_return;
@@ -61,6 +65,7 @@ void TempClusterConfigWatcher::on_notify(void *context,
                     .message = "temp-cluster configuration subscription closed before shutdown",
             });
             owner.state_ = TempClusterConfigWatcherState::Failed;
+            owner.readiness_publisher_->publish(false);
             ++owner.failed_updates_;
             owner.last_failure_ = TempClusterConfigWatcherFailure{
                     .stage = "subscription",
@@ -99,6 +104,7 @@ void TempClusterConfigWatcher::apply(const nacos::ConfigData &data) {
     }
     auto updated = store_->apply(*parsed);
     FIBER_ASSERT(updated.has_value());
+    readiness_publisher_->publish(true);
     ++successful_updates_;
 }
 

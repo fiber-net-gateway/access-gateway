@@ -7,6 +7,7 @@
 
 #include <expected>
 #include <memory>
+#include <string_view>
 
 #include <fiber/async/Task.h>
 #include <fiber/common/NonCopyable.h>
@@ -30,6 +31,11 @@ public:
     ~AccessServerRuntime() noexcept;
 
     [[nodiscard]] async::Task<std::expected<void, AccessServerRuntimeError>> start() noexcept;
+    [[nodiscard]] async::Task<std::expected<void, AccessServerRuntimeError>> prepare() noexcept;
+    [[nodiscard]] async::Task<std::expected<void, AccessServerRuntimeError>> activate_upgrade() noexcept;
+    [[nodiscard]] async::Task<std::expected<void, AccessServerRuntimeError>> release() noexcept;
+    [[nodiscard]] bool upgrade_ready() noexcept;
+    [[nodiscard]] std::string_view registration_state() const noexcept;
     [[nodiscard]] async::Task<void> shutdown() noexcept;
 
     [[nodiscard]] AccessServerRuntimeState state() const noexcept { return coordinator_.state(); }

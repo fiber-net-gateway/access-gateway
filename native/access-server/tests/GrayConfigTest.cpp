@@ -297,9 +297,15 @@ TEST(GrayConfigTest, WatcherRetainsOnEmptyAndInvalidThenAcceptsClear) {
 
     fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
         EXPECT_TRUE(watcher.start());
+        auto readiness = watcher.subscribe_readiness();
+        EXPECT_FALSE(*readiness.current().value);
+        service.push("{", "first-invalid");
+        co_await yield_updates();
+        EXPECT_FALSE(*readiness.current().value);
         service.push(R"({"internet":{"ratio":5000,"cidrs":["2001:db8::/32"]}})", "v1");
         co_await yield_updates();
         EXPECT_EQ(store.rule_count(), 1u);
+        EXPECT_TRUE(*readiness.current().value);
         EXPECT_TRUE(store.matches(
                 "internet",
                 metadata_for(fiber::net::IpAddress::v6({0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1})),
@@ -336,7 +342,7 @@ TEST(GrayConfigTest, WatcherRetainsOnEmptyAndInvalidThenAcceptsClear) {
         service.push("{", "invalid");
         co_await yield_updates();
         EXPECT_EQ(store.rule_count(), 1u);
-        EXPECT_EQ(watcher.failed_updates(), 2u);
+        EXPECT_EQ(watcher.failed_updates(), 3u);
         EXPECT_TRUE(watcher.last_failure());
 
         service.push("{}", "clear");
@@ -346,6 +352,7 @@ TEST(GrayConfigTest, WatcherRetainsOnEmptyAndInvalidThenAcceptsClear) {
         EXPECT_EQ(activation_evidence.pin()->gray.resource.active_md5, "clear");
         EXPECT_EQ(activation_evidence.pin()->gray.generation, 2U);
 
+        EXPECT_TRUE(*readiness.current().value);
         service.close();
         co_await yield_updates();
         EXPECT_EQ(watcher.state(), fiber::access_server::GrayConfigWatcherState::Failed);
@@ -357,6 +364,7 @@ TEST(GrayConfigTest, WatcherRetainsOnEmptyAndInvalidThenAcceptsClear) {
         }
         EXPECT_EQ(closed_evidence->gray.resource.active_md5, "clear");
 
+        EXPECT_FALSE(*readiness.current().value);
         co_await watcher.shutdown();
         completed = true;
         loop.stop();

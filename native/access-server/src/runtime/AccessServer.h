@@ -64,6 +64,8 @@ public:
                                                       const net::ListenOptions &options = {});
     async::DetachedTask serve();
     async::DetachedTask serve_metrics();
+    void begin_drain() noexcept;
+    [[nodiscard]] bool serving() const noexcept;
     [[nodiscard]] async::Task<void> shutdown_and_wait() noexcept;
     [[nodiscard]] int fd() const noexcept { return tls_endpoint_ ? tls_endpoint_->listener_fd() : -1; }
     [[nodiscard]] int plain_fd() const noexcept { return plain_endpoint_ ? plain_endpoint_->listener_fd() : -1; }
