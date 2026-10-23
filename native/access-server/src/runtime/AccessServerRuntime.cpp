@@ -46,6 +46,24 @@ async::Task<std::expected<void, AccessServerRuntimeError>> AccessServerRuntime::
     return coordinator_.start();
 }
 
+async::Task<std::expected<void, AccessServerRuntimeError>> AccessServerRuntime::prepare() noexcept {
+    return coordinator_.prepare();
+}
+
+async::Task<std::expected<void, AccessServerRuntimeError>> AccessServerRuntime::activate_upgrade() noexcept {
+    return coordinator_.activate(true);
+}
+
+async::Task<std::expected<void, AccessServerRuntimeError>> AccessServerRuntime::release() noexcept {
+    return coordinator_.release();
+}
+
+bool AccessServerRuntime::upgrade_ready() noexcept { return control_plane_->upgrade_ready(); }
+
+std::string_view AccessServerRuntime::registration_state() const noexcept {
+    return control_plane_->registration_state();
+}
+
 async::Task<void> AccessServerRuntime::shutdown() noexcept { return coordinator_.shutdown(); }
 
 int AccessServerRuntime::fd() const noexcept { return data_plane_->fd(); }

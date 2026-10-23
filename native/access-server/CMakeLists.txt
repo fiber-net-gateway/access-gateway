@@ -97,6 +97,9 @@ add_library(access_server::execution ALIAS access_server_execution)
 
 access_server_add_component(access_server_runtime
     "${CMAKE_CURRENT_LIST_DIR}/src/runtime/AccessActivationEndpoint.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/runtime/AccessControlProtocol.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/runtime/AccessProcessControl.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/runtime/AccessProcessArguments.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/runtime/AccessControlPlaneSupervisor.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/runtime/AccessConfigCompiler.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/runtime/AccessConfigWatcher.cpp"
@@ -182,6 +185,11 @@ fiber_add_app(access_server
         "${CMAKE_CURRENT_LIST_DIR}/src/main.cpp"
     LIBRARIES
         access_server_runtime)
+
+fiber_add_app(access_serverctl
+    OUTPUT_NAME access-serverctl
+    SOURCES "${CMAKE_CURRENT_LIST_DIR}/src/control_main.cpp"
+    LIBRARIES access_server_runtime)
 
 if (ACCESS_SERVER_BUILD_BENCHMARKS)
     function(access_server_add_benchmark target source library)
@@ -275,6 +283,7 @@ if (FIBER_BUILD_TESTS AND (GTest_FOUND OR TARGET GTest::gtest_main))
         "${CMAKE_CURRENT_LIST_DIR}/tests/AccessRequestHandlerTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/AccessRequestTelemetryTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/AccessRuntimeCoordinatorTest.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/tests/AccessProcessControlTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/AccessServerTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/AccessServerMetricsTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/AccessServerConfigTest.cpp"

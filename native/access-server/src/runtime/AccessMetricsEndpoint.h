@@ -36,6 +36,8 @@ public:
     [[nodiscard]] common::IoResult<void> bind(const net::SocketAddress &address,
                                               const net::ListenOptions &options = {});
     async::DetachedTask serve();
+    void begin_drain() noexcept;
+    [[nodiscard]] bool serving() const noexcept { return server_.state() == http::Server::State::Serving; }
     [[nodiscard]] async::Task<void> shutdown_and_wait() noexcept;
     [[nodiscard]] int fd() const noexcept { return endpoint_ ? endpoint_->listener_fd() : -1; }
 

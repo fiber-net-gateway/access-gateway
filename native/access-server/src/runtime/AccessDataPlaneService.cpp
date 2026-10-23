@@ -11,6 +11,7 @@
 #include <sys/socket.h>
 
 #include <fiber/async/Spawn.h>
+#include <fiber/async/Yield.h>
 #include <fiber/common/Assert.h>
 
 namespace fiber::access_server {
@@ -45,15 +46,33 @@ AccessDataPlaneService::~AccessDataPlaneService() noexcept = default;
 AccessDataPlaneLifecycle AccessDataPlaneService::lifecycle() noexcept {
     return AccessDataPlaneLifecycle{
             .context = this,
+            .prepare = &prepare_lifecycle,
             .bind = &bind_lifecycle,
+            .begin_drain = &begin_drain_lifecycle,
             .serve = &serve_lifecycle,
             .shutdown = &shutdown_lifecycle,
     };
 }
 
 async::Task<std::expected<AccessBoundEndpoint, AccessServerRuntimeError>>
-AccessDataPlaneService::bind_lifecycle(void *context, AccessControlPlaneReady ready) noexcept {
-    return static_cast<AccessDataPlaneService *>(context)->bind(std::move(ready));
+AccessDataPlaneService::bind_lifecycle(void *context) noexcept {
+    return static_cast<AccessDataPlaneService *>(context)->bind();
+}
+
+async::Task<std::expected<void, AccessServerRuntimeError>>
+AccessDataPlaneService::prepare_lifecycle(void *context, AccessControlPlaneReady ready) noexcept {
+    return static_cast<AccessDataPlaneService *>(context)->prepare(std::move(ready));
+}
+
+void AccessDataPlaneService::begin_drain_lifecycle(void *context) noexcept {
+    static_cast<AccessDataPlaneService *>(context)->begin_drain();
+}
+
+void AccessDataPlaneService::begin_drain() noexcept {
+    FIBER_ASSERT(accept_loop_->in_loop());
+    if (server_) {
+        server_->begin_drain();
+    }
 }
 
 async::Task<std::expected<void, AccessServerRuntimeError>>
@@ -67,15 +86,19 @@ async::Task<void> AccessDataPlaneService::shutdown_lifecycle(void *context) noex
 
 async::Task<std::expected<void, AccessServerRuntimeError>>
 AccessDataPlaneService::start(AccessControlPlaneReady ready) noexcept {
-    auto bound = co_await bind(std::move(ready));
+    auto prepared = co_await prepare(std::move(ready));
+    if (!prepared) {
+        co_return std::unexpected(std::move(prepared.error()));
+    }
+    auto bound = co_await bind();
     if (!bound) {
         co_return std::unexpected(std::move(bound.error()));
     }
     co_return co_await serve();
 }
 
-async::Task<std::expected<AccessBoundEndpoint, AccessServerRuntimeError>>
-AccessDataPlaneService::bind(AccessControlPlaneReady ready) noexcept {
+async::Task<std::expected<void, AccessServerRuntimeError>>
+AccessDataPlaneService::prepare(AccessControlPlaneReady ready) noexcept {
     FIBER_ASSERT(accept_loop_->in_loop());
     FIBER_ASSERT(!server_);
     FIBER_ASSERT(!shutdown_complete_);
@@ -124,6 +147,15 @@ AccessDataPlaneService::bind(AccessControlPlaneReady ready) noexcept {
                                                                       initialized.error()));
     }
 
+    ready_ = std::move(ready);
+    co_return std::expected<void, AccessServerRuntimeError>{};
+}
+
+async::Task<std::expected<AccessBoundEndpoint, AccessServerRuntimeError>> AccessDataPlaneService::bind() noexcept {
+    FIBER_ASSERT(accept_loop_->in_loop());
+    FIBER_ASSERT(server_);
+    FIBER_ASSERT(!bound_);
+    auto &ready = ready_;
     // The TLS listener is only bound when TLS is enabled; with TLS off the
     // TLS address:port stays closed and only the plaintext listener serves.
     if (options_.http_server.tls.enabled()) {
@@ -177,6 +209,11 @@ async::Task<std::expected<void, AccessServerRuntimeError>> AccessDataPlaneServic
     }
     async::spawn([this]() { return server_->serve(); });
     async::spawn([this]() { return server_->serve_metrics(); });
+    // spawn() schedules the coroutine. Do not report service until the Server
+    // has actually transitioned to Serving on this owner loop.
+    while (!server_->serving()) {
+        co_await async::yield();
+    }
     serving_ = true;
     co_return std::expected<void, AccessServerRuntimeError>{};
 }
@@ -185,6 +222,9 @@ async::Task<void> AccessDataPlaneService::rollback_start(AccessControlPlaneReady
     FIBER_ASSERT(accept_loop_->in_loop());
     if (ready.tls_bootstrap) {
         ready.tls_bootstrap->close();
+    }
+    if (ready_.tls_bootstrap) {
+        ready_.tls_bootstrap->close();
     }
     if (server_) {
         co_await server_->shutdown_and_wait();
@@ -198,6 +238,9 @@ async::Task<void> AccessDataPlaneService::shutdown() noexcept {
     FIBER_ASSERT(accept_loop_->in_loop());
     if (shutdown_complete_) {
         co_return;
+    }
+    if (ready_.tls_bootstrap) {
+        ready_.tls_bootstrap->close();
     }
     if (server_) {
         co_await server_->shutdown_and_wait();

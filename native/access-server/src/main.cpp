@@ -1,5 +1,7 @@
 #include "observability/AccessLogChannel.h"
 #include "observability/AccessServerLogCategories.h"
+#include "runtime/AccessProcessArguments.h"
+#include "runtime/AccessProcessControl.h"
 #include "runtime/AccessServerConfig.h"
 #include "runtime/AccessServerRuntime.h"
 
@@ -13,6 +15,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #include <cerrno>
 #include <fcntl.h>
@@ -21,8 +24,11 @@
 #include <unistd.h>
 
 #include <fiber/async/Signal.h>
+#include <fiber/async/Sleep.h>
 #include <fiber/async/Spawn.h>
 #include <fiber/async/TaskSelect.h>
+#include <fiber/async/Timeout.h>
+#include <fiber/async/Watch.h>
 #include <fiber/async/WhenAny.h>
 #include <fiber/common/IoError.h>
 #include <fiber/common/util/CpuConcurrency.h>
@@ -38,7 +44,8 @@ namespace {
 
 DEFINE_LOGGER(LOG_LIFECYCLE, fiber::access_server::kAccessServerLifecycleLogger);
 
-constexpr std::string_view kUsage = "usage: access-server [config.env]\n";
+constexpr std::string_view kUsage = "usage: access-server [config.env] [--start-mode=normal|prewarm] "
+                                    "[--control-dir=/run/access-server/<instance>] [--prewarm-timeout-millis=120000]\n";
 
 fiber::common::IoResult<std::uint16_t> bound_port(int fd) noexcept {
     sockaddr_storage storage{};
@@ -184,18 +191,28 @@ int main(int argc, char **argv) {
         std::cout << kUsage;
         return 0;
     }
-    if (argc > 2) {
+    std::vector<std::string_view> arguments;
+    for (int i = 1; i < argc; ++i) {
+        arguments.emplace_back(argv[i]);
+    }
+    auto parsed_arguments = fiber::access_server::parse_access_process_arguments(arguments);
+    if (!parsed_arguments) {
         std::cerr << kUsage;
         return 1;
     }
-
-    const std::string_view config_path = argc == 2 ? std::string_view(argv[1]) : std::string_view("access-server.env");
+    const auto launch = std::move(*parsed_arguments);
+    const std::string_view config_path = launch.config_path;
     auto loaded = fiber::access_server::AccessServerConfig::load_from_file(config_path);
     if (!loaded) {
         print_config_error(config_path, loaded.error());
         return 1;
     }
     fiber::access_server::AccessServerConfig config = std::move(*loaded);
+
+    if (launch.prewarm && config.tls_http_server_options().http3_enabled) {
+        std::cerr << "prewarm upgrade does not support HTTP/3; disable it explicitly before using this mode\n";
+        return 1;
+    }
 
     (void) ::signal(SIGPIPE, SIG_IGN);
     fiber::async::SignalSet shutdown_signals;
@@ -244,32 +261,109 @@ int main(int argc, char **argv) {
     }
     std::unique_ptr<fiber::access_server::AccessServerRuntime> runtime = std::move(*created);
 
+    std::unique_ptr<fiber::access_server::AccessProcessControl> control;
+    if (!launch.control_directory.empty()) {
+        auto options = fiber::access_server::access_process_control_options(config, launch.control_directory);
+        if (!options || (launch.prewarm && !options->fixed_ports)) {
+            std::cerr << "invalid process-control configuration (fixed ports and existing log directory required)\n";
+            return 1;
+        }
+        control = std::make_unique<fiber::access_server::AccessProcessControl>(
+                accept_loop, fiber::access_server::access_process_actions(*runtime), std::move(*options));
+        auto initialized = control->initialize();
+        if (!initialized) {
+            std::cerr << "failed to initialize process control: " << fiber::common::io_err_name(initialized.error())
+                      << '\n';
+            return 1;
+        }
+        std::cout << "access-server control socket=" << control->path() << std::endl;
+    }
+
     http_workers.start(shutdown_signals);
     nacos_group.start(shutdown_signals);
     cat_group.start(shutdown_signals);
 
     fiber::event::SignalService signal_service(accept_loop);
+    fiber::async::Watch<bool> no_control_exit{false};
+    auto wait_control = [&]() -> fiber::async::Task<void> {
+        if (control) {
+            co_await control->wait_exit();
+        } else {
+            auto subscriber = no_control_exit.subscribe();
+            auto snapshot = subscriber.current();
+            (void) co_await subscriber.next(snapshot.version);
+        }
+    };
+    auto stop_runtime = [&]() -> fiber::async::Task<void> {
+        if (control) {
+            co_await control->quiesce();
+        }
+        co_await runtime->shutdown();
+        if (control) {
+            co_await control->shutdown();
+        }
+    };
+    auto wait_idle_prewarm = [&]() -> fiber::async::Task<void> {
+        if (launch.prewarm) {
+            co_await fiber::async::sleep(std::chrono::seconds(120));
+            if (runtime->state() == fiber::access_server::AccessServerRuntimeState::Prepared &&
+                control->status().phase == "idle") {
+                co_return;
+            }
+        }
+        auto subscriber = no_control_exit.subscribe();
+        auto snapshot = subscriber.current();
+        (void) co_await subscriber.next(snapshot.version);
+    };
+    using StartResult = std::expected<void, fiber::access_server::AccessServerRuntimeError>;
+    auto prepare_runtime = [&]() -> fiber::async::Task<StartResult> {
+        auto prepared = co_await runtime->prepare();
+        if (!prepared) {
+            co_return std::unexpected(std::move(prepared.error()));
+        }
+        while (!runtime->upgrade_ready()) {
+            co_await fiber::async::sleep(std::chrono::milliseconds(10));
+        }
+        co_return StartResult{};
+    };
+    auto start_runtime = [&]() -> fiber::async::Task<StartResult> {
+        if (!launch.prewarm) {
+            co_return co_await runtime->start();
+        }
+        auto prepared = co_await fiber::async::timeout_for([&]() { return prepare_runtime().select(); },
+                                                           launch.prewarm_timeout);
+        if (!prepared) {
+            co_return std::unexpected(fiber::access_server::make_access_server_runtime_io_error(
+                    fiber::access_server::AccessServerRuntimeErrorCode::InitialConfigTimeout, prepared.error()));
+        }
+        co_return std::move(*prepared);
+    };
     int exit_code = 0;
     fiber::async::spawn(accept_loop, [&]() -> fiber::async::DetachedTask {
         if (!signal_service.attach(shutdown_signals)) {
             LOG(LOG_LIFECYCLE, ERROR) << "failed to attach shutdown signal service";
             std::cerr << "failed to attach shutdown signal service\n";
             exit_code = 1;
-            co_await runtime->shutdown();
+            co_await stop_runtime();
             accept_loop.stop();
             co_return;
         }
 
-        auto startup = co_await fiber::async::when_any([&runtime]() { return runtime->start().select(); },
-                                                       []() { return fiber::async::wait_signal(SIGINT); },
-                                                       []() { return fiber::async::wait_signal(SIGTERM); });
+        if (control) {
+            control->start();
+        }
+        auto startup = co_await fiber::async::when_any(
+                [&]() { return start_runtime().select(); }, []() { return fiber::async::wait_signal(SIGINT); },
+                []() { return fiber::async::wait_signal(SIGTERM); }, [&]() { return wait_control().select(); });
         if (!startup.is<0>()) {
             if (startup.is<1>()) {
                 (void) std::move(startup).get<1>();
-            } else {
+            } else if (startup.is<2>()) {
                 (void) std::move(startup).get<2>();
+            } else {
+                std::move(startup).get<3>();
             }
-            co_await runtime->shutdown();
+            co_await stop_runtime();
             signal_service.detach();
             accept_loop.stop();
             co_return;
@@ -279,93 +373,107 @@ int main(int argc, char **argv) {
         if (!started) {
             print_runtime_error(started.error());
             exit_code = 1;
+            co_await stop_runtime();
             signal_service.detach();
             accept_loop.stop();
             co_return;
         }
 
-        auto metrics_port = bound_port(runtime->metrics_fd());
-        if (!metrics_port) {
-            std::cerr << "failed to resolve metrics listener port: " << fiber::common::io_err_name(metrics_port.error())
-                      << '\n';
-            exit_code = 1;
-            co_await runtime->shutdown();
-            signal_service.detach();
-            accept_loop.stop();
-            co_return;
-        }
-        const fiber::net::SocketAddress metrics_address(config.metrics_listen_address().ip(), *metrics_port);
-        const bool tls_enabled = config.tls_http_server_options().tls.enabled();
-        const bool http3_enabled = config.tls_http_server_options().http3_enabled;
-        const bool plain_enabled = config.plain_listen_enabled();
-
-        std::optional<fiber::net::SocketAddress> tls_address;
-        if (tls_enabled) {
-            auto tls_port = bound_port(runtime->fd());
-            if (!tls_port) {
-                std::cerr << "failed to resolve bound TLS listener port: "
-                          << fiber::common::io_err_name(tls_port.error()) << '\n';
+        if (!launch.prewarm) {
+            auto metrics_port = bound_port(runtime->metrics_fd());
+            if (!metrics_port) {
+                std::cerr << "failed to resolve metrics listener port: "
+                          << fiber::common::io_err_name(metrics_port.error()) << '\n';
                 exit_code = 1;
-                co_await runtime->shutdown();
+                co_await stop_runtime();
                 signal_service.detach();
                 accept_loop.stop();
                 co_return;
             }
-            tls_address = fiber::net::SocketAddress(config.tls_listen_address().ip(), *tls_port);
-        }
-        std::optional<fiber::net::SocketAddress> plain_address;
-        if (plain_enabled) {
-            auto plain_port = bound_port(runtime->plain_fd());
-            if (!plain_port) {
-                std::cerr << "failed to resolve bound plaintext listener port: "
-                          << fiber::common::io_err_name(plain_port.error()) << '\n';
-                exit_code = 1;
-                co_await runtime->shutdown();
-                signal_service.detach();
-                accept_loop.stop();
-                co_return;
+            const fiber::net::SocketAddress metrics_address(config.metrics_listen_address().ip(), *metrics_port);
+            const bool tls_enabled = config.tls_http_server_options().tls.enabled();
+            const bool http3_enabled = config.tls_http_server_options().http3_enabled;
+            const bool plain_enabled = config.plain_listen_enabled();
+
+            std::optional<fiber::net::SocketAddress> tls_address;
+            if (tls_enabled) {
+                auto tls_port = bound_port(runtime->fd());
+                if (!tls_port) {
+                    std::cerr << "failed to resolve bound TLS listener port: "
+                              << fiber::common::io_err_name(tls_port.error()) << '\n';
+                    exit_code = 1;
+                    co_await stop_runtime();
+                    signal_service.detach();
+                    accept_loop.stop();
+                    co_return;
+                }
+                tls_address = fiber::net::SocketAddress(config.tls_listen_address().ip(), *tls_port);
             }
-            plain_address = fiber::net::SocketAddress(config.plain_listen_address().ip(), *plain_port);
+            std::optional<fiber::net::SocketAddress> plain_address;
+            if (plain_enabled) {
+                auto plain_port = bound_port(runtime->plain_fd());
+                if (!plain_port) {
+                    std::cerr << "failed to resolve bound plaintext listener port: "
+                              << fiber::common::io_err_name(plain_port.error()) << '\n';
+                    exit_code = 1;
+                    co_await stop_runtime();
+                    signal_service.detach();
+                    accept_loop.stop();
+                    co_return;
+                }
+                plain_address = fiber::net::SocketAddress(config.plain_listen_address().ip(), *plain_port);
+            }
+
+            std::cout << "access-server listening";
+            if (tls_address) {
+                std::cout << " on https://" << tls_address->to_string() << ", protocols=http/1.1,h2"
+                          << (http3_enabled ? ",h3" : "");
+            }
+            if (plain_address) {
+                std::cout << (tls_address ? " and" : " on") << " http://" << plain_address->to_string()
+                          << ", protocols=http/1.1";
+            }
+            std::cout << ", metrics=http://" << metrics_address.to_string() << ", http workers=" << http_workers.size()
+                      << ", nacos servers=" << config.nacos_config().server_hosts().size() << std::endl;
+            std::string lifecycle_addresses;
+            if (tls_address) {
+                lifecycle_addresses += " tls_address=\"" + tls_address->to_string() + "\"";
+            }
+            if (plain_address) {
+                lifecycle_addresses += " plain_address=\"" + plain_address->to_string() + "\"";
+            }
+            lifecycle_addresses += " metrics_address=\"" + metrics_address.to_string() + "\"";
+            LOG(LOG_LIFECYCLE, INFO) << "server listening" << lifecycle_addresses
+                                     << " http_workers=" << http_workers.size()
+                                     << " cpu_affinity=" << cpu.affinity_count
+                                     << " cpu_quota_workers=" << cpu.quota_count << " cpu_quota_us=" << cpu.quota_us
+                                     << " cpu_period_us=" << cpu.period_us << " cpu_concurrency_source="
+                                     << fiber::util::cpu_concurrency_source_name(cpu.source)
+                                     << " cgroup_probe_failed=" << cpu.cgroup_probe_failed
+                                     << " nacos_servers=" << config.nacos_config().server_hosts().size()
+                                     << " cat_enabled=" << config.cat_config().has_value()
+                                     << " tls_enabled=" << tls_enabled << " http2_enabled=" << tls_enabled
+                                     << " http3_enabled=" << http3_enabled << " plain_enabled=" << plain_enabled
+                                     << " network_entry=\"" << config.network_entry() << "\"";
+        } else {
+            std::cout << "access-server prepared pid=" << ::getpid() << std::endl;
         }
 
-        std::cout << "access-server listening";
-        if (tls_address) {
-            std::cout << " on https://" << tls_address->to_string() << ", protocols=http/1.1,h2"
-                      << (http3_enabled ? ",h3" : "");
-        }
-        if (plain_address) {
-            std::cout << (tls_address ? " and" : " on") << " http://" << plain_address->to_string()
-                      << ", protocols=http/1.1";
-        }
-        std::cout << ", metrics=http://" << metrics_address.to_string() << ", http workers=" << http_workers.size()
-                  << ", nacos servers=" << config.nacos_config().server_hosts().size() << std::endl;
-        std::string lifecycle_addresses;
-        if (tls_address) {
-            lifecycle_addresses += " tls_address=\"" + tls_address->to_string() + "\"";
-        }
-        if (plain_address) {
-            lifecycle_addresses += " plain_address=\"" + plain_address->to_string() + "\"";
-        }
-        lifecycle_addresses += " metrics_address=\"" + metrics_address.to_string() + "\"";
-        LOG(LOG_LIFECYCLE, INFO) << "server listening" << lifecycle_addresses << " http_workers=" << http_workers.size()
-                                 << " cpu_affinity=" << cpu.affinity_count << " cpu_quota_workers=" << cpu.quota_count
-                                 << " cpu_quota_us=" << cpu.quota_us << " cpu_period_us=" << cpu.period_us
-                                 << " cpu_concurrency_source=" << fiber::util::cpu_concurrency_source_name(cpu.source)
-                                 << " cgroup_probe_failed=" << cpu.cgroup_probe_failed
-                                 << " nacos_servers=" << config.nacos_config().server_hosts().size()
-                                 << " cat_enabled=" << config.cat_config().has_value() << " tls_enabled=" << tls_enabled
-                                 << " http2_enabled=" << tls_enabled << " http3_enabled=" << http3_enabled
-                                 << " plain_enabled=" << plain_enabled << " network_entry=\"" << config.network_entry()
-                                 << "\"";
-
-        auto signal = co_await fiber::async::when_any([]() { return fiber::async::wait_signal(SIGINT); },
-                                                      []() { return fiber::async::wait_signal(SIGTERM); });
+        auto signal = co_await fiber::async::when_any(
+                []() { return fiber::async::wait_signal(SIGINT); }, []() { return fiber::async::wait_signal(SIGTERM); },
+                [&]() { return wait_control().select(); }, [&]() { return wait_idle_prewarm().select(); });
         if (signal.is<0>()) {
             (void) std::move(signal).get<0>();
-        } else {
+        } else if (signal.is<1>()) {
             (void) std::move(signal).get<1>();
+        } else if (signal.is<2>()) {
+            std::move(signal).get<2>();
+        } else {
+            std::move(signal).get<3>();
+            std::cerr << "idle prewarm expired without a takeover request\n";
+            exit_code = 1;
         }
-        co_await runtime->shutdown();
+        co_await stop_runtime();
         signal_service.detach();
         accept_loop.stop();
     });

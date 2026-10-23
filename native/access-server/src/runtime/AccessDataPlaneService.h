@@ -54,8 +54,10 @@ public:
     ~AccessDataPlaneService() noexcept;
 
     [[nodiscard]] AccessDataPlaneLifecycle lifecycle() noexcept;
-    [[nodiscard]] async::Task<std::expected<AccessBoundEndpoint, AccessServerRuntimeError>>
-    bind(AccessControlPlaneReady ready) noexcept;
+    [[nodiscard]] async::Task<std::expected<AccessBoundEndpoint, AccessServerRuntimeError>> bind() noexcept;
+    [[nodiscard]] async::Task<std::expected<void, AccessServerRuntimeError>>
+    prepare(AccessControlPlaneReady ready) noexcept;
+    void begin_drain() noexcept;
     [[nodiscard]] async::Task<std::expected<void, AccessServerRuntimeError>> serve() noexcept;
     [[nodiscard]] async::Task<std::expected<void, AccessServerRuntimeError>>
     start(AccessControlPlaneReady ready) noexcept;
@@ -67,7 +69,10 @@ public:
 
 private:
     [[nodiscard]] static async::Task<std::expected<AccessBoundEndpoint, AccessServerRuntimeError>>
-    bind_lifecycle(void *context, AccessControlPlaneReady ready) noexcept;
+    bind_lifecycle(void *context) noexcept;
+    [[nodiscard]] static async::Task<std::expected<void, AccessServerRuntimeError>>
+    prepare_lifecycle(void *context, AccessControlPlaneReady ready) noexcept;
+    static void begin_drain_lifecycle(void *context) noexcept;
     [[nodiscard]] static async::Task<std::expected<void, AccessServerRuntimeError>>
     serve_lifecycle(void *context) noexcept;
     [[nodiscard]] static async::Task<void> shutdown_lifecycle(void *context) noexcept;
@@ -83,6 +88,7 @@ private:
     AccessDataPlaneOptions options_;
     AccessScriptRuntime script_runtime_;
     std::unique_ptr<AccessServer> server_;
+    AccessControlPlaneReady ready_;
     bool bound_ = false;
     bool serving_ = false;
     bool shutdown_complete_ = false;

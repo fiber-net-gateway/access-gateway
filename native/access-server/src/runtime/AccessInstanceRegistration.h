@@ -36,6 +36,7 @@ public:
 
     [[nodiscard]] async::Task<std::expected<void, AccessServerRuntimeError>> start(net::IpAddress bound_address,
                                                                                    std::uint16_t port) noexcept;
+    [[nodiscard]] nacos::InstanceRegistration::StatusSubscriber subscribe_status() const;
     void close() noexcept;
 
     [[nodiscard]] bool active() const noexcept { return registration_.has_value(); }

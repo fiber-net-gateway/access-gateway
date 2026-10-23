@@ -84,6 +84,12 @@ AccessInstanceRegistration::start(net::IpAddress bound_address, std::uint16_t po
     co_return std::expected<void, AccessServerRuntimeError>{};
 }
 
+nacos::InstanceRegistration::StatusSubscriber AccessInstanceRegistration::subscribe_status() const {
+    FIBER_ASSERT(loop_->in_loop());
+    FIBER_ASSERT(registration_);
+    return registration_->subscribe_status();
+}
+
 void AccessInstanceRegistration::close() noexcept {
     FIBER_ASSERT(loop_->in_loop());
     if (!registration_) {

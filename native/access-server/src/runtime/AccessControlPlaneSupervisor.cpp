@@ -4,12 +4,21 @@
 #include <string>
 #include <utility>
 
+#include <algorithm>
+#include <fiber/async/Sleep.h>
 #include <fiber/async/Spawn.h>
+#include <fiber/async/TaskSelect.h>
 #include <fiber/async/Timeout.h>
+#include <fiber/async/WhenAny.h>
+#include <fiber/async/Yield.h>
 #include <fiber/common/Assert.h>
+#include <fiber/log/Log.h>
+#include "../observability/AccessServerLogCategories.h"
 
 namespace fiber::access_server {
 namespace {
+
+DEFINE_LOGGER(LOG_REGISTRATION, kAccessServerLifecycleLogger);
 
 #ifndef FIBER_ACCESS_SERVER_BUILD_VERSION
 #define FIBER_ACCESS_SERVER_BUILD_VERSION "unknown"
@@ -58,9 +67,11 @@ AccessControlPlaneSupervisor::AccessControlPlaneSupervisor(event::EventLoop &coo
                                                            AccessControlPlaneOptions options,
                                                            AccessControlPlaneDependencies dependencies) noexcept :
     coordinator_loop_(&coordinator_loop), nacos_loop_(&nacos_loop), cat_loop_(&cat_loop),
-    initial_config_timeout_(options.initial_config_timeout), cat_client_(std::move(dependencies.cat_client)),
-    nacos_client_(std::move(dependencies.nacos_client)), config_service_(std::move(dependencies.config_service)),
-    naming_service_(std::move(dependencies.naming_service)),
+    initial_config_timeout_(options.initial_config_timeout),
+    registration_retry_initial_delay_(options.registration_retry_initial_delay),
+    registration_retry_max_delay_(options.registration_retry_max_delay),
+    cat_client_(std::move(dependencies.cat_client)), nacos_client_(std::move(dependencies.nacos_client)),
+    config_service_(std::move(dependencies.config_service)), naming_service_(std::move(dependencies.naming_service)),
     instance_registration_(nacos_loop, *naming_service_, std::move(options.instance_registration)),
     cat_lifecycle_(dependencies.cat_lifecycle), nacos_lifecycle_(dependencies.nacos_lifecycle),
     config_compiler_(nacos_loop), runtime_metrics_(nacos_loop, options.process_metrics),
@@ -92,6 +103,8 @@ AccessControlPlaneSupervisor::AccessControlPlaneSupervisor(event::EventLoop &coo
                              options.activation_endpoint.enabled ? activation_evidence_.tls_observer()
                                                                  : AccessTlsActivationEvidenceObserver{}),
     tls_enabled_(options.tls_enabled), test_mode_(options.test_mode) {
+    FIBER_ASSERT(registration_retry_initial_delay_ >= std::chrono::milliseconds::zero());
+    FIBER_ASSERT(registration_retry_max_delay_ >= registration_retry_initial_delay_);
     FIBER_ASSERT(config_service_);
     FIBER_ASSERT(naming_service_);
     route_store_.set_tls_client_identity_resolver(tls_certificate_store_.client_identity_resolver());
@@ -130,6 +143,8 @@ AccessControlPlaneSupervisor::AccessControlPlaneSupervisor(event::EventLoop &coo
     FIBER_ASSERT(cat_stopped_publisher_.has_value());
     instance_registration_publisher_ = instance_registration_status_.acquire_publisher();
     FIBER_ASSERT(instance_registration_publisher_.has_value());
+    registration_stop_publisher_ = registration_stop_.acquire_publisher();
+    FIBER_ASSERT(registration_stop_publisher_);
     instance_deregistered_publisher_ = instance_deregistered_.acquire_publisher();
     FIBER_ASSERT(instance_deregistered_publisher_.has_value());
 }
@@ -146,6 +161,7 @@ AccessControlPlaneLifecycle AccessControlPlaneSupervisor::lifecycle() noexcept {
             .context = this,
             .start = &start_lifecycle,
             .register_instance = &register_instance_lifecycle,
+            .register_background = &register_background_lifecycle,
             .deregister_instance = &deregister_instance_lifecycle,
             .shutdown = &shutdown_lifecycle,
     };
@@ -182,10 +198,93 @@ async::DetachedTask AccessControlPlaneSupervisor::register_instance_on_owner(Acc
     instance_registration_tasks_.done();
 }
 
+void AccessControlPlaneSupervisor::register_background_lifecycle(void *context, AccessBoundEndpoint endpoint) noexcept {
+    static_cast<AccessControlPlaneSupervisor *>(context)->register_background(endpoint);
+}
+
+void AccessControlPlaneSupervisor::register_background(AccessBoundEndpoint endpoint) noexcept {
+    FIBER_ASSERT(coordinator_loop_->in_loop());
+    FIBER_ASSERT(!instance_registration_started_);
+    instance_registration_started_ = true;
+    instance_registration_tasks_.add();
+    async::spawn(*nacos_loop_, [this, endpoint]() { return background_registration_on_owner(endpoint); });
+}
+
+std::string_view AccessControlPlaneSupervisor::registration_state() noexcept {
+    auto snapshot = instance_registration_status_.subscribe().current();
+    if (!snapshot.value) {
+        return "pending";
+    }
+    return snapshot.value->stopped    ? "stopped"
+           : snapshot.value->success  ? "registered"
+           : snapshot.value->retrying ? "retrying"
+                                      : "failed";
+}
+
+async::Task<void> AccessControlPlaneSupervisor::maintain_registration(AccessBoundEndpoint endpoint) noexcept {
+    auto delay = registration_retry_initial_delay_;
+    for (;;) {
+        auto registered = co_await instance_registration_.start(endpoint.address.ip(), endpoint.address.port());
+        instance_registration_publisher_->publish(
+                InstanceRegistrationStatus{.success = registered.has_value(), .retrying = !registered.has_value()});
+        if (registered) {
+            delay = registration_retry_initial_delay_;
+            auto status = instance_registration_.subscribe_status();
+            auto snapshot = status.current();
+            for (;;) {
+                if (!snapshot.value || snapshot.value->state == nacos::RegistrationState::Failed ||
+                    snapshot.value->state == nacos::RegistrationState::Closed) {
+                    break;
+                }
+                instance_registration_publisher_->publish(InstanceRegistrationStatus{
+                        .success = snapshot.value->state == nacos::RegistrationState::Registered,
+                        .retrying = snapshot.value->state != nacos::RegistrationState::Registered});
+                snapshot = co_await status.next(snapshot.version);
+            }
+            instance_registration_publisher_->publish(InstanceRegistrationStatus{.retrying = true});
+        }
+        instance_registration_.close();
+        LOG(LOG_REGISTRATION, WARN) << "background registration retry";
+        co_await async::yield();
+        co_await async::sleep(delay);
+        delay = std::min(delay * 2, registration_retry_max_delay_);
+    }
+}
+
+async::DetachedTask
+AccessControlPlaneSupervisor::background_registration_on_owner(AccessBoundEndpoint endpoint) noexcept {
+    auto stopped = registration_stop_.subscribe();
+    auto snapshot = stopped.current();
+    if (!snapshot.value || !*snapshot.value) {
+        auto result =
+                co_await async::when_any([this, endpoint]() { return maintain_registration(endpoint).select(); },
+                                         [&stopped, version = snapshot.version]() { return stopped.next(version); });
+        if (result.is<0>()) {
+            std::move(result).get<0>();
+        } else {
+            (void) std::move(result).get<1>();
+        }
+    }
+    instance_registration_.close();
+    instance_registration_tasks_.done();
+}
+
+bool AccessControlPlaneSupervisor::upgrade_ready() noexcept {
+    const auto routes = config_watcher_.subscribe_readiness().current();
+    const auto gray = gray_watcher_.subscribe_readiness().current();
+    const auto temp = temp_cluster_watcher_.subscribe_readiness().current();
+    const auto tls = tls_certificate_watcher_.subscribe_readiness().current();
+    return routes.value && routes.value->state == AccessConfigReadinessState::Ready && gray.value && *gray.value &&
+           (!test_mode_ || (temp.value && *temp.value)) &&
+           (!tls_enabled_ || (tls.value && *tls.value == TlsCertificateReadiness::Ready));
+}
+
 async::DetachedTask AccessControlPlaneSupervisor::deregister_instance_on_owner() noexcept {
     FIBER_ASSERT(nacos_loop_->in_loop());
+    registration_stop_publisher_->publish(true);
     instance_registration_.close();
     co_await instance_registration_tasks_.join();
+    instance_registration_publisher_->publish(InstanceRegistrationStatus{.stopped = true});
     instance_deregistered_publisher_->publish(true);
 }
 
@@ -304,6 +403,7 @@ async::DetachedTask AccessControlPlaneSupervisor::shutdown_nacos_on_owner() noex
     FIBER_ASSERT(nacos_loop_->in_loop());
     const AccessDiscoveryMetricsObserver metrics = runtime_metrics_.discovery().observer();
     co_await nacos_start_tasks_.join();
+    registration_stop_publisher_->publish(true);
     instance_registration_.close();
     co_await instance_registration_tasks_.join();
     if (config_watcher_started_) {

@@ -350,6 +350,7 @@ in English and Simplified Chinese:
 - [Compatibility contract](native/access-server/docs/compatibility-contract.md)
 - [Configuration compilation model](native/access-server/docs/config-compilation.md)
 - [Project publication typestate](native/access-server/docs/config-publication-typestate.md)
+- [Prewarm upgrade operation and design](docs/access-server-prewarm-upgrade-design.md)
 - [Bounded access-server metrics](native/access-server/docs/bounded-metrics.md)
 - [Migration plan](native/access-server/docs/migration-plan.md)
 - [Script-corpus differential status](native/access-server/docs/script-corpus-differential.md)

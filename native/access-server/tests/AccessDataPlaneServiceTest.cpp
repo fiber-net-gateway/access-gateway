@@ -223,6 +223,24 @@ TEST_F(AccessDataPlaneServiceTest, RollsBackBusinessListenerWhenMetricsBindFails
     EXPECT_TRUE(completed);
 }
 
+TEST_F(AccessDataPlaneServiceTest, CancelsPreparedResourcesWithoutEverBindingListeners) {
+    bool completed = false;
+    async::spawn(accept_loop_, [&]() -> async::DetachedTask {
+        const net::SocketAddress loopback(net::IpAddress::loopback_v4(), 0);
+        AccessDataPlaneService service(accept_loop_, workers_, route_store_, {}, runtime_metrics_, activation_evidence_,
+                                       nullptr, data_plane_options(loopback, loopback));
+        EXPECT_TRUE(co_await service.prepare({}));
+        EXPECT_EQ(service.plain_fd(), -1);
+        EXPECT_EQ(service.metrics_fd(), -1);
+        co_await service.shutdown();
+        co_await service.shutdown();
+        completed = true;
+        accept_loop_.stop();
+    });
+    accept_loop_.run();
+    EXPECT_TRUE(completed);
+}
+
 TEST_F(AccessDataPlaneServiceTest, ClosesBoundListenersWhenRegistrationFailsBeforeServe) {
     bool completed = false;
     async::spawn(accept_loop_, [&]() -> async::DetachedTask {
@@ -230,7 +248,10 @@ TEST_F(AccessDataPlaneServiceTest, ClosesBoundListenersWhenRegistrationFailsBefo
         AccessDataPlaneService service(accept_loop_, workers_, route_store_, {}, runtime_metrics_, activation_evidence_,
                                        nullptr, data_plane_options(loopback, loopback));
 
-        auto bound = co_await service.bind({});
+        EXPECT_TRUE(co_await service.prepare({}));
+        EXPECT_EQ(service.plain_fd(), -1);
+        EXPECT_EQ(service.metrics_fd(), -1);
+        auto bound = co_await service.bind();
         if (!bound) {
             ADD_FAILURE() << "failed to bind listeners before the registration rollback test";
             co_await service.shutdown();

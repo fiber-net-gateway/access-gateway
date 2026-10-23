@@ -13,6 +13,7 @@
 #include <vector>
 
 #include <fiber/async/Spawn.h>
+#include <fiber/async/Yield.h>
 #include <fiber/event/EventLoop.h>
 #include <fiber/event/EventLoopGroup.h>
 #include <fiber/nacos/ConfigService.h>
@@ -240,6 +241,8 @@ public:
     FakeNamingService(LifecycleEvents &events, bool fail_start) : events_(&events), fail_start_(fail_start) {
         status_publisher_ = status_.acquire_publisher();
         FIBER_ASSERT(status_publisher_);
+        registration_publisher = registration_calls.acquire_publisher();
+        FIBER_ASSERT(registration_publisher);
     }
 
     fiber::common::IoResult<void> start() noexcept override {
@@ -313,11 +316,46 @@ public:
 
     std::expected<fiber::nacos::InstanceRegistration, fiber::nacos::NamingServiceError>
     registry(std::string_view, std::string_view, fiber::nacos::Instance) override {
+        ++attempts;
+        registration_publisher->publish(attempts);
+        if (attempts > reject_attempts) {
+            registration = std::make_shared<Registration>();
+            registration->publisher->publish(fiber::nacos::RegistrationStatus{
+                    .state = pending_registration ? fiber::nacos::RegistrationState::Pending
+                                                  : fiber::nacos::RegistrationState::Registered});
+            return fiber::nacos::InstanceRegistration(registration, registration.get(), &update_registration,
+                                                      &subscribe_registration, &close_registration);
+        }
         return std::unexpected(fiber::nacos::NamingServiceError{
                 .code = fiber::nacos::NamingServiceErrorCode::Shutdown,
                 .io_error = fiber::common::IoErr::Canceled,
         });
     }
+
+    struct Registration {
+        fiber::async::Watch<fiber::nacos::RegistrationStatus> status;
+        std::optional<fiber::async::Watch<fiber::nacos::RegistrationStatus>::Publisher> publisher =
+                status.acquire_publisher();
+        bool closed = false;
+    };
+    static std::expected<void, fiber::nacos::NamingServiceError> update_registration(void *,
+                                                                                     fiber::nacos::Instance) noexcept {
+        return {};
+    }
+    static fiber::nacos::InstanceRegistration::StatusSubscriber subscribe_registration(void *p) {
+        return static_cast<Registration *>(p)->status.subscribe();
+    }
+    static void close_registration(void *p) noexcept {
+        auto &instance = *static_cast<Registration *>(p);
+        instance.closed = true;
+        instance.publisher->publish(fiber::nacos::RegistrationStatus{.state = fiber::nacos::RegistrationState::Closed});
+    }
+    fiber::async::Watch<unsigned> registration_calls{0};
+    std::optional<fiber::async::Watch<unsigned>::Publisher> registration_publisher;
+    unsigned attempts = 0;
+    unsigned reject_attempts = 1000000;
+    bool pending_registration = true;
+    std::shared_ptr<Registration> registration;
 
 private:
     LifecycleEvents *events_ = nullptr;
@@ -421,6 +459,77 @@ TestModeProbeResult run_supervisor_probe(bool test_mode) {
 
     result.events = events.snapshot();
     return result;
+}
+
+TEST(AccessControlPlaneSupervisorTest, BackgroundRegistrationRetriesAndPendingAttemptCancelsLocally) {
+    LifecycleEvents events;
+    FakeResourceLifecycle cat{.events = &events, .name = "cat"};
+    FakeResourceLifecycle nacos{.events = &events, .name = "nacos"};
+    auto config = std::make_unique<FakeConfigService>(events, false, "", ProjectListReplay::Valid, false);
+    auto naming = std::make_unique<FakeNamingService>(events, false);
+    auto *observed = naming.get();
+    observed->reject_attempts = 1;
+    auto calls = observed->registration_calls.subscribe();
+    fiber::event::EventLoop coordinator;
+    fiber::event::EventLoopGroup nacos_group(1), cat_group(1), workers(1);
+    nacos_group.start();
+    cat_group.start();
+    workers.start();
+    AccessControlPlaneOptions options;
+    options.config_watcher.project_list_data_id = "projects";
+    options.config_watcher.project_route_data_id_prefix = "routes.";
+    options.config_watcher.project_route_group = "routes-group";
+    options.gray_watcher.data_id = "gray";
+    options.gray_watcher.group = "gray-group";
+    options.tls_certificate_watcher.data_id = "tls";
+    options.tls_certificate_watcher.group = "tls-group";
+    options.registration_retry_initial_delay = std::chrono::milliseconds(0);
+    options.registration_retry_max_delay = std::chrono::milliseconds(0);
+    bool completed = false;
+    {
+        AccessControlPlaneSupervisor supervisor(coordinator, nacos_group.at(0), cat_group.at(0), workers,
+                                                std::move(options),
+                                                AccessControlPlaneDependencies{.config_service = std::move(config),
+                                                                               .naming_service = std::move(naming),
+                                                                               .cat_lifecycle = cat.adapter(),
+                                                                               .nacos_lifecycle = nacos.adapter()});
+        fiber::async::spawn(coordinator, [&]() -> fiber::async::DetachedTask {
+            auto started = co_await supervisor.start();
+            EXPECT_TRUE(started);
+            if (started) {
+                supervisor.register_background(
+                        {.address = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 19000)});
+                auto snapshot = calls.current();
+                while (!snapshot.value || *snapshot.value < 2) {
+                    snapshot = co_await calls.next(snapshot.version);
+                }
+                // Second attempt is Pending forever. Local cancellation must
+                // finish without its registration deadline or any remote ACK.
+                co_await supervisor.deregister_instance();
+                EXPECT_EQ(supervisor.registration_state(), "stopped");
+                EXPECT_EQ(observed->attempts, 2U);
+                EXPECT_TRUE(observed->registration);
+                if (observed->registration) {
+                    EXPECT_TRUE(observed->registration->closed);
+                }
+                for (unsigned i = 0; i < 32; ++i) {
+                    co_await fiber::async::yield();
+                }
+                EXPECT_EQ(observed->attempts, 2U);
+            }
+            co_await supervisor.shutdown();
+            completed = true;
+            coordinator.stop();
+        });
+        coordinator.run();
+    }
+    workers.stop();
+    workers.join();
+    cat_group.stop();
+    cat_group.join();
+    nacos_group.stop();
+    nacos_group.join();
+    EXPECT_TRUE(completed);
 }
 
 bool contains_event(const std::vector<std::string> &events, std::string_view name) {

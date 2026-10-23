@@ -64,6 +64,12 @@ async::DetachedTask AccessMetricsEndpoint::serve() {
     co_return;
 }
 
+void AccessMetricsEndpoint::begin_drain() noexcept {
+    FIBER_ASSERT(accept_loop_->in_loop());
+    server_.stop();
+    endpoint_ = nullptr;
+}
+
 async::Task<void> AccessMetricsEndpoint::shutdown_and_wait() noexcept {
     FIBER_ASSERT(accept_loop_->in_loop());
     if (!bound_) {
