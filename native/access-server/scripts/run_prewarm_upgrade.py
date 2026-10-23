@@ -94,7 +94,7 @@ class GateProxy(socketserver.ThreadingTCPServer):
     daemon_threads = True
 
 
-def run(server_binary, ctl_binary, rnacos_binary, output, tls=False):
+def run(server_binary, ctl_binary, rnacos_binary, output, tls=False, http3=False, workers=None):
     processes = []
     logs = []
     paused = False
@@ -182,6 +182,7 @@ def run(server_binary, ctl_binary, rnacos_binary, output, tls=False):
     proxy_thread.start()
     upstream_thread.start()
     rnacos = None
+    udp_peer = None
     try:
         environment = os.environ.copy()
         environment.update({
@@ -199,7 +200,13 @@ def run(server_binary, ctl_binary, rnacos_binary, output, tls=False):
         def start(binary, arguments, log_name, env=None):
             log = (output / log_name).open('w')
             logs.append(log)
-            process = subprocess.Popen([str(binary), *arguments], cwd=output, env=env, stdout=log, stderr=log)
+            command = [str(binary), *arguments]
+            if binary == server_binary and workers:
+                cpus = sorted(os.sched_getaffinity(0))[:workers]
+                if len(cpus) != workers or not shutil.which('taskset'):
+                    raise RuntimeError('requested worker affinity requires available CPUs and taskset')
+                command = ['taskset', '--cpu-list', ','.join(map(str, cpus)), *command]
+            process = subprocess.Popen(command, cwd=output, env=env, stdout=log, stderr=log)
             processes.append(process)
             return process
 
@@ -252,7 +259,7 @@ def run(server_binary, ctl_binary, rnacos_binary, output, tls=False):
             }))
         configuration = output / 'access.env'
         configuration.write_text('\n'.join([
-            f'ACCESS_SERVER_TLS_ENABLED={str(tls).lower()}', 'ACCESS_SERVER_HTTP3_ENABLED=false',
+            f'ACCESS_SERVER_TLS_ENABLED={str(tls).lower()}', f'ACCESS_SERVER_HTTP3_ENABLED={str(http3).lower()}',
             'ACCESS_SERVER_TLS_LISTEN_ADDRESS=127.0.0.1', f'ACCESS_SERVER_TLS_LISTEN_PORT={tls_port}',
             'ACCESS_SERVER_PLAIN_LISTEN_ENABLED=true', 'ACCESS_SERVER_PLAIN_LISTEN_ADDRESS=127.0.0.1',
             f'ACCESS_SERVER_PLAIN_LISTEN_PORT={traffic_port}',
@@ -264,9 +271,18 @@ def run(server_binary, ctl_binary, rnacos_binary, output, tls=False):
         configuration.chmod(0o600)
         directory = output / 'control'
         directory.mkdir(mode=0o700)
+        if http3:
+            # Keep a same-port UDP peer alive across the entire TCP handoff.
+            # No REUSEADDR: both gateway generations must really use REUSEPORT,
+            # including when CPU affinity gives them only one worker.
+            udp_peer = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            udp_peer.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+            udp_peer.bind(('127.0.0.1', tls_port))
         old = start(server_binary, [str(configuration), f'--control-dir={directory}'], 'old.log')
         old_socket = directory / f'{old.pid}.sock'
-        wait_status(old, old_socket, lambda value: value['state'] == 'serving')
+        initial_status = wait_status(old, old_socket, lambda value: value['state'] == 'serving')
+        if initial_status['http3'] != http3:
+            raise RuntimeError('old HTTP/3 setting was not applied')
         assert request(traffic_port) == (200, b'ok')
         tls_checks()
 
@@ -325,6 +341,8 @@ def run(server_binary, ctl_binary, rnacos_binary, output, tls=False):
             raise RuntimeError('new traffic readiness incorrectly depends on registration')
         if old.poll() is not None or control(old_socket)['state'] != 'draining':
             raise RuntimeError('old generation exited before its outstanding request finished')
+        if new_status['http3'] != http3 or (http3 and udp_peer.fileno() < 0):
+            raise RuntimeError('new generation did not keep the requested UDP overlap policy')
         assert request(traffic_port) == (200, b'ok')
         tls_checks()
         time.sleep(0.2)
@@ -337,6 +355,8 @@ def run(server_binary, ctl_binary, rnacos_binary, output, tls=False):
         if old.wait(timeout=10) != 0:
             raise RuntimeError('old generation did not exit cleanly')
         wait_status(fresh, fresh_socket, lambda value: value['registration'] == 'registered')
+        if udp_peer is not None:
+            udp_peer.close()
         if old_socket.exists() or not fresh_socket.exists():
             raise RuntimeError('old generation removed the wrong PID socket')
         # A disposable idle prewarm can be aborted through the same PID socket
@@ -366,6 +386,9 @@ def run(server_binary, ctl_binary, rnacos_binary, output, tls=False):
             'old_request_completed': True,
             'idle_prewarm_aborted': True,
             'tls_http1_and_http2_verified': tls,
+            'http3_enabled': http3,
+            'udp_peer_held_during_cutover': http3,
+            'worker_affinity_limit': workers,
             'note': 'command duration includes preflight and CLI polling; it is not a measured listener gap',
         }, indent=2))
     finally:
@@ -382,6 +405,8 @@ def run(server_binary, ctl_binary, rnacos_binary, output, tls=False):
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait()
+        if udp_peer is not None:
+            udp_peer.close()
         proxy.shutdown()
         proxy.server_close()
         upstream.shutdown()
@@ -396,6 +421,8 @@ def main():
     parser.add_argument('--ctl', type=Path, required=True)
     parser.add_argument('--rnacos', type=Path, required=True)
     parser.add_argument('--output-dir', type=Path)
+    parser.add_argument('--http3', action='store_true', help='enable HTTP/3 and retain a reusable UDP peer across handoff (also enables TLS)')
+    parser.add_argument('--workers', type=int, choices=(1, 2), help='limit gateway CPU affinity to exercise single/multiple workers')
     parser.add_argument('--tls', action='store_true', help='also verify TLS HTTP/1.1 and HTTP/2 (requires openssl and HTTP/2 curl)')
     arguments = parser.parse_args()
     for binary in (arguments.server, arguments.ctl, arguments.rnacos):
@@ -405,7 +432,7 @@ def main():
     if arguments.output_dir:
         output.mkdir(mode=0o700, parents=True, exist_ok=False)
     try:
-        run(arguments.server.resolve(), arguments.ctl.resolve(), arguments.rnacos.resolve(), output, arguments.tls)
+        run(arguments.server.resolve(), arguments.ctl.resolve(), arguments.rnacos.resolve(), output, arguments.tls or arguments.http3, arguments.http3, arguments.workers)
     except Exception as error:
         print(f'Upgrade integration failed: {error}; artifacts: {output}', file=sys.stderr)
         return 1

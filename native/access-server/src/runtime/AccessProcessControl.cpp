@@ -372,10 +372,6 @@ async::Task<AccessControlMessage> AccessProcessControl::handle(AccessControlMess
         response.error = "UPGRADE_ID_REQUIRED";
         co_return response;
     }
-    if (options_.http3) {
-        response.error = "UPGRADE_HTTP3_UNSUPPORTED";
-        co_return response;
-    }
     if (!options_.fixed_ports) {
         response.error = "UPGRADE_FIXED_PORTS_REQUIRED";
         co_return response;
@@ -406,7 +402,7 @@ async::Task<AccessControlMessage> AccessProcessControl::handle(AccessControlMess
         }
         released_ = true;
         phase_ = "released";
-        LOG(LOG_UPGRADE, INFO) << "listeners released" << " boot_id=" << boot_id_;
+        LOG(LOG_UPGRADE, INFO) << "TCP listeners released" << " boot_id=" << boot_id_;
     } else {
         if (!upgrade_id_.empty()) {
             if (upgrade_id_ != request.upgrade_id || old_socket_ != request.old_socket ||
@@ -486,10 +482,6 @@ async::DetachedTask AccessProcessControl::takeover(AccessControlMessage request)
     auto old = co_await exchange_access_control(stream, std::move(query));
     if (!old || old->boot_id != request.old_boot_id) {
         job_error_ = "OLD_BOOT_ID_MISMATCH";
-        co_return;
-    }
-    if (old->http3) {
-        job_error_ = "UPGRADE_HTTP3_UNSUPPORTED";
         co_return;
     }
     if (old->state != "serving" || old->compatibility != options_.compatibility) {

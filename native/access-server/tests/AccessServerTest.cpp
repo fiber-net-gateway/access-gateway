@@ -26,15 +26,21 @@
 #include <fiber/async/Spawn.h>
 #include <fiber/cat/CatClient.h>
 #include <fiber/cat/CatClientConfig.h>
+#include <fiber/common/mem/BufPool.h>
 #include <fiber/common/util/Base64.h>
 #include <fiber/event/EventLoop.h>
 #include <fiber/event/EventLoopGroup.h>
 #include <fiber/http/ClientHttp2Exchange.h>
+#include <fiber/http/ClientHttp3Exchange.h>
 #include <fiber/http/Http2ClientConnection.h>
+#include <fiber/http/Http3Client.h>
+#include <fiber/http/Http3ClientConnection.h>
 #include <fiber/http/HttpClientTlsOptions.h>
 #include <fiber/net/TlsCredential.h>
 #include <fiber/net/TlsPemSource.h>
 #include <fiber/net/TlsServerHandshakeConfig.h>
+#include <fiber/net/UdpSocket.h>
+#include <fiber/quic/QuicUdpEndpoint.h>
 #include <openssl/sha.h>
 
 #include "../src/observability/AccessRuntimeMetrics.h"
@@ -806,6 +812,118 @@ async::DetachedTask run_h2_websocket_client(event::EventLoop &loop, std::uint16_
     }
     promise->set_value(std::move(outcome));
 }
+
+async::Task<bool> request_http3(event::EventLoop &loop, const net::SocketAddress &address) {
+    quic::QuicUdpEndpoint endpoint(loop);
+    quic::QuicUdpEndpoint::EndpointOptions endpoint_options;
+    endpoint_options.bind_addr = {net::IpAddress::loopback_v4(), 0};
+    if (!endpoint.init(endpoint_options)) {
+        co_return false;
+    }
+    if (!endpoint.start()) {
+        co_await endpoint.shutdown();
+        co_return false;
+    }
+    http::Http3Client::Options client_options;
+    client_options.tls.verify_peer = false;
+    http::Http3Client client(endpoint, client_options);
+    http::Http3ClientConnectOptions options;
+    options.remote_addr = address;
+    options.server_name = "localhost";
+    options.allow_insecure = true;
+    options.handshake_timeout = 3s;
+    http::Http3ClientConnection connection(client, options);
+    bool received = false;
+    auto connected = co_await connection.connect();
+    if (connected) {
+        mem::BufPool pool;
+        auto exchange = connection.open_exchange(pool);
+        http::HttpHeaders headers(pool);
+        auto sent = co_await exchange.send_request_header({.method = http::HttpMethod::Get,
+                                                           .scheme = "https",
+                                                           .authority = "api.example.com",
+                                                           .path = "/",
+                                                           .headers = &headers},
+                                                          true, 3s);
+        if (sent) {
+            auto head = co_await exchange.read_header(3s);
+            if (head && *head && (*head)->status_code == 200) {
+                std::string body;
+                for (;;) {
+                    auto chunk = co_await exchange.read_body(1024, 3s);
+                    if (!chunk) {
+                        break;
+                    }
+                    const bool complete = chunk->complete();
+                    while (auto *buffer = chunk->first_readable()) {
+                        body.append(reinterpret_cast<const char *>(buffer->readable_data()), buffer->readable());
+                        chunk->consume_and_compact(buffer->readable());
+                    }
+                    if (complete) {
+                        received = body == "ok";
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    connection.shutdown(http::Http3ErrorCode::NoError);
+    co_await endpoint.shutdown();
+    co_await connection.wait_closed();
+    co_return received;
+}
+
+class AccessServerHttp3ReuseTest : public testing::TestWithParam<std::size_t> {};
+
+TEST_P(AccessServerHttp3ReuseTest, BindsBesideExistingUdpPeerAndServesAfterPeerLeaves) {
+    net::TlsCredentialOptions credential_options;
+    credential_options.certificate_chain = net::TlsPemSource::from_content(kWsCertPem);
+    credential_options.private_key = net::TlsPemSource::from_content(kWwKeyPem);
+    auto credential = net::TlsCredential::create(credential_options);
+    ASSERT_TRUE(credential);
+    http::HttpServerTlsOptions tls;
+    tls.configure_callback = &net::configure_tls_with_credential;
+    tls.configure_ctx = &*credential;
+    RouteConfigStore store;
+    ASSERT_TRUE(store.apply("demo", response_config()));
+    event::EventLoop loop;
+    event::EventLoopGroup workers(GetParam());
+    AccessServer server(loop, workers, store, {}, {.http_server = {.tls = tls, .http3_enabled = true}});
+    bool completed = false;
+    workers.start();
+    async::spawn(loop, [&]() -> async::DetachedTask {
+        net::UdpSocket previous(loop);
+        // Disabling REUSEADDR makes this a real REUSEPORT regression: a new
+        // single-worker server cannot bind here merely through REUSEADDR.
+        auto peer_bound = previous.bind({net::IpAddress::loopback_v4(), 0}, {.reuse_addr = false, .reuse_port = true});
+        EXPECT_TRUE(peer_bound);
+        auto initialized = co_await server.initialize();
+        EXPECT_TRUE(initialized);
+        if (peer_bound && initialized) {
+            const auto address = previous.local_addr();
+            auto bound = server.bind(address);
+            EXPECT_TRUE(bound) << "HTTP/3 UDP overlap failed with " << GetParam() << " worker(s)";
+            if (bound) {
+                EXPECT_TRUE(previous.valid());
+                // A draining old UDP endpoint can still take datagrams during
+                // overlap. Only test a reliable fresh H3 request after it leaves.
+                previous.close();
+                async::spawn(loop, [&]() { return server.serve(); });
+                EXPECT_TRUE(co_await request_http3(loop, address));
+            }
+        }
+        previous.close();
+        co_await server.shutdown_and_wait();
+        completed = true;
+        loop.stop();
+    });
+    loop.run();
+    workers.stop();
+    workers.join();
+    EXPECT_TRUE(completed);
+}
+
+INSTANTIATE_TEST_SUITE_P(WorkerCounts, AccessServerHttp3ReuseTest, testing::Values(1U, 2U));
 
 TEST(AccessServerTest, ServesWebSocketExtendedConnectOverHttp2Tls) {
     WebSocketUpstreamFixture upstream;
