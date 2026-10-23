@@ -90,7 +90,9 @@ common::IoResult<void> AccessServer::bind(const net::SocketAddress &address, con
                 .tls = http_options_.tls,
                 // Same opt-in as the HTTP/2 endpoint, for WebSocket over
                 // HTTP/3 (RFC 9220).
-                .http3 = {.enable_connect_protocol = true},
+                // Permit UDP overlap between generations even with one worker.
+                // QUIC state is not migrated: HTTP/3 may fail throughout overlap.
+                .http3 = {.udp = {.reuse_port = true}, .enable_connect_protocol = true},
                 .handler = [this](http::HttpExchange &exchange) { return worker_resources_.handle(exchange, true); },
         });
         if (http3_endpoint_ == nullptr) {
@@ -164,6 +166,8 @@ bool AccessServer::serving() const noexcept {
 void AccessServer::begin_drain() noexcept {
     FIBER_ASSERT(accept_loop_->in_loop());
     metrics_endpoint_.begin_drain();
+    // TCP listeners close synchronously. HTTP/3 keeps its UDP sockets until
+    // protocol drain completes; the next generation can bind via REUSEPORT.
     server_.stop();
     plain_server_.stop();
     // Endpoint storage may be reclaimed as soon as the stop tasks run.

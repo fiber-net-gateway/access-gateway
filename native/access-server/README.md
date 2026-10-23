@@ -341,7 +341,9 @@ python3 native/access-server/scripts/sync_test_nacos.py \
 
 已支持本机 TCP 预热升级：新代先完成配置和应用 worker 准备，经 UDS 通知旧代释放监听后，
 立即绑定并开始接流量，随后后台注册 Nacos。普通冷启动仍保留注册成功后才 serve 的门槛。
-需要明确关闭参与交接两代的 HTTP/3；业务/status 端口必须固定且一致。
+业务/status 端口必须固定且一致。允许开启 HTTP/3：新老进程使用 UDP `SO_REUSEPORT`，
+旧 UDP socket 沿用现有排空流程，不阻挡 TCP 交接。重叠期间 HTTP/3 请求可能失败，
+包括新建连接；不保证 QUIC 连接连续性。
 
 ```bash
 # 控制目录由部署系统预先建立，属于服务用户，权限 0700。
@@ -352,7 +354,7 @@ access-serverctl upgrade --old-socket /run/access-server/access-prod-0/23140.soc
 ```
 
 两个路径中的 PID 仅为示例；实际文件名由各进程自己的 PID 自动生成。控制命令需由同一
-有效 UID 执行。旧代回复只确认监听释放，不等待已有连接结束或 Nacos 远端注销。
+有效 UID 执行。旧代回复只确认 TCP 监听释放，不等待已有连接结束或 Nacos 远端注销。
 旧代保持依赖并排空后自行退出；释放后激活失败不能原地恢复旧监听。
 
 构建 CLI 使用 `fiber_app_access_serverctl` target，产物为 `native/build/apps/access-serverctl`。

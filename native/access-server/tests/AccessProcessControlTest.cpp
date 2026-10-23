@@ -89,7 +89,8 @@ struct Pair {
     Runtime fresh{.old = &old};
     AccessProcessControl old_control;
     AccessProcessControl new_control;
-    Pair(std::string old_compatibility = "same", bool old_http3 = false, bool shared_log = false) :
+    Pair(std::string old_compatibility = "same", bool old_http3 = false, bool shared_log = false,
+         bool new_http3 = false) :
         old_control(loop, old.actions(),
                     {.directory = old_directory.path,
                      .compatibility = std::move(old_compatibility),
@@ -98,7 +99,8 @@ struct Pair {
         new_control(loop, fresh.actions(),
                     {.directory = new_directory.path,
                      .compatibility = "same",
-                     .log_identity = shared_log ? "same-log" : ""}) {}
+                     .log_identity = shared_log ? "same-log" : "",
+                     .http3 = new_http3}) {}
 
 
     template<class Function>
@@ -372,18 +374,36 @@ TEST(AccessProcessControlTest, RejectsWrongOldBootBeforeAnyRelease) {
     });
 }
 
-TEST(AccessProcessControlTest, UnsupportedHttp3AndIncompatibleSettingsDoNotReleaseOldListener) {
-    for (unsigned mode = 0; mode < 3; ++mode) {
-        Pair pair(mode == 0 ? "different-environment" : "same", mode == 1, mode == 2);
+TEST(AccessProcessControlTest, IncompatibleSettingsAndSharedLogsDoNotReleaseOldListener) {
+    for (unsigned mode = 0; mode < 2; ++mode) {
+        Pair pair(mode == 0 ? "different-environment" : "same", false, mode == 1);
         pair.run([&]() -> async::Task<void> {
             auto accepted = co_await request_access_control(pair.loop, pair.new_control.path(), pair.takeover());
             EXPECT_TRUE(accepted);
             co_await pair.wait_job();
-            constexpr std::array<std::string_view, 3> expected{"UPGRADE_INCOMPATIBLE", "UPGRADE_HTTP3_UNSUPPORTED",
-                                                               "UPGRADE_LOG_DIRECTORY_SHARED"};
+            constexpr std::array<std::string_view, 2> expected{"UPGRADE_INCOMPATIBLE", "UPGRADE_LOG_DIRECTORY_SHARED"};
             EXPECT_EQ(pair.new_control.status().error, expected[mode]);
             EXPECT_EQ(pair.old.releases, 0U);
             EXPECT_EQ(pair.fresh.activations, 0U);
+        });
+    }
+}
+
+TEST(AccessProcessControlTest, AllowsTakeoverWithHttp3EnabledOnEitherOrBothGenerations) {
+    for (unsigned mode = 1; mode <= 3; ++mode) {
+        Pair pair("same", (mode & 1U) != 0, false, (mode & 2U) != 0);
+        pair.run([&]() -> async::Task<void> {
+            auto accepted = co_await request_access_control(pair.loop, pair.new_control.path(), pair.takeover());
+            EXPECT_TRUE(accepted);
+            if (accepted) {
+                EXPECT_TRUE(accepted->error.empty());
+            }
+            co_await pair.wait_job();
+            EXPECT_EQ(pair.new_control.status().phase, "serving");
+            EXPECT_EQ(pair.old.releases, 1U);
+            EXPECT_EQ(pair.fresh.activations, 1U);
+            EXPECT_EQ(pair.old_control.status().http3, (mode & 1U) != 0);
+            EXPECT_EQ(pair.new_control.status().http3, (mode & 2U) != 0);
         });
     }
 }

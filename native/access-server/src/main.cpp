@@ -209,11 +209,6 @@ int main(int argc, char **argv) {
     }
     fiber::access_server::AccessServerConfig config = std::move(*loaded);
 
-    if (launch.prewarm && config.tls_http_server_options().http3_enabled) {
-        std::cerr << "prewarm upgrade does not support HTTP/3; disable it explicitly before using this mode\n";
-        return 1;
-    }
-
     (void) ::signal(SIGPIPE, SIG_IGN);
     fiber::async::SignalSet shutdown_signals;
     shutdown_signals.add(SIGINT).add(SIGTERM);
