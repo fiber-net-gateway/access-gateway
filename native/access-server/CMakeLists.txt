@@ -97,9 +97,12 @@ add_library(access_server::execution ALIAS access_server_execution)
 
 access_server_add_component(access_server_runtime
     "${CMAKE_CURRENT_LIST_DIR}/src/runtime/AccessActivationEndpoint.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/runtime/AccessBoss.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/runtime/AccessBossChannel.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/runtime/AccessBossLauncher.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/runtime/AccessControlProtocol.cpp"
-    "${CMAKE_CURRENT_LIST_DIR}/src/runtime/AccessProcessControl.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/runtime/AccessProcessArguments.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/runtime/AccessServerBinaryInstall.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/runtime/AccessControlPlaneSupervisor.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/runtime/AccessConfigCompiler.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/runtime/AccessConfigWatcher.cpp"
@@ -186,6 +189,11 @@ fiber_add_app(access_server
     LIBRARIES
         access_server_runtime)
 
+fiber_add_app(access_server_boss
+    OUTPUT_NAME access-server-boss
+    SOURCES "${CMAKE_CURRENT_LIST_DIR}/src/boss_main.cpp"
+    LIBRARIES access_server_runtime)
+
 fiber_add_app(access_serverctl
     OUTPUT_NAME access-serverctl
     SOURCES "${CMAKE_CURRENT_LIST_DIR}/src/control_main.cpp"
@@ -268,6 +276,8 @@ if (FIBER_BUILD_TESTS AND (GTest_FOUND OR TARGET GTest::gtest_main))
 
     add_executable(fiber_access_server_tests
         "${CMAKE_CURRENT_LIST_DIR}/tests/AccessActivationEvidenceTest.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/tests/AccessBossChannelTest.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/tests/AccessBossTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/AccessConfigCodecTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/AccessConfigLimitsTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/AccessConfigMetricsTest.cpp"
@@ -283,7 +293,7 @@ if (FIBER_BUILD_TESTS AND (GTest_FOUND OR TARGET GTest::gtest_main))
         "${CMAKE_CURRENT_LIST_DIR}/tests/AccessRequestHandlerTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/AccessRequestTelemetryTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/AccessRuntimeCoordinatorTest.cpp"
-        "${CMAKE_CURRENT_LIST_DIR}/tests/AccessProcessControlTest.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/tests/AccessControlProtocolTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/AccessServerTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/AccessServerMetricsTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/AccessServerConfigTest.cpp"
