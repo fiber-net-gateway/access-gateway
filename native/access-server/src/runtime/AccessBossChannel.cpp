@@ -157,8 +157,14 @@ async::DetachedTask AccessBossChannel::serve() {
         if (stopping_ || !readable) {
             break;
         }
-        auto request = co_await read_access_control(stream_);
+        bool frame_started = false;
+        auto request = co_await read_access_control(stream_, &frame_started);
         if (!request) {
+            if (request.error() == common::IoErr::TimedOut && !frame_started) {
+                // A stale readiness edge with no frame bytes: keep waiting.
+                // Only a started frame is bound by the protocol timeout.
+                continue;
+            }
             break;
         }
         const bool release_command = request->command == "RELEASE";

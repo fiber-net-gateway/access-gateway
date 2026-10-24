@@ -277,6 +277,7 @@ if (FIBER_BUILD_TESTS AND (GTest_FOUND OR TARGET GTest::gtest_main))
     add_executable(fiber_access_server_tests
         "${CMAKE_CURRENT_LIST_DIR}/tests/AccessActivationEvidenceTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/AccessBossChannelTest.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/tests/AccessBossIdleReproTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/AccessBossTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/AccessConfigCodecTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/AccessConfigLimitsTest.cpp"

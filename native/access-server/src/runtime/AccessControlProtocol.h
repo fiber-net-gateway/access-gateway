@@ -49,7 +49,13 @@ struct AccessControlMessage {
 
 [[nodiscard]] common::IoResult<AccessControlMessage> decode_access_control(std::string_view input);
 [[nodiscard]] common::IoResult<std::string> encode_access_control(const AccessControlMessage &message);
-[[nodiscard]] async::Task<common::IoResult<AccessControlMessage>> read_access_control(net::UnixStream &stream);
+// Reads one length-prefixed frame. `frame_started`, when provided, reports
+// whether any header byte arrived: a TimedOut with no byte consumed means the
+// stream merely reported a stale readiness edge (the fd was marked ready by an
+// earlier exchange and never drained to EAGAIN), not a protocol failure — the
+// caller keeps waiting instead of dropping the channel.
+[[nodiscard]] async::Task<common::IoResult<AccessControlMessage>> read_access_control(net::UnixStream &stream,
+                                                                                      bool *frame_started = nullptr);
 [[nodiscard]] async::Task<common::IoResult<void>> write_access_control(net::UnixStream &stream,
                                                                        const AccessControlMessage &message);
 // Accepts a peer with the same effective UID, or when either side is root:
