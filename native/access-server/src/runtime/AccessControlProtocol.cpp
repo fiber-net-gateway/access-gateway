@@ -104,7 +104,7 @@ private:
 };
 
 async::Task<common::IoResult<void>> read_exact(net::UnixStream &stream, char *out, std::size_t size,
-                                               std::chrono::steady_clock::time_point deadline) {
+                                               std::chrono::steady_clock::time_point deadline, std::size_t *consumed) {
     while (size != 0) {
         const auto now = event::EventLoop::current().now();
         if (now >= deadline) {
@@ -120,6 +120,9 @@ async::Task<common::IoResult<void>> read_exact(net::UnixStream &stream, char *ou
         }
         out += *read;
         size -= *read;
+        if (consumed != nullptr) {
+            *consumed += *read;
+        }
     }
     co_return common::IoResult<void>{};
 }
@@ -213,10 +216,15 @@ common::IoResult<std::string> encode_access_control(const AccessControlMessage &
     return output;
 }
 
-async::Task<common::IoResult<AccessControlMessage>> read_access_control(net::UnixStream &stream) {
+async::Task<common::IoResult<AccessControlMessage>> read_access_control(net::UnixStream &stream, bool *frame_started) {
     const auto deadline = event::EventLoop::current().now() + kAccessControlTimeout;
     std::uint32_t wire_size = 0;
-    auto header = co_await read_exact(stream, reinterpret_cast<char *>(&wire_size), sizeof(wire_size), deadline);
+    std::size_t header_bytes = 0;
+    auto header = co_await read_exact(stream, reinterpret_cast<char *>(&wire_size), sizeof(wire_size), deadline,
+                                      &header_bytes);
+    if (frame_started != nullptr) {
+        *frame_started = header_bytes != 0;
+    }
     if (!header) {
         co_return std::unexpected(header.error());
     }
@@ -225,7 +233,7 @@ async::Task<common::IoResult<AccessControlMessage>> read_access_control(net::Uni
         co_return std::unexpected(common::IoErr::Invalid);
     }
     std::string input(size, '\0');
-    auto body = co_await read_exact(stream, input.data(), input.size(), deadline);
+    auto body = co_await read_exact(stream, input.data(), input.size(), deadline, nullptr);
     if (!body) {
         co_return std::unexpected(body.error());
     }

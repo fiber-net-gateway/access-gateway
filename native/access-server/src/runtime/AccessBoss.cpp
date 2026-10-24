@@ -689,13 +689,23 @@ async::DetachedTask AccessBoss::accept_connections() {
 
 async::DetachedTask AccessBoss::serve_connection(std::size_t slot) {
     auto &stream = *streams_[slot];
-    for (unsigned count = 0; count < kMaxRequestsPerConnection; ++count) {
-        auto request = co_await read_access_control(stream);
+    unsigned count = 0;
+    for (;;) {
+        bool frame_started = false;
+        auto request = co_await read_access_control(stream, &frame_started);
         if (!request) {
+            // Same stale-readiness tolerance as the child channel: an idle ctl
+            // connection that woke with no frame bytes keeps waiting.
+            if (request.error() == common::IoErr::TimedOut && !frame_started) {
+                continue;
+            }
             break;
         }
         auto response = co_await handle(std::move(*request));
         if (!co_await write_access_control(stream, response)) {
+            break;
+        }
+        if (++count >= kMaxRequestsPerConnection) {
             break;
         }
     }
