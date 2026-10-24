@@ -10,7 +10,7 @@ HTTP, JSON/script, Nacos, CAT, and Prometheus modules are consumed from the pinn
 historical application import revision.
 
 The current reusable Fiber dependency is pinned at
-`47e71f6cb34b01d20ff866dc3c274be16a368fe1` (upstream `master`, fetched 2026-10-19). The pinned
+`56534432cd695653206b759ac33b7603783f2226` (upstream `master`, fetched 2026-10-24). The pinned
 revision carries no repository-owned compatibility patches: the TLS dynamic-credential lifetime
 defect ([upstream issue #41](https://github.com/fiber-net-gateway/fiber-gateway-cpp/issues/41)),
 briefly patched against `f832d5458d3bfca1cefa45a4c7a6cb1cd0662f23`, is fixed upstream in `90ed153`
@@ -18,6 +18,28 @@ briefly patched against `f832d5458d3bfca1cefa45a4c7a6cb1cd0662f23`, is fixed ups
 The repository-owned regression
 `ProxyExecutorTest.StreamsChunkedUpstreamWhoseFramingArrivesSeparatelyFromPayload` still guards
 the HTTP/1 chunked split-framing fix from the application side.
+The reviewed update range from the previous pin is
+`47e71f6cb34b01d20ff866dc3c274be16a368fe1..56534432cd695653206b759ac33b7603783f2226` (eight
+non-merge commits, fast-forward). Its behavioral core is two memory bounds on slow peers, a TLS
+read-path optimization, and two QUIC wire fixes. Buffered body pipes now coalesce trickled reads
+(`d36d2fc3`): each read used to stay pinned in its own read-sized block while buffered bytes stayed
+below `low_water`, so an upstream or client trickling 5-byte reads held ~400 MB per pipe (~640 MB
+for TLS-sized slices); sparse nodes are now copied into a uniquely owned tail buffer, bounding
+pinned storage at 16x the buffered bytes plus one coalesce buffer. access-server's default
+(non-`flush`) proxy request and response pipes run in buffered mode, so this applies to ordinary
+proxied bodies. The TLS handshake now reads into the same inbound buffer as the connected phase
+(`a4967a17`): a handshake record split over K segments previously pinned K x 32 KiB before
+authenticating anything (one peer could hold ~512 MiB of address space per connection within the
+handshake timeout). `StreamFd::read_would_block()` and `ensure_read_observation()` (additive
+`detail` API) let both TLS phases skip reads a short read proved would only return EAGAIN
+(`a037892e`), and TLS connections observe half-closes from the handshake on. QUIC FIN-only STREAM
+frames now carry an explicit LEN=0 (`783b233c`; an omitted LEN swallowed any following frames or
+padding), and GSO is enabled only after `getsockopt(SOL_UDP, UDP_SEGMENT)` succeeds on the running
+kernel (`56534432`): a binary built with the header but run on a pre-4.18 kernel previously sent
+each GSO buffer as one oversized datagram, stalling HTTP/3. The remaining commits make `run_tidy.sh`
+pick the clang-tidy release matching the toolchain and record the clang-tidy 22 findings. Public
+headers move +54/-16, all under `net/detail` and either additive or private `TlsStreamFd` members.
+Access-server needed no source adaptation for this update.
 The reviewed update range from the previous pin is
 `512ef8a73a653d951ea80d9f3ccc095545577319..47e71f6cb34b01d20ff866dc3c274be16a368fe1`. Its
 behavioral core is a pair of HTTP/1 data-plane fixes. The header parse buffer now tracks view
