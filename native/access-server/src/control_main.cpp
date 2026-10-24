@@ -1,7 +1,6 @@
 #include "runtime/AccessControlProtocol.h"
 #include "runtime/AccessServerBinaryInstall.h"
 
-#include <array>
 #include <chrono>
 #include <csignal>
 #include <iostream>
@@ -10,7 +9,6 @@
 #include <thread>
 #include <utility>
 
-#include <sys/random.h>
 #include <unistd.h>
 
 #include <fiber/async/Spawn.h>
@@ -50,22 +48,13 @@ void print(const AccessControlMessage &message) {
     }
 }
 
-std::string random_upgrade_id() {
-    std::array<unsigned char, 12> random{};
-    std::size_t offset = 0;
-    while (offset < random.size()) {
-        const auto size = ::getrandom(random.data() + offset, random.size() - offset, 0);
-        if (size > 0) {
-            offset += static_cast<std::size_t>(size);
-        }
-    }
-    constexpr char alphabet[] = "0123456789abcdef";
-    std::string id = "ctl-";
-    for (auto byte: random) {
-        id.push_back(alphabet[byte >> 4U]);
-        id.push_back(alphabet[byte & 15U]);
-    }
-    return id;
+// Only has to differ between CLI runs against one boss, not be unpredictable:
+// a PID paired with the monotonic clock never repeats before a reboot, which
+// also restarts the boss. Avoids getrandom(2) (glibc 2.25, Linux 3.17).
+std::string make_upgrade_id() {
+    const auto uptime = std::chrono::steady_clock::now().time_since_epoch();
+    return "ctl-" + std::to_string(::getpid()) + "-" +
+           std::to_string(std::chrono::duration_cast<std::chrono::nanoseconds>(uptime).count());
 }
 
 // The request was never delivered when the boss could not even be reached.
@@ -112,7 +101,7 @@ int upgrade(const std::string &socket, const std::string &binary) {
         std::cerr << "installed " << binary << " at " << target << ", previous kept at "
                   << access_server_binary_backup_path(target) << '\n';
     }
-    const auto upgrade_id = random_upgrade_id();
+    const auto upgrade_id = make_upgrade_id();
     auto accepted = call(socket, "UPGRADE", upgrade_id);
     if (!accepted) {
         if (undelivered(accepted.error())) {
