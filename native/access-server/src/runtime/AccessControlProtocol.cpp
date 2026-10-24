@@ -21,23 +21,72 @@ struct TextField {
     std::string AccessControlMessage::*member;
 };
 
-constexpr std::array kFields{
+struct IntegerField {
+    std::string_view name;
+    std::int64_t AccessControlMessage::*member;
+};
+
+struct BoolField {
+    std::string_view name;
+    bool AccessControlMessage::*member;
+};
+
+constexpr std::array kTextFields{
         TextField{"requestId", &AccessControlMessage::request_id},
         TextField{"command", &AccessControlMessage::command},
-        TextField{"bootId", &AccessControlMessage::boot_id},
-        TextField{"expectedBootId", &AccessControlMessage::expected_boot_id},
         TextField{"upgradeId", &AccessControlMessage::upgrade_id},
-        TextField{"oldSocket", &AccessControlMessage::old_socket},
-        TextField{"oldBootId", &AccessControlMessage::old_boot_id},
         TextField{"state", &AccessControlMessage::state},
         TextField{"phase", &AccessControlMessage::phase},
         TextField{"registration", &AccessControlMessage::registration},
         TextField{"compatibility", &AccessControlMessage::compatibility},
-        TextField{"logIdentity", &AccessControlMessage::log_identity},
         TextField{"error", &AccessControlMessage::error},
-        TextField{"previousSocket", &AccessControlMessage::previous_socket},
-        TextField{"previousBootId", &AccessControlMessage::previous_boot_id},
+        TextField{"upgradeError", &AccessControlMessage::upgrade_error},
+        TextField{"serverPath", &AccessControlMessage::server_path},
+        TextField{"activeState", &AccessControlMessage::active_state},
+        TextField{"activeRegistration", &AccessControlMessage::active_registration},
+        TextField{"candidateState", &AccessControlMessage::candidate_state},
 };
+
+constexpr std::array kIntegerFields{
+        IntegerField{"protocolVersion", &AccessControlMessage::protocol_version},
+        IntegerField{"pid", &AccessControlMessage::pid},
+        IntegerField{"activePid", &AccessControlMessage::active_pid},
+        IntegerField{"drainingPid", &AccessControlMessage::draining_pid},
+        IntegerField{"candidatePid", &AccessControlMessage::candidate_pid},
+        IntegerField{"prewarmTimeoutMillis", &AccessControlMessage::prewarm_timeout_millis},
+};
+
+constexpr std::array kBoolFields{
+        BoolField{"ready", &AccessControlMessage::ready},
+        BoolField{"http3", &AccessControlMessage::http3},
+        BoolField{"fixedPorts", &AccessControlMessage::fixed_ports},
+        BoolField{"background", &AccessControlMessage::background},
+};
+
+constexpr std::size_t kTextCount = kTextFields.size();
+constexpr std::size_t kIntegerCount = kIntegerFields.size();
+constexpr std::size_t kFieldCount = kTextCount + kIntegerCount + kBoolFields.size();
+static_assert(kFieldCount <= 64);
+constexpr std::size_t kMaxTextField = 4096;
+
+std::size_t field_index(std::string_view name) noexcept {
+    for (std::size_t i = 0; i < kTextCount; ++i) {
+        if (kTextFields[i].name == name) {
+            return i;
+        }
+    }
+    for (std::size_t i = 0; i < kIntegerCount; ++i) {
+        if (kIntegerFields[i].name == name) {
+            return kTextCount + i;
+        }
+    }
+    for (std::size_t i = 0; i < kBoolFields.size(); ++i) {
+        if (kBoolFields[i].name == name) {
+            return kTextCount + kIntegerCount + i;
+        }
+    }
+    return kFieldCount;
+}
 
 class StringSink final : public json::OutputSink {
 public:
@@ -92,8 +141,8 @@ common::IoResult<AccessControlMessage> decode_access_control(std::string_view in
         return std::unexpected(common::IoErr::Invalid);
     }
     AccessControlMessage message;
-    std::uint32_t seen = 0;
-    constexpr auto count = kFields.size();
+    message.protocol_version = 0;
+    std::uint64_t seen = 0;
     for (;;) {
         if (parser.next() != Status::Token) {
             return std::unexpected(common::IoErr::Invalid);
@@ -104,52 +153,35 @@ common::IoResult<AccessControlMessage> decode_access_control(std::string_view in
         if (parser.current_token()->kind != Kind::Text || parser.current_token()->role != json::TokenRole::ObjectKey) {
             return std::unexpected(common::IoErr::Invalid);
         }
-        const auto name = parser.current_token()->view;
-        std::size_t index = count + 4;
-        for (std::size_t i = 0; i < count; ++i) {
-            if (kFields[i].name == name) {
-                index = i;
-                break;
-            }
-        }
-        if (name == "protocolVersion") {
-            index = count;
-        } else if (name == "pid") {
-            index = count + 1;
-        } else if (name == "ready") {
-            index = count + 2;
-        } else if (name == "http3") {
-            index = count + 3;
-        }
-        if (index >= count + 4 || (seen & (1U << index)) != 0) {
+        const auto index = field_index(parser.current_token()->view);
+        if (index >= kFieldCount || (seen & (std::uint64_t{1} << index)) != 0) {
             return std::unexpected(common::IoErr::Invalid);
         }
-        seen |= 1U << index;
+        seen |= std::uint64_t{1} << index;
         if (parser.next() != Status::Token) {
             return std::unexpected(common::IoErr::Invalid);
         }
         const auto &value = *parser.current_token();
-        if (index < count) {
-            if (value.kind != Kind::Text || value.view.size() > 2048 ||
+        if (index < kTextCount) {
+            if (value.kind != Kind::Text || value.view.size() > kMaxTextField ||
                 value.view.find('\0') != std::string_view::npos) {
                 return std::unexpected(common::IoErr::Invalid);
             }
-            message.*kFields[index].member = value.view;
-        } else if (index == count || index == count + 1) {
-            if (value.kind != Kind::Integer) {
+            message.*kTextFields[index].member = value.view;
+        } else if (index < kTextCount + kIntegerCount) {
+            if (value.kind != Kind::Integer || value.inum < 0) {
                 return std::unexpected(common::IoErr::Invalid);
             }
-            (index == count ? message.protocol_version : message.pid) = value.inum;
+            message.*kIntegerFields[index - kTextCount].member = value.inum;
         } else {
             if (value.kind != Kind::Bool) {
                 return std::unexpected(common::IoErr::Invalid);
             }
-            (index == count + 2 ? message.ready : message.http3) = value.bval;
+            message.*kBoolFields[index - kTextCount - kIntegerCount].member = value.bval;
         }
     }
-    if (parser.next() != Status::Complete || (seen & (1U << count)) == 0 || message.protocol_version != 1 ||
+    if (parser.next() != Status::Complete || message.protocol_version != kAccessControlProtocolVersion ||
         message.request_id.empty() || message.request_id.size() > 128 || message.upgrade_id.size() > 128 ||
-        message.boot_id.size() > 128 || message.expected_boot_id.size() > 128 || message.old_boot_id.size() > 128 ||
         message.command.size() > 32) {
         return std::unexpected(common::IoErr::Invalid);
     }
@@ -164,12 +196,14 @@ common::IoResult<std::string> encode_access_control(const AccessControlMessage &
     const auto text = [&generator](std::string_view value) {
         return generator.string(value.data(), value.size()) == Result::OK;
     };
-    bool ok = generator.map_open() == Result::OK && text("protocolVersion") &&
-              generator.integer(message.protocol_version) == Result::OK && text("pid") &&
-              generator.integer(message.pid) == Result::OK && text("ready") &&
-              generator.bool_value(message.ready) == Result::OK && text("http3") &&
-              generator.bool_value(message.http3) == Result::OK;
-    for (const auto &field: kFields) {
+    bool ok = generator.map_open() == Result::OK;
+    for (const auto &field: kIntegerFields) {
+        ok = ok && text(field.name) && generator.integer(message.*field.member) == Result::OK;
+    }
+    for (const auto &field: kBoolFields) {
+        ok = ok && text(field.name) && generator.bool_value(message.*field.member) == Result::OK;
+    }
+    for (const auto &field: kTextFields) {
         ok = ok && text(field.name) && text(message.*field.member);
     }
     ok = ok && generator.map_close() == Result::OK;
@@ -229,8 +263,11 @@ async::Task<common::IoResult<void>> write_access_control(net::UnixStream &stream
 common::IoResult<void> validate_access_control_peer(int fd) noexcept {
     ucred peer{};
     socklen_t size = sizeof(peer);
-    if (::getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &peer, &size) != 0 || size != sizeof(peer) ||
-        peer.uid != ::geteuid()) {
+    if (::getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &peer, &size) != 0 || size != sizeof(peer)) {
+        return std::unexpected(common::IoErr::Permission);
+    }
+    const uid_t self = ::geteuid();
+    if (peer.uid != self && peer.uid != 0 && self != 0) {
         return std::unexpected(common::IoErr::Permission);
     }
     return {};

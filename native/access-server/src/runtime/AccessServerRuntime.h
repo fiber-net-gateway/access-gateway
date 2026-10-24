@@ -32,7 +32,10 @@ public:
 
     [[nodiscard]] async::Task<std::expected<void, AccessServerRuntimeError>> start() noexcept;
     [[nodiscard]] async::Task<std::expected<void, AccessServerRuntimeError>> prepare() noexcept;
-    [[nodiscard]] async::Task<std::expected<void, AccessServerRuntimeError>> activate_upgrade() noexcept;
+    // Binds and serves a prepared runtime. Upgrades register in the background
+    // after serving; cold starts keep the bind -> register -> serve order.
+    [[nodiscard]] async::Task<std::expected<void, AccessServerRuntimeError>>
+    activate(bool background_registration) noexcept;
     [[nodiscard]] async::Task<std::expected<void, AccessServerRuntimeError>> release() noexcept;
     [[nodiscard]] bool upgrade_ready() noexcept;
     [[nodiscard]] std::string_view registration_state() const noexcept;

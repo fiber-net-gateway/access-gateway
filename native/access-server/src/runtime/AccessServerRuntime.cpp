@@ -50,8 +50,9 @@ async::Task<std::expected<void, AccessServerRuntimeError>> AccessServerRuntime::
     return coordinator_.prepare();
 }
 
-async::Task<std::expected<void, AccessServerRuntimeError>> AccessServerRuntime::activate_upgrade() noexcept {
-    return coordinator_.activate(true);
+async::Task<std::expected<void, AccessServerRuntimeError>>
+AccessServerRuntime::activate(bool background_registration) noexcept {
+    return coordinator_.activate(background_registration);
 }
 
 async::Task<std::expected<void, AccessServerRuntimeError>> AccessServerRuntime::release() noexcept {

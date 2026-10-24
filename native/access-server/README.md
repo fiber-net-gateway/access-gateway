@@ -339,27 +339,28 @@ python3 native/access-server/scripts/sync_test_nacos.py \
 
 ### 预热后交接监听
 
-已支持本机 TCP 预热升级：新代先完成配置和应用 worker 准备，经 UDS 通知旧代释放监听后，
-立即绑定并开始接流量，随后后台注册 Nacos。普通冷启动仍保留注册成功后才 serve 的门槛。
-业务/status 端口必须固定且一致。允许开启 HTTP/3：新老进程使用 UDP `SO_REUSEPORT`，
-旧 UDP socket 沿用现有排空流程，不阻挡 TCP 交接。重叠期间 HTTP/3 请求可能失败，
-包括新建连接；不保证 QUIC 连接连续性。
+本机 TCP 预热升级由常驻的 `access-server-boss` 托管：boss 拉起新代，新代完成配置和应用
+worker 准备后，boss 通知旧代释放监听，确认 `released`（或旧代已退出）后才让新代绑定并开始
+接流量，新代随后后台注册 Nacos。普通冷启动（独立运行、boss 首次启动和崩溃恢复）仍保留注册
+成功后才 serve 的门槛。业务/status 端口必须固定且一致。允许开启 HTTP/3：新老进程使用 UDP
+`SO_REUSEPORT`，旧 UDP socket 沿用现有排空流程，不阻挡 TCP 交接。重叠期间 HTTP/3 请求可能
+失败，包括新建连接；不保证 QUIC 连接连续性。
 
 ```bash
-# 控制目录由部署系统预先建立，属于服务用户，权限 0700。
-access-server generation-a.env --control-dir=/run/access-server/access-prod-0
-access-server generation-b.env --start-mode=prewarm --control-dir=/run/access-server/access-prod-0
-access-serverctl upgrade --old-socket /run/access-server/access-prod-0/23140.sock \
-  --new-socket /run/access-server/access-prod-0/23472.sock --wait
+# boss 的控制 socket 目录属于服务用户，且不可被 group/other 写入。
+access-server-boss --socket=/run/access-server/boss.sock \
+  --server=/opt/access-server/bin/access-server --config=/etc/access-server/access-server.env
+# 替换二进制（保留 <server>.prev）并升级；明确失败时 CLI 恢复 .prev。
+access-serverctl upgrade --socket /run/access-server/boss.sock --binary /tmp/access-server-new
+access-serverctl status --socket /run/access-server/boss.sock
 ```
 
-两个路径中的 PID 仅为示例；实际文件名由各进程自己的 PID 自动生成。控制命令需由同一
-有效 UID 执行。旧代回复只确认 TCP 监听释放，不等待已有连接结束或 Nacos 远端注销。
-旧代保持依赖并排空后自行退出；释放后激活失败不能原地恢复旧监听。
+不带 `--boss-fd` 的 `access-server <config.env>` 仍独立冷启动，但不提供进程内升级。boss
+崩溃时子进程读到通道 EOF，有界排空 5 s 后退出；serving 代崩溃或释放后激活失败时，boss 用
+最后一次进入 serving 的二进制 inode 冷启动恢复。两代可以共用同一个访问日志目录。
 
-构建 CLI 使用 `fiber_app_access_serverctl` target，产物为 `native/build/apps/access-serverctl`。
-文件日志启用时，各代需使用不同的既存日志目录。进程管理器负责代际启动、当前代记录和
-故障恢复，不能在旧代正常退出后自动重新启动它争抢端口。
+构建使用 `fiber_app_access_server_boss` 和 `fiber_app_access_serverctl` target，产物为
+`native/build/apps/access-server-boss` 与 `native/build/apps/access-serverctl`。
 完整状态、失败处理和集成验证入口见[预热升级文档](../../docs/access-server-prewarm-upgrade-design.md)。
 
 ## 目录
