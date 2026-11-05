@@ -129,8 +129,8 @@ TEST(RoutePolicyEvaluatorTest, AcceptsOnlyEmptyOrKnownLengthScriptBodies) {
     EXPECT_TRUE(RoutePolicyEvaluator::script_body_supported(http::HttpBodySpec::None()));
     EXPECT_TRUE(RoutePolicyEvaluator::script_body_supported(http::HttpBodySpec::ContentLength(0)));
     EXPECT_TRUE(RoutePolicyEvaluator::script_body_supported(http::HttpBodySpec::ContentLength(17)));
-    EXPECT_FALSE(RoutePolicyEvaluator::script_body_supported(http::HttpBodySpec::Chunked()));
     EXPECT_FALSE(RoutePolicyEvaluator::script_body_supported(http::HttpBodySpec::Stream()));
+    EXPECT_FALSE(RoutePolicyEvaluator::script_body_supported(http::HttpBodySpec::Raw()));
     EXPECT_FALSE(RoutePolicyEvaluator::script_body_supported(http::HttpBodySpec::Auto()));
 }
 

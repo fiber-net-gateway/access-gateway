@@ -15,9 +15,9 @@ TEST(ProxyRequestPlanTest, PreservesJavaRequestBodyFraming) {
     EXPECT_TRUE(known.is_content_length());
     EXPECT_EQ(known.content_length(), 17U);
 
-    EXPECT_TRUE(select_proxy_request_body_spec(http::HttpBodySpec::ContentLength(17), false, false).is_chunked());
-    EXPECT_TRUE(select_proxy_request_body_spec(http::HttpBodySpec::Chunked(), true, false).is_chunked());
-    EXPECT_TRUE(select_proxy_request_body_spec(http::HttpBodySpec::None(), false, false).is_chunked());
+    EXPECT_TRUE(select_proxy_request_body_spec(http::HttpBodySpec::ContentLength(17), false, false).is_stream());
+    EXPECT_TRUE(select_proxy_request_body_spec(http::HttpBodySpec::Stream(), true, false).is_stream());
+    EXPECT_TRUE(select_proxy_request_body_spec(http::HttpBodySpec::None(), false, false).is_stream());
     EXPECT_TRUE(select_proxy_request_body_spec(http::HttpBodySpec::Stream(), false, true).is_none());
 }
 

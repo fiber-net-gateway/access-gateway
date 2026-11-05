@@ -948,6 +948,32 @@ TEST(AccessRequestHandlerTest, MatchesRecordedConditionAndTemplateSyntaxSnapshot
               "origin=https://origin.example.test;forwarded_for=192.0.2.20;remote_addr=192.0.2.10");
 }
 
+TEST(AccessRequestHandlerTest, RoutesCanUseLinearRegexScriptFunctions) {
+    // strings.match / strings.findAll arrive with the pinned Fiber's regex
+    // engine; this guards them through the real script runtime and handler
+    // (the Fiber-owned suite does not compile on every deployment host).
+    AccessScriptRuntime scripts;
+    RouteConfig regex_route = response_route("/corpus/*tail", "regex-ok", 203);
+    regex_route.condition = "strings.match($path.tail, 'gm') && strings.match($path.tail, '^segment/') && "
+                            "strings.match($path.tail, '/rest$') && strings.match($path.tail, 'GM') == false && "
+                            "strings.match($path.tail, 'z+') == false && "
+                            "length(strings.findAll($path.tail, 'e')) == 3 && "
+                            "length(strings.findAll($path.tail, 'zzz')) == 0";
+    RouteConfig fallback = response_route("/corpus/*tail", "fallback");
+
+    RouteConfigStore store(scripts.compiler_adapter());
+    publish(store, project({}, {std::move(regex_route), std::move(fallback)}));
+
+    const std::string response = run_request(store,
+                                             "GET /corpus/segment/rest HTTP/1.1\r\n"
+                                             "Host: api.example.com\r\n"
+                                             "Connection: close\r\n\r\n",
+                                             scripts.request_adapter());
+
+    EXPECT_TRUE(response.starts_with("HTTP/1.1 203 "));
+    EXPECT_EQ(response_body(response), "regex-ok");
+}
+
 TEST(AccessRequestHandlerTest, BindsBnrcContextAndGeneratedTraceParentBeforeRouteScripts) {
     AccessScriptRuntime scripts;
     RouteConfig conditional =

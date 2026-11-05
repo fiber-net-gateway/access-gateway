@@ -556,7 +556,7 @@ fiber::async::Task<void> serve_upstream(fiber::http::HttpExchange &exchange, Ups
                 .kind = fiber::http::OutgoingHeaderKind::Final,
                 .status_code = 101,
                 .headers = &headers,
-                .body = fiber::http::HttpBodySpec::Stream(),
+                .body = fiber::http::HttpBodySpec::Raw(),
                 .end_stream = false,
         });
         if (sent) {
@@ -603,7 +603,7 @@ fiber::async::Task<void> serve_upstream(fiber::http::HttpExchange &exchange, Ups
         }
     }
     const fiber::http::HttpBodySpec body_spec =
-            state->response.chunked ? fiber::http::HttpBodySpec::Chunked()
+            state->response.chunked ? fiber::http::HttpBodySpec::Stream()
                                     : fiber::http::HttpBodySpec::ContentLength(
                                               state->response.advertised_content_length.value_or(response_body_size));
     auto sent = co_await exchange.send_header({

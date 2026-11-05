@@ -245,6 +245,7 @@ strings.trimRight              strings.split                   strings.contains
 strings.contains_any           strings.index                   strings.indexAny
 strings.lastIndex              strings.lastIndexAny            strings.repeat
 strings.substring              strings.toString
+strings.findAll                strings.match
 binary.base64Encode            binary.base64Decode             binary.hex
 binary.fromHex                 binary.getUtf8Bytes
 hash.crc32                     hash.md5                         hash.sha1
@@ -416,6 +417,9 @@ namespace strings {
 
     function repeat(text: string, count: number): string | null;
     function substring(text: string, start?: number, end?: number): string | null;
+
+    function match(text: string, pattern: string): boolean | null;
+    function findAll(text: string, pattern: string): string[] | null;
 
     function toString(): string;
     function toString(value: ScriptValue): string;
@@ -649,7 +653,37 @@ return {
 };
 ```
 
-`strings.match` 和 `strings.findAll` 未注册。
+### `strings.match(text, pattern)`
+
+- 参数：两个参数均为必填 string。`pattern` 为正则表达式，采用 RE2 语法：不支持反向引用、不支持前后瞻断言，
+  也不支持 `\p{...}` Unicode 类。
+- 匹配语义：非锚定搜索 —— `text` 中任意位置命中即返回 `true`，不是整段全匹配。模式按 UTF-8 处理：`.`
+  匹配一个码点且不匹配换行；默认区分大小写；`^`/`$` 锚定整段文本的首尾（无多行模式）。
+- 性能：匹配耗时与输入长度线性相关，模式写法不会引发回溯指数爆炸。
+- 返回：boolean。任一参数不是 string，或 `pattern` 编译失败（含超过 64 KiB 的模式），返回 `null`，不会抛错。
+- 异常：不抛可捕获异常。
+
+```javascript
+return {
+    hit: strings.match("order-42 shipped", "order-\\d+"), // true
+    miss: strings.match("order-42 shipped", "^refund"), // false
+    badPattern: strings.match("text", "a(") // null
+};
+```
+
+### `strings.findAll(text, pattern)`
+
+- 参数与 `pattern` 语义：与 `strings.match(text, pattern)` 完全一致。
+- 返回：string 数组，按从左到右的顺序给出全部不重叠匹配的子串（仅整段匹配，不返回捕获组）。空串匹配在每个
+  位置至多报告一次，紧接上一匹配结尾的空匹配会被跳过，随后从下一个码点继续扫描。无命中返回 `[]`；任一参数
+  不是 string 或 `pattern` 编译失败返回 `null`。
+- 异常：不抛可捕获异常。
+
+```javascript
+return strings.findAll("id=7, id=11; id=23", "id=\\d+");
+// ["id=7", "id=11", "id=23"]
+```
+
 
 ## 8. Binary 函数
 

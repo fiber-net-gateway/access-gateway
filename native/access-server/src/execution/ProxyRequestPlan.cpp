@@ -184,7 +184,7 @@ http::HttpBodySpec select_proxy_request_body_spec(http::HttpBodySpec inbound, bo
     if (has_content_length_header && inbound.is_content_length()) {
         return http::HttpBodySpec::ContentLength(inbound.content_length());
     }
-    return http::HttpBodySpec::Chunked();
+    return http::HttpBodySpec::Stream();
 }
 
 std::optional<std::uint64_t> normalize_proxy_response_body_limit(std::optional<std::int64_t> configured_limit,

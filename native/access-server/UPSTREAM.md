@@ -10,7 +10,7 @@ HTTP, JSON/script, Nacos, CAT, and Prometheus modules are consumed from the pinn
 historical application import revision.
 
 The current reusable Fiber dependency is pinned at
-`56534432cd695653206b759ac33b7603783f2226` (upstream `master`, fetched 2026-10-24). The pinned
+`f28838ff6f6a2e9ee0ca685fb84e346c087952d9` (upstream `master`, fetched 2026-11-05). The pinned
 revision carries no repository-owned compatibility patches: the TLS dynamic-credential lifetime
 defect ([upstream issue #41](https://github.com/fiber-net-gateway/fiber-gateway-cpp/issues/41)),
 briefly patched against `f832d5458d3bfca1cefa45a4c7a6cb1cd0662f23`, is fixed upstream in `90ed153`
@@ -18,6 +18,36 @@ briefly patched against `f832d5458d3bfca1cefa45a4c7a6cb1cd0662f23`, is fixed ups
 The repository-owned regression
 `ProxyExecutorTest.StreamsChunkedUpstreamWhoseFramingArrivesSeparatelyFromPayload` still guards
 the HTTP/1 chunked split-framing fix from the application side.
+The reviewed update range from the previous pin is
+`56534432cd695653206b759ac33b7603783f2226..f28838ff6f6a2e9ee0ca685fb84e346c087952d9` (five
+non-merge commits, fast-forward). Its behavioral core is the linear-time regex engine `d5047f4a`
+(PR #50): an in-tree port of RE2's architecture with no external dependency — parser/simplifier,
+Pike VM, BitState, OnePass, lazy DFA with a non-failing degraded path, `RegexSet`, a multi-literal
+`LiteralSet`, a streaming `Scanner`, UTF-8 and byte modes, RE2 syntax minus lookaround,
+backreferences, and `\p{...}`; patterns are capped at 64 KiB and resource exhaustion surfaces as
+an error rather than a silent non-match (WAF-oriented; OWASP CRS is the acceptance corpus). The
+script stdlib registers the two functions that previously had a reserved placeholder:
+`strings.match(text, pattern)` and `strings.findAll(text, pattern)`, backed by a per-thread
+128-entry LRU compile cache and per-thread scratch, so route scripts gain them automatically
+through `StdLibrary` with no per-call compile cost in the hot path.
+The second core is the `HttpBodySpec` rework (PR #48, `a42b6705`/`8c1826c3`/`af5a35b7`):
+`Chunked` is folded into `Stream` — unknown-length content that HTTP/1 frames with chunked
+transfer coding (close-delimited only when answering an HTTP/1.0 request) and HTTP/2/3 delimit by
+end of stream — and the new `Raw` kind carries tunnel bytes that are not HTTP content (after an
+HTTP/1 101 or a 2xx answering CONNECT). Inbound h2/h3 CONNECT requests now surface
+`request_body_spec() == Raw()`, and a 101/2xx-CONNECT response must use `Raw`: `Stream()` on a
+1xx status is rejected (`must_not_have_body`), and `Raw()` on anything but a tunnel-opening
+status is rejected on h1 and h2/h3 alike.
+Access-server adapted to the new API in three sites: `select_proxy_request_body_spec` returns
+`Stream()` where it returned `Chunked()` (identical HTTP/1-upstream chunked wire framing, the
+same rename upstream applied to `proxy_core::detect_request_body`); the WebSocket handshake
+response (101 upgrade / extended-CONNECT 2xx) sends `Raw()` instead of `Stream()` so the tunnel
+bytes stay out of HTTP content framing; and the test fixtures/port assertions follow
+(`ProxyExecutorTest`'s fake upstream 101 uses `Raw()`, its chunked-response fixture uses
+`Stream()`, `script_body_supported` coverage gains the `Raw` rejection). Everything else in the
+range is internal to the pinned modules (h1 exchange-IO tunnel validation, h2/h3 CONNECT raw
+plumbing, gzip writer raw exclusion, script `http.request` CONNECT handling) or additive test
+coverage (`c09d9b16`).
 The reviewed update range from the previous pin is
 `47e71f6cb34b01d20ff866dc3c274be16a368fe1..56534432cd695653206b759ac33b7603783f2226` (eight
 non-merge commits, fast-forward). Its behavioral core is two memory bounds on slow peers, a TLS
