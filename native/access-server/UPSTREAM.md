@@ -10,7 +10,7 @@ HTTP, JSON/script, Nacos, CAT, and Prometheus modules are consumed from the pinn
 historical application import revision.
 
 The current reusable Fiber dependency is pinned at
-`f28838ff6f6a2e9ee0ca685fb84e346c087952d9` (upstream `master`, fetched 2026-11-05). The pinned
+`4a5f12b8b374045975e21410e3987447a550043e` (upstream `master`, fetched 2026-11-05). The pinned
 revision carries no repository-owned compatibility patches: the TLS dynamic-credential lifetime
 defect ([upstream issue #41](https://github.com/fiber-net-gateway/fiber-gateway-cpp/issues/41)),
 briefly patched against `f832d5458d3bfca1cefa45a4c7a6cb1cd0662f23`, is fixed upstream in `90ed153`
@@ -18,6 +18,15 @@ briefly patched against `f832d5458d3bfca1cefa45a4c7a6cb1cd0662f23`, is fixed ups
 The repository-owned regression
 `ProxyExecutorTest.StreamsChunkedUpstreamWhoseFramingArrivesSeparatelyFromPayload` still guards
 the HTTP/1 chunked split-framing fix from the application side.
+The reviewed update range from the previous pin is
+`f28838ff6f6a2e9ee0ca685fb84e346c087952d9..4a5f12b8b374045975e21410e3987447a550043e` (a single
+test-only commit, fast-forward): `TlsStreamFdTest`'s `heap_in_use()` now gates `mallinfo2` on
+`__GLIBC_PREREQ(2, 33)` and falls back to `mallinfo` on older glibc — the 32-bit counters only
+wrap past 2 GiB in use, far beyond the deltas the trickled-handshake test inspects, and the
+probe still vetoes allocators invisible to glibc (jemalloc, ASan) by skipping. `fiber_tests`
+therefore compiles again on glibc < 2.33 hosts, where the
+`TrickledHandshakeRecordStaysInOneWireBuffer` probe now also runs instead of being unreachable.
+No library source or public header changes; access-server needed no adaptation.
 The reviewed update range from the previous pin is
 `56534432cd695653206b759ac33b7603783f2226..f28838ff6f6a2e9ee0ca685fb84e346c087952d9` (five
 non-merge commits, fast-forward). Its behavioral core is the linear-time regex engine `d5047f4a`
