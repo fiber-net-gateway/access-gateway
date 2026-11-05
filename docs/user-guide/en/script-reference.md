@@ -254,6 +254,7 @@ strings.trimRight              strings.split                   strings.contains
 strings.contains_any           strings.index                   strings.indexAny
 strings.lastIndex              strings.lastIndexAny            strings.repeat
 strings.substring              strings.toString
+strings.findAll                strings.match
 binary.base64Encode            binary.base64Decode             binary.hex
 binary.fromHex                 binary.getUtf8Bytes
 hash.crc32                     hash.md5                         hash.sha1
@@ -428,6 +429,9 @@ namespace strings {
 
     function repeat(text: string, count: number): string | null;
     function substring(text: string, start?: number, end?: number): string | null;
+
+    function match(text: string, pattern: string): boolean | null;
+    function findAll(text: string, pattern: string): string[] | null;
 
     function toString(): string;
     function toString(value: ScriptValue): string;
@@ -668,7 +672,41 @@ return {
 };
 ```
 
-`strings.match` and `strings.findAll` are not registered.
+### `strings.match(text, pattern)`
+
+- Parameters: two required strings. `pattern` is a regular expression using RE2 syntax: no backreferences, no
+  lookahead/lookbehind, and `\p{...}` Unicode classes are not supported.
+- Matching: unanchored search — returns `true` when any position of `text` matches, not a whole-text match
+  test. Patterns are UTF-8: `.` matches one code point and never a newline; matching is case-sensitive; `^` and
+  `$` anchor the start and end of the text (no multi-line mode).
+- Performance: matching runs in linear time in the input length; a pathological pattern cannot cause
+  exponential backtracking.
+- Returns: boolean. A non-string argument, or a `pattern` that does not compile (including patterns longer
+  than 64 KiB), returns `null` rather than raising.
+- Exceptions: none.
+
+```javascript
+return {
+    hit: strings.match("order-42 shipped", "order-\\d+"), // true
+    miss: strings.match("order-42 shipped", "^refund"), // false
+    badPattern: strings.match("text", "a(") // null
+};
+```
+
+### `strings.findAll(text, pattern)`
+
+- Parameters and pattern semantics: identical to `strings.match(text, pattern)`.
+- Returns: array of all non-overlapping matched substrings, left to right (whole matches only; capture groups
+  are not returned). An empty match is reported at most once per position, an empty match immediately after a
+  previous match is skipped, and scanning resumes one code point later. Text with no match returns `[]`. A
+  non-string argument or a `pattern` that does not compile returns `null`.
+- Exceptions: none.
+
+```javascript
+return strings.findAll("id=7, id=11; id=23", "id=\\d+");
+// ["id=7", "id=11", "id=23"]
+```
+
 
 ## 8. Binary functions
 

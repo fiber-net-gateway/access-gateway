@@ -1246,7 +1246,9 @@ async::Task<Result<void>> UpstreamAttempt::run() noexcept {
                         .reason =
                                 request_plan_.websocket_extended_connect() ? std::string_view{} : upstream_head->reason,
                         .headers = &response_headers,
-                        .body = http::HttpBodySpec::Stream(),
+                        // Tunnel bytes follow the handshake head: Raw over the
+                        // 101/2xx CONNECT tunnel, not HTTP content framing.
+                        .body = http::HttpBodySpec::Raw(),
                         .connection_mode = http::ResponseConnectionMode::Auto,
                         .end_stream = false,
                 },
