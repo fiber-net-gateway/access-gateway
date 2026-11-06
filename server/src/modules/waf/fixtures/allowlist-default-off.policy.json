@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "defaultMode": "off",
+  "projectModes": {
+    "trade-web": "block",
+    "loan-admin": "log"
+  },
+  "rules": [
+    {
+      "id": "xss-0001",
+      "name": "XSS probe",
+      "severity": "high",
+      "priority": 50,
+      "action": "block",
+      "phase": "request_head",
+      "match": "strings.match($query.q, \"(?i)<script\")",
+      "scope": {
+        "paths": ["/search"]
+      }
+    }
+  ]
+}
