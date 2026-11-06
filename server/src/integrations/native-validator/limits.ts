@@ -36,6 +36,22 @@ const grayRuleKeys = [
   'maxCidrsPerRule',
   'maxCidrBytes',
 ] as const
+const edgeFunctionKeys = [
+  'maxPayloadBytes',
+  'maxFunctions',
+  'maxFunctionIdBytes',
+  'maxFunctionNameBytes',
+  'maxMountsPerFunction',
+  'maxGlobsPerSelector',
+  'maxGlobBytes',
+  'maxScriptPayloadBytes',
+  'maxTotalScriptBytes',
+  'maxReportsPerExecution',
+  'maxCidrDirectivesPerScript',
+  'maxCidrsPerDirective',
+  'maxCidrBytes',
+  'maxInputFieldBytes',
+] as const
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -61,11 +77,24 @@ function isAtMost(value: unknown, upperBound: unknown): boolean {
 }
 
 export function isAccessConfigLimits(value: unknown): value is AccessConfigLimits {
-  if (!isRecord(value) || value.schemaVersion !== 2) return false
-  if (!isRecord(value.projectList) || !isRecord(value.projectRoute) || !isRecord(value.grayRules)) {
+  if (!isRecord(value) || value.schemaVersion !== 3) return false
+  if (
+    !isRecord(value.projectList) ||
+    !isRecord(value.projectRoute) ||
+    !isRecord(value.grayRules) ||
+    !isRecord(value.edgeFunctions)
+  ) {
     return false
   }
-  if (!hasExactKeys(value, ['schemaVersion', 'projectList', 'projectRoute', 'grayRules'])) {
+  if (
+    !hasExactKeys(value, [
+      'schemaVersion',
+      'projectList',
+      'projectRoute',
+      'grayRules',
+      'edgeFunctions',
+    ])
+  ) {
     return false
   }
   return (
@@ -75,12 +104,16 @@ export function isAccessConfigLimits(value: unknown): value is AccessConfigLimit
     hasPositiveSafeIntegers(value.projectRoute, projectRouteKeys) &&
     hasExactKeys(value.grayRules, grayRuleKeys) &&
     hasPositiveSafeIntegers(value.grayRules, grayRuleKeys) &&
+    hasExactKeys(value.edgeFunctions, edgeFunctionKeys) &&
+    hasPositiveSafeIntegers(value.edgeFunctions, edgeFunctionKeys) &&
     isAtMost(value.projectList.maxProjectNameBytes, value.projectList.maxPayloadBytes) &&
     isAtMost(
       value.projectRoute.maxStaticResponseBodyBytes,
       value.projectRoute.maxStaticResponseBytes,
     ) &&
-    isAtMost(value.grayRules.maxCidrBytes, value.grayRules.maxPayloadBytes)
+    isAtMost(value.grayRules.maxCidrBytes, value.grayRules.maxPayloadBytes) &&
+    isAtMost(value.edgeFunctions.maxFunctionIdBytes, value.edgeFunctions.maxPayloadBytes) &&
+    isAtMost(value.edgeFunctions.maxScriptPayloadBytes, value.edgeFunctions.maxTotalScriptBytes)
   )
 }
 
@@ -88,7 +121,7 @@ export function isAccessConfigLimits(value: unknown): value is AccessConfigLimit
 // bounded transport envelope. Publication still fails closed without a
 // validator revision and its probed limits.
 export const fallbackAccessConfigLimits: AccessConfigLimits = {
-  schemaVersion: 2,
+  schemaVersion: 3,
   projectList: {
     maxPayloadBytes: 262_144,
     maxProjects: 1_024,
@@ -128,6 +161,22 @@ export const fallbackAccessConfigLimits: AccessConfigLimits = {
     maxEntryBytes: 64,
     maxCidrsPerRule: 256,
     maxCidrBytes: 64,
+  },
+  edgeFunctions: {
+    maxPayloadBytes: 262_144,
+    maxFunctions: 64,
+    maxFunctionIdBytes: 64,
+    maxFunctionNameBytes: 128,
+    maxMountsPerFunction: 16,
+    maxGlobsPerSelector: 256,
+    maxGlobBytes: 255,
+    maxScriptPayloadBytes: 1_048_576,
+    maxTotalScriptBytes: 8_388_608,
+    maxReportsPerExecution: 16,
+    maxCidrDirectivesPerScript: 16,
+    maxCidrsPerDirective: 256,
+    maxCidrBytes: 64,
+    maxInputFieldBytes: 8_192,
   },
 }
 

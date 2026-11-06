@@ -96,10 +96,11 @@ function hasPositiveIntegers(value: Record<string, unknown>, keys: readonly stri
 function isAccessConfigLimits(value: unknown): value is AccessConfigLimits {
   if (
     !isRecord(value) ||
-    value.schemaVersion !== 2 ||
+    value.schemaVersion !== 3 ||
     !isRecord(value.projectList) ||
     !isRecord(value.projectRoute) ||
-    !isRecord(value.grayRules)
+    !isRecord(value.grayRules) ||
+    !isRecord(value.edgeFunctions)
   ) {
     return false
   }
@@ -143,6 +144,22 @@ function isAccessConfigLimits(value: unknown): value is AccessConfigLimits {
       'maxEntryBytes',
       'maxCidrsPerRule',
       'maxCidrBytes',
+    ]) &&
+    hasPositiveIntegers(value.edgeFunctions, [
+      'maxPayloadBytes',
+      'maxFunctions',
+      'maxFunctionIdBytes',
+      'maxFunctionNameBytes',
+      'maxMountsPerFunction',
+      'maxGlobsPerSelector',
+      'maxGlobBytes',
+      'maxScriptPayloadBytes',
+      'maxTotalScriptBytes',
+      'maxReportsPerExecution',
+      'maxCidrDirectivesPerScript',
+      'maxCidrsPerDirective',
+      'maxCidrBytes',
+      'maxInputFieldBytes',
     ])
   )
 }
