@@ -35,6 +35,13 @@ enum class AccessConfigMetricEvent : std::uint8_t {
     ProjectRouteCompileFailed,
     ProjectRouteServiceReadyFailed,
     ProjectRoutePublishFailed,
+    EdgeFunctionSetPublished,
+    EdgeFunctionSetRemoved,
+    EdgeFunctionIndexSubscriptionFailed,
+    EdgeFunctionIndexDecodeFailed,
+    EdgeFunctionScriptSubscriptionFailed,
+    EdgeFunctionScriptRejected,
+    EdgeFunctionCompileFailed,
     Count,
 };
 
@@ -99,6 +106,8 @@ private:
         std::uint64_t hosts = 0;
         std::uint64_t routes = 0;
         std::uint64_t compiled_programs = 0;
+        std::uint64_t edge_functions = 0;
+        std::uint64_t edge_function_script_bytes = 0;
         std::uint64_t estimated_bytes = 0;
         std::uint64_t static_response_bytes = 0;
         std::int64_t published_at_nanoseconds = 0;
@@ -138,6 +147,8 @@ private:
     std::atomic<std::uint64_t> snapshot_hosts_{0};
     std::atomic<std::uint64_t> snapshot_routes_{0};
     std::atomic<std::uint64_t> snapshot_compiled_programs_{0};
+    std::atomic<std::uint64_t> snapshot_edge_functions_{0};
+    std::atomic<std::uint64_t> snapshot_edge_function_script_bytes_{0};
     std::atomic<std::uint64_t> snapshot_estimated_bytes_{0};
     std::atomic<std::uint64_t> snapshot_static_response_bytes_{0};
     std::atomic<std::int64_t> snapshot_published_at_nanoseconds_{0};

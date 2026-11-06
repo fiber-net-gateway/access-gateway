@@ -33,6 +33,13 @@ constexpr std::array<EventDescription, static_cast<std::size_t>(AccessConfigMetr
         EventDescription{"project_route", "failure", "compile"},
         EventDescription{"project_route", "failure", "service_ready"},
         EventDescription{"project_route", "failure", "publish"},
+        EventDescription{"edge_function_set", "success", "published"},
+        EventDescription{"edge_function_set", "success", "removed"},
+        EventDescription{"edge_function_index", "failure", "subscription"},
+        EventDescription{"edge_function_index", "failure", "decode"},
+        EventDescription{"edge_function_script", "failure", "subscription"},
+        EventDescription{"edge_function_script", "failure", "rejected"},
+        EventDescription{"edge_function_script", "failure", "compile"},
 };
 
 constexpr std::array<std::string_view, 5> kReadinessStates{
@@ -138,6 +145,8 @@ void AccessConfigMetrics::update_snapshot(const AccessRouteSnapshot &snapshot) n
     snapshot_hosts_.store(snapshot.host_count(), std::memory_order_relaxed);
     snapshot_routes_.store(snapshot.route_count(), std::memory_order_relaxed);
     snapshot_compiled_programs_.store(snapshot.compiled_program_count(), std::memory_order_relaxed);
+    snapshot_edge_functions_.store(snapshot.edge_function_count(), std::memory_order_relaxed);
+    snapshot_edge_function_script_bytes_.store(snapshot.edge_function_script_bytes(), std::memory_order_relaxed);
     snapshot_estimated_bytes_.store(snapshot.estimated_memory_bytes(), std::memory_order_relaxed);
     snapshot_static_response_bytes_.store(snapshot.static_response_bytes(), std::memory_order_relaxed);
     snapshot_published_at_nanoseconds_.store(steady_nanoseconds(event::EventLoop::current().now()),
@@ -179,6 +188,8 @@ AccessConfigMetrics::Snapshot AccessConfigMetrics::load_snapshot() const noexcep
         snapshot.hosts = snapshot_hosts_.load(std::memory_order_relaxed);
         snapshot.routes = snapshot_routes_.load(std::memory_order_relaxed);
         snapshot.compiled_programs = snapshot_compiled_programs_.load(std::memory_order_relaxed);
+        snapshot.edge_functions = snapshot_edge_functions_.load(std::memory_order_relaxed);
+        snapshot.edge_function_script_bytes = snapshot_edge_function_script_bytes_.load(std::memory_order_relaxed);
         snapshot.estimated_bytes = snapshot_estimated_bytes_.load(std::memory_order_relaxed);
         snapshot.static_response_bytes = snapshot_static_response_bytes_.load(std::memory_order_relaxed);
         snapshot.published_at_nanoseconds = snapshot_published_at_nanoseconds_.load(std::memory_order_relaxed);
@@ -269,6 +280,10 @@ void AccessConfigMetrics::append_prometheus(std::string &output, std::chrono::st
     append_series(output, "access_server_route_snapshot_resources", "{resource=\"route\"}", snapshot.routes);
     append_series(output, "access_server_route_snapshot_resources", "{resource=\"compiled_program\"}",
                   snapshot.compiled_programs);
+    append_series(output, "access_server_route_snapshot_resources", "{resource=\"edge_function\"}",
+                  snapshot.edge_functions);
+    append_series(output, "access_server_route_snapshot_edge_function_script_bytes", {},
+                  snapshot.edge_function_script_bytes);
 
     output.append("# HELP access_server_route_snapshot_generation Local route snapshot publication generation.\n");
     output.append("# TYPE access_server_route_snapshot_generation gauge\n");

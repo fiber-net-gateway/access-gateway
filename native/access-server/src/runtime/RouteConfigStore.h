@@ -1,6 +1,7 @@
 #ifndef FIBER_ACCESS_SERVER_ROUTE_CONFIG_STORE_H
 #define FIBER_ACCESS_SERVER_ROUTE_CONFIG_STORE_H
 
+#include "../routing/EdgeFunctionsSnapshot.h"
 #include "../routing/ProjectConfigCompiler.h"
 #include "AccessServiceDiscovery.h"
 #include "ProjectSnapshotRegistry.h"
@@ -158,6 +159,11 @@ public:
                  ConfigBatchCommitMode mode = ConfigBatchCommitMode::IsolateRejectedProjects);
     [[nodiscard]] ConfigUpdateOutcome remove_project(std::string_view project);
     void clear() noexcept;
+    // Replaces the mounted edge-function set and republishes the snapshot
+    // assembled from the current registry content. Mount expansion is total,
+    // so this cannot fail on the edge state itself; if the registry content
+    // somehow fails to rebuild, the previously published snapshot is kept.
+    void set_edge_functions(std::shared_ptr<const EdgeFunctionsState> state) noexcept;
     void set_tls_client_identity_resolver(UpstreamTlsClientIdentityResolver resolver) noexcept {
         tls_client_identity_resolver_ = resolver;
     }
@@ -175,6 +181,7 @@ private:
     AccessServiceSelectorFactory service_selector_factory_;
     ProxyAddressSelectorFactory selector_factory_;
     UpstreamTlsClientIdentityResolver tls_client_identity_resolver_;
+    std::shared_ptr<const EdgeFunctionsState> edge_functions_;
     ProjectSnapshotRegistry registry_;
     RouteSnapshotPublisher publisher_;
 };

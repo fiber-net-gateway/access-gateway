@@ -83,6 +83,17 @@ struct AccessGrayActivationEvidence {
     std::size_t rule_count = 0;
 };
 
+struct AccessEdgeFunctionsActivationEvidence {
+    std::string watcher_state = "created";
+    // The index Data ID drives the whole two-level set (script subscriptions
+    // are derived from it), so one resource block describes the candidate.
+    AccessActivationResourceEvidence index;
+    std::uint64_t generation = 0;
+    std::size_t function_count = 0;
+    std::size_t total_script_bytes = 0;
+    std::string active_index_sha256;
+};
+
 struct AccessTlsActivationEvidence {
     bool enabled = false;
     std::string watcher_state = "created";
@@ -103,6 +114,7 @@ struct AccessActivationEvidenceSnapshot {
     AccessActivationEvidenceIdentity identity;
     AccessRouteActivationEvidence route;
     AccessGrayActivationEvidence gray;
+    AccessEdgeFunctionsActivationEvidence edge_functions;
     AccessTlsActivationEvidence tls;
     std::string route_snapshot_fingerprint_sha256;
 };
@@ -116,6 +128,13 @@ struct AccessRouteActivationEvidenceObserver {
 
 struct AccessGrayActivationEvidenceObserver {
     using Function = void (*)(void *context, const AccessGrayActivationEvidence &evidence) noexcept;
+
+    void *context = nullptr;
+    Function on_update = nullptr;
+};
+
+struct AccessEdgeFunctionsActivationEvidenceObserver {
+    using Function = void (*)(void *context, const AccessEdgeFunctionsActivationEvidence &evidence) noexcept;
 
     void *context = nullptr;
     Function on_update = nullptr;
@@ -136,6 +155,7 @@ public:
 
     [[nodiscard]] AccessRouteActivationEvidenceObserver route_observer() noexcept;
     [[nodiscard]] AccessGrayActivationEvidenceObserver gray_observer() noexcept;
+    [[nodiscard]] AccessEdgeFunctionsActivationEvidenceObserver edge_functions_observer() noexcept;
     [[nodiscard]] AccessTlsActivationEvidenceObserver tls_observer() noexcept;
 
     [[nodiscard]] std::shared_ptr<const AccessActivationEvidenceSnapshot> pin() const noexcept {
@@ -149,10 +169,12 @@ public:
 private:
     static void observe_route(void *context, const AccessRouteActivationEvidence &evidence) noexcept;
     static void observe_gray(void *context, const AccessGrayActivationEvidence &evidence) noexcept;
+    static void observe_edge_functions(void *context, const AccessEdgeFunctionsActivationEvidence &evidence) noexcept;
     static void observe_tls(void *context, const AccessTlsActivationEvidence &evidence) noexcept;
 
     void update_route(const AccessRouteActivationEvidence &evidence) noexcept;
     void update_gray(const AccessGrayActivationEvidence &evidence) noexcept;
+    void update_edge_functions(const AccessEdgeFunctionsActivationEvidence &evidence) noexcept;
     void update_tls(const AccessTlsActivationEvidence &evidence) noexcept;
     void publish() noexcept;
     [[nodiscard]] std::string route_fingerprint() const noexcept;
@@ -161,6 +183,7 @@ private:
     AccessActivationEvidenceIdentity identity_;
     AccessRouteActivationEvidence route_;
     AccessGrayActivationEvidence gray_;
+    AccessEdgeFunctionsActivationEvidence edge_functions_;
     AccessTlsActivationEvidence tls_;
     std::uint64_t revision_ = 0;
 #if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
