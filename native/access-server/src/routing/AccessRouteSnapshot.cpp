@@ -20,7 +20,8 @@ AccessConfigError snapshot_error(std::string_view field, std::string_view messag
 } // namespace
 
 std::expected<AccessRouteSnapshot, AccessConfigError>
-AccessRouteSnapshot::build(std::span<const std::shared_ptr<const ProjectRouteSnapshot>> projects) {
+AccessRouteSnapshot::build(std::span<const std::shared_ptr<const ProjectRouteSnapshot>> projects,
+                           std::shared_ptr<const EdgeFunctionsState> edge_functions) {
     if (projects.size() > kAccessConfigLimits.project_list.max_projects) {
         return std::unexpected(snapshot_error("projects", "project count exceeds the configured limit",
                                               AccessConfigErrorCode::LimitExceeded));
@@ -47,6 +48,21 @@ AccessRouteSnapshot::build(std::span<const std::shared_ptr<const ProjectRouteSna
     }
     snapshot.host_count_ = host_count;
 
+    if (edge_functions && edge_functions->index.functions.empty()) {
+        edge_functions.reset(); // an empty index unmounts everything
+    }
+    if (edge_functions) {
+        std::vector<std::string_view> names;
+        names.reserve(snapshot.projects_.size());
+        for (const std::shared_ptr<const ProjectRouteSnapshot> &project: snapshot.projects_) {
+            names.push_back(project->project());
+        }
+        snapshot.edge_functions_ = std::move(edge_functions);
+        snapshot.edge_mounts_ = EdgeFunctionMountTable::build(*snapshot.edge_functions_, names);
+        snapshot.edge_function_count_ = snapshot.edge_functions_->index.functions.size();
+        snapshot.estimated_memory_bytes_ += snapshot.edge_functions_->total_script_bytes;
+    }
+
     std::vector<HostPattern> patterns;
     patterns.reserve(host_count);
     snapshot.host_targets_.reserve(host_count);
@@ -71,6 +87,14 @@ AccessRouteSnapshot::build(std::span<const std::shared_ptr<const ProjectRouteSna
     }
     snapshot.host_matcher_ = std::move(*matcher);
     return snapshot;
+}
+
+const EdgeFunctionMountTable &AccessRouteSnapshot::edge_functions() const noexcept {
+    if (edge_mounts_) {
+        return *edge_mounts_;
+    }
+    static const EdgeFunctionMountTable kEmpty;
+    return kEmpty;
 }
 
 ProjectHostMatch AccessRouteSnapshot::match_host(std::string_view host) const noexcept {
