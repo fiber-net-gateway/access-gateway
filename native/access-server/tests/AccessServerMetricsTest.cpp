@@ -203,6 +203,20 @@ record_dynamic_series_and_collect(fiber::access_server::AccessServerMetrics *met
     worker.upstream_circuit_rejected("inventory");
     worker.upstream_circuit_rejected({});
 
+    // Edge-function families: evaluations by function+project, duration into
+    // the first fine bucket, errors by fixed reason, events with an empty
+    // label allowed, overflow per function, and guarded empty labels dropped.
+    worker.edge_function_evaluated("waf-block", "orders");
+    worker.edge_function_evaluated("waf-block", "orders");
+    worker.edge_function_evaluated("waf-block", {});
+    worker.edge_function_duration("waf-block", 30us);
+    worker.edge_function_error("waf-block", "exception");
+    worker.edge_function_error("waf-block", {});
+    worker.edge_function_event("waf-block", "waf.block", "sqli-0023");
+    worker.edge_function_event("waf-block", {}, "dropped-event");
+    worker.edge_function_report_overflow("waf-block");
+    worker.edge_function_report_overflow({});
+
     auto collected = co_await metrics->collect();
     fiber::common::IoErr error = fiber::common::IoErr::None;
     std::string output;
@@ -269,9 +283,22 @@ TEST(AccessServerMetricsTest, ExposesRequestLabeledDynamicSeries) {
               std::string::npos);
     EXPECT_NE(collected->find("access_server_upstream_circuit_rejections_total{app=\"inventory\"} 1"),
               std::string::npos);
+    // Edge-function dynamic families.
+    EXPECT_NE(collected->find("access_server_function_evaluations_total{function=\"waf-block\",project=\"orders\"} 2"),
+              std::string::npos);
+    EXPECT_NE(collected->find("access_server_function_duration_seconds_count{function=\"waf-block\"} 1"),
+              std::string::npos);
+    EXPECT_NE(collected->find("access_server_function_errors_total{function=\"waf-block\",reason=\"exception\"} 1"),
+              std::string::npos);
+    EXPECT_NE(collected->find("access_server_function_events_total{function=\"waf-block\",event=\"waf.block\","
+                              "label=\"sqli-0023\"} 1"),
+              std::string::npos);
+    EXPECT_NE(collected->find("access_server_function_report_overflow_total{function=\"waf-block\"} 1"),
+              std::string::npos);
     // Guarded recorders never emit empty label values.
     EXPECT_EQ(collected->find("app=\"\""), std::string::npos);
     EXPECT_EQ(collected->find("error=\"\""), std::string::npos);
+    EXPECT_EQ(collected->find("event=\"\""), std::string::npos);
 
     workers.stop();
     workers.join();

@@ -1,5 +1,6 @@
 #include "AccessRequestHandler.h"
 #include "../observability/AccessRequestTelemetry.h"
+#include "EdgeFunctionExecutor.h"
 #include "ResponsePlan.h"
 
 #include <fiber/common/Assert.h>
@@ -332,6 +333,27 @@ async::Task<Result<void>> AccessRequestHandler::handle_impl(http::HttpExchange &
         case HostPolicyAction::Redirect:
             co_return co_await send_redirect(exchange, host_policy.redirect_status, request_host.effective_host,
                                              options_.response.write_timeout, telemetry);
+    }
+
+    // Edge functions run after host policy and before route matching. A
+    // function that writes a response completes the request; the header
+    // handoff mirrors the route-script path so resp.* sees the same baseline
+    // (finalize only stamps the trace header and is safe to repeat later).
+    const std::span<const EdgeFunctionMounted> edge_mounted =
+            snapshot->edge_functions().mounted_for(host_match.project->project());
+    if (!edge_mounted.empty()) {
+        if (!telemetry.finalize_response_headers()) {
+            co_return std::unexpected(Err::from_error(common::IoErr::NoMem));
+        }
+        for (const http::HttpHeaders::HeaderField &field: telemetry.response_headers()) {
+            telemetry.script_context().set_response_header(field.name_view(), field.value_view());
+        }
+        const bool edge_short_circuit =
+                co_await EdgeFunctionExecutor::run(edge_mounted, telemetry.script_context(), telemetry,
+                                                   host_match.project->project(), request_host.effective_host);
+        if (edge_short_circuit) {
+            co_return Result<void>{};
+        }
     }
 
     RequestEvaluationContext evaluation{
