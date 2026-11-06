@@ -1,4 +1,5 @@
-export type NativeValidationKind = 'project_route' | 'gray_rules'
+export type NativeValidationKind =
+  'project_route' | 'gray_rules' | 'edge_function_index' | 'edge_function_script'
 
 export interface AccessConfigLimits {
   schemaVersion: 2

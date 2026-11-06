@@ -3,6 +3,7 @@
 #include "config/AccessConfigCodec.h"
 #include "routing/AccessScriptCompiler.h"
 #include "routing/Cidr.h"
+#include "routing/EdgeFunctionLibrary.h"
 #include "routing/GrayMatchCompiler.h"
 #include "routing/ProjectConfigCompiler.h"
 
@@ -61,6 +62,9 @@ struct ValidationSummary {
     std::optional<std::size_t> estimated_snapshot_bytes;
     std::optional<std::size_t> static_response_bytes;
     std::optional<std::size_t> compiled_program_count;
+    std::optional<std::size_t> function_count;
+    std::optional<std::size_t> script_bytes;
+    std::optional<std::size_t> cidr_directive_count;
 };
 
 struct ValidationResult {
@@ -176,7 +180,8 @@ std::optional<ValidationError> decode_request(std::string_view input, ValidatorR
                 .message = "requestId must be 1-128 bytes",
         };
     }
-    if (request.kind != "project_route" && request.kind != "gray_rules") {
+    if (request.kind != "project_route" && request.kind != "gray_rules" && request.kind != "edge_function_index" &&
+        request.kind != "edge_function_script") {
         return ValidationError{
                 .code = "invalid_request",
                 .field = "kind",
@@ -335,6 +340,65 @@ ValidationResult validate_gray(std::string_view payload) {
     };
 }
 
+ValidationResult validate_edge_function_index(std::string_view payload) {
+    auto parsed = parse_edge_function_index_config(payload);
+    if (!parsed) {
+        return ValidationResult{.errors = {to_validation_error(std::move(parsed.error()))}};
+    }
+    if (!parsed->has_value()) {
+        // The watcher treats empty content as keep-current; a validation
+        // request is always about a publishable candidate, and only JSON
+        // null (or an empty functions array) publishes.
+        return ValidationResult{
+                .errors = {{
+                        .code = "invalid_request",
+                        .field = "payloadBase64",
+                        .message = "empty payload is keep-current, not a publishable edge-function index",
+                }},
+        };
+    }
+    if (auto limited = validate_edge_function_index_limits(**parsed); !limited) {
+        return ValidationResult{.errors = {to_validation_error(std::move(limited.error()))}};
+    }
+    return ValidationResult{
+            .valid = true,
+            .summary = {.function_count = (**parsed).functions.size()},
+    };
+}
+
+ValidationResult validate_edge_function_script(std::string_view payload) {
+    if (payload.size() > kAccessConfigLimits.edge_functions.max_script_payload_bytes) {
+        return ValidationResult{
+                .errors = {{
+                        .code = "limit_exceeded",
+                        .field = "payloadBase64",
+                        .message = "edge-function script exceeds maxScriptPayloadBytes",
+                }},
+        };
+    }
+    EdgeFunctionLibrary library;
+    auto program = library.compile(payload);
+    if (!program) {
+        return ValidationResult{
+                .errors = {{
+                        .code = "script_compile_failed",
+                        .field = "payloadBase64",
+                        .offset = program.error().position,
+                        .message = std::move(program.error().message),
+                }},
+        };
+    }
+    return ValidationResult{
+            .valid = true,
+            .summary =
+                    {
+                            .compiled_program_count = 1,
+                            .script_bytes = payload.size(),
+                            .cidr_directive_count = program->cidr_directives.size(),
+                    },
+    };
+}
+
 bool generated(Generator::Result result) noexcept { return result == Generator::Result::OK; }
 
 bool write_key(Generator &generator, std::string_view key) {
@@ -454,6 +518,15 @@ std::string encode_response(const ValidationResult &result) {
         if (ok && result.summary.compiled_program_count) {
             ok = write_size(generator, "compiledProgramCount", *result.summary.compiled_program_count);
         }
+        if (ok && result.summary.function_count) {
+            ok = write_size(generator, "functionCount", *result.summary.function_count);
+        }
+        if (ok && result.summary.script_bytes) {
+            ok = write_size(generator, "scriptBytes", *result.summary.script_bytes);
+        }
+        if (ok && result.summary.cidr_directive_count) {
+            ok = write_size(generator, "cidrDirectiveCount", *result.summary.cidr_directive_count);
+        }
         ok = ok && generated(generator.map_close());
     }
     ok = ok && write_key(generator, "errors") && generated(generator.array_open());
@@ -493,8 +566,16 @@ std::string process_native_validator_request(std::string_view input) {
                 }},
         });
     }
-    return encode_response(request.kind == "project_route" ? validate_project(request.project, payload)
-                                                           : validate_gray(payload));
+    if (request.kind == "project_route") {
+        return encode_response(validate_project(request.project, payload));
+    }
+    if (request.kind == "gray_rules") {
+        return encode_response(validate_gray(payload));
+    }
+    if (request.kind == "edge_function_index") {
+        return encode_response(validate_edge_function_index(payload));
+    }
+    return encode_response(validate_edge_function_script(payload));
 }
 
 std::string native_validator_input_too_large_response() {
