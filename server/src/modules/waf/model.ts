@@ -79,3 +79,13 @@ export interface WafPolicy {
   /** Per-project overrides. Keys are exact project names, not globs. */
   readonly projectModes: Readonly<Record<string, WafProjectMode>>
 }
+
+/** The draft a fresh workspace starts from: no rules, everything off. */
+export function emptyWafPolicy(): WafPolicy {
+  return {
+    schemaVersion: WAF_POLICY_SCHEMA_VERSION,
+    defaultMode: 'off',
+    rules: [],
+    projectModes: {},
+  }
+}
