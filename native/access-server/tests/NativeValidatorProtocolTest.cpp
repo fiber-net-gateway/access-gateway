@@ -180,7 +180,7 @@ TEST(NativeValidatorProtocolTest, ReportsStableLimitErrorsWithoutEchoingValues) 
 
 TEST(NativeValidatorProtocolTest, DescribesTheRuntimeConfigLimits) {
     const std::string response = fiber::access_server::native_validator_config_limits_response();
-    EXPECT_NE(response.find(R"("schemaVersion":3)"), std::string::npos) << response;
+    EXPECT_NE(response.find(R"("schemaVersion":4)"), std::string::npos) << response;
     EXPECT_NE(response.find(R"("maxUpstreamTlsProfiles":256)"), std::string::npos) << response;
     EXPECT_NE(response.find(R"("maxUpstreamTlsCaPemBytes":524288)"), std::string::npos) << response;
     EXPECT_NE(response.find(R"("maxPayloadBytes":4194304)"), std::string::npos) << response;
@@ -189,6 +189,7 @@ TEST(NativeValidatorProtocolTest, DescribesTheRuntimeConfigLimits) {
     EXPECT_NE(response.find(R"("grayRules")"), std::string::npos) << response;
     EXPECT_NE(response.find(R"("edgeFunctions":{"maxPayloadBytes":262144,"maxFunctions":64)"), std::string::npos)
             << response;
+    EXPECT_NE(response.find(R"("maxFunctionNameBytes":64)"), std::string::npos) << response;
     EXPECT_NE(response.find(R"("maxScriptPayloadBytes":1048576,"maxTotalScriptBytes":8388608)"), std::string::npos)
             << response;
     EXPECT_NE(response.find(R"("maxCidrDirectivesPerScript":16,"maxCidrsPerDirective":256)"), std::string::npos)
@@ -199,10 +200,10 @@ TEST(NativeValidatorProtocolTest, ValidatesEdgeFunctionIndexCandidates) {
     constexpr std::string_view payload = R"({
         "version": 3,
         "functions": [
-            {"id": "waf", "dataId": "ploto.unified-access.edge-function.waf",
+            {"name": "waf",
              "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
              "mounts": [{"projects": {"include": ["*"]}}]},
-            {"id": "audit", "dataId": "ploto.unified-access.edge-function.audit",
+            {"name": "audit",
              "sha256": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
              "mounts": [{"projects": {"include": ["loan-*"]}, "priority": 10}]}
         ]
@@ -227,15 +228,18 @@ TEST(NativeValidatorProtocolTest, ValidatesEdgeFunctionIndexCandidates) {
     EXPECT_NE(empty.find(R"("code":"invalid_request")"), std::string::npos) << empty;
     EXPECT_NE(empty.find(R"("field":"payloadBase64")"), std::string::npos) << empty;
 
-    // Codec violations surface with their structured field path.
+    // Codec violations surface with their structured field path: duplicate
+    // slug names conflict.
     const std::string invalid = fiber::access_server::process_native_validator_request(
             request("edge_function_index", "",
-                    R"({"version":1,"functions":[{"id":"waf","dataId":"ploto.unified-access.edge-function.other",)"
+                    R"({"version":1,"functions":[{"name":"waf",)"
                     R"("sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",)"
+                    R"("mounts":[{"projects":{"include":["*"]}}]},)"
+                    R"({"name":"waf","sha256":"fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",)"
                     R"("mounts":[{"projects":{"include":["*"]}}]}]})"));
     EXPECT_NE(invalid.find(R"("valid":false)"), std::string::npos) << invalid;
     EXPECT_NE(invalid.find(R"("code":"conflict")"), std::string::npos) << invalid;
-    EXPECT_NE(invalid.find("functions[0].dataId"), std::string::npos) << invalid;
+    EXPECT_NE(invalid.find("functions[1]"), std::string::npos) << invalid;
 }
 
 TEST(NativeValidatorProtocolTest, CompilesEdgeFunctionScriptsWithCidrDirective) {

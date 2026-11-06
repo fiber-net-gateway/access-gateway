@@ -44,8 +44,8 @@ public:
                                      << " event=\"" << event << "\"" << " label=\"" << label << "\"";
     }
 
-    void begin_function(std::string_view id) noexcept {
-        function = id;
+    void begin_function(std::string_view name) noexcept {
+        function = name;
         reports_ = 0;
         overflow_recorded_ = false;
     }
@@ -72,7 +72,7 @@ fiber::async::Task<bool> EdgeFunctionExecutor::run(std::span<const EdgeFunctionM
     // scripts; edge functions must see (and leave) the original pointer.
     http_script::HttpScriptServices *const previous_services = script_context.services();
     for (const EdgeFunctionMounted &entry: mounted) {
-        edge.begin_function(entry.id);
+        edge.begin_function(entry.name);
         script_context.set_services(&edge);
         const std::chrono::steady_clock::time_point started = std::chrono::steady_clock::now();
         script::JsValue root = script::JsValue::make_undefined();
@@ -81,12 +81,12 @@ fiber::async::Task<bool> EdgeFunctionExecutor::run(std::span<const EdgeFunctionM
         const std::chrono::nanoseconds elapsed = std::chrono::steady_clock::now() - started;
         script_context.set_services(previous_services);
 
-        telemetry.record_edge_function_evaluated(entry.id, project);
-        telemetry.record_edge_function_duration(entry.id, elapsed);
+        telemetry.record_edge_function_evaluated(entry.name, project);
+        telemetry.record_edge_function_duration(entry.name, elapsed);
         if (script_context.response_header_sent()) {
             LOG(LOG_EDGE_FUNCTION, INFO) << "edge_function_short_circuit"
                                          << " trace_id=\"" << telemetry.trace_id() << "\"" << " project=\"" << project
-                                         << "\"" << " host=\"" << host << "\"" << " function=\"" << entry.id << "\"";
+                                         << "\"" << " host=\"" << host << "\"" << " function=\"" << entry.name << "\"";
             co_return true;
         }
         switch (result.kind) {
@@ -95,18 +95,18 @@ fiber::async::Task<bool> EdgeFunctionExecutor::run(std::span<const EdgeFunctionM
                 // Completed without writing a response: continue the chain.
                 break;
             case script::ScriptResultKind::Exception:
-                telemetry.record_edge_function_error(entry.id, kErrorReasonException);
+                telemetry.record_edge_function_error(entry.name, kErrorReasonException);
                 LOG(LOG_EDGE_FUNCTION, WARN)
                         << "edge_function_error"
                         << " trace_id=\"" << telemetry.trace_id() << "\"" << " project=\"" << project << "\""
-                        << " function=\"" << entry.id << "\"" << " reason=\"" << kErrorReasonException << "\"";
+                        << " function=\"" << entry.name << "\"" << " reason=\"" << kErrorReasonException << "\"";
                 break;
             case script::ScriptResultKind::Abort:
-                telemetry.record_edge_function_error(entry.id, kErrorReasonAbort);
+                telemetry.record_edge_function_error(entry.name, kErrorReasonAbort);
                 LOG(LOG_EDGE_FUNCTION, WARN)
                         << "edge_function_error"
                         << " trace_id=\"" << telemetry.trace_id() << "\"" << " project=\"" << project << "\""
-                        << " function=\"" << entry.id << "\"" << " reason=\"" << kErrorReasonAbort << "\" detail=\""
+                        << " function=\"" << entry.name << "\"" << " reason=\"" << kErrorReasonAbort << "\" detail=\""
                         << script::abort_reason_name(result.abort().reason) << "\"";
                 break;
         }

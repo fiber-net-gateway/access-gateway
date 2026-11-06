@@ -466,7 +466,6 @@ std::string encode_config_limits() {
               write_key(generator, "edgeFunctions") && generated(generator.map_open()) &&
               write_size(generator, "maxPayloadBytes", edge_functions.max_payload_bytes) &&
               write_size(generator, "maxFunctions", edge_functions.max_functions) &&
-              write_size(generator, "maxFunctionIdBytes", edge_functions.max_function_id_bytes) &&
               write_size(generator, "maxFunctionNameBytes", edge_functions.max_function_name_bytes) &&
               write_size(generator, "maxMountsPerFunction", edge_functions.max_mounts_per_function) &&
               write_size(generator, "maxGlobsPerSelector", edge_functions.max_globs_per_selector) &&
@@ -479,7 +478,7 @@ std::string encode_config_limits() {
               write_size(generator, "maxCidrBytes", edge_functions.max_cidr_bytes) &&
               write_size(generator, "maxInputFieldBytes", edge_functions.max_input_field_bytes) &&
               generated(generator.map_close()) && generated(generator.map_close());
-    return ok ? output : std::string(R"({"schemaVersion":3,"error":"encoding_failed"})");
+    return ok ? output : std::string(R"({"schemaVersion":4,"error":"encoding_failed"})");
 }
 
 std::string encode_response(const ValidationResult &result) {

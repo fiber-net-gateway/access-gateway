@@ -186,7 +186,7 @@ EdgeFunctionMountConfig mounted_on(std::string project_glob, std::int32_t priori
     };
 }
 
-void add_function(EdgeFunctionsState &state, EdgeFunctionLibrary &library, std::string id, std::string_view source,
+void add_function(EdgeFunctionsState &state, EdgeFunctionLibrary &library, std::string name, std::string_view source,
                   std::vector<EdgeFunctionMountConfig> mounts) {
     auto compiled = library.compile(source);
     ASSERT_TRUE(compiled.has_value()) << (compiled ? "" : compiled.error().message);
@@ -196,7 +196,7 @@ void add_function(EdgeFunctionsState &state, EdgeFunctionLibrary &library, std::
     state.total_script_bytes += source.size();
     state.programs.push_back(std::make_shared<EdgeFunctionProgram>(std::move(*compiled)));
     EdgeFunctionIndexEntry entry;
-    entry.id = std::move(id);
+    entry.name = std::move(name);
     entry.mounts = std::move(mounts);
     state.index.functions.push_back(std::move(entry));
 }

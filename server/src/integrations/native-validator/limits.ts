@@ -39,7 +39,6 @@ const grayRuleKeys = [
 const edgeFunctionKeys = [
   'maxPayloadBytes',
   'maxFunctions',
-  'maxFunctionIdBytes',
   'maxFunctionNameBytes',
   'maxMountsPerFunction',
   'maxGlobsPerSelector',
@@ -77,7 +76,7 @@ function isAtMost(value: unknown, upperBound: unknown): boolean {
 }
 
 export function isAccessConfigLimits(value: unknown): value is AccessConfigLimits {
-  if (!isRecord(value) || value.schemaVersion !== 3) return false
+  if (!isRecord(value) || value.schemaVersion !== 4) return false
   if (
     !isRecord(value.projectList) ||
     !isRecord(value.projectRoute) ||
@@ -112,7 +111,7 @@ export function isAccessConfigLimits(value: unknown): value is AccessConfigLimit
       value.projectRoute.maxStaticResponseBytes,
     ) &&
     isAtMost(value.grayRules.maxCidrBytes, value.grayRules.maxPayloadBytes) &&
-    isAtMost(value.edgeFunctions.maxFunctionIdBytes, value.edgeFunctions.maxPayloadBytes) &&
+    isAtMost(value.edgeFunctions.maxFunctionNameBytes, value.edgeFunctions.maxPayloadBytes) &&
     isAtMost(value.edgeFunctions.maxScriptPayloadBytes, value.edgeFunctions.maxTotalScriptBytes)
   )
 }
@@ -121,7 +120,7 @@ export function isAccessConfigLimits(value: unknown): value is AccessConfigLimit
 // bounded transport envelope. Publication still fails closed without a
 // validator revision and its probed limits.
 export const fallbackAccessConfigLimits: AccessConfigLimits = {
-  schemaVersion: 3,
+  schemaVersion: 4,
   projectList: {
     maxPayloadBytes: 262_144,
     maxProjects: 1_024,
@@ -165,8 +164,7 @@ export const fallbackAccessConfigLimits: AccessConfigLimits = {
   edgeFunctions: {
     maxPayloadBytes: 262_144,
     maxFunctions: 64,
-    maxFunctionIdBytes: 64,
-    maxFunctionNameBytes: 128,
+    maxFunctionNameBytes: 64,
     maxMountsPerFunction: 16,
     maxGlobsPerSelector: 256,
     maxGlobBytes: 255,

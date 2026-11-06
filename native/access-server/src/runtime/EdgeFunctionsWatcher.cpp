@@ -142,7 +142,7 @@ void EdgeFunctionsWatcher::script_notify(void *context,
         if (owner.state_ == EdgeFunctionsWatcherState::Running) {
             owner.readiness_publisher_->publish(false);
             ++owner.failed_updates_;
-            owner.report_failure("subscription", "script_closed", entry.id);
+            owner.report_failure("subscription", "script_closed", entry.name);
             owner.emit_event(AccessConfigMetricEvent::EdgeFunctionScriptSubscriptionFailed);
             owner.publish_evidence();
         }
@@ -189,10 +189,12 @@ void EdgeFunctionsWatcher::apply_index(const nacos::ConfigData &data) {
 
 void EdgeFunctionsWatcher::reconcile_scripts(const EdgeFunctionIndexConfig &index) {
     // Stop subscriptions no longer referenced, then subscribe new references.
+    // Entries are keyed by function name; the script Data ID is derived from
+    // it (the wire index never carries a dataId field).
     for (auto it = scripts_.begin(); it != scripts_.end();) {
         const bool referenced =
                 std::any_of(index.functions.begin(), index.functions.end(),
-                            [&it](const EdgeFunctionIndexEntry &entry) { return entry.data_id == it->first; });
+                            [&it](const EdgeFunctionIndexEntry &entry) { return entry.name == it->first; });
         if (!referenced) {
             it->second->subscription.stop();
             it = scripts_.erase(it);
@@ -201,8 +203,8 @@ void EdgeFunctionsWatcher::reconcile_scripts(const EdgeFunctionIndexConfig &inde
         ++it;
     }
     for (const EdgeFunctionIndexEntry &function: index.functions) {
-        if (const auto existing = scripts_.find(function.data_id); existing != scripts_.end()) {
-            existing->second->id = function.id;
+        if (const auto existing = scripts_.find(function.name); existing != scripts_.end()) {
+            existing->second->name = function.name;
             existing->second->sha256_hex = function.sha256_hex;
             if (existing->second->verified_content &&
                 sha256_hex(*existing->second->verified_content) != existing->second->sha256_hex) {
@@ -211,12 +213,12 @@ void EdgeFunctionsWatcher::reconcile_scripts(const EdgeFunctionIndexConfig &inde
             }
             continue;
         }
-        const std::string data_id = function.data_id;
         auto entry = std::make_unique<ScriptEntry>(*loop_, this);
-        entry->id = function.id;
+        entry->name = function.name;
         entry->sha256_hex = function.sha256_hex;
         ScriptEntry *entry_ptr = entry.get();
-        scripts_[data_id] = std::move(entry);
+        scripts_[function.name] = std::move(entry);
+        const std::string data_id = edge_function_script_data_id(function.name);
         auto subscribed =
                 entry_ptr->subscription.subscribe(*config_service_, data_id, options_.group, &script_notify, entry_ptr);
         if (!subscribed) {
@@ -224,7 +226,7 @@ void EdgeFunctionsWatcher::reconcile_scripts(const EdgeFunctionIndexConfig &inde
             entry_ptr->subscription.stop();
             // Drop the dead entry: the lifecycle is one-shot, so the next
             // index publication (even identical bytes) re-subscribes it.
-            scripts_.erase(data_id);
+            scripts_.erase(function.name);
             ++failed_updates_;
             report_failure("subscription", "script_subscribe_failed", data_id);
             emit_event(AccessConfigMetricEvent::EdgeFunctionScriptSubscriptionFailed);
@@ -237,7 +239,7 @@ void EdgeFunctionsWatcher::apply_script(ScriptEntry &entry, const nacos::ConfigD
     if (data.state == nacos::ConfigState::NotFound) {
         entry.verified_content.reset();
         ++failed_updates_;
-        report_failure("script", "script_missing", entry.id);
+        report_failure("script", "script_missing", entry.name);
         readiness_publisher_->publish(false);
         emit_event(AccessConfigMetricEvent::EdgeFunctionScriptRejected);
         publish_evidence();
@@ -247,7 +249,7 @@ void EdgeFunctionsWatcher::apply_script(ScriptEntry &entry, const nacos::ConfigD
     if (content.size() > kAccessConfigLimits.edge_functions.max_script_payload_bytes) {
         entry.verified_content.reset();
         ++failed_updates_;
-        report_failure("script", "script_too_large", entry.id);
+        report_failure("script", "script_too_large", entry.name);
         readiness_publisher_->publish(false);
         emit_event(AccessConfigMetricEvent::EdgeFunctionScriptRejected);
         publish_evidence();
@@ -257,7 +259,7 @@ void EdgeFunctionsWatcher::apply_script(ScriptEntry &entry, const nacos::ConfigD
     if (actual != entry.sha256_hex) {
         entry.verified_content.reset();
         ++failed_updates_;
-        report_failure("script", "sha256_mismatch", entry.id);
+        report_failure("script", "sha256_mismatch", entry.name);
         readiness_publisher_->publish(false);
         emit_event(AccessConfigMetricEvent::EdgeFunctionScriptRejected);
         publish_evidence();
@@ -298,7 +300,7 @@ bool EdgeFunctionsWatcher::try_assemble() {
     // Phase 1: every referenced script must have arrived and verified before
     // any compilation work is spent on the set.
     for (const EdgeFunctionIndexEntry &function: desired_index_->functions) {
-        const auto found = scripts_.find(function.data_id);
+        const auto found = scripts_.find(function.name);
         if (found == scripts_.end() || !found->second->verified_content) {
             return false; // all-or-nothing: wait for the rest
         }
@@ -308,13 +310,13 @@ bool EdgeFunctionsWatcher::try_assemble() {
     state.programs.reserve(desired_index_->functions.size());
     std::size_t total_script_bytes = 0;
     for (const EdgeFunctionIndexEntry &function: desired_index_->functions) {
-        const auto found = scripts_.find(function.data_id);
+        const auto found = scripts_.find(function.name);
         bool compiled = false;
         std::shared_ptr<EdgeFunctionProgram> program =
                 compile_cached(function.sha256_hex, *found->second->verified_content, compiled);
         if (!program) {
             ++failed_updates_;
-            report_failure("compile", "script_compile_failed", function.id);
+            report_failure("compile", "script_compile_failed", function.name);
             readiness_publisher_->publish(false);
             emit_event(AccessConfigMetricEvent::EdgeFunctionCompileFailed);
             publish_evidence();

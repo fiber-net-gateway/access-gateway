@@ -189,10 +189,10 @@ struct EdgeFunctionMountConfig {
 };
 
 struct EdgeFunctionIndexEntry {
-    std::string id;
-    std::optional<std::string> name;
-    // Must equal kEdgeFunctionDataIdPrefix + id; the codec enforces it.
-    std::string data_id;
+    // Single slug identity ([a-z0-9-], alphanumeric edges): the script Data ID
+    // is derived from it and it feeds metric labels, event logs, and evidence.
+    // Display names are console-DB-only; renaming is delete-and-create.
+    std::string name;
     // Lowercase-hex sha256 of the script payload. The watcher verifies script
     // content against it and uses it for content-addressed compile reuse.
     std::string sha256_hex;
@@ -208,6 +208,15 @@ struct EdgeFunctionIndexConfig {
 
     bool operator==(const EdgeFunctionIndexConfig &) const = default;
 };
+
+// Script Data ID of a function: derived from the slug name (docs
+// edge-functions-and-waf-design.md §3.1). The wire index never carries it —
+// the watcher and validator call this instead.
+[[nodiscard]] inline std::string edge_function_script_data_id(std::string_view function_name) {
+    std::string data_id(kEdgeFunctionDataIdPrefix);
+    data_id.append(function_name);
+    return data_id;
+}
 
 } // namespace fiber::access_server
 

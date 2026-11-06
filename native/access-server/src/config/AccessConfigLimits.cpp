@@ -251,10 +251,7 @@ std::expected<void, AccessConfigError> validate_edge_function_index_limits(const
     for (std::size_t index = 0; index < config.functions.size(); ++index) {
         const EdgeFunctionIndexEntry &function = config.functions[index];
         const std::string field = indexed_field("functions", index);
-        if (function.id.size() > edge_limits.max_function_id_bytes) {
-            return std::unexpected(limit_error(field + ".id", "function id bytes", edge_limits.max_function_id_bytes));
-        }
-        if (function.name && function.name->size() > edge_limits.max_function_name_bytes) {
+        if (function.name.size() > edge_limits.max_function_name_bytes) {
             return std::unexpected(
                     limit_error(field + ".name", "function name bytes", edge_limits.max_function_name_bytes));
         }

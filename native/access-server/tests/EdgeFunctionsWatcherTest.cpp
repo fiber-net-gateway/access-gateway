@@ -222,11 +222,11 @@ struct EvidenceCapture {
     }
 };
 
-// Wire helpers mirroring the codec fixtures: functions default their Data ID
-// to the ploto.unified-access.edge-function.<id> prefix the codec enforces.
-std::string function_json(const std::string &id, const std::string &sha256) {
-    return "{\"id\": \"" + id + "\", \"dataId\": \"" + std::string(fiber::access_server::kEdgeFunctionDataIdPrefix) +
-           id + "\", \"sha256\": \"" + sha256 + "\", \"mounts\": [{\"projects\": {\"include\": [\"*\"]}}]}";
+// Wire helpers mirroring the codec fixtures: the script Data ID is derived
+// from the slug name (ploto.unified-access.edge-function.<name>).
+std::string function_json(const std::string &name, const std::string &sha256) {
+    return "{\"name\": \"" + name + "\", \"sha256\": \"" + sha256 +
+           "\", \"mounts\": [{\"projects\": {\"include\": [\"*\"]}}]}";
 }
 
 std::string index_json(std::string functions) {
