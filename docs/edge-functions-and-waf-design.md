@@ -9,12 +9,12 @@
 
 需求是在网关上提供请求侧检测与处置能力（WAF 是第一个消费者），规则主要用脚本引擎表达。有两种分层方式：
 
-| 维度 | 数据面懂 WAF（规则信封进 wire） | 数据面只懂函数（本设计） |
-| --- | --- | --- |
-| 数据面 API 面 | rule/severity/scope/action/exclusion 全套语义进 codec、limits、validator、watcher | 一个通用钩子：挂载的函数列表 + 执行契约 |
-| rnacos 契约 | `waf-rules` Data ID 携带规则结构，规则模型每次演化都是跨组件变更 | 通用函数索引 + 每函数脚本 Data ID，与 WAF 终身解耦 |
-| 能力上限 | 只能表达规则能表达的事 | 边缘函数是独立能力；限流、请求改写等将来都是"控制面前端 + 生成器" |
-| 复用度 | 新造一套规则执行管线 | 复用现有 route script 全部基础设施（`req.*`/`resp.*`、每请求 GcHeap、编译管线） |
+| 维度          | 数据面懂 WAF（规则信封进 wire）                                                   | 数据面只懂函数（本设计）                                                        |
+| ------------- | --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| 数据面 API 面 | rule/severity/scope/action/exclusion 全套语义进 codec、limits、validator、watcher | 一个通用钩子：挂载的函数列表 + 执行契约                                         |
+| rnacos 契约   | `waf-rules` Data ID 携带规则结构，规则模型每次演化都是跨组件变更                  | 通用函数索引 + 每函数脚本 Data ID，与 WAF 终身解耦                              |
+| 能力上限      | 只能表达规则能表达的事                                                            | 边缘函数是独立能力；限流、请求改写等将来都是"控制面前端 + 生成器"               |
+| 复用度        | 新造一套规则执行管线                                                              | 复用现有 route script 全部基础设施（`req.*`/`resp.*`、每请求 GcHeap、编译管线） |
 
 采用第二种的实质理由：控制面拥有全部策略语义，`effective = f(rule, project mode)` 这类合成在发布期完成，数据面零策略；这与仓库既有哲学一致——"publication deterministically compiles its model into the native wire format"（web 路由 YAML → JSON wire 是先例）。
 
@@ -33,9 +33,9 @@ WAF/边缘函数是全新能力，**没有 Java wire 兼容包袱**：错误码�
 
 沿用 projects list → per-project route 的既有"索引 + 每条目独立 Data ID"模式：
 
-| 用途 | Data ID | Group | 形态 |
-| --- | --- | --- | --- |
-| 函数索引 | `ploto.unified-access.edge-functions` | `ACCESS-SERVER` | JSON，versioned |
+| 用途     | Data ID                                           | Group           | 形态               |
+| -------- | ------------------------------------------------- | --------------- | ------------------ |
+| 函数索引 | `ploto.unified-access.edge-functions`             | `ACCESS-SERVER` | JSON，versioned    |
 | 函数脚本 | `ploto.unified-access.edge-function.<functionId>` | `ACCESS-SERVER` | 纯脚本文本（TEXT） |
 
 索引示例：
@@ -78,24 +78,24 @@ gray matcher → host match → host policy（X-Entry / HTTPS 强制）→ 【�
 执行语义：
 
 1. host→project 解析后取该项目挂载的函数列表（快照索引），按 `priority` 升序、同序按索引内声明序执行。
-2. 每个函数是独立编译产物，**共享该请求已有的每请求 GcHeap**（`ScriptExecutionContext`，串行 `exec_sync` 合法；无新增 per-request 分配）。
+2. 每个函数是独立编译产物，**共享该请求已有的每请求 GcHeap**（`ScriptExecutionContext`）。执行用 `exec_async`（`resp.*` 含异步 opcode，`exec_sync` 遇异步指令会 panic）；纯同步函数的 `exec_async` 不挂起，成本与 `exec_sync` 相同。无新增 per-request 分配。
 3. **短路判定零新协议**：函数执行后检查 `ScriptExchangeCtx::response_header_sent()`（已存在，`AccessScriptRuntime.cpp` 已在用）——已发送即终结请求，不执行后续函数与路由；未发送则继续。
 4. 未挂载函数的项目零成本（索引为空，不进入任何脚本路径）。
 5. 函数异常/中止：fail-open（§6）。
 
 ### 3.3 v1 执行契约（写死，只增不收）
 
-| # | 契约 | 实现方式 |
-| --- | --- | --- |
-| 1 | 只读请求：`$req`/`$header`/`$query`/`$cookie`/`$conn`/`req.*` 可读；不可改写 path/method/header/query | 不注册任何改写函数；v1 无改写 API |
-| 2 | 提前响应：`resp.*` 全量可用 | 复用现有 route script 语义 |
-| 3 | 事件上报：仅 `ctx.report(event, label)` | 新增宿主函数，见 §3.5 |
-| 4 | CIDR 集合：`directive x = cidr "…"; x.contains(ip)` | app 侧脚本扩展，见 §3.4 |
-| 5 | 不消费 body：`req.readJson/readBinary/discardBody` 不可用 | 前置函数使用**受限 Library** 编译：不注册 body 读取函数。函数名为编译期静态解析，未注册即编译失败——fail-closed |
-| 6 | 无上游访问：不注册 `http` directive | 同上，函数不能发起上游请求、不能变代理 |
-| 7 | 无函数间通信、无可变上下文 | 无对应 API |
+| #   | 契约                                                                                                                                                                                  | 实现方式                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | 只读请求：`$req`/`$conn`/`req.*` 函数族（`getHeader/getQuery/getCookie/getUri/getPath/getQueryStr/getMethod`）与 `$header/$query/$cookie` 常量可读；不可改写 path/method/header/query | 不注册任何改写函数；v1 无改写 API。`$header/$query/$cookie` 自 Fiber 动态常量模型（pin ≥ 7ee40abe：无 prepare、按请求经 `ScriptExchangeCtx::resolve_constant` 解析并备忘）起在边缘函数可用——组合 `RouteScriptExtension`（空 path vars、禁 http directive）即得，**值不截断**（`req.*` 函数族仍按 `max_input_field_bytes` 截断，规则内长值匹配请用常量形式）。`$context`（项目级 trace 上下文）与 `$path`（无路由已选）保持编译失败 |
+| 2   | 提前响应：`resp.*` 全量可用                                                                                                                                                           | 复用现有 route script 语义                                                                                                                                                                                                                                                                                                                                                                                                         |
+| 3   | 事件上报：仅 `ctx.report(event, label)`                                                                                                                                               | 新增宿主函数，见 §3.5                                                                                                                                                                                                                                                                                                                                                                                                              |
+| 4   | CIDR 集合：`directive x = cidr "…"; x.contains(ip)`                                                                                                                                   | app 侧脚本扩展，见 §3.4                                                                                                                                                                                                                                                                                                                                                                                                            |
+| 5   | 不消费 body：`req.readJson/readBinary/discardBody` 不可用                                                                                                                             | 前置函数使用**受限 Library** 编译：不注册 body 读取函数。函数名为编译期静态解析，未注册即编译失败——fail-closed                                                                                                                                                                                                                                                                                                                     |
+| 6   | 无上游访问：不注册 `http` directive                                                                                                                                                   | 同上，函数不能发起上游请求、不能变代理                                                                                                                                                                                                                                                                                                                                                                                             |
+| 7   | 无函数间通信、无可变上下文                                                                                                                                                            | 无对应 API                                                                                                                                                                                                                                                                                                                                                                                                                         |
 
-契约 5/6 的实现要点：为边缘函数构建专用 `StdLibrary`（在 `AccessScriptCompiler` 旁），注册 `req.*` 读函数、`resp.*`、`ctx.report` 与 cidr directive 扩展；`$req/$header/$query/$cookie/$conn` 常量复用 `RouteScriptExtension`，另加 `$ctx = {project, host}` 常量组（客户端 IP 直接用已有的 `$conn.remote_addr`）。编译一律 `allow_assign=false`。**cidr directive 只在边缘函数 Library 开放，不进 route condition**——避免路由配置语义漂移。
+契约 5/6 的实现要点：为边缘函数构建专用 `StdLibrary`（在 `AccessScriptCompiler` 旁），注册 `req.*` 读函数、`resp.*`、`ctx.report` 与 cidr directive 扩展，并组合 `RouteScriptExtension`（空 path vars、`http_directives_enabled=false`）提供 `$header/$query/$cookie` 动态常量；`EdgeFunctionProgram` 持有 `shared_ptr<const ConstPackage>` 作生命周期锚（脚本的 constant 引用指向包内存储，包须与脚本一同长寿）。常量键只接受标识符字符集——**写规范化形式（小写、`-` 写作 `_`），运行期经 normalize 匹配真实 header/cookie/query 名**；连字符会按减法解析成未定义全局算术，运行期 TypeError（编译不报错，属已知脚枪，规则作者需用规范化拼写）。`$req`/`$conn` 复用 `ExchangeConstExtension`，`$ctx = {project, host}` 为新增运行期常量组（客户端 IP 直接用 `$conn.remote_addr`）。`$context` 仍为项目路由专属（app 侧 `TraceContextConstExtension` 经每请求 services 指针读 trace 状态），边缘函数不开放。编译一律 `allow_assign=false`。**cidr directive 只在边缘函数 Library 开放，不进 route condition**——避免路由配置语义漂移。
 
 ### 3.4 cidr directive
 
@@ -131,6 +131,7 @@ if (!office.contains($conn.remote_addr) && strings.match($req.uri, "(?i)union\\s
 ### 3.6 配置编译、快照与联合索引
 
 - 新增 `EdgeFunctionsWatcher`（照 `AccessConfigWatcher`/`GrayConfigWatcher` 模式）：订阅索引 + 引用的脚本 Data ID → 校验 hash → 逐函数受限编译 → 按 §3.1 的全或无语义组装。编译产物按脚本内容（sha256）寻址缓存，未变函数复用。
+- 观察语义（与项目路由对齐）：索引空串/NotFound = 保持当前（codec 契约），卸载只走 JSON `null` 或空 `functions` 数组；**字节相同的索引重发 = 无操作**（同 md5 路由同 doctrine，不产生新代）；脚本订阅启动失败无定时重试——**重发索引（即使字节相同）即重驱动该 Data ID 的订阅**。
 - **联合索引**：`project → 函数列表` 的 glob 展开不能在请求期做。挂载展开依赖 projects list 与函数索引两个版本，在快照装配侧（`AccessConfigCompiler`/`RouteSnapshotPublisher` 一侧）于任一变更时重算，请求期只做一次查表。
 - limits 新增 `EdgeFunctionLimits`（挂进 `AccessConfigLimits` 并提升 `schema_version`）：索引 payload 上限、函数数上限、单函数脚本字节数、挂载条目数、编译产物总大小估算、每函数 report 次数、cidr directive 相关上限（§3.4），全部进 validator `--describe-config-limits` schema。
 
@@ -152,24 +153,24 @@ if (!office.contains($conn.remote_addr) && strings.match($req.uri, "(?i)union\\s
 
 ```yaml
 rules:
-  - id: sqli-0023              # 稳定 ID，进日志/metrics 标签/豁免引用
-    name: "union select 注入探测"
-    severity: high             # critical/high/medium/low，仅元信息
-    priority: 100              # 生成 if 链顺序
-    action: block              # log | block
-    phase: request_head        # v1 仅此枚举
-    match: |                   # 表达式，与路由 condition 同语言同编译管线
+  - id: sqli-0023 # 稳定 ID，进日志/metrics 标签/豁免引用
+    name: 'union select 注入探测'
+    severity: high # critical/high/medium/low，仅元信息
+    priority: 100 # 生成 if 链顺序
+    action: block # log | block
+    phase: request_head # v1 仅此枚举
+    match: | # 表达式，与路由 condition 同语言同编译管线
       strings.match($req.uri, "(?i)union[+%20\\s]+select")
       || strings.match($query.q, "(?i)union\\s+select")
-    scope:                     # 折叠进生成脚本
+    scope: # 折叠进生成脚本
       methods: [GET, POST]
-      paths: ["/api/*"]
-      source_cidrs: ["172.28.0.0/16"]   # 生成器收集去重 → 脚本顶部 cidr directive 声明
+      paths: ['/api/*']
+      source_cidrs: ['172.28.0.0/16'] # 生成器收集去重 → 脚本顶部 cidr directive 声明
     exclusions:
       - project: loan-web
-        reason: "内部报表导出含 SQL 片段, 2026-11-05 张三"
+        reason: '内部报表导出含 SQL 片段, 2026-11-05 张三'
 projectWaf:
-  loan-admin: {mode: log}      # off/log/block；off 的项目在生成时进挂载 exclude
+  loan-admin: { mode: log } # off/log/block；off 的项目在生成时进挂载 exclude
 ```
 
 脚本做不了的事由信封/生成器补：CIDR 判断经 `scope.source_cidrs` 语法糖编译为脚本顶部的 cidr directive 声明（多条规则共享的网段去重合并），规则体引用 `<name>.contains($conn.remote_addr)`；手写场景（P3）可直接写 directive，两者兼容。性能敏感的全量扫描由 `scope.methods/paths` 折叠为 `strings.hasPrefix`/`contains` 前置链（公共前缀合并，不逐规则跑正则）。需要完整脚本表达力的场景走既有 Script 路由类型，不往 WAF 规则里塞。
@@ -216,15 +217,16 @@ projectWaf:
 
 ## 7. 阶段计划
 
-| 阶段 | 内容 |
-| --- | --- |
-| P0 | fleet 升级至 pin ≥ 4a5f12b8；上游建议（step budget、script-guide 文档） |
-| P1 native | `EdgeFunctionLimits` + 索引/脚本 codec + validator 扩展 → `EdgeFunctionsWatcher`（hash 校验 + 内容寻址编译缓存 + 全或无组装）+ 联合索引 → 受限 Library（含 cidr directive 扩展）+ 编译 → 管线钩子 + 短路 → `ctx.report` + metrics + 事件日志 → CTest 覆盖（含黄金 fixture 的 native 侧编译断言、cidr directive 编译期失败用例） |
-| P2 server+web | `modules/waf` + 转义器/生成器 + 黄金 fixtures + 发布资源条目（先脚本后索引）+ 激活证据；WAF 页 + 项目策略页 + 发布预览；边缘函数只读页 |
-| P3 | body phase（缓冲-重放、per-route opt-in、content-type 白名单、大小上限——219 大文件分块上传的前车之鉴，绝不全量缓冲）；手写边缘函数开放（先扛住 step budget / 基数上限硬约束）；fail-close 选项；起手规则包（SQLi/XSS/路径穿越/扫描器 UA/畸形 URI，纯数据）；控制台命中统计页（server 集成 Prometheus 查询） |
+| 阶段          | 内容                                                                                                                                                                                                                                                                                                                            |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| P0            | fleet 升级至 pin ≥ 4a5f12b8；上游建议（step budget、script-guide 文档）                                                                                                                                                                                                                                                         |
+| P1 native     | `EdgeFunctionLimits` + 索引/脚本 codec + validator 扩展 → `EdgeFunctionsWatcher`（hash 校验 + 内容寻址编译缓存 + 全或无组装）+ 联合索引 → 受限 Library（含 cidr directive 扩展）+ 编译 → 管线钩子 + 短路 → `ctx.report` + metrics + 事件日志 → CTest 覆盖（含黄金 fixture 的 native 侧编译断言、cidr directive 编译期失败用例） |
+| P2 server+web | `modules/waf` + 转义器/生成器 + 黄金 fixtures + 发布资源条目（先脚本后索引）+ 激活证据；WAF 页 + 项目策略页 + 发布预览；边缘函数只读页                                                                                                                                                                                          |
+| P3            | body phase（缓冲-重放、per-route opt-in、content-type 白名单、大小上限——219 大文件分块上传的前车之鉴，绝不全量缓冲）；手写边缘函数开放（先扛住 step budget / 基数上限硬约束）；fail-close 选项；起手规则包（SQLi/XSS/路径穿越/扫描器 UA/畸形 URI，纯数据）；控制台命中统计页（server 集成 Prometheus 查询）                     |
 
 ## 8. 开放项
 
+- ~~**上游备忘失效缺陷**：`ScriptExchangeCtx::set_path_vars()` 不清除已备忘的 `$path` 常量~~ **已解决**（上游 `625f0b46`，随本设计实施一同 pin）：`set_path_vars()` 现重置整个常量备忘（单条摘除会断线性探测链），各候选条件读到自己的捕获；`AccessRequestHandlerTest.PathVarConditionSeesEachCandidatesOwnCapture` 已解封守护。
 - CAT 事务标记形态（函数短路是否独立 transaction type 或仅 trace 标记）。
 - 函数能否读 trace context（`$context` 已含 trace cluster；开放给 `$ctx` 的范围待实现时定）。
 - 响应阶段函数（`phase: response`）与请求改写（`phase: request_rewrite`）的契约扩展——远期，先留枚举位不实现。
