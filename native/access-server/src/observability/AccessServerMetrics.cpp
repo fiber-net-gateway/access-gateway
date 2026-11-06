@@ -155,6 +155,7 @@ constexpr std::size_t kFunctionDurationSeriesLimit = 1024;
 constexpr std::size_t kFunctionErrorSeriesLimit = 2048;
 constexpr std::size_t kFunctionEventSeriesLimit = 8192;
 constexpr std::size_t kFunctionReportOverflowSeriesLimit = 1024;
+constexpr std::size_t kFunctionSampledOutSeriesLimit = 4096;
 
 template<std::size_t N>
 bool register_labeled_series(prometheus::MetricsRegistry &registry, prometheus::FamilyId family,
@@ -405,6 +406,15 @@ void AccessServerMetrics::Worker::edge_function_report_overflow(std::string_view
     (void) function_report_overflow_dynamic_->inc(labels);
 }
 
+void AccessServerMetrics::Worker::edge_function_sampled_out(std::string_view function,
+                                                            std::string_view project) noexcept {
+    if (!function_sampled_out_dynamic_ || function.empty()) {
+        return;
+    }
+    const std::array<std::string_view, 2> labels{function, project};
+    (void) function_sampled_out_dynamic_->inc(labels);
+}
+
 AccessServerMetrics::AccessServerMetrics(event::EventLoopGroup &workers, const AccessRuntimeMetrics *runtime_metrics) :
     runtime_metrics_(runtime_metrics) {
     valid_ = initialize(workers);
@@ -653,6 +663,10 @@ bool AccessServerMetrics::initialize(event::EventLoopGroup &worker_group) {
             .mode = prometheus::SeriesMode::Lru,
             .max_series = kFunctionReportOverflowSeriesLimit,
     };
+    const prometheus::SeriesOptions function_sampled_out_options{
+            .mode = prometheus::SeriesMode::Lru,
+            .max_series = kFunctionSampledOutSeriesLimit,
+    };
     auto route_requests = registry_.register_counter(
             "access_server_route_requests_total",
             "Completed requests by matched host pattern, route path pattern, and final status code.",
@@ -679,25 +693,31 @@ bool AccessServerMetrics::initialize(event::EventLoopGroup &worker_group) {
                                                           "address: request bodies written to and response bodies "
                                                           "read from that endpoint.",
                                                           kProviderBodyLabels, provider_body_options);
-    auto function_evaluations = registry_.register_counter(
-            "access_server_function_evaluations_total", "Edge-function executions by function id and mounted project.",
-            kFunctionEvaluationLabels, function_evaluation_options);
+    auto function_evaluations =
+            registry_.register_counter("access_server_function_evaluations_total",
+                                       "Edge-function executions by function name and mounted project.",
+                                       kFunctionEvaluationLabels, function_evaluation_options);
     auto function_duration = registry_.register_histogram(
-            "access_server_function_duration_seconds", "Edge-function execution wall time by function id.",
+            "access_server_function_duration_seconds", "Edge-function execution wall time by function name.",
             kFunctionDurationBounds, prometheus::HistogramUnit::Microseconds, kFunctionLabels,
             function_duration_options);
     auto function_errors =
             registry_.register_counter("access_server_function_errors_total",
-                                       "Edge-function executions that ended in an error by function id and reason.",
+                                       "Edge-function executions that ended in an error by function name and reason.",
                                        kFunctionErrorLabels, function_error_options);
     auto function_events = registry_.register_counter("access_server_function_events_total",
-                                                      "Edge-function reported events by function id, event, and "
+                                                      "Edge-function reported events by function name, event, and "
                                                       "label.",
                                                       kFunctionEventLabels, function_event_options);
     auto function_report_overflow =
             registry_.register_counter("access_server_function_report_overflow_total",
                                        "ctx.report calls dropped because the per-function report budget was exhausted.",
                                        kFunctionLabels, function_report_overflow_options);
+    auto function_sampled_out =
+            registry_.register_counter("access_server_function_sampled_out_total",
+                                       "Edge-function mounts skipped by sticky ratio sampling (peer bucket outside "
+                                       "the mount ratio, or ratio 0 = disabled).",
+                                       kFunctionEvaluationLabels, function_sampled_out_options);
     if (!requests || !requests_by_status || !response_compression || !duration || !inflight || !proxy_executions ||
         !proxy_attempts || !proxy_attempts_inflight || !proxy_failures || !proxy_pool_acquires ||
         !proxy_dns_resolutions || !proxy_connect_attempts || !proxy_connect_candidates || !happy_eyeballs ||
@@ -705,7 +725,7 @@ bool AccessServerMetrics::initialize(event::EventLoopGroup &worker_group) {
         !route_requests || !provider_responses || !proxy_errors || !circuit_rejections || !request_body_bytes ||
         !response_body_bytes || !response_compression_bytes || !request_body_size || !response_body_size ||
         !route_body_bytes || !provider_body_bytes || !function_evaluations || !function_duration || !function_errors ||
-        !function_events || !function_report_overflow) {
+        !function_events || !function_report_overflow || !function_sampled_out) {
         return false;
     }
 
@@ -781,10 +801,11 @@ bool AccessServerMetrics::initialize(event::EventLoopGroup &worker_group) {
     auto function_errors_dynamic = registry_.dynamic_counter(*function_errors);
     auto function_events_dynamic = registry_.dynamic_counter(*function_events);
     auto function_report_overflow_dynamic = registry_.dynamic_counter(*function_report_overflow);
+    auto function_sampled_out_dynamic = registry_.dynamic_counter(*function_sampled_out);
     if (!route_requests_dynamic || !provider_responses_dynamic || !proxy_errors_dynamic ||
         !circuit_rejections_dynamic || !route_body_bytes_dynamic || !provider_body_bytes_dynamic ||
         !function_evaluations_dynamic || !function_duration_dynamic || !function_errors_dynamic ||
-        !function_events_dynamic || !function_report_overflow_dynamic) {
+        !function_events_dynamic || !function_report_overflow_dynamic || !function_sampled_out_dynamic) {
         return false;
     }
 
@@ -842,6 +863,7 @@ bool AccessServerMetrics::initialize(event::EventLoopGroup &worker_group) {
         worker.function_errors_dynamic_ = *function_errors_dynamic;
         worker.function_events_dynamic_ = *function_events_dynamic;
         worker.function_report_overflow_dynamic_ = *function_report_overflow_dynamic;
+        worker.function_sampled_out_dynamic_ = *function_sampled_out_dynamic;
     }
     return true;
 }

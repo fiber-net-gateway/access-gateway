@@ -70,7 +70,7 @@ TEST(EdgeFunctionConfigCodec, ParsesFullIndex) {
                                 R"(",
                 "mounts": [
                     {"projects": {"include": ["loan-*", "trade-web"], "exclude": ["loan-admin-legacy"]},
-                     "priority": 100},
+                     "priority": 100, "ratio": 1000},
                     {"projects": {"include": ["*"]}}
                 ]
             },
@@ -94,17 +94,20 @@ TEST(EdgeFunctionConfigCodec, ParsesFullIndex) {
     EXPECT_EQ(first.sha256_hex, kValidSha256);
     ASSERT_EQ(first.mounts.size(), 2U);
     EXPECT_EQ(first.mounts[0].priority, 100);
+    EXPECT_EQ(first.mounts[0].ratio, 1000);
     ASSERT_EQ(first.mounts[0].projects.include.size(), 2U);
     EXPECT_EQ(first.mounts[0].projects.include[0], "loan-*");
     EXPECT_EQ(first.mounts[0].projects.include[1], "trade-web");
     ASSERT_EQ(first.mounts[0].projects.exclude.size(), 1U);
     EXPECT_EQ(first.mounts[0].projects.exclude[0], "loan-admin-legacy");
     EXPECT_EQ(first.mounts[1].priority, 0);
+    EXPECT_EQ(first.mounts[1].ratio, fiber::access_server::kEdgeFunctionFullRatio);
     ASSERT_EQ(first.mounts[1].projects.include.size(), 1U);
     EXPECT_EQ(first.mounts[1].projects.include[0], "*");
     EXPECT_TRUE(first.mounts[1].projects.exclude.empty());
 
     EXPECT_EQ(config.functions[1].name, "audit");
+    EXPECT_EQ(config.functions[1].mounts[0].ratio, fiber::access_server::kEdgeFunctionFullRatio);
 }
 
 TEST(EdgeFunctionConfigCodec, EmptyFunctionsListIsAccepted) {
@@ -221,6 +224,30 @@ TEST(EdgeFunctionConfigCodec, PriorityRangeEnforced) {
             EXPECT_EQ(error.code, AccessConfigErrorCode::OutOfRange) << "priority: " << priority;
         }
         EXPECT_EQ(error.field, "functions[0].mounts[0].priority") << "priority: " << priority;
+    }
+}
+
+TEST(EdgeFunctionConfigCodec, RatioRangeEnforced) {
+    for (const std::string ratio: {"-1", "10001", R"("5")"}) {
+        const AccessConfigError error = parse_error(
+                index_json("1", function_json("waf", kValidSha256,
+                                              R"({"projects": {"include": ["*"]}, "ratio": )" + ratio + "}")));
+        if (ratio == R"("5")") {
+            EXPECT_EQ(error.code, AccessConfigErrorCode::InvalidField) << "ratio: " << ratio;
+        } else {
+            EXPECT_EQ(error.code, AccessConfigErrorCode::OutOfRange) << "ratio: " << ratio;
+        }
+        EXPECT_EQ(error.field, "functions[0].mounts[0].ratio") << "ratio: " << ratio;
+    }
+
+    // Both endpoints of the closed domain are legal: 10000 = must-run,
+    // 0 = mounted-but-disabled.
+    for (const std::string ratio: {"0", "10000"}) {
+        auto parsed = parse_edge_function_index_config(
+                index_json("1", function_json("waf", kValidSha256,
+                                              R"({"projects": {"include": ["*"]}, "ratio": )" + ratio + "}")));
+        ASSERT_TRUE(parsed.has_value() && parsed->has_value()) << "ratio: " << ratio;
+        EXPECT_EQ((*parsed)->functions[0].mounts[0].ratio, std::stoi(ratio)) << "ratio: " << ratio;
     }
 }
 

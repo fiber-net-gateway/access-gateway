@@ -102,6 +102,7 @@ EdgeFunctionMountTable::build(const EdgeFunctionsState &state, std::span<const s
                     .name = table->name_storage_[function_index],
                     .program = table->owned_programs_[function_index].get(),
                     .priority = mount->priority,
+                    .ratio = mount->ratio,
             });
         }
         if (!group.mounted.empty()) {

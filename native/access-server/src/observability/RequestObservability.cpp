@@ -371,6 +371,13 @@ void RequestObservability::record_edge_function_report_overflow(std::string_view
     }
 }
 
+void RequestObservability::record_edge_function_sampled_out(std::string_view function,
+                                                            std::string_view project) noexcept {
+    if (metrics_) {
+        metrics_->edge_function_sampled_out(function, project);
+    }
+}
+
 void RequestObservability::record_response_compression_bytes(std::uint64_t raw_bytes,
                                                              std::uint64_t compressed_bytes) noexcept {
     if (metrics_ != nullptr) {

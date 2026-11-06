@@ -32,6 +32,9 @@ struct EdgeFunctionMounted {
     std::string_view name; // borrowed from the table's storage
     EdgeFunctionProgram *program; // borrowed; the table owns the shared_ptr
     std::int32_t priority = 0;
+    // Sticky sampling threshold from the matching mount (design §3.1): the
+    // executor compares one per-request crc32(peer IP) bucket against it.
+    std::int32_t ratio = kEdgeFunctionFullRatio;
 };
 
 // Joint index (docs/edge-functions-and-waf-design.md §3.6): the

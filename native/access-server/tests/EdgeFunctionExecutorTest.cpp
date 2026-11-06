@@ -2,16 +2,19 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdint>
 #include <cstring>
 #include <future>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
 
 #include <fiber/async/Spawn.h>
+#include <fiber/common/util/Crc32.h>
 #include <fiber/event/EventLoopGroup.h>
 #include <fiber/http/Http1Connection.h>
 #include <fiber/http/HttpExchange.h>
@@ -51,8 +54,9 @@ using fiber::access_server::RouteType;
 
 class RecordingTransport final : public fiber::test::HttpTransportStub {
 public:
-    RecordingTransport(fiber::event::EventLoop &loop, std::string input, std::string &output) :
-        loop_(loop), input_(std::move(input)), output_(output) {}
+    RecordingTransport(fiber::event::EventLoop &loop, std::string input, std::string &output,
+                       fiber::net::SocketAddress remote_addr = {}) :
+        loop_(loop), input_(std::move(input)), output_(output), remote_addr_(std::move(remote_addr)) {}
 
     fiber::async::Task<fiber::common::IoResult<void>> shutdown(std::chrono::milliseconds) override {
         co_return fiber::common::IoResult<void>{};
@@ -115,8 +119,9 @@ private:
 };
 
 fiber::async::DetachedTask run_request_on_loop(fiber::event::EventLoop *loop, const RouteConfigStore *store,
-                                               std::string request, std::string *output, std::promise<void> *done) {
-    auto transport = std::make_unique<RecordingTransport>(*loop, std::move(request), *output);
+                                               std::string request, std::string *output, std::promise<void> *done,
+                                               fiber::net::SocketAddress remote_addr = {}) {
+    auto transport = std::make_unique<RecordingTransport>(*loop, std::move(request), *output, std::move(remote_addr));
     fiber::access_server::AccessRequestHandler access_handler(store->snapshot_provider(), {},
                                                               AccessRequestHandlerOptions{}, {});
     ClientMetadataResolver client_metadata_resolver(ClientMetadataResolverOptions{
@@ -133,7 +138,8 @@ fiber::async::DetachedTask run_request_on_loop(fiber::event::EventLoop *loop, co
     co_return;
 }
 
-std::string run_request(const RouteConfigStore &store, std::string request) {
+std::string run_request(const RouteConfigStore &store, std::string request,
+                        fiber::net::SocketAddress remote_addr = {}) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
@@ -141,7 +147,7 @@ std::string run_request(const RouteConfigStore &store, std::string request) {
     std::promise<void> done;
     auto completed = done.get_future();
     fiber::async::spawn(group.at(0), [&]() {
-        return run_request_on_loop(&group.at(0), &store, std::move(request), &output, &done);
+        return run_request_on_loop(&group.at(0), &store, std::move(request), &output, &done, std::move(remote_addr));
     });
 
     EXPECT_EQ(completed.wait_for(2s), std::future_status::ready);
@@ -177,6 +183,37 @@ EdgeFunctionMountConfig mounted_everywhere(std::int32_t priority) {
             .projects = EdgeFunctionProjectsSelector{.include = {"*"}},
             .priority = priority,
     };
+}
+
+EdgeFunctionMountConfig mounted_everywhere(std::int32_t priority, std::int32_t ratio) {
+    return EdgeFunctionMountConfig{
+            .projects = EdgeFunctionProjectsSelector{.include = {"*"}},
+            .priority = priority,
+            .ratio = ratio,
+    };
+}
+
+// Same sticky-sampling bucket as the executor: crc32 over the raw peer IP
+// bytes % 10000. Deterministic, so fixture addresses with known buckets can
+// be brute-forced at test time instead of hard-coded.
+std::uint32_t sampling_bucket(const fiber::net::IpAddress &peer) {
+    return fiber::util::Crc32::compute(std::span<const std::uint8_t>{peer.data(), peer.byte_size()}) %
+           fiber::access_server::kEdgeFunctionFullRatio;
+}
+
+fiber::net::SocketAddress address_with_bucket(std::uint32_t wanted) {
+    for (int a = 0; a < 256; ++a) {
+        for (int b = 0; b < 256; ++b) {
+            fiber::net::IpAddress ip;
+            if (!fiber::net::IpAddress::parse("198.51." + std::to_string(a) + "." + std::to_string(b), ip)) {
+                continue;
+            }
+            if (sampling_bucket(ip) == wanted) {
+                return fiber::net::SocketAddress(ip, 52341);
+            }
+        }
+    }
+    return {};
 }
 
 EdgeFunctionMountConfig mounted_on(std::string project_glob, std::int32_t priority) {
@@ -230,6 +267,42 @@ TEST(EdgeFunctionExecutor, ShortCircuitBeatsLaterFunctionsAndRouting) {
     const std::string response = run_request(store, request());
     EXPECT_NE(response.find(" 403 "), std::string::npos) << response;
     EXPECT_NE(response_body(response).find("blocked-by-blocker"), std::string::npos) << response;
+}
+
+TEST(EdgeFunctionExecutor, RatioSamplingExecutesOnlySampledPeers) {
+    // ratio 1: only peers whose sticky bucket is exactly 0 run the function;
+    // everyone else flows straight to the route.
+    RouteConfigStore store;
+    publish_response_route(store);
+    EdgeFunctionLibrary library;
+    EdgeFunctionsState state;
+    add_function(state, library, "canary", R"(resp.send(403, "canary-blocked");)", {mounted_everywhere(0, 1)});
+    store.set_edge_functions(std::make_shared<EdgeFunctionsState>(std::move(state)));
+
+    const std::string sampled = run_request(store, request(), address_with_bucket(0));
+    EXPECT_NE(sampled.find(" 403 "), std::string::npos) << sampled;
+    EXPECT_NE(response_body(sampled).find("canary-blocked"), std::string::npos) << sampled;
+
+    const std::string skipped = run_request(store, request(), address_with_bucket(9999));
+    EXPECT_NE(skipped.find(" 200 "), std::string::npos) << skipped;
+    EXPECT_NE(response_body(skipped).find("route-body"), std::string::npos) << skipped;
+}
+
+TEST(EdgeFunctionExecutor, RatioZeroMountStaysDisabledButChainContinues) {
+    // ratio 0 is mounted-but-disabled: the function never executes for any
+    // peer, and the chain moves on to the next mounted function.
+    RouteConfigStore store;
+    publish_response_route(store);
+    EdgeFunctionLibrary library;
+    EdgeFunctionsState state;
+    add_function(state, library, "off", R"(resp.send(200, "never-off");)", {mounted_everywhere(1, 0)});
+    add_function(state, library, "responder", R"(resp.send(403, "after-disabled");)", {mounted_everywhere(2)});
+    store.set_edge_functions(std::make_shared<EdgeFunctionsState>(std::move(state)));
+
+    const std::string response = run_request(store, request(), address_with_bucket(0));
+    EXPECT_NE(response.find(" 403 "), std::string::npos) << response;
+    EXPECT_NE(response_body(response).find("after-disabled"), std::string::npos) << response;
+    EXPECT_EQ(response.find("never-off"), std::string::npos) << response;
 }
 
 TEST(EdgeFunctionExecutor, ExceptionFailsOpenToRouting) {

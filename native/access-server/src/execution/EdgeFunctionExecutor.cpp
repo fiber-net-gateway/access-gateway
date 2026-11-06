@@ -5,8 +5,12 @@
 
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
+#include <optional>
+#include <span>
 #include <string_view>
 
+#include <fiber/common/util/Crc32.h>
 #include <fiber/http_script/ScriptExchangeCtx.h>
 #include <fiber/log/Log.h>
 #include <fiber/script/ScriptResult.h>
@@ -19,6 +23,16 @@ DEFINE_LOGGER(LOG_EDGE_FUNCTION, kAccessServerEdgeFunctionLogger);
 // Fixed reason vocabulary for access_server_function_errors_total.
 constexpr std::string_view kErrorReasonException = "exception";
 constexpr std::string_view kErrorReasonAbort = "abort";
+
+// Sticky sampling bucket (design §3.1 挂载采样): CRC-32 over the peer IP
+// bytes (v4 or v6, branch-free), so the same client lands in the same bucket
+// on every request and on every instance. Computed at most once per request
+// and shared by all sampled mounts, which keeps cohorts monotone: raising a
+// ratio only adds clients, never swaps them.
+std::uint32_t sampling_bucket(const net::IpAddress &peer) noexcept {
+    return fiber::util::Crc32::compute(std::span<const std::uint8_t>{peer.data(), peer.byte_size()}) %
+           static_cast<std::uint32_t>(kEdgeFunctionFullRatio);
+}
 
 // Per-request edge context: backs ctx.report and the $ctx constants. The
 // report budget is per function per execution, so begin_function() resets it
@@ -71,7 +85,26 @@ fiber::async::Task<bool> EdgeFunctionExecutor::run(std::span<const EdgeFunctionM
     // Production installs the HTTP upstream services for the request's route
     // scripts; edge functions must see (and leave) the original pointer.
     http_script::HttpScriptServices *const previous_services = script_context.services();
+    // Sampling happens before execution (design §3.2): a skipped function
+    // leaves no GcHeap entry and only bumps the sampled_out counter. The draw
+    // is lazy — full-ratio requests never compute it.
+    std::optional<std::uint32_t> bucket;
     for (const EdgeFunctionMounted &entry: mounted) {
+        if (entry.ratio < kEdgeFunctionFullRatio) {
+            if (entry.ratio <= 0) {
+                // ratio 0 is mounted-but-disabled: subscription and evidence
+                // stay live, execution stays off.
+                telemetry.record_edge_function_sampled_out(entry.name, project);
+                continue;
+            }
+            if (!bucket.has_value()) {
+                bucket = sampling_bucket(telemetry.client_metadata().peer_address);
+            }
+            if (*bucket >= static_cast<std::uint32_t>(entry.ratio)) {
+                telemetry.record_edge_function_sampled_out(entry.name, project);
+                continue;
+            }
+        }
         edge.begin_function(entry.name);
         script_context.set_services(&edge);
         const std::chrono::steady_clock::time_point started = std::chrono::steady_clock::now();
