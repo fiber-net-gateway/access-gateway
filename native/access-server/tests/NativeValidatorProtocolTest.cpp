@@ -195,4 +195,85 @@ TEST(NativeValidatorProtocolTest, DescribesTheRuntimeConfigLimits) {
             << response;
 }
 
+TEST(NativeValidatorProtocolTest, ValidatesEdgeFunctionIndexCandidates) {
+    constexpr std::string_view payload = R"({
+        "version": 3,
+        "functions": [
+            {"id": "waf", "dataId": "ploto.unified-access.edge-function.waf",
+             "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+             "mounts": [{"projects": {"include": ["*"]}}]},
+            {"id": "audit", "dataId": "ploto.unified-access.edge-function.audit",
+             "sha256": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+             "mounts": [{"projects": {"include": ["loan-*"]}, "priority": 10}]}
+        ]
+    })";
+
+    const std::string response =
+            fiber::access_server::process_native_validator_request(request("edge_function_index", "", payload));
+    EXPECT_NE(response.find(R"("valid":true)"), std::string::npos) << response;
+    EXPECT_NE(response.find(R"("functionCount":2)"), std::string::npos) << response;
+
+    // JSON null is the explicit unmount candidate and validates as empty.
+    const std::string unmount =
+            fiber::access_server::process_native_validator_request(request("edge_function_index", "", "null"));
+    EXPECT_NE(unmount.find(R"("valid":true)"), std::string::npos) << unmount;
+    EXPECT_NE(unmount.find(R"("functionCount":0)"), std::string::npos) << unmount;
+
+    // Empty content is keep-current for the watcher, never a publishable
+    // candidate.
+    const std::string empty =
+            fiber::access_server::process_native_validator_request(request("edge_function_index", "", ""));
+    EXPECT_NE(empty.find(R"("valid":false)"), std::string::npos) << empty;
+    EXPECT_NE(empty.find(R"("code":"invalid_request")"), std::string::npos) << empty;
+    EXPECT_NE(empty.find(R"("field":"payloadBase64")"), std::string::npos) << empty;
+
+    // Codec violations surface with their structured field path.
+    const std::string invalid = fiber::access_server::process_native_validator_request(
+            request("edge_function_index", "",
+                    R"({"version":1,"functions":[{"id":"waf","dataId":"ploto.unified-access.edge-function.other",)"
+                    R"("sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",)"
+                    R"("mounts":[{"projects":{"include":["*"]}}]}]})"));
+    EXPECT_NE(invalid.find(R"("valid":false)"), std::string::npos) << invalid;
+    EXPECT_NE(invalid.find(R"("code":"conflict")"), std::string::npos) << invalid;
+    EXPECT_NE(invalid.find("functions[0].dataId"), std::string::npos) << invalid;
+}
+
+TEST(NativeValidatorProtocolTest, CompilesEdgeFunctionScriptsWithCidrDirective) {
+    constexpr std::string_view payload =
+            R"(directive office = cidr "172.28.0.0/16"; return office.contains($conn.remote_addr);)";
+
+    const std::string response =
+            fiber::access_server::process_native_validator_request(request("edge_function_script", "", payload));
+    EXPECT_NE(response.find(R"("valid":true)"), std::string::npos) << response;
+    EXPECT_NE(response.find(R"("compiledProgramCount":1)"), std::string::npos) << response;
+    EXPECT_NE(response.find(R"("scriptBytes":)" + std::to_string(payload.size()) + ","), std::string::npos) << response;
+    EXPECT_NE(response.find(R"("cidrDirectiveCount":1)"), std::string::npos) << response;
+
+    // Malformed CIDR literals fail the compile (never reach a data plane).
+    const std::string bad_cidr = fiber::access_server::process_native_validator_request(
+            request("edge_function_script", "", R"(directive office = cidr "172.28.0.0/33"; true)"));
+    EXPECT_NE(bad_cidr.find(R"("valid":false)"), std::string::npos) << bad_cidr;
+    EXPECT_NE(bad_cidr.find(R"("code":"script_compile_failed")"), std::string::npos) << bad_cidr;
+}
+
+TEST(NativeValidatorProtocolTest, ReportsEdgeScriptCompileErrorsWithoutEchoingSource) {
+    const std::string response = fiber::access_server::process_native_validator_request(
+            request("edge_function_script", "", "$context.secret_marker == 'x'"));
+    EXPECT_NE(response.find(R"("valid":false)"), std::string::npos) << response;
+    EXPECT_NE(response.find(R"("code":"script_compile_failed")"), std::string::npos) << response;
+    EXPECT_NE(response.find(R"("field":"payloadBase64")"), std::string::npos) << response;
+    EXPECT_NE(response.find(R"("offset":)"), std::string::npos) << response;
+    EXPECT_EQ(response.find("secret_marker"), std::string::npos) << response;
+}
+
+TEST(NativeValidatorProtocolTest, RejectsOversizedEdgeScriptPayload) {
+    const std::string oversized(1024U * 1024U + 1U, 'x');
+    const std::string response =
+            fiber::access_server::process_native_validator_request(request("edge_function_script", "", oversized));
+    EXPECT_NE(response.find(R"("valid":false)"), std::string::npos) << response;
+    EXPECT_NE(response.find(R"("code":"limit_exceeded")"), std::string::npos) << response;
+    EXPECT_NE(response.find(R"("field":"payloadBase64")"), std::string::npos) << response;
+    EXPECT_EQ(response.find("xxxxxxxx"), std::string::npos) << response;
+}
+
 } // namespace
