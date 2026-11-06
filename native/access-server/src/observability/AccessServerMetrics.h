@@ -234,7 +234,7 @@ public:
                                        std::uint64_t bytes) noexcept;
 
         // Edge-function execution families. Label values are bounded by the
-        // published edge-function model (function ids, mount projects) plus a
+        // published edge-function model (function names, mount projects) plus a
         // small fixed reason vocabulary; events carry the script-chosen
         // event/label pair, which the config limits already bound.
         void edge_function_evaluated(std::string_view function, std::string_view project) noexcept;
@@ -244,6 +244,10 @@ public:
         // ctx.report calls dropped because the per-function per-request report
         // budget was exhausted (design §3.5 overflow counter).
         void edge_function_report_overflow(std::string_view function) noexcept;
+        // Mounts skipped by sticky ratio sampling (design §3.1 挂载采样):
+        // the function stayed mounted but this request's peer bucket fell
+        // outside the mount's ratio (or the ratio is 0 = disabled).
+        void edge_function_sampled_out(std::string_view function, std::string_view project) noexcept;
 
     private:
         friend class AccessServerMetrics;
@@ -300,6 +304,7 @@ public:
         std::optional<prometheus::DynamicCounter> function_errors_dynamic_;
         std::optional<prometheus::DynamicCounter> function_events_dynamic_;
         std::optional<prometheus::DynamicCounter> function_report_overflow_dynamic_;
+        std::optional<prometheus::DynamicCounter> function_sampled_out_dynamic_;
         prometheus::HistogramRef request_duration_;
         prometheus::HistogramRef request_body_size_;
         prometheus::HistogramRef response_body_size_;

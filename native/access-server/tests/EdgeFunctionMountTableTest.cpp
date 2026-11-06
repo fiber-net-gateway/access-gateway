@@ -22,7 +22,18 @@ using fiber::access_server::EdgeFunctionProjectsSelector;
 using fiber::access_server::EdgeFunctionsState;
 
 EdgeFunctionMountConfig mount(std::vector<std::string> include, std::int32_t priority,
-                              std::vector<std::string> exclude = {}) {
+                              std::vector<std::string> exclude = {}, std::int32_t ratio = -1) {
+    // ratio < 0 means "leave the struct default" so tests can assert it.
+    if (ratio < 0) {
+        return EdgeFunctionMountConfig{
+                .projects =
+                        EdgeFunctionProjectsSelector{
+                                .include = std::move(include),
+                                .exclude = std::move(exclude),
+                        },
+                .priority = priority,
+        };
+    }
     return EdgeFunctionMountConfig{
             .projects =
                     EdgeFunctionProjectsSelector{
@@ -30,6 +41,7 @@ EdgeFunctionMountConfig mount(std::vector<std::string> include, std::int32_t pri
                             .exclude = std::move(exclude),
                     },
             .priority = priority,
+            .ratio = ratio,
     };
 }
 
@@ -110,6 +122,21 @@ TEST(EdgeFunctionMountTable, FirstMatchingMountWins) {
     const std::span<const EdgeFunctionMounted> fallback = table->mounted_for("api");
     ASSERT_EQ(fallback.size(), 1U);
     EXPECT_EQ(fallback[0].priority, 10);
+}
+
+TEST(EdgeFunctionMountTable, MatchingMountRatioCarriesToMountedEntry) {
+    // The winning mount's ratio travels with the mounted entry; a mount that
+    // leaves ratio unset stays at the must-run default.
+    EdgeFunctionsState state =
+            state_with({function("f", {mount({"loan-*"}, 1, {}, 250), mount({"*"}, 10, {}, 10000)})});
+    const std::vector<std::string> projects = {"loan-web", "api"};
+    auto table = build_table(state, projects);
+    EXPECT_EQ(table->mounted_for("loan-web")[0].ratio, 250);
+    EXPECT_EQ(table->mounted_for("api")[0].ratio, 10000);
+
+    EdgeFunctionsState defaulted = state_with({function("g", {mount({"*"}, 0)})});
+    auto default_table = build_table(defaulted, projects);
+    EXPECT_EQ(default_table->mounted_for("api")[0].ratio, fiber::access_server::kEdgeFunctionFullRatio);
 }
 
 TEST(EdgeFunctionMountTable, ExcludedFirstMountFallsThroughToSecond) {

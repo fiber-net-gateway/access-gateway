@@ -181,9 +181,16 @@ struct EdgeFunctionProjectsSelector {
     bool operator==(const EdgeFunctionProjectsSelector &) const = default;
 };
 
+// Sampling denominator: mount-level ratio is basis points out of this value.
+// 10000 (kEdgeFunctionFullRatio) means must-run; below it is a sticky sample
+// over crc32(peer IP) % kEdgeFunctionFullRatio; 0 is mounted-but-disabled.
+inline constexpr std::int32_t kEdgeFunctionFullRatio = 10000;
+
 struct EdgeFunctionMountConfig {
     EdgeFunctionProjectsSelector projects;
     std::int32_t priority = 0;
+    // [0, kEdgeFunctionFullRatio]; the codec rejects anything outside.
+    std::int32_t ratio = kEdgeFunctionFullRatio;
 
     bool operator==(const EdgeFunctionMountConfig &) const = default;
 };

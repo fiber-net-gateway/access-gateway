@@ -134,6 +134,9 @@ public:
     void record_edge_function_report_overflow(std::string_view function) noexcept {
         observability_.record_edge_function_report_overflow(function);
     }
+    void record_edge_function_sampled_out(std::string_view function, std::string_view project) noexcept {
+        observability_.record_edge_function_sampled_out(function, project);
+    }
     void mark_io_error(common::IoErr error) noexcept { observability_.mark_io_error(execution_, error); }
     void set_upstream(const ProxyUpstreamEndpoint &endpoint) noexcept {
         observability_.set_upstream(execution_, endpoint);

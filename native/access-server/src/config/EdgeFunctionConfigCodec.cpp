@@ -171,6 +171,16 @@ DecodeResult<EdgeFunctionMountConfig> mount_config(const AccessJsonValue &value,
                 return std::unexpected(out_of_range(priority_field, "priority must be within [0, 1000000]"));
             }
             mount.priority = *decoded;
+        } else if (property.key == "ratio") {
+            const std::string ratio_field = child(field, "ratio");
+            auto decoded = strict_int32(property.value, ratio_field);
+            if (!decoded) {
+                return std::unexpected(std::move(decoded.error()));
+            }
+            if (*decoded < 0 || *decoded > kEdgeFunctionFullRatio) {
+                return std::unexpected(out_of_range(ratio_field, "ratio must be within [0, 10000]"));
+            }
+            mount.ratio = *decoded;
         } else {
             return unknown_key(child(field, property.key));
         }
