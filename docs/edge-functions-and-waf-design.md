@@ -226,7 +226,7 @@ projectWaf:
 ### 4.2 代码生成器（`server/`，关键路径组件）
 
 - 输入：规则集 + 项目 mode 表；输出：单函数脚本文本（含顶部 cidr directive 声明）+ 索引条目（exclude 含全部 mode=off 项目）。
-- 生成策略：priority 升序 if 链；mode 查表在脚本头部；`block` 命中 = `ctx.report("waf.block", "<ruleId>")` + `resp.send(403, …)` 默认 JSON 体 `{code:"WAF_BLOCKED", ruleId, requestId, traceId}`；`log` 命中 = 仅 `ctx.report("waf.log", "<ruleId>")`。
+- 生成策略：priority 升序 if 链；mode 查表在脚本头部；`block` 命中 = `ctx.report("waf.block", "<ruleId>")` + `resp.sendJson(403, …)` 默认 JSON 体 `{code:"WAF_BLOCKED", ruleId}`（实现修订：v1 方言不暴露 requestId/traceId 常量，二者不入体——traceId 经响应头 `hi-trace-id` 关联，ruleId 足以定位规则）；`log` 命中 = 仅 `ctx.report("waf.log", "<ruleId>")`。转义器实现要点（P2 落地）：非可打印 ASCII 与全部元字符统一走 `\xHH` 按字节转义，回避方言的八进制/`\a`/`\u{}` 转义死角，可证明字节级往返。
 - **转义器**是安全关键点：规则里的正则/字面量要安全转义进方言字符串。方言转义与 JS 有差异（无 `\u{...}`、支持 1-3 位八进制、`\a` 写出普通 `a` 等），转义器单独单测并覆盖恶意输入（转义错误 = 规则语义偏移 = 安全漏洞）。CIDR 列表同样经转义器进 directive 字面量。
 - **黄金 fixtures**：规则集 → 生成脚本快照对比（对齐 `tests/fixtures/java` 的做法），并用 native validator 断言全部 fixture 编译通过。
 - 发布预览展示生成脚本文本（可 diff），编译错误行号回映规则 ID——可调试性必做项。
