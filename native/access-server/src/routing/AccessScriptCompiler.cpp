@@ -13,8 +13,12 @@ AccessScriptCompiler::AccessScriptCompiler() {
     http_script::register_request_funcs(expression_library_);
     http_script::register_http_functions_to_lib(route_library_);
     expression_library_.add_ext_ops(&exchange_const_extension_, http_script::ExchangeConstExtension::ops());
+    // Before RouteScriptExtension so the $header.traceparent override claims
+    // the key first; $context falls through (RouteScriptExtension rejects it).
+    expression_library_.add_ext_ops(&trace_const_extension_, TraceContextConstExtension::ops());
     expression_library_.add_ext_ops(&route_extension_, http_script::RouteScriptExtension::ops());
     route_library_.add_ext_ops(&exchange_const_extension_, http_script::ExchangeConstExtension::ops());
+    route_library_.add_ext_ops(&trace_const_extension_, TraceContextConstExtension::ops());
     route_library_.add_ext_ops(&route_extension_, http_script::RouteScriptExtension::ops());
 }
 

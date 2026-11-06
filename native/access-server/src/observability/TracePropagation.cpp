@@ -111,28 +111,23 @@ void TracePropagation::attach_cat(cat::Transaction &root) noexcept {
     });
 }
 
-common::IoResult<void> TracePropagation::bind_trace_context(ScriptExecutionContext &execution,
-                                                            const http_script::ConstPackage &constants) noexcept {
-    const_package_ = &constants;
-    bool bound = true;
+std::optional<std::string_view>
+TracePropagation::resolve_trace_context(std::string_view normalized_key) const noexcept {
+    std::optional<std::string_view> found;
     trace_state_.for_each_context([&](std::string_view key, std::string_view value) noexcept {
-        if (!execution.bind_context_constant(constants, key, value)) {
-            bound = false;
+        // const_name_equal folds the stored key through the same
+        // normalization rule as the caller-provided name.
+        if (http_script::const_name_equal(normalized_key, key)) {
+            found = value;
             return false;
         }
         return true;
     });
-    if (!bound) {
-        return std::unexpected(common::IoErr::Invalid);
-    }
-    if (!trace_parent_.empty() && !execution.bind_header_constant(constants, kTraceParentHeader, trace_parent_)) {
-        return std::unexpected(common::IoErr::Invalid);
-    }
-    return {};
+    return found;
 }
 
-common::IoResult<void> TracePropagation::put_trace_context(ScriptExecutionContext &execution, cat::Transaction &root,
-                                                           std::string_view key, std::string_view value) noexcept {
+common::IoResult<void> TracePropagation::put_trace_context(cat::Transaction &root, std::string_view key,
+                                                           std::string_view value) noexcept {
     auto stored = trace_state_.put_context(key, value);
     if (!stored) {
         return stored;
@@ -141,23 +136,16 @@ common::IoResult<void> TracePropagation::put_trace_context(ScriptExecutionContex
         cat::MessageTrace message_trace = root.message_trace();
         (void) message_trace.put_context(key, value);
     }
-    if (const_package_ && !execution.bind_context_constant(*const_package_, key, value)) {
-        return std::unexpected(common::IoErr::Invalid);
-    }
     return {};
 }
 
-void TracePropagation::remove_trace_context(ScriptExecutionContext &execution, cat::Transaction &root,
-                                            std::string_view key) noexcept {
+void TracePropagation::remove_trace_context(cat::Transaction &root, std::string_view key) noexcept {
     if (!trace_state_.remove_context(key)) {
         return;
     }
     if (root.valid() && !key.empty()) {
         cat::MessageTrace message_trace = root.message_trace();
         (void) message_trace.remove_context(key);
-    }
-    if (const_package_) {
-        execution.clear_context_constant(*const_package_, key);
     }
 }
 

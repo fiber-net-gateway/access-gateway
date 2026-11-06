@@ -903,6 +903,33 @@ TEST(AccessRequestHandlerTest, AcceptsUnderscoreRequestHeaderNames) {
     EXPECT_EQ(response_body(response), "value=forwarded");
 }
 
+TEST(AccessRequestHandlerTest, PathVarConditionSeesEachCandidatesOwnCapture) {
+    // Two patterns both match "/api/foo" with the same variable name capturing
+    // different text (/api/:id -> id=foo; /:id/foo -> id=api). The earlier
+    // candidate's condition reads $path.id and fails; the later candidate must
+    // observe its own capture, not a memoized value from the earlier one.
+    // Guards the upstream fix (set_path_vars resets the constant memo on
+    // rebind); Fiber pins it with RouteVarTest.PathVarRebindInvalidatesMemoizedConstant.
+    AccessScriptRuntime scripts;
+    RouteConfig first = response_route("/api/:id", "first");
+    first.condition = "$path.id == 'never'";
+    RouteConfig second = response_route("/:id/foo", "second-match");
+    second.condition = "$path.id == 'api'";
+
+    RouteConfigStore store(scripts.compiler_adapter());
+    publish(store, project({}, {std::move(first), std::move(second)}));
+
+    AccessRequestHandlerOptions options;
+    const std::string response = run_request(store,
+                                             "GET /api/foo HTTP/1.1\r\n"
+                                             "Host: api.example.com\r\n"
+                                             "Connection: close\r\n\r\n",
+                                             scripts.request_adapter());
+
+    EXPECT_NE(response.find(" 200 "), std::string::npos) << response;
+    EXPECT_EQ(response_body(response), "second-match");
+}
+
 TEST(AccessRequestHandlerTest, MatchesRecordedConditionAndTemplateSyntaxSnapshot) {
     AccessScriptRuntime scripts;
     RouteConfig conditional =

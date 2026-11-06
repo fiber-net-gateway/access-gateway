@@ -1158,12 +1158,6 @@ ProjectSnapshotResult ProjectConfigCompiler::compile(std::string_view project, c
     if (!snapshot.const_package_) {
         return std::unexpected(project_error("routes", "failed to finalize route constant package"));
     }
-    for (CompiledRoute &route: snapshot.routes_) {
-        route.path_constant_indices.reserve(route.path_variable_names.size());
-        for (const std::string &name: route.path_variable_names) {
-            route.path_constant_indices.push_back(snapshot.const_package_->find(http_script::ConstType::Path, name));
-        }
-    }
 
     std::vector<HostPattern> patterns;
     patterns.reserve(config.hosts->size());
