@@ -2,7 +2,7 @@ export type NativeValidationKind =
   'project_route' | 'gray_rules' | 'edge_function_index' | 'edge_function_script'
 
 export interface AccessConfigLimits {
-  schemaVersion: 2
+  schemaVersion: 3
   projectList: {
     maxPayloadBytes: number
     maxProjects: number
@@ -42,6 +42,22 @@ export interface AccessConfigLimits {
     maxEntryBytes: number
     maxCidrsPerRule: number
     maxCidrBytes: number
+  }
+  edgeFunctions: {
+    maxPayloadBytes: number
+    maxFunctions: number
+    maxFunctionIdBytes: number
+    maxFunctionNameBytes: number
+    maxMountsPerFunction: number
+    maxGlobsPerSelector: number
+    maxGlobBytes: number
+    maxScriptPayloadBytes: number
+    maxTotalScriptBytes: number
+    maxReportsPerExecution: number
+    maxCidrDirectivesPerScript: number
+    maxCidrsPerDirective: number
+    maxCidrBytes: number
+    maxInputFieldBytes: number
   }
 }
 
