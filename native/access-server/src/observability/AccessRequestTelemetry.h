@@ -117,6 +117,23 @@ public:
                                        std::uint64_t bytes) noexcept {
         observability_.record_provider_body_transfer(endpoint, direction, bytes);
     }
+    // Edge-function execution families; see RequestObservability for the semantics.
+    void record_edge_function_evaluated(std::string_view function, std::string_view project) noexcept {
+        observability_.record_edge_function_evaluated(function, project);
+    }
+    void record_edge_function_duration(std::string_view function, std::chrono::nanoseconds elapsed) noexcept {
+        observability_.record_edge_function_duration(function, elapsed);
+    }
+    void record_edge_function_error(std::string_view function, std::string_view reason) noexcept {
+        observability_.record_edge_function_error(function, reason);
+    }
+    void record_edge_function_event(std::string_view function, std::string_view event,
+                                    std::string_view label) noexcept {
+        observability_.record_edge_function_event(function, event, label);
+    }
+    void record_edge_function_report_overflow(std::string_view function) noexcept {
+        observability_.record_edge_function_report_overflow(function);
+    }
     void mark_io_error(common::IoErr error) noexcept { observability_.mark_io_error(execution_, error); }
     void set_upstream(const ProxyUpstreamEndpoint &endpoint) noexcept {
         observability_.set_upstream(execution_, endpoint);

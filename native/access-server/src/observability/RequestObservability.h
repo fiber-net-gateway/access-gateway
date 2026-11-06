@@ -103,6 +103,14 @@ public:
     void record_response_body_upstream(std::uint64_t bytes) noexcept;
     void record_provider_body_transfer(const ProxyUpstreamEndpoint &endpoint, AccessBodyDirection direction,
                                        std::uint64_t bytes) noexcept;
+    // Edge-function execution families. The edge executor fires these directly;
+    // labels are the mounted function id and its project, plus the fixed error
+    // reason vocabulary or the script-chosen event/label pair.
+    void record_edge_function_evaluated(std::string_view function, std::string_view project) noexcept;
+    void record_edge_function_duration(std::string_view function, std::chrono::nanoseconds elapsed) noexcept;
+    void record_edge_function_error(std::string_view function, std::string_view reason) noexcept;
+    void record_edge_function_event(std::string_view function, std::string_view event, std::string_view label) noexcept;
+    void record_edge_function_report_overflow(std::string_view function) noexcept;
     // Raw input versus compressed wire output of the gzip response path, read
     // from the gzip writer stats when the telemetry is destroyed.
     void record_response_compression_bytes(std::uint64_t raw_bytes, std::uint64_t compressed_bytes) noexcept;

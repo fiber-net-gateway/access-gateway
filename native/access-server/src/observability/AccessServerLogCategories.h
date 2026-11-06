@@ -10,6 +10,7 @@ inline constexpr std::string_view kAccessServerLifecycleLogger = "access_server.
 inline constexpr std::string_view kAccessServerConfigLogger = "access_server.config";
 inline constexpr std::string_view kAccessServerHttpLogger = "access_server.http";
 inline constexpr std::string_view kAccessServerBossLogger = "access_server.boss";
+inline constexpr std::string_view kAccessServerEdgeFunctionLogger = "access_server.edge_function";
 
 } // namespace fiber::access_server
 
