@@ -92,6 +92,10 @@ AccessControlPlaneSupervisor::AccessControlPlaneSupervisor(event::EventLoop &coo
     gray_watcher_(nacos_loop, *config_service_, gray_store_, std::move(options.gray_watcher),
                   options.activation_endpoint.enabled ? activation_evidence_.gray_observer()
                                                       : AccessGrayActivationEvidenceObserver{}),
+    edge_functions_watcher_(nacos_loop, *config_service_, route_store_, std::move(options.edge_functions_watcher),
+                            runtime_metrics_.config().observer(),
+                            options.activation_endpoint.enabled ? activation_evidence_.edge_functions_observer()
+                                                                : AccessEdgeFunctionsActivationEvidenceObserver{}),
     temp_cluster_watcher_(nacos_loop, *config_service_, temp_cluster_store_, std::move(options.temp_cluster_watcher)),
     tls_certificate_store_(nacos_loop, http_workers, options.quic_enabled, runtime_metrics_.tls().observer(),
                            TlsCertificateIdentityObserver{
@@ -384,6 +388,17 @@ async::DetachedTask AccessControlPlaneSupervisor::start_nacos_on_owner() noexcep
         co_return;
     }
     tls_certificate_watcher_started_ = true;
+    auto edge_functions_started = edge_functions_watcher_.start();
+    if (!edge_functions_started) {
+        nacos_start_publisher_->publish(NacosStartStatus{
+                .error = make_access_server_runtime_io_error(AccessServerRuntimeErrorCode::StartEdgeFunctionsWatcher,
+                                                             edge_functions_started.error().io_error,
+                                                             std::move(edge_functions_started.error().message)),
+        });
+        nacos_start_tasks_.done();
+        co_return;
+    }
+    edge_functions_watcher_started_ = true;
     auto watcher_started = config_watcher_.start();
     if (!watcher_started) {
         nacos_start_publisher_->publish(NacosStartStatus{
@@ -413,6 +428,10 @@ async::DetachedTask AccessControlPlaneSupervisor::shutdown_nacos_on_owner() noex
     if (tls_certificate_watcher_started_) {
         co_await tls_certificate_watcher_.shutdown();
         tls_certificate_watcher_started_ = false;
+    }
+    if (edge_functions_watcher_started_) {
+        co_await edge_functions_watcher_.shutdown();
+        edge_functions_watcher_started_ = false;
     }
     if (temp_cluster_watcher_started_) {
         co_await temp_cluster_watcher_.shutdown();

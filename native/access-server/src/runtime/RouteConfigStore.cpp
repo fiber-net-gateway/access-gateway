@@ -17,9 +17,9 @@ using SteadyClock = std::chrono::steady_clock;
 
 std::expected<AccessRouteSnapshot, AccessConfigError>
 build_candidate(std::span<const std::shared_ptr<const ProjectRouteSnapshot>> candidate,
-                std::chrono::nanoseconds &elapsed) {
+                const std::shared_ptr<const EdgeFunctionsState> &edge_functions, std::chrono::nanoseconds &elapsed) {
     const SteadyClock::time_point started = SteadyClock::now();
-    auto snapshot = AccessRouteSnapshot::build(candidate);
+    auto snapshot = AccessRouteSnapshot::build(candidate, edge_functions);
     elapsed += std::chrono::duration_cast<std::chrono::nanoseconds>(SteadyClock::now() - started);
     return snapshot;
 }
@@ -247,7 +247,7 @@ ConfigUpdateOutcome RouteConfigStore::commit(ReadyProjectUpdate ready) {
     std::vector<std::shared_ptr<const ProjectRouteSnapshot>> candidate = registry_.loaded_snapshots();
     apply_to_candidate(candidate, ready);
     std::chrono::nanoseconds global_build_duration{};
-    auto snapshot = build_candidate(candidate, global_build_duration);
+    auto snapshot = build_candidate(candidate, edge_functions_, global_build_duration);
     if (!snapshot) {
         ready.valid_ = false;
         return std::unexpected(std::move(snapshot.error()));
@@ -392,7 +392,7 @@ ConfigBatchUpdateOutcome RouteConfigStore::commit_batch(std::vector<ReadyProject
 
     std::optional<AccessRouteSnapshot> final_snapshot;
     if (has_mutation) {
-        auto built = build_candidate(candidate, result.global_build_duration);
+        auto built = build_candidate(candidate, edge_functions_, result.global_build_duration);
         if (!built) {
             return std::unexpected(std::move(built.error()));
         }
@@ -457,7 +457,7 @@ ConfigUpdateOutcome RouteConfigStore::remove_project(std::string_view project) {
     }
 
     std::chrono::nanoseconds global_build_duration{};
-    auto snapshot = build_candidate(candidate, global_build_duration);
+    auto snapshot = build_candidate(candidate, edge_functions_, global_build_duration);
     if (!snapshot) {
         return std::unexpected(std::move(snapshot.error()));
     }
@@ -479,6 +479,19 @@ ConfigUpdateOutcome RouteConfigStore::remove_project(std::string_view project) {
 void RouteConfigStore::clear() noexcept {
     registry_.clear();
     publisher_.publish(std::make_shared<const AccessRouteSnapshot>());
+}
+
+void RouteConfigStore::set_edge_functions(std::shared_ptr<const EdgeFunctionsState> state) noexcept {
+    edge_functions_ = std::move(state);
+    std::vector<std::shared_ptr<const ProjectRouteSnapshot>> candidate = registry_.loaded_snapshots();
+    std::chrono::nanoseconds global_build_duration{};
+    auto snapshot = build_candidate(candidate, edge_functions_, global_build_duration);
+    if (!snapshot) {
+        // Mount expansion is total; only registry content can fail here, and
+        // that content was publishable before. Keep the prior snapshot.
+        return;
+    }
+    publisher_.publish(std::make_shared<const AccessRouteSnapshot>(std::move(*snapshot)));
 }
 
 std::optional<std::int32_t> RouteConfigStore::current_version(std::string_view project) const noexcept {
