@@ -9,6 +9,7 @@ import type { SystemStatusService } from './modules/system/service.js'
 import type { TlsSniService } from './modules/tls/service.js'
 import type { TlsCertificateReleaseService } from './modules/tls/release-service.js'
 import type { ConfigurationVersionService } from './modules/versions/service.js'
+import type { WafService } from './modules/waf/service.js'
 
 export interface ApplicationServices {
   auth: AuthService
@@ -22,6 +23,7 @@ export interface ApplicationServices {
   system: SystemStatusService
   tlsSni: TlsSniService
   tlsReleases: TlsCertificateReleaseService
+  waf: WafService
 }
 
 export interface ApplicationRuntime {
