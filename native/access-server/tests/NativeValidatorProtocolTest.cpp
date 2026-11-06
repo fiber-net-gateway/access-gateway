@@ -180,13 +180,19 @@ TEST(NativeValidatorProtocolTest, ReportsStableLimitErrorsWithoutEchoingValues) 
 
 TEST(NativeValidatorProtocolTest, DescribesTheRuntimeConfigLimits) {
     const std::string response = fiber::access_server::native_validator_config_limits_response();
-    EXPECT_NE(response.find(R"("schemaVersion":2)"), std::string::npos) << response;
+    EXPECT_NE(response.find(R"("schemaVersion":3)"), std::string::npos) << response;
     EXPECT_NE(response.find(R"("maxUpstreamTlsProfiles":256)"), std::string::npos) << response;
     EXPECT_NE(response.find(R"("maxUpstreamTlsCaPemBytes":524288)"), std::string::npos) << response;
     EXPECT_NE(response.find(R"("maxPayloadBytes":4194304)"), std::string::npos) << response;
     EXPECT_NE(response.find(R"("maxRoutes":5000)"), std::string::npos) << response;
     EXPECT_NE(response.find(R"("maxEstimatedSnapshotBytes":67108864)"), std::string::npos) << response;
     EXPECT_NE(response.find(R"("grayRules")"), std::string::npos) << response;
+    EXPECT_NE(response.find(R"("edgeFunctions":{"maxPayloadBytes":262144,"maxFunctions":64)"), std::string::npos)
+            << response;
+    EXPECT_NE(response.find(R"("maxScriptPayloadBytes":1048576,"maxTotalScriptBytes":8388608)"), std::string::npos)
+            << response;
+    EXPECT_NE(response.find(R"("maxCidrDirectivesPerScript":16,"maxCidrsPerDirective":256)"), std::string::npos)
+            << response;
 }
 
 } // namespace

@@ -15,6 +15,7 @@ namespace fiber::access_server {
 using ProjectConfigResult = std::expected<std::optional<ProjectConfig>, AccessConfigError>;
 using GrayMatchConfigResult = std::expected<std::optional<GrayMatchConfig>, AccessConfigError>;
 using TempClusterConfigResult = std::expected<std::optional<TempClusterConfig>, AccessConfigError>;
+using EdgeFunctionIndexResult = std::expected<std::optional<EdgeFunctionIndexConfig>, AccessConfigError>;
 using ProjectListResult = std::expected<std::vector<std::string>, AccessConfigError>;
 
 // Empty content and a JSON null match AccessRouteConfigWatcher's empty-conf
@@ -32,6 +33,13 @@ using ProjectListResult = std::expected<std::vector<std::string>, AccessConfigEr
 // clears the whitelist. Invalid payloads are rejected so the watcher can keep
 // the previous snapshot.
 [[nodiscard]] TempClusterConfigResult parse_temp_cluster_config(std::string_view content);
+
+// Edge-function index. This is the project's own wire format (no Java
+// compatibility), so it is strict: unknown fields are rejected. Empty content
+// is the watcher's keep-current signal; a JSON null or an explicit empty
+// functions list is an accepted update that unmounts every function.
+[[nodiscard]] EdgeFunctionIndexResult
+parse_edge_function_index_config(std::string_view content, const AccessConfigLimits &limits = kAccessConfigLimits);
 
 // Matches DynamicRouteConfigWatcher: the complete value is trimmed once and
 // then split on ';'. Individual project names are not trimmed.
