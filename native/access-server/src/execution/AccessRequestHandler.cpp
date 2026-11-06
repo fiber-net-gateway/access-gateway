@@ -80,20 +80,18 @@ public:
             return false;
         }
         const std::span<const PathVariable> captures = path_variables_.first(path_variable_count_);
-        std::size_t bound_count = 0;
-        for (; bound_count < route.path_constant_indices.size() && bound_count < captures.size(); ++bound_count) {
-            const http_script::ConstIndex index = route.path_constant_indices[bound_count];
-            if (index != http_script::kInvalidConstIndex &&
-                !request_.telemetry.script_context().bind_constant(index, captures[bound_count].value)) {
-                request_.telemetry.script_context().clear_constants(route.path_constant_indices);
-                return false;
-            }
-        }
+        // $path.<name> resolves against the candidate's capture set. Re-setting
+        // per candidate (and clearing on failure) mirrors the old bind/clear
+        // frame. set_path_vars resets the constant memo (upstream 625f0b46), so
+        // two candidates sharing a variable name with different captures each
+        // observe their own capture; PathVarConditionSeesEachCandidatesOwnCapture
+        // guards that contract.
+        request_.telemetry.script_context().set_path_vars(captures);
         if (route.condition_program &&
             (!request_.adapter.evaluate_condition ||
              !request_.adapter.evaluate_condition(request_.adapter.context, request_.telemetry.script_context(),
                                                   *route.condition_program))) {
-            request_.telemetry.script_context().clear_constants(route.path_constant_indices);
+            request_.telemetry.script_context().set_path_vars({});
             return false;
         }
         matched_route_ = &route;
@@ -102,10 +100,7 @@ public:
     }
 
     void add_path_var(std::string_view name, std::string_view value) noexcept {
-        path_variables_[path_variable_count_++] = PathVariable{
-                .name = name,
-                .value = value,
-        };
+        path_variables_[path_variable_count_++] = PathVariable{name, value};
     }
 
     void pop_path_var() noexcept { --path_variable_count_; }
@@ -337,15 +332,6 @@ async::Task<Result<void>> AccessRequestHandler::handle_impl(http::HttpExchange &
         case HostPolicyAction::Redirect:
             co_return co_await send_redirect(exchange, host_policy.redirect_status, request_host.effective_host,
                                              options_.response.write_timeout, telemetry);
-    }
-
-    auto constants_ready = telemetry.script_context().prepare_constants(host_match.project->const_package());
-    if (!constants_ready) {
-        co_return std::unexpected(Err::from_error(constants_ready.error()));
-    }
-    auto trace_context_ready = telemetry.bind_trace_context(host_match.project->const_package());
-    if (!trace_context_ready) {
-        co_return std::unexpected(Err::from_error(trace_context_ready.error()));
     }
 
     RequestEvaluationContext evaluation{

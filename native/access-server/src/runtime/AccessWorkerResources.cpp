@@ -90,7 +90,7 @@ async::Task<void> AccessWorkerResources::handle(http::HttpExchange &exchange, bo
                                        exchange.remote_addr().ip(), network_entry_, connection_secure);
     AccessServerMetrics::Worker &worker = metrics_.worker(event::EventLoop::current().group_index());
     AccessRequestTelemetry telemetry(exchange, &worker, cat_client_, &client_metadata_resolver_, connection_secure);
-    telemetry.script_context().set_services(&script_http_services_);
+    telemetry.attach_script_services(script_http_services_);
     if (!http3_alt_svc_.empty()) {
         (void) telemetry.response_headers().set("Alt-Svc", http3_alt_svc_);
     }

@@ -10,7 +10,7 @@ HTTP, JSON/script, Nacos, CAT, and Prometheus modules are consumed from the pinn
 historical application import revision.
 
 The current reusable Fiber dependency is pinned at
-`4a5f12b8b374045975e21410e3987447a550043e` (upstream `master`, fetched 2026-11-05). The pinned
+`625f0b469db78b2527498dbd1e79e343234f2b97` (upstream `master`, fetched 2026-11-06). The pinned
 revision carries no repository-owned compatibility patches: the TLS dynamic-credential lifetime
 defect ([upstream issue #41](https://github.com/fiber-net-gateway/fiber-gateway-cpp/issues/41)),
 briefly patched against `f832d5458d3bfca1cefa45a4c7a6cb1cd0662f23`, is fixed upstream in `90ed153`
@@ -18,6 +18,31 @@ briefly patched against `f832d5458d3bfca1cefa45a4c7a6cb1cd0662f23`, is fixed ups
 The repository-owned regression
 `ProxyExecutorTest.StreamsChunkedUpstreamWhoseFramingArrivesSeparatelyFromPayload` still guards
 the HTTP/1 chunked split-framing fix from the application side.
+The reviewed update range from the previous pin is
+`4a5f12b8b374045975e21410e3987447a550043e..625f0b469db78b2527498dbd1e79e343234f2b97` (seven
+non-merge commits, fast-forward). Its behavioral core is the script constant model rework
+(`03ea19bf`): request constants (`$header`/`$query`/`$cookie`/`$path`) are no longer prepared and
+bound per package — `ConstPackage` compiles (type, normalized name, precomputed hash) into each
+constant's callable, `ScriptExchangeCtx` resolves values against request state at first access
+and memoizes them in a pool-backed open-addressing table, and one ctx can serve scripts compiled
+against different packages (including a mid-request configuration-generation swap).
+`prepare_constants`/`bind_*` disappear in favor of `set_path_vars` + `resolve_constant`, and
+`$path.<name>` compiles only when the name is declared to the compile scope's path-variable span.
+The repository's edge-function library (this change set) composes that model directly:
+`RouteScriptExtension` with an empty path-variable span and HTTP directives disabled yields the
+untruncated `$header`/`$query`/`$cookie` reads of the v1 execution contract. `625f0b46` fixes the
+defect that rebind exposed: `set_path_vars()` now resets the whole constant memo (unlinking
+single entries would break the linear-probe chains), so when several candidate patterns capture
+the same variable name, each candidate's condition observes its own capture instead of a value
+memoized from an earlier candidate — `AccessRequestHandlerTest.PathVarConditionSeesEachCandidatesOwnCapture`
+is unsealed to guard it (previously `GTEST_SKIP`ed against the old pin). `e06e4ab0` reworks
+`encode_set_cookie` around an injected allocator returning a `string_view` (the removed
+`std::string&` overload could throw `bad_alloc` inside the `noexcept` host function); access-server
+adapted in one place: `EdgeFunctionLibrary`'s `ctx.addCookie` encodes into a 4096-byte stack
+buffer per RFC 6265 6.1, refuses oversize cookies (the script observes `false`), mirroring
+upstream's `add_cookie_fn`. The remaining commits are additive or internal: `a0b39c18` adds a
+zero-allocation `to_string_view` to `IpAddress`/`SocketAddress`, `e24161a1`/`2f65e513` scope
+clang-tidy runs, and `7ee40abe` records the dynamic-constant design doc.
 The reviewed update range from the previous pin is
 `f28838ff6f6a2e9ee0ca685fb84e346c087952d9..4a5f12b8b374045975e21410e3987447a550043e` (a single
 test-only commit, fast-forward): `TlsStreamFdTest`'s `heap_in_use()` now gates `mallinfo2` on

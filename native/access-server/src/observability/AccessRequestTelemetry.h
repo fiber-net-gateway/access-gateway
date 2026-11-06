@@ -2,6 +2,7 @@
 #define FIBER_ACCESS_SERVER_ACCESS_REQUEST_TELEMETRY_H
 
 #include "../execution/ClientMetadata.h"
+#include "../routing/RequestTraceServices.h"
 #include "AccessProviderTransaction.h"
 #include "RequestObservability.h"
 #include "ScriptExecutionContext.h"
@@ -136,14 +137,16 @@ public:
     [[nodiscard]] std::optional<std::string_view> trace_context(std::string_view key) const noexcept {
         return trace_.trace_context(key);
     }
-    [[nodiscard]] common::IoResult<void> bind_trace_context(const http_script::ConstPackage &constants) noexcept {
-        return trace_.bind_trace_context(execution_, constants);
-    }
     [[nodiscard]] common::IoResult<void> put_trace_context(std::string_view key, std::string_view value) noexcept {
-        return trace_.put_trace_context(execution_, observability_.root_transaction(), key, value);
+        return trace_.put_trace_context(observability_.root_transaction(), key, value);
     }
     void remove_trace_context(std::string_view key) noexcept {
-        trace_.remove_trace_context(execution_, observability_.root_transaction(), key);
+        trace_.remove_trace_context(observability_.root_transaction(), key);
+    }
+    // The worker attaches its script HTTP services after construction; until
+    // then script upstream acquisition fails closed.
+    void attach_script_services(http_script::HttpScriptServices &upstream) noexcept {
+        trace_services_.attach_upstream(upstream);
     }
     [[nodiscard]] http_script::ScriptExchangeCtx &script_context() noexcept { return execution_.script_context(); }
     [[nodiscard]] const http_script::ScriptExchangeCtx &script_context() const noexcept {
@@ -174,6 +177,9 @@ private:
     bool response_channel_self_abort_ = false;
     ClientMetadata client_metadata_;
     TracePropagation trace_;
+    // Installed on the execution context in the constructor: the trace
+    // constants ($context / $header.traceparent) read it through services().
+    RequestTraceServices trace_services_;
     RequestObservability observability_;
 };
 

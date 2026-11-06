@@ -1,12 +1,10 @@
 #ifndef FIBER_ACCESS_SERVER_SCRIPT_EXECUTION_CONTEXT_H
 #define FIBER_ACCESS_SERVER_SCRIPT_EXECUTION_CONTEXT_H
 
-#include <array>
 #include <string_view>
 
 #include <fiber/http/HttpExchange.h>
 #include <fiber/http/HttpHeaders.h>
-#include <fiber/http_script/ConstPackage.h>
 #include <fiber/http_script/ScriptExchangeCtx.h>
 #include <fiber/script/JsGc.h>
 
@@ -35,22 +33,6 @@ public:
     [[nodiscard]] mem::BufPool &pool() const noexcept { return exchange().pool(); }
 
     [[nodiscard]] std::string_view copy_to_request_pool(std::string_view value) noexcept;
-    [[nodiscard]] bool bind_context_constant(const http_script::ConstPackage &constants, std::string_view key,
-                                             std::string_view value) noexcept {
-        const http_script::ConstIndex index = constants.find(http_script::ConstType::Context, key);
-        return index == http_script::kInvalidConstIndex || script_context_.bind_constant(index, value);
-    }
-    [[nodiscard]] bool bind_header_constant(const http_script::ConstPackage &constants, std::string_view name,
-                                            std::string_view value) noexcept {
-        const http_script::ConstIndex index = constants.find(http_script::ConstType::Header, name);
-        return index == http_script::kInvalidConstIndex || script_context_.bind_constant(index, value);
-    }
-    void clear_context_constant(const http_script::ConstPackage &constants, std::string_view key) noexcept {
-        const std::array<http_script::ConstIndex, 1> indices{
-                constants.find(http_script::ConstType::Context, key),
-        };
-        script_context_.clear_constants(indices);
-    }
 
 private:
     script::GcHeap script_heap_;
