@@ -356,6 +356,7 @@ std::string encode_config_limits() {
     const ProjectListLimits &project_list = kAccessConfigLimits.project_list;
     const ProjectRouteLimits &project_route = kAccessConfigLimits.project_route;
     const GrayRuleLimits &gray_rules = kAccessConfigLimits.gray_rules;
+    const EdgeFunctionLimits &edge_functions = kAccessConfigLimits.edge_functions;
 
     bool ok = generated(generator.map_open()) &&
               write_size(generator, "schemaVersion", kAccessConfigLimits.schema_version) &&
@@ -398,8 +399,23 @@ std::string encode_config_limits() {
               write_size(generator, "maxEntryBytes", gray_rules.max_entry_bytes) &&
               write_size(generator, "maxCidrsPerRule", gray_rules.max_cidrs_per_rule) &&
               write_size(generator, "maxCidrBytes", gray_rules.max_cidr_bytes) && generated(generator.map_close()) &&
-              generated(generator.map_close());
-    return ok ? output : std::string(R"({"schemaVersion":2,"error":"encoding_failed"})");
+              write_key(generator, "edgeFunctions") && generated(generator.map_open()) &&
+              write_size(generator, "maxPayloadBytes", edge_functions.max_payload_bytes) &&
+              write_size(generator, "maxFunctions", edge_functions.max_functions) &&
+              write_size(generator, "maxFunctionIdBytes", edge_functions.max_function_id_bytes) &&
+              write_size(generator, "maxFunctionNameBytes", edge_functions.max_function_name_bytes) &&
+              write_size(generator, "maxMountsPerFunction", edge_functions.max_mounts_per_function) &&
+              write_size(generator, "maxGlobsPerSelector", edge_functions.max_globs_per_selector) &&
+              write_size(generator, "maxGlobBytes", edge_functions.max_glob_bytes) &&
+              write_size(generator, "maxScriptPayloadBytes", edge_functions.max_script_payload_bytes) &&
+              write_size(generator, "maxTotalScriptBytes", edge_functions.max_total_script_bytes) &&
+              write_size(generator, "maxReportsPerExecution", edge_functions.max_reports_per_execution) &&
+              write_size(generator, "maxCidrDirectivesPerScript", edge_functions.max_cidr_directives_per_script) &&
+              write_size(generator, "maxCidrsPerDirective", edge_functions.max_cidrs_per_directive) &&
+              write_size(generator, "maxCidrBytes", edge_functions.max_cidr_bytes) &&
+              write_size(generator, "maxInputFieldBytes", edge_functions.max_input_field_bytes) &&
+              generated(generator.map_close()) && generated(generator.map_close());
+    return ok ? output : std::string(R"({"schemaVersion":3,"error":"encoding_failed"})");
 }
 
 std::string encode_response(const ValidationResult &result) {

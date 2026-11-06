@@ -16,6 +16,10 @@ inline constexpr std::string_view kProjectRouteGroup = "ACCESS-SERVER";
 inline constexpr std::string_view kGrayConfigDataId = "ploto.unified-access.gray-match";
 inline constexpr std::string_view kTempClusterConfigDataId = "ploto.test.temp-cluster-apps";
 inline constexpr std::string_view kDefaultNacosGroup = "DEFAULT_GROUP";
+// Edge functions: one versioned index plus one plain-text script per function
+// (docs/edge-functions-and-waf-design.md). Same group as project routes.
+inline constexpr std::string_view kEdgeFunctionsIndexDataId = "ploto.unified-access.edge-functions";
+inline constexpr std::string_view kEdgeFunctionDataIdPrefix = "ploto.unified-access.edge-function.";
 
 enum class RouteType : std::uint8_t {
     Proxy,
@@ -165,6 +169,45 @@ struct TempClusterConfigEntry {
 };
 
 using TempClusterConfig = std::vector<TempClusterConfigEntry>;
+
+// Edge-function index (ploto.unified-access.edge-functions): which functions
+// exist, where their script payloads live, and how they are mounted. The wire
+// carries no policy semantics — WAF and any future consumers are control-plane
+// compile targets (docs/edge-functions-and-waf-design.md).
+struct EdgeFunctionProjectsSelector {
+    std::vector<std::string> include;
+    std::vector<std::string> exclude;
+
+    bool operator==(const EdgeFunctionProjectsSelector &) const = default;
+};
+
+struct EdgeFunctionMountConfig {
+    EdgeFunctionProjectsSelector projects;
+    std::int32_t priority = 0;
+
+    bool operator==(const EdgeFunctionMountConfig &) const = default;
+};
+
+struct EdgeFunctionIndexEntry {
+    std::string id;
+    std::optional<std::string> name;
+    // Must equal kEdgeFunctionDataIdPrefix + id; the codec enforces it.
+    std::string data_id;
+    // Lowercase-hex sha256 of the script payload. The watcher verifies script
+    // content against it and uses it for content-addressed compile reuse.
+    std::string sha256_hex;
+    std::vector<EdgeFunctionMountConfig> mounts;
+
+    bool operator==(const EdgeFunctionIndexEntry &) const = default;
+};
+
+struct EdgeFunctionIndexConfig {
+    std::int32_t version = 0;
+    // Declaration order is the same-priority execution tie-break.
+    std::vector<EdgeFunctionIndexEntry> functions;
+
+    bool operator==(const EdgeFunctionIndexConfig &) const = default;
+};
 
 } // namespace fiber::access_server
 

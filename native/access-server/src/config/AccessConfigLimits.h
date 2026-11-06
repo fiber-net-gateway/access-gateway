@@ -53,11 +53,36 @@ struct GrayRuleLimits {
     std::size_t max_cidr_bytes = 64;
 };
 
+struct EdgeFunctionLimits {
+    // Index document (ploto.unified-access.edge-functions) byte budget.
+    std::size_t max_payload_bytes = 256U << 10U;
+    std::size_t max_functions = 64;
+    std::size_t max_function_id_bytes = 64;
+    std::size_t max_function_name_bytes = 128;
+    std::size_t max_mounts_per_function = 16;
+    std::size_t max_globs_per_selector = 256;
+    std::size_t max_glob_bytes = 255;
+    // Per-function script Data ID payload budget.
+    std::size_t max_script_payload_bytes = 1U << 20U;
+    // Sum across all functions in one snapshot.
+    std::size_t max_total_script_bytes = 8U << 20U;
+    // Per function per request; excess reports are dropped and counted.
+    std::size_t max_reports_per_execution = 16;
+    // cidr directive budgets for the restricted edge-function library.
+    std::size_t max_cidr_directives_per_script = 16;
+    std::size_t max_cidrs_per_directive = 256;
+    std::size_t max_cidr_bytes = 64;
+    // Truncation applied to request fields exposed to edge functions.
+    std::size_t max_input_field_bytes = 8U << 10U;
+};
+
 struct AccessConfigLimits {
-    std::size_t schema_version = 2;
+    // Version 3 adds EdgeFunctionLimits (edge-function index + scripts).
+    std::size_t schema_version = 3;
     ProjectListLimits project_list;
     ProjectRouteLimits project_route;
     GrayRuleLimits gray_rules;
+    EdgeFunctionLimits edge_functions;
 };
 
 inline constexpr AccessConfigLimits kAccessConfigLimits{};
@@ -71,6 +96,10 @@ validate_project_config_limits(const ProjectConfig &config, const AccessConfigLi
 [[nodiscard]] std::expected<void, AccessConfigError>
 validate_gray_match_config_limits(const GrayMatchConfig &config,
                                   const AccessConfigLimits &limits = kAccessConfigLimits);
+
+[[nodiscard]] std::expected<void, AccessConfigError>
+validate_edge_function_index_limits(const EdgeFunctionIndexConfig &config,
+                                    const AccessConfigLimits &limits = kAccessConfigLimits);
 
 } // namespace fiber::access_server
 

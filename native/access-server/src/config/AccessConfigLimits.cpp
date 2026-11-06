@@ -225,4 +225,56 @@ std::expected<void, AccessConfigError> validate_gray_match_config_limits(const G
     return {};
 }
 
+namespace {
+
+std::optional<AccessConfigError> check_glob_list(const std::vector<std::string> &globs, std::string_view field,
+                                                 std::size_t max_globs, std::size_t max_bytes) {
+    if (globs.size() > max_globs) {
+        return limit_error(std::string(field), "glob count", max_globs);
+    }
+    for (std::size_t index = 0; index < globs.size(); ++index) {
+        if (globs[index].size() > max_bytes) {
+            return limit_error(indexed_field(field, index), "glob bytes", max_bytes);
+        }
+    }
+    return std::nullopt;
+}
+
+} // namespace
+
+std::expected<void, AccessConfigError> validate_edge_function_index_limits(const EdgeFunctionIndexConfig &config,
+                                                                           const AccessConfigLimits &limits) {
+    const EdgeFunctionLimits &edge_limits = limits.edge_functions;
+    if (config.functions.size() > edge_limits.max_functions) {
+        return std::unexpected(limit_error("functions", "function count", edge_limits.max_functions));
+    }
+    for (std::size_t index = 0; index < config.functions.size(); ++index) {
+        const EdgeFunctionIndexEntry &function = config.functions[index];
+        const std::string field = indexed_field("functions", index);
+        if (function.id.size() > edge_limits.max_function_id_bytes) {
+            return std::unexpected(limit_error(field + ".id", "function id bytes", edge_limits.max_function_id_bytes));
+        }
+        if (function.name && function.name->size() > edge_limits.max_function_name_bytes) {
+            return std::unexpected(
+                    limit_error(field + ".name", "function name bytes", edge_limits.max_function_name_bytes));
+        }
+        if (function.mounts.size() > edge_limits.max_mounts_per_function) {
+            return std::unexpected(limit_error(field + ".mounts", "mount count", edge_limits.max_mounts_per_function));
+        }
+        for (std::size_t mount_index = 0; mount_index < function.mounts.size(); ++mount_index) {
+            const EdgeFunctionProjectsSelector &projects = function.mounts[mount_index].projects;
+            const std::string projects_field = indexed_field(field + ".mounts", mount_index, "projects");
+            if (auto error = check_glob_list(projects.include, projects_field + ".include",
+                                             edge_limits.max_globs_per_selector, edge_limits.max_glob_bytes)) {
+                return std::unexpected(std::move(*error));
+            }
+            if (auto error = check_glob_list(projects.exclude, projects_field + ".exclude",
+                                             edge_limits.max_globs_per_selector, edge_limits.max_glob_bytes)) {
+                return std::unexpected(std::move(*error));
+            }
+        }
+    }
+    return {};
+}
+
 } // namespace fiber::access_server
