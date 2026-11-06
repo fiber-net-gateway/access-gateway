@@ -77,9 +77,9 @@ EdgeFunctionMountTable::build(const EdgeFunctionsState &state, std::span<const s
     }
 
     table->owned_programs_ = state.programs;
-    table->id_storage_.reserve(state.index.functions.size());
+    table->name_storage_.reserve(state.index.functions.size());
     for (const EdgeFunctionIndexEntry &function: state.index.functions) {
-        table->id_storage_.push_back(function.id);
+        table->name_storage_.push_back(function.name);
     }
 
     // Per project: the mounted functions in declaration order, then a stable
@@ -99,7 +99,7 @@ EdgeFunctionMountTable::build(const EdgeFunctionsState &state, std::span<const s
                 continue;
             }
             group.mounted.push_back(EdgeFunctionMounted{
-                    .id = table->id_storage_[function_index],
+                    .name = table->name_storage_[function_index],
                     .program = table->owned_programs_[function_index].get(),
                     .priority = mount->priority,
             });

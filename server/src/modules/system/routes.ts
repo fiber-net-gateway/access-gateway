@@ -19,7 +19,7 @@ const accessConfigLimitsSchema = {
   additionalProperties: false,
   required: ['schemaVersion', 'projectList', 'projectRoute', 'grayRules', 'edgeFunctions'],
   properties: {
-    schemaVersion: { type: 'integer', const: 3 },
+    schemaVersion: { type: 'integer', const: 4 },
     projectList: {
       type: 'object',
       additionalProperties: false,
@@ -108,7 +108,6 @@ const accessConfigLimitsSchema = {
       required: [
         'maxPayloadBytes',
         'maxFunctions',
-        'maxFunctionIdBytes',
         'maxFunctionNameBytes',
         'maxMountsPerFunction',
         'maxGlobsPerSelector',
@@ -124,7 +123,6 @@ const accessConfigLimitsSchema = {
       properties: {
         maxPayloadBytes: positiveIntegerSchema,
         maxFunctions: positiveIntegerSchema,
-        maxFunctionIdBytes: positiveIntegerSchema,
         maxFunctionNameBytes: positiveIntegerSchema,
         maxMountsPerFunction: positiveIntegerSchema,
         maxGlobsPerSelector: positiveIntegerSchema,

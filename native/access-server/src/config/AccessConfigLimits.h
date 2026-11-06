@@ -57,8 +57,8 @@ struct EdgeFunctionLimits {
     // Index document (ploto.unified-access.edge-functions) byte budget.
     std::size_t max_payload_bytes = 256U << 10U;
     std::size_t max_functions = 64;
-    std::size_t max_function_id_bytes = 64;
-    std::size_t max_function_name_bytes = 128;
+    // Slug identity cap (the name also forms the script Data ID).
+    std::size_t max_function_name_bytes = 64;
     std::size_t max_mounts_per_function = 16;
     std::size_t max_globs_per_selector = 256;
     std::size_t max_glob_bytes = 255;
@@ -77,8 +77,10 @@ struct EdgeFunctionLimits {
 };
 
 struct AccessConfigLimits {
-    // Version 3 adds EdgeFunctionLimits (edge-function index + scripts).
-    std::size_t schema_version = 3;
+    // Version 3 added EdgeFunctionLimits; version 4 collapses the
+    // edge-function identity to a single slug name (maxFunctionIdBytes
+    // removed, maxFunctionNameBytes is now the slug cap).
+    std::size_t schema_version = 4;
     ProjectListLimits project_list;
     ProjectRouteLimits project_route;
     GrayRuleLimits gray_rules;

@@ -86,7 +86,7 @@ private:
         ScriptEntry(event::EventLoop &loop, EdgeFunctionsWatcher *owner) noexcept :
             subscription(loop), watcher(owner) {}
 
-        std::string id;
+        std::string name;
         std::string sha256_hex;
         SubscriptionLifecycle subscription;
         // Set once a payload arrived and matched the index sha256.
@@ -119,7 +119,8 @@ private:
     RouteConfigStore *store_ = nullptr;
     EdgeFunctionsWatcherOptions options_;
     SubscriptionLifecycle index_subscription_;
-    // Script data_id -> entry; mirrors the current index references.
+    // Function name -> entry; mirrors the current index references (script
+    // Data IDs are derived from the names on subscribe).
     std::map<std::string, std::unique_ptr<ScriptEntry>> scripts_;
     // sha256 -> compiled program; bounded by 2x the index function limit with
     // unreferenced entries evicted first on overflow.

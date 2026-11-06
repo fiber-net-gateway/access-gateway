@@ -43,13 +43,14 @@ DecodeFailure unknown_key(const std::string &field) { return invalid_field(field
 
 bool is_lower_alnum(char value) noexcept { return (value >= 'a' && value <= 'z') || (value >= '0' && value <= '9'); }
 
-// Function ids travel into Data IDs and metric labels: restrict to
-// [a-z0-9-], 1..64 bytes, edges must be alphanumeric.
-bool valid_function_id(std::string_view id) noexcept {
-    if (id.empty() || id.size() > 64 || !is_lower_alnum(id.front()) || !is_lower_alnum(id.back())) {
+// Function names are slug identities: they travel into Data IDs, metric
+// labels, event logs, and evidence. Restrict to [a-z0-9-], 1..64 bytes,
+// edges alphanumeric. Display names live in the console DB, not the wire.
+bool valid_function_name(std::string_view name) noexcept {
+    if (name.empty() || name.size() > 64 || !is_lower_alnum(name.front()) || !is_lower_alnum(name.back())) {
         return false;
     }
-    for (const char value: id) {
+    for (const char value: name) {
         if (!is_lower_alnum(value) && value != '-') {
             return false;
         }
@@ -189,28 +190,15 @@ DecodeResult<EdgeFunctionIndexEntry> index_entry(const AccessJsonValue &value, c
     bool have_mounts = false;
     for (const auto &property: value.as_object()) {
         const std::string path = child(field, property.key);
-        if (property.key == "id") {
-            if (!property.value.is_text() || !valid_function_id(property.value.as_text())) {
+        if (property.key == "name") {
+            if (!property.value.is_text() || !valid_function_name(property.value.as_text())) {
                 return std::unexpected(
-                        invalid_field(path, "function id must be 1-64 bytes of [a-z0-9-] with alphanumeric edges"));
+                        invalid_field(path, "function name must be 1-64 bytes of [a-z0-9-] with alphanumeric edges"));
             }
-            entry.id.assign(property.value.as_text());
-        } else if (property.key == "name") {
-            if (!property.value.is_null() && !property.value.is_text()) {
-                return std::unexpected(invalid_field(path, "expected a display name string or null"));
+            if (property.value.as_text().size() > limits.max_function_name_bytes) {
+                return std::unexpected(limit_exceeded(path, "function name bytes exceed the configured limit"));
             }
-            if (property.value.is_text()) {
-                const std::string_view name = property.value.as_text();
-                if (name.size() > limits.max_function_name_bytes) {
-                    return std::unexpected(limit_exceeded(path, "function name bytes exceed the configured limit"));
-                }
-                entry.name.emplace(name);
-            }
-        } else if (property.key == "dataId") {
-            if (!property.value.is_text()) {
-                return std::unexpected(invalid_field(path, "expected the script Data ID string"));
-            }
-            entry.data_id.assign(property.value.as_text());
+            entry.name.assign(property.value.as_text());
         } else if (property.key == "sha256") {
             if (!property.value.is_text() || !valid_sha256_hex(property.value.as_text())) {
                 return std::unexpected(invalid_field(path, "expected 64 lowercase hex sha256 characters"));
@@ -237,22 +225,14 @@ DecodeResult<EdgeFunctionIndexEntry> index_entry(const AccessJsonValue &value, c
             return unknown_key(path);
         }
     }
-    if (entry.id.empty()) {
-        return std::unexpected(invalid_field(child(field, "id"), "function is missing the id field"));
-    }
-    if (entry.data_id.empty()) {
-        return std::unexpected(invalid_field(child(field, "dataId"), "function is missing the dataId field"));
+    if (entry.name.empty()) {
+        return std::unexpected(invalid_field(child(field, "name"), "function is missing the name field"));
     }
     if (entry.sha256_hex.empty()) {
         return std::unexpected(invalid_field(child(field, "sha256"), "function is missing the sha256 field"));
     }
     if (!have_mounts) {
         return std::unexpected(invalid_field(child(field, "mounts"), "function is missing the mounts field"));
-    }
-    const std::string expected_data_id = std::string(kEdgeFunctionDataIdPrefix) + entry.id;
-    if (entry.data_id != expected_data_id) {
-        return config_error(AccessConfigErrorCode::Conflict, child(field, "dataId"),
-                            "dataId must equal " + expected_data_id);
     }
     return entry;
 }
@@ -310,9 +290,9 @@ EdgeFunctionIndexResult parse_edge_function_index_config(std::string_view conten
                     return std::unexpected(std::move(decoded.error()));
                 }
                 for (const EdgeFunctionIndexEntry &existing: config.functions) {
-                    if (existing.id == decoded->id) {
+                    if (existing.name == decoded->name) {
                         return config_error(AccessConfigErrorCode::Conflict, index_path("functions", index),
-                                            "duplicate function id: " + decoded->id);
+                                            "duplicate function name: " + decoded->name);
                     }
                 }
                 config.functions.push_back(std::move(*decoded));

@@ -29,7 +29,7 @@ struct EdgeFunctionsState {
 
 // One function mounted on one project, ready for request-time execution.
 struct EdgeFunctionMounted {
-    std::string_view id; // borrowed from the table's storage
+    std::string_view name; // borrowed from the table's storage
     EdgeFunctionProgram *program; // borrowed; the table owns the shared_ptr
     std::int32_t priority = 0;
 };
@@ -64,7 +64,7 @@ private:
     // Keeps every compiled program (and its cidr directive definitions) alive
     // for exactly as long as snapshots referencing this table.
     std::vector<std::shared_ptr<EdgeFunctionProgram>> owned_programs_;
-    std::vector<std::string> id_storage_;
+    std::vector<std::string> name_storage_;
     std::vector<EdgeFunctionMounted> entries_;
     std::vector<std::uint32_t> group_offsets_;
     std::vector<std::string_view> project_names_;

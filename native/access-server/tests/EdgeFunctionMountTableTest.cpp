@@ -33,9 +33,9 @@ EdgeFunctionMountConfig mount(std::vector<std::string> include, std::int32_t pri
     };
 }
 
-EdgeFunctionIndexEntry function(std::string id, std::vector<EdgeFunctionMountConfig> mounts) {
+EdgeFunctionIndexEntry function(std::string name, std::vector<EdgeFunctionMountConfig> mounts) {
     EdgeFunctionIndexEntry entry;
-    entry.id = std::move(id);
+    entry.name = std::move(name);
     entry.mounts = std::move(mounts);
     return entry;
 }
@@ -61,12 +61,12 @@ std::shared_ptr<const EdgeFunctionMountTable> build_table(const EdgeFunctionsSta
     return EdgeFunctionMountTable::build(state, views);
 }
 
-std::vector<std::string_view> mounted_ids(const EdgeFunctionMountTable &table, std::string_view project) {
-    std::vector<std::string_view> ids;
+std::vector<std::string_view> mounted_names(const EdgeFunctionMountTable &table, std::string_view project) {
+    std::vector<std::string_view> names;
     for (const EdgeFunctionMounted &entry: table.mounted_for(project)) {
-        ids.push_back(entry.id);
+        names.push_back(entry.name);
     }
-    return ids;
+    return names;
 }
 
 TEST(EdgeGlob, MatchesSingleStarSemantics) {
@@ -90,7 +90,7 @@ TEST(EdgeFunctionMountTable, IncludeAndExcludeGlobs) {
     EdgeFunctionsState state = state_with({function("waf", {mount({"*-web"}, 0, {"internal-*"})})});
     const std::vector<std::string> projects = {"loan-web", "internal-web", "loan-app", "api"};
     auto table = build_table(state, projects);
-    EXPECT_EQ(mounted_ids(*table, "loan-web"), std::vector<std::string_view>({"waf"}));
+    EXPECT_EQ(mounted_names(*table, "loan-web"), std::vector<std::string_view>({"waf"}));
     EXPECT_TRUE(table->mounted_for("internal-web").empty());
     EXPECT_TRUE(table->mounted_for("loan-app").empty());
     EXPECT_TRUE(table->mounted_for("api").empty());
@@ -105,7 +105,7 @@ TEST(EdgeFunctionMountTable, FirstMatchingMountWins) {
     auto table = build_table(state, projects);
     const std::span<const EdgeFunctionMounted> mounted = table->mounted_for("loan-web");
     ASSERT_EQ(mounted.size(), 1U);
-    EXPECT_EQ(mounted[0].id, "f");
+    EXPECT_EQ(mounted[0].name, "f");
     EXPECT_EQ(mounted[0].priority, 1);
     const std::span<const EdgeFunctionMounted> fallback = table->mounted_for("api");
     ASSERT_EQ(fallback.size(), 1U);
@@ -126,7 +126,7 @@ TEST(EdgeFunctionMountTable, PriorityOrderKeepsDeclarationTies) {
                                            function("c", {mount({"*"}, 5)}), function("d", {mount({"*"}, 9)})});
     const std::vector<std::string> projects = {"proj"};
     auto table = build_table(state, projects);
-    EXPECT_EQ(mounted_ids(*table, "proj"), std::vector<std::string_view>({"b", "a", "c", "d"}));
+    EXPECT_EQ(mounted_names(*table, "proj"), std::vector<std::string_view>({"b", "a", "c", "d"}));
 }
 
 TEST(EdgeFunctionMountTable, PerProjectGroupsAreIndependent) {
@@ -134,8 +134,8 @@ TEST(EdgeFunctionMountTable, PerProjectGroupsAreIndependent) {
             state_with({function("shared", {mount({"p-*"}, 0)}), function("only-q", {mount({"q"}, 0)})});
     const std::vector<std::string> projects = {"p-1", "q", "r"};
     auto table = build_table(state, projects);
-    EXPECT_EQ(mounted_ids(*table, "p-1"), std::vector<std::string_view>({"shared"}));
-    EXPECT_EQ(mounted_ids(*table, "q"), std::vector<std::string_view>({"only-q"}));
+    EXPECT_EQ(mounted_names(*table, "p-1"), std::vector<std::string_view>({"shared"}));
+    EXPECT_EQ(mounted_names(*table, "q"), std::vector<std::string_view>({"only-q"}));
     EXPECT_TRUE(table->mounted_for("r").empty());
     EXPECT_EQ(table->mounted_project_count(), 2U);
 }

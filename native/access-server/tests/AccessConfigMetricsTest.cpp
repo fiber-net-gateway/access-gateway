@@ -147,8 +147,7 @@ TEST(AccessConfigMetricsTest, RendersEdgeFunctionEventsAndSnapshotGauges) {
     state->index.version = 1;
     state->index.functions = std::vector<EdgeFunctionIndexEntry>{
             EdgeFunctionIndexEntry{
-                    .id = "waf",
-                    .data_id = std::string(kEdgeFunctionDataIdPrefix) + "waf",
+                    .name = "waf",
                     .sha256_hex = std::string(64, '0'),
                     .mounts =
                             std::vector<EdgeFunctionMountConfig>{
