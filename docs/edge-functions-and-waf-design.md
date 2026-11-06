@@ -1,7 +1,7 @@
 # 边缘函数与 WAF 设计
 
-- 状态：Proposal（方向已评审，未实施）
-- 日期：2026-11-05
+- 状态：P1（native 数据面）已实施并提交；P2/P3 未实施；2026-11-06 修订定稿：①身份字段收敛为 slug `name`，②挂载级 `ratio` 灰度采样（§3.1/§3.2）——codec 跟进待做
+- 日期：2026-11-05（修订：2026-11-06）
 - 适用范围：`native/access-server/`（边缘函数执行钩子）、`server/`（WAF 规则模型 + 代码生成器 + 发布资源）、`web/`（WAF 管理页）
 - 分层结论：**数据面不理解 WAF**。数据面只提供通用的"边缘函数"钩子；WAF 是控制面的第一个编译目标，规则在发布前被组合并生成一段 Fiber 脚本，作为普通边缘函数下发执行。
 
@@ -33,10 +33,15 @@ WAF/边缘函数是全新能力，**没有 Java wire 兼容包袱**：错误码�
 
 沿用 projects list → per-project route 的既有"索引 + 每条目独立 Data ID"模式：
 
-| 用途     | Data ID                                           | Group           | 形态               |
-| -------- | ------------------------------------------------- | --------------- | ------------------ |
-| 函数索引 | `ploto.unified-access.edge-functions`             | `ACCESS-SERVER` | JSON，versioned    |
-| 函数脚本 | `ploto.unified-access.edge-function.<functionId>` | `ACCESS-SERVER` | 纯脚本文本（TEXT） |
+| 用途     | Data ID                                             | Group           | 形态               |
+| -------- | --------------------------------------------------- | --------------- | ------------------ |
+| 函数索引 | `ploto.unified-access.edge-functions`               | `ACCESS-SERVER` | JSON，versioned    |
+| 函数脚本 | `ploto.unified-access.edge-function.<functionName>` | `ACCESS-SERVER` | 纯脚本文本（TEXT） |
+
+**身份字段方案（2026-11-06 修订定稿）**：函数条目的身份收敛为单一 slug 字段 `name`，不再有独立的 `id` 与线上 `dataId` 字段。理由：`dataId` 恒等于前缀 + slug，属可派生冗余，派生后"dataId 不匹配"这个错误类从契约中整个消失；id/name 双字段（slug 身份 + 可空展示名）迫使发布侧每次分辨"用哪个"；展示名（中文、空格、任意文本）是控制台 DB 的职责，不进 wire。收敛后 wire 条目 = 作者格式（temp 授权文件与线上一一对应，发布工具零映射）。代价是两条写死的契约：
+
+1. **`name` 是 slug，不是显示名**：它流入脚本 Data ID、metrics `function` label、事件日志与激活证据，字符集必须封死（见下表）。
+2. **`name` 是承重身份，没有"原地重命名"**：改名 = 删除旧函数 + 新建新函数（旧脚本 Data ID 成孤儿由发布侧清理、metrics 时间序列在旧名下终止、激活证据标签换名）。
 
 索引示例：
 
@@ -45,19 +50,58 @@ WAF/边缘函数是全新能力，**没有 Java wire 兼容包袱**：错误码�
   "version": 3,
   "functions": [
     {
-      "id": "waf-generated",
-      "name": "WAF",
-      "dataId": "ploto.unified-access.edge-function.waf-generated",
-      "sha256": "…hex…",
+      "name": "waf",
+      "sha256": "…64 位小写 hex…",
       "mounts": [
         { "projects": { "include": ["*"], "exclude": ["loan-admin-legacy"] }, "priority": 100 }
       ]
+    },
+    {
+      "name": "waf-candidate",
+      "sha256": "…64 位小写 hex…",
+      "mounts": [{ "projects": { "include": ["*"] }, "ratio": 1000 }]
     }
   ]
 }
 ```
 
-- `mounts[].projects` 为 project 名 glob 列表（include/exclude），纯挂载语义，无策略含义。
+字段规格（codec 逐字段强制，**未知字段一律拒绝**，fail-closed）：
+
+顶层：
+
+| 字段        | 类型    | 必填 | 约束    | 语义                                                                                       |
+| ----------- | ------- | ---- | ------- | ------------------------------------------------------------------------------------------ |
+| `version`   | integer | 是   | ≥ 0     | 发布侧单调递增的索引版本；数据面不比较大小，仅透传进激活证据；与 limits schemaVersion 无关 |
+| `functions` | array   | 否   | ≤ 64 条 | 省略与空数组等价 = 卸载全部函数；JSON 根为 `null` 同义                                     |
+
+函数条目（`functions[i]`）：
+
+| 字段     | 类型   | 必填 | 约束                                                                   | 语义                                                                                                     |
+| -------- | ------ | ---- | ---------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `name`   | string | 是   | `[a-z0-9-]` 1-64 字节，首尾必须字母数字，索引内唯一（重复 = conflict） | slug 身份；脚本 Data ID = `ploto.unified-access.edge-function.` + `name`，watcher/validator 派生，不上线 |
+| `sha256` | string | 是   | 恰 64 个小写十六进制字符                                               | 对发布写入的脚本文本字节（UTF-8）计算；内容寻址编译缓存的键；watcher 逐脚本校验                          |
+| `mounts` | array  | 是   | 非空，≤ 16 条                                                          | 挂载条目（下表）；纯挂载语义，无策略含义                                                                 |
+
+挂载条目（`functions[i].mounts[j]`）：
+
+| 字段               | 类型            | 必填 | 约束                   | 语义                                                                                      |
+| ------------------ | --------------- | ---- | ---------------------- | ----------------------------------------------------------------------------------------- |
+| `projects`         | object          | 是   |                        | 项目名选择器                                                                              |
+| `projects.include` | array\<string\> | 是   | ≥ 1 条，≤ 256 条       | 项目名 glob；先命中 include，再被 exclude 否决                                            |
+| `projects.exclude` | array\<string\> | 否   | ≤ 256 条，默认 `[]`    | 否决名单                                                                                  |
+| `priority`         | integer         | 否   | [0, 1000000]，默认 0   | 升序执行；同序按索引声明序（稳定）                                                        |
+| `ratio`            | integer         | 否   | [0, 10000]，默认 10000 | 采样比例（万分比）：缺省 = 必跑；< 10000 = 粘性采样；0 = 挂载保留但禁用（见下"挂载采样"） |
+
+glob 规则：非空可打印文本、不含 `;`（项目列表 wire 以分号分隔，项目名里不会有它）、单条 ≤ 255 字节；通配语法为单星 `*`（带回溯匹配），无 `?`/`**`/字符类。
+
+**挂载采样（`ratio`，2026-11-06 修订新增）**：缺省/10000 = 必跑（作者视图的 `must`）；< 10000 = 按比例采样执行（作者视图的 `maybe`，比例 = `ratio`/10000）；0 = 挂载保留但禁用（订阅与证据不断，比卸载再重挂温和）。采样判定为**粘性单次抽签**：请求期至多计算一次 `crc32c($conn.remote_addr) % 10000`，该请求命中的全部采样挂载用**同一抽签值**对比各自阈值，未达阈值即跳过该函数（计入 `function_sampled_out_total`，不执行、不进 GcHeap）。粘性带来两个必然性质：同一客户端行为一致（block 灰度期不会一半请求拦一半放）；阈值单调（ratio 从 1000 提到 2000 只增不减，原命中者继续命中，指标前后可比）。快照内该项目命中的函数列表全部必跑时不抽签——纯必跑 fleet 零额外成本。已知限制：独立阈值**不是互斥分群**（表达不了"90% 老 + 10% 新、绝不双跑"）——新内容灰度走"新名 `maybe` 小比例试用 → 转正换必跑"，试用期新旧函数会在部分请求上双跑（先发送者赢，log 模式无感）；互斥分群留 v2。
+
+**作者格式与 wire 格式分离**（对齐 web 路由 YAML → JSON wire 的既有先例）：运营/工具侧的作者格式是 mount-first 视图（`temp/edge-functions.json`：条目 = `include_projects`/`exclude_projects` + `must`（函数名字符串，必跑）+ `maybe`（`{name, probably}`，按比例试跑）；JSONC 注释只在作者侧）。发布工具负责：转置为函数优先 wire、对脚本内容计算 sha256、套上 `version`、按声明序赋 `priority`；wire 只认函数优先 + 严格 JSON（无注释、未知字段拒绝）。两个视图表达力等价（一函数多挂载 ≡ 多条目引用同名函数，工具负责去重合并）。
+
+脚本 Data ID（每函数一个）：内容为纯脚本文本，sha256 必须与索引一致（不一致 = 组装失败，全或无保留旧快照）；空串/NotFound = 该函数保持当前（keep-current），与索引的 keep-current 语义对齐。limits：索引 payload ≤ 256 KiB、单脚本 ≤ 1 MiB、快照内全部脚本合计 ≤ 8 MiB。
+
+limits 同步修订：`maxFunctionIdBytes` 删除（身份只剩一个），`maxFunctionNameBytes` 128 → 64（从展示名上限变为 slug 上限），`--describe-config-limits` schemaVersion 3 → 4；`ratio` 为固定值域 [0,10000]（同 `priority` 的 [0,1000000]），不设 limits 字段。P1 已提交的 codec/validator/server 镜像（master `23c2388`）仍是修订前形态（`id` + 可空 `name` + `dataId`、无 `ratio`），本修订的实现变更为下一步（未部署、P2 未消费，零迁移）。
+
 - 项目级 WAF mode（off/log/block）**不设 wire 字段**：由生成器折叠——mode 为 `off` 的项目直接进 `exclude`（零执行成本），`log`/`block` 项目共享同一脚本，脚本头部按 `$ctx.project` 查表。
 - 脚本 Data ID 的身份 = 索引中的 `sha256`；脚本文本不变则 hash 不变，watcher 编译产物按内容寻址复用（改挂载只 bump 索引版本，不重写脚本）。
 
@@ -78,10 +122,11 @@ gray matcher → host match → host policy（X-Entry / HTTPS 强制）→ 【�
 执行语义：
 
 1. host→project 解析后取该项目挂载的函数列表（快照索引），按 `priority` 升序、同序按索引内声明序执行。
-2. 每个函数是独立编译产物，**共享该请求已有的每请求 GcHeap**（`ScriptExecutionContext`）。执行用 `exec_async`（`resp.*` 含异步 opcode，`exec_sync` 遇异步指令会 panic）；纯同步函数的 `exec_async` 不挂起，成本与 `exec_sync` 相同。无新增 per-request 分配。
-3. **短路判定零新协议**：函数执行后检查 `ScriptExchangeCtx::response_header_sent()`（已存在，`AccessScriptRuntime.cpp` 已在用）——已发送即终结请求，不执行后续函数与路由；未发送则继续。
-4. 未挂载函数的项目零成本（索引为空，不进入任何脚本路径）。
-5. 函数异常/中止：fail-open（§6）。
+2. `ratio` 采样在执行前判定（§3.1 挂载采样）：命中的函数列表存在任一采样挂载（ratio < 10000）时，请求期计算一次 `crc32c($conn.remote_addr) % 10000` 并与各挂载阈值比较，未达阈值 = 跳过该函数（计入 `function_sampled_out_total`，不执行、无 GcHeap 成本）；全部必跑时不抽签，零额外成本。
+3. 每个函数是独立编译产物，**共享该请求已有的每请求 GcHeap**（`ScriptExecutionContext`）。执行用 `exec_async`（`resp.*` 含异步 opcode，`exec_sync` 遇异步指令会 panic）；纯同步函数的 `exec_async` 不挂起，成本与 `exec_sync` 相同。无新增 per-request 分配。
+4. **短路判定零新协议**：函数执行后检查 `ScriptExchangeCtx::response_header_sent()`（已存在，`AccessScriptRuntime.cpp` 已在用）——已发送即终结请求，不执行后续函数与路由；未发送则继续。
+5. 未挂载函数的项目零成本（索引为空，不进入任何脚本路径）。
+6. 函数异常/中止：fail-open（§6）。
 
 ### 3.3 v1 执行契约（写死，只增不收）
 
@@ -139,6 +184,7 @@ if (!office.contains($conn.remote_addr) && strings.match($req.uri, "(?i)union\\s
 
 - metrics（命名对齐 `access_server_*` 既有风格）：
   - `access_server_function_evaluations_total{function, project}`（项目 label 走 bounded 动态家族）
+  - `access_server_function_sampled_out_total{function, project}`（ratio 采样未命中跳过；与 evaluations 对比即实测命中率）
   - `access_server_function_duration_seconds`（histogram，function label）
   - `access_server_function_errors_total{function, reason}`（Exception/Abort/Timeout/OversizeReport）
   - `access_server_function_events_total{function, event, label}`（§3.5）
@@ -201,9 +247,10 @@ projectWaf:
 
 ## 5. 性能预算
 
-- 挂载项目每请求：1 次 `exec_sync`（GcHeap 已存在，无新增分配）+ 生成代码的前置字符串链；CIDR 判断为纯 C++ 区间匹配，无 VM 参与。
+- 挂载项目每请求：1 次 `exec_async`（GcHeap 已存在，无新增分配；纯同步函数不挂起，成本同 `exec_sync`）+ 生成代码的前置字符串链；CIDR 判断为纯 C++ 区间匹配，无 VM 参与。
+- ratio 采样：每请求至多一次 crc32c + 整数比较（无分配）；命中的函数列表全部必跑（ratio 缺省/10000）时不抽签，零成本。
 - 目标：典型 50 规则集函数求值 p99 < 100µs；进 `benchmark:native` 基线，PR 中报告。
-- 未挂载项目零成本；mode=off 项目经挂载排除零成本。
+- 未挂载项目零成本；mode=off 项目经挂载排除零成本；ratio=0 函数只余一次阈值比较。
 - 热路径承诺：数据面侧短路判定（`response_header_sent()`）与索引查表无分配。
 
 ## 6. 安全与失败语义
@@ -213,7 +260,7 @@ projectWaf:
 - **VM 无 step budget**（`InterpreterVm` 无指令预算；`ScriptAbortReason::Timeout` 仅有枚举位）。v1 缓解：方言静态封堵（无函数定义/递归/`while`，唯一循环是 for-of over 有限容器）+ 表达式/脚本/产物上限 + 输入截断。根治手段是**上游建议**：InterpreterVm 增加可选 step budget/deadline；顺带建议上游更新 `docs/script-guide`（`strings.match/findAll` 在当前 pin 已注册，文档仍写"未注册"）。
 - 正则：`strings.match` 为 RE2 线性实现 + 编译缓存 + WorkBudget，无回溯炸弹。CIDR 经 directive 编译期解析，畸形 CIDR 在发布期失败。
 - 生成器安全：转义器单测 + 黄金 fixtures + validator fail-closed 三层兜底。
-- 部署依赖与顺序：**fleet 需先升级到 pin ≥ 4a5f12b8**（`strings.match/findAll` 依赖；111/218/219 目前在旧 pin）。新二进制在无函数索引时零行为变化——先升二进制（ctl upgrade，窗口 <2ms），再发布首个函数索引 + 脚本，灰度顺序：单项目 log 模式 → 观察 → block。
+- 部署依赖与顺序：**fleet 需先升级到 pin ≥ 4a5f12b8**（`strings.match/findAll` 依赖；111/218/219 目前在旧 pin）。新二进制在无函数索引时零行为变化——先升二进制（ctl upgrade，窗口 <2ms），再发布首个函数索引 + 脚本，灰度顺序：单项目 log 模式 → 观察 → block；函数级另有 `ratio` 采样阶梯（§3.1）：小比例试跑 → 提比例 → 100%（转缺省/必跑）。
 
 ## 7. 阶段计划
 
