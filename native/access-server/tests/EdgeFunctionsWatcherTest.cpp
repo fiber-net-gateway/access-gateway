@@ -523,6 +523,57 @@ TEST(EdgeFunctionsWatcherTest, ShaMismatchRetainsActiveSetAndRecovers) {
     EXPECT_TRUE(completed);
 }
 
+// Publication writes every script before the index, so a changed script reaches
+// the watcher while the old index is still current. Nacos will not push those
+// bytes again, so the watcher has to verify them when the index catches up.
+TEST(EdgeFunctionsWatcherTest, ScriptPublishedBeforeIndexActivatesWhenIndexArrives) {
+    fiber::event::EventLoop loop;
+    FakeConfigService service;
+    fiber::access_server::RouteConfigStore store;
+    MetricsCapture metrics;
+    EvidenceCapture evidence;
+    fiber::access_server::EdgeFunctionsWatcher watcher(loop, service, store, {}, metrics.observer(),
+                                                       evidence.observer());
+    bool completed = false;
+
+    fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
+        auto readiness = watcher.subscribe_readiness();
+        EXPECT_TRUE(watcher.start());
+
+        const std::string script(kGoodScript);
+        service.push(fiber::access_server::kEdgeFunctionIndexDataId,
+                     index_json(function_json("waf", sha256_hex(script))), "idx-1");
+        service.push(script_data_id("waf"), script);
+        ReadinessWatch::Snapshot snapshot;
+        co_await wait_for_readiness(readiness, snapshot, true);
+        const auto active = store.pin();
+
+        const std::string replacement = "$header.x_edge_token == 'replacement'";
+        service.push(script_data_id("waf"), replacement);
+        co_await yield_updates();
+        EXPECT_EQ(store.pin(), active); // the old index still governs the active set
+
+        service.push(fiber::access_server::kEdgeFunctionIndexDataId,
+                     index_json(function_json("waf", sha256_hex(replacement))), "idx-2");
+        co_await yield_updates();
+        EXPECT_EQ(store.pin()->edge_function_script_bytes(), replacement.size());
+        EXPECT_EQ(watcher.successful_updates(), 2u);
+        EXPECT_FALSE(watcher.last_failure().has_value());
+        expect_readiness_value(readiness.current(), true);
+        expect_evidence(evidence,
+                        {
+                                .candidate_status = fiber::access_server::AccessActivationCandidateStatus::Accepted,
+                                .no_failure = true,
+                        });
+
+        co_await watcher.shutdown();
+        completed = true;
+        loop.stop();
+    });
+    loop.run();
+    EXPECT_TRUE(completed);
+}
+
 TEST(EdgeFunctionsWatcherTest, CompileFailureRetainsActiveSet) {
     fiber::event::EventLoop loop;
     FakeConfigService service;

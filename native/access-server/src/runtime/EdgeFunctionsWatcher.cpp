@@ -211,6 +211,11 @@ void EdgeFunctionsWatcher::reconcile_scripts(const EdgeFunctionIndexConfig &inde
                 // The index now references different content for this Data ID.
                 existing->second->verified_content.reset();
             }
+            if (!existing->second->verified_content && existing->second->unverified_content &&
+                sha256_hex(*existing->second->unverified_content) == existing->second->sha256_hex) {
+                existing->second->verified_content = std::move(existing->second->unverified_content);
+                existing->second->unverified_content.reset();
+            }
             continue;
         }
         auto entry = std::make_unique<ScriptEntry>(*loop_, this);
@@ -236,6 +241,7 @@ void EdgeFunctionsWatcher::reconcile_scripts(const EdgeFunctionIndexConfig &inde
 }
 
 void EdgeFunctionsWatcher::apply_script(ScriptEntry &entry, const nacos::ConfigData &data) {
+    entry.unverified_content.reset();
     if (data.state == nacos::ConfigState::NotFound) {
         entry.verified_content.reset();
         ++failed_updates_;
@@ -258,6 +264,7 @@ void EdgeFunctionsWatcher::apply_script(ScriptEntry &entry, const nacos::ConfigD
     const std::string actual = sha256_hex(content);
     if (actual != entry.sha256_hex) {
         entry.verified_content.reset();
+        entry.unverified_content = std::string(content);
         ++failed_updates_;
         report_failure("script", "sha256_mismatch", entry.name);
         readiness_publisher_->publish(false);

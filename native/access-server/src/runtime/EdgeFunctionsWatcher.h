@@ -91,6 +91,10 @@ private:
         SubscriptionLifecycle subscription;
         // Set once a payload arrived and matched the index sha256.
         std::optional<std::string> verified_content;
+        // Latest payload that did not match the current index. Publication
+        // writes scripts first and Nacos will not push them again, so these
+        // bytes are re-checked when the next index arrives.
+        std::optional<std::string> unverified_content;
         // Subscription callback context; the entry is heap-owned and fully
         // constructed before subscribe() so early pushes see valid state.
         EdgeFunctionsWatcher *watcher = nullptr;
