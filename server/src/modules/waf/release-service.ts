@@ -132,6 +132,10 @@ function parseLiveIndex(content: string): {
       {
         name: functionRecord.name,
         sha256: typeof functionRecord.sha256 === 'string' ? functionRecord.sha256 : null,
+        phase:
+          functionRecord.phase === 'request_head' || functionRecord.phase === 'request_body'
+            ? functionRecord.phase
+            : null,
         mounts,
       },
     ]
@@ -172,6 +176,9 @@ function planFromPolicy(
     ...handwritten.map((fn) => ({
       name: fn.name,
       sha256: sha256(fn.script).toString('hex'),
+      // Omit the wire default (request_head) so canonical index bytes stay
+      // minimal; a body-phase function only buffers for opted-in routes.
+      ...(fn.phase === 'request_body' ? { phase: 'request_body' as const } : {}),
       mounts: fn.mounts.map((mount) => ({
         projects: {
           include: [...mount.projects.include],
@@ -194,7 +201,11 @@ function planFromPolicy(
     ...(wafMounted && compilation.kind === 'mounted'
       ? [{ name: compilation.functionName, script: compilation.script }]
       : []),
-    ...handwritten.map((fn) => ({ name: fn.name, script: fn.script })),
+    ...handwritten.map((fn) => ({
+      name: fn.name,
+      script: fn.script,
+      ...(fn.phase === 'request_body' ? { phase: 'request_body' as const } : {}),
+    })),
   ]
 
   return {
@@ -461,12 +472,15 @@ export class DefaultWafReleaseService implements WafReleaseService {
     requestId: string,
     errorCode: string,
   ): Promise<void> {
+    // Each script compiles in its own phase: $req.body resolves only for
+    // request_body, so the head/body distinction must reach the validator.
     const validations = plan.scripts.map((entry) =>
       this.#validator.validate({
         requestId,
         kind: 'edge_function_script',
         project: '',
         payload: Buffer.from(entry.script, 'utf8'),
+        ...(entry.phase !== undefined ? { phase: entry.phase } : {}),
       }),
     )
     const representativeIndex = canonicalJson({

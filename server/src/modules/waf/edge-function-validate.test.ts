@@ -174,3 +174,58 @@ test('lone surrogates are rejected in scripts and globs', () => {
   })
   assert.ok(issues.some((issue) => issue.field === 'functions[0].script'))
 })
+
+test('phase must be request_head or request_body when present', () => {
+  assert.deepEqual(
+    validateEdgeFunctionsDraft(
+      draft({
+        functions: [
+          {
+            name: 'body-scan',
+            enabled: true,
+            phase: 'request_body',
+            script: 'return true;',
+            mounts: [{ projects: { include: ['*'] } }],
+          },
+        ],
+      }),
+    ),
+    [],
+  )
+  assert.deepEqual(
+    validateEdgeFunctionsDraft(
+      draft({
+        functions: [
+          {
+            name: 'body-scan',
+            enabled: true,
+            phase: 'request_head',
+            script: 'return true;',
+            mounts: [{ projects: { include: ['*'] } }],
+          },
+        ],
+      }),
+    ),
+    [],
+  )
+  const issues = validateEdgeFunctionsDraft(
+    draft({
+      functions: [
+        {
+          name: 'body-scan' as string,
+          enabled: true,
+          phase: 'response' as unknown as EdgeFunctionsDraft['functions'][number]['phase'],
+          script: 'return true;',
+          mounts: [{ projects: { include: ['*'] } }],
+        },
+      ],
+    }),
+  )
+  assert.deepEqual(issues, [
+    {
+      field: 'functions[0].phase',
+      code: 'invalid_field',
+      message: 'phase must be one of request_head, request_body',
+    },
+  ])
+})

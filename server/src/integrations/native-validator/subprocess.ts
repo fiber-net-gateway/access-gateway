@@ -147,6 +147,7 @@ export class SubprocessNativeValidator implements NativeValidator {
       requestId: request.requestId,
       kind: request.kind,
       project: request.project,
+      ...(request.phase !== undefined ? { phase: request.phase } : {}),
       payloadBase64: Buffer.from(request.payload).toString('base64'),
     })}\n`
 

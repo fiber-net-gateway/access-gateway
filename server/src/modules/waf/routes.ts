@@ -302,6 +302,7 @@ const edgeFunctionDraftFunctionSchema = {
     },
     description: { type: 'string', minLength: 1, maxLength: 255 },
     enabled: { type: 'boolean' },
+    phase: { type: 'string', enum: ['request_head', 'request_body'] },
     script: { type: 'string', minLength: 1, maxLength: 1048576 },
     mounts: { type: 'array', maxItems: 16, items: edgeFunctionMountSchema },
   },
@@ -356,9 +357,10 @@ const edgeFunctionCompilePreviewResponseSchema = {
       items: {
         type: 'object',
         additionalProperties: false,
-        required: ['name', 'scriptSha256', 'scriptValid', 'errors'],
+        required: ['name', 'phase', 'scriptSha256', 'scriptValid', 'errors'],
         properties: {
           name: { type: 'string' },
+          phase: { type: 'string', enum: ['request_head', 'request_body'] },
           scriptSha256: { type: 'string', pattern: '^[0-9a-f]{64}$' },
           scriptValid: { type: 'boolean' },
           errors: {
@@ -748,10 +750,14 @@ function registerWafReleaseRoutes(
                     items: {
                       type: 'object',
                       additionalProperties: false,
-                      required: ['name', 'sha256', 'mounts'],
+                      required: ['name', 'sha256', 'phase', 'mounts'],
                       properties: {
                         name: { type: 'string' },
                         sha256: { type: ['string', 'null'] },
+                        phase: {
+                          type: ['string', 'null'],
+                          enum: ['request_head', 'request_body', null],
+                        },
                         mounts: {
                           type: 'array',
                           items: {
