@@ -35,6 +35,7 @@ const routeFields = new Set([
   'flush',
   'allows',
   'upstream_tls',
+  'edge_function_body',
 ])
 
 export const ROUTE_COMPILER_REVISION = 'project-routes-upstream-mtls-gzip-host-aliases-v1'
@@ -481,12 +482,40 @@ function validateRouteFieldShapes(
     'max_proxy_body_size',
     'websocket_timeout',
     'flush',
+    'edge_function_body',
   ]) {
     if (field in value && !isScalarValue(value[field])) {
       addTypeIssue(field, 'a scalar value or null')
     }
   }
   if ('body' in value && !isScalarMap(value.body)) addTypeIssue('body', 'an object or null')
+  // request_body edge functions replay the buffered body into the proxy:
+  // the opt-in is only meaningful on a PROXY route.
+  if ('edge_function_body' in value && value.edge_function_body !== null) {
+    if (value.type !== 'PROXY') {
+      issues.push(
+        issue(
+          route,
+          lineCounter,
+          'ROUTE_EDGE_FUNCTION_BODY_NOT_PROXY',
+          'edge_function_body is only valid on PROXY routes',
+          'edge_function_body',
+          findFieldOffset(document, 'edge_function_body'),
+        ),
+      )
+    } else if (value.edge_function_body !== true && value.edge_function_body !== false) {
+      issues.push(
+        issue(
+          route,
+          lineCounter,
+          'INVALID_ROUTE_EDGE_FUNCTION_BODY',
+          'edge_function_body must be true or false',
+          'edge_function_body',
+          findFieldOffset(document, 'edge_function_body'),
+        ),
+      )
+    }
+  }
   validateUpstreamTls(route, lineCounter, document, value, issues)
 }
 
