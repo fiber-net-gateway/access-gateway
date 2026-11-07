@@ -1,6 +1,6 @@
 # 边缘函数与 WAF 设计
 
-- 状态：P1（native 数据面）已实施并提交；P2/P3 未实施；2026-11-06 修订定稿：①身份字段收敛为 slug `name`，②挂载级 `ratio` 灰度采样（§3.1/§3.2）——codec 跟进待做
+- 状态：P1（native 数据面）、P2（server/web WAF 控制面，e5925f7）、P3 ③fail-close（908a1d2）、④起手规则包（ca691d8）、⑤命中统计页（a093da2）、②手写边缘函数开放（草稿存储 8404ea0 + 多函数发布 969c214 + 控制台 70b26ad）均已实施；剩 P3 ①body phase。2026-11-06 修订（slug `name` 身份 + 挂载级 `ratio` 采样）已随 P2 落地。
 - 日期：2026-11-05（修订：2026-11-06）
 - 适用范围：`native/access-server/`（边缘函数执行钩子）、`server/`（WAF 规则模型 + 代码生成器 + 发布资源）、`web/`（WAF 管理页）
 - 分层结论：**数据面不理解 WAF**。数据面只提供通用的"边缘函数"钩子；WAF 是控制面的第一个编译目标，规则在发布前被组合并生成一段 Fiber 脚本，作为普通边缘函数下发执行。
@@ -96,7 +96,7 @@ glob 规则：非空可打印文本、不含 `;`（项目列表 wire 以分号�
 
 **挂载采样（`ratio`，2026-11-06 修订新增）**：缺省/10000 = 必跑（作者视图的 `must`）；< 10000 = 按比例采样执行（作者视图的 `maybe`，比例 = `ratio`/10000）；0 = 挂载保留但禁用（订阅与证据不断，比卸载再重挂温和）。采样判定为**粘性单次抽签**：请求期至多计算一次 `crc32(对端 IP 原始字节) % 10000`（CRC-32，zlib 多项式/Java zip 同构，`fiber::util::Crc32`，v4/v6 字节数组直算），该请求命中的全部采样挂载用**同一抽签值**对比各自阈值，未达阈值即跳过该函数（计入 `function_sampled_out_total`，不执行、不进 GcHeap）。粘性带来两个必然性质：同一客户端行为一致（block 灰度期不会一半请求拦一半放）；阈值单调（ratio 从 1000 提到 2000 只增不减，原命中者继续命中，指标前后可比）。快照内该项目命中的函数列表全部必跑时不抽签——纯必跑 fleet 零额外成本。已知限制：独立阈值**不是互斥分群**（表达不了"90% 老 + 10% 新、绝不双跑"）——新内容灰度走"新名 `maybe` 小比例试用 → 转正换必跑"，试用期新旧函数会在部分请求上双跑（先发送者赢，log 模式无感）；互斥分群留 v2。
 
-**作者格式与 wire 格式分离**（对齐 web 路由 YAML → JSON wire 的既有先例）：运营/工具侧的作者格式是 mount-first 视图（`temp/edge-functions.json`：条目 = `include_projects`/`exclude_projects` + `must`（函数名字符串，必跑）+ `maybe`（`{name, probably}`，按比例试跑）；JSONC 注释只在作者侧）。发布工具负责：转置为函数优先 wire、对脚本内容计算 sha256、套上 `version`、按声明序赋 `priority`；wire 只认函数优先 + 严格 JSON（无注释、未知字段拒绝）。两个视图表达力等价（一函数多挂载 ≡ 多条目引用同名函数，工具负责去重合并）。
+**作者格式与 wire 格式分离**（对齐 web 路由 YAML → JSON wire 的既有先例）。P3 ② 实施后控制台的作者格式是**函数优先草稿**（环境级单例：`functions[]` = `name`/`description`/`enabled`/`script`/`mounts[]`，mount 含 `include`/`exclude` glob、`priority`、`ratio`），发布时由 server 合并 WAF 生成条目、按声明序+最低挂载优先级排序、对脚本内容计算 sha256、套上 `version`；wire 只认函数优先 + 严格 JSON（无注释、未知字段拒绝）。早期设想的 mount-first 作者视图（`temp/edge-functions.json` 的 `must`/`maybe` 条目）被该草稿模型覆盖，其 `must` ≡ 缺省 `ratio` 10000、`maybe` ≡ `ratio < 10000`，表达力等价（一函数多挂载直接写在函数条目内）。
 
 脚本 Data ID（每函数一个）：内容为纯脚本文本，sha256 必须与索引一致（不一致 = 组装失败，全或无保留旧快照）；空串/NotFound = 该函数保持当前（keep-current），与索引的 keep-current 语义对齐。limits：索引 payload ≤ 256 KiB、单脚本 ≤ 1 MiB、快照内全部脚本合计 ≤ 8 MiB。
 
@@ -242,8 +242,8 @@ projectWaf:
 
 - WAF 页：规则表格 + 结构化编辑 + `match` 表达式 CodeMirror 编辑器 + 即时编译校验（server → validator）。
 - 项目策略页：per-project mode 与豁免管理（豁免带原因，可审计）。
-- 发布预览：生成脚本 diff + 编译结果。
-- 边缘函数页：**v1 占位只读**（展示当前函数索引与脚本内容），手写函数 P3 开放（见 §7）。
+- 发布预览：编译两个已存草稿（WAF 策略 + 手写函数）得到 planned 索引，与 rnacos live 索引**逐函数对比**（新增 / 不变 / 变更（脚本|挂载，含脚本 diff）/ 残留），全部脚本可编译才允许创建 Release。
+- 边缘函数页：手写函数工作区（函数列表 + 脚本 CodeMirror 编辑 + 挂载编辑 + 去抖逐函数原生编译预览 + If-Match 乐观并发保存），rnacos 实时快照折叠只读保留（§7 P3 ②，已实施）。
 
 ## 5. 性能预算
 
@@ -272,6 +272,8 @@ projectWaf:
 | P3            | body phase（缓冲-重放、per-route opt-in、content-type 白名单、大小上限——219 大文件分块上传的前车之鉴，绝不全量缓冲）；手写边缘函数开放（先扛住 step budget / 基数上限硬约束）；fail-close 选项；起手规则包（SQLi/XSS/路径穿越/扫描器 UA/畸形 URI，纯数据）；控制台命中统计页（server 集成 Prometheus 查询）                     |
 
 ## 8. 开放项
+
+- **孤儿脚本 Data ID 清理**（发布侧）：函数从索引移除后其脚本 Data ID 仍留在 rnacos（数据面按索引组装、直接忽略孤儿，无正确性影响，但字节残留且快照上限按索引内函数计）。console 的 NacosClient 只有 read/write，`release_resources` 的 remove 操作在发布 worker 中未实现（worker 只认 `required_resource = TRUE`）。需要：nacos delete 集成 + worker remove 路径 + 移除资源与失败语义设计。
 
 - ~~**上游备忘失效缺陷**：`ScriptExchangeCtx::set_path_vars()` 不清除已备忘的 `$path` 常量~~ **已解决**（上游 `625f0b46`，随本设计实施一同 pin）：`set_path_vars()` 现重置整个常量备忘（单条摘除会断线性探测链），各候选条件读到自己的捕获；`AccessRequestHandlerTest.PathVarConditionSeesEachCandidatesOwnCapture` 已解封守护。
 - CAT 事务标记形态（函数短路是否独立 transaction type 或仅 trace 标记）。
