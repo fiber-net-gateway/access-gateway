@@ -50,6 +50,7 @@ const edgeFunctionKeys = [
   'maxCidrsPerDirective',
   'maxCidrBytes',
   'maxInputFieldBytes',
+  'maxBodyPhaseBytes',
 ] as const
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -76,7 +77,7 @@ function isAtMost(value: unknown, upperBound: unknown): boolean {
 }
 
 export function isAccessConfigLimits(value: unknown): value is AccessConfigLimits {
-  if (!isRecord(value) || value.schemaVersion !== 4) return false
+  if (!isRecord(value) || value.schemaVersion !== 5) return false
   if (
     !isRecord(value.projectList) ||
     !isRecord(value.projectRoute) ||
@@ -120,7 +121,7 @@ export function isAccessConfigLimits(value: unknown): value is AccessConfigLimit
 // bounded transport envelope. Publication still fails closed without a
 // validator revision and its probed limits.
 export const fallbackAccessConfigLimits: AccessConfigLimits = {
-  schemaVersion: 4,
+  schemaVersion: 5,
   projectList: {
     maxPayloadBytes: 262_144,
     maxProjects: 1_024,
@@ -175,6 +176,7 @@ export const fallbackAccessConfigLimits: AccessConfigLimits = {
     maxCidrsPerDirective: 256,
     maxCidrBytes: 64,
     maxInputFieldBytes: 8_192,
+    maxBodyPhaseBytes: 1_048_576,
   },
 }
 

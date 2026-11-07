@@ -39,6 +39,15 @@ export const EDGE_FUNCTION_PRIORITY_MAX = 1_000_000
 export const EDGE_FUNCTION_RATIO_MIN = 0
 export const EDGE_FUNCTION_RATIO_MAX = 10_000
 
+/**
+ * Execution phase (wire "phase"; omitted = request_head). A request_body
+ * function runs after the route matched, only for PROXY routes opted in via
+ * the route-level edge_function_body flag, and may reference $req.body;
+ * request_head scripts that reference $req.body fail the native compile.
+ */
+export const EDGE_FUNCTION_PHASES = ['request_head', 'request_body'] as const
+export type EdgeFunctionPhase = (typeof EDGE_FUNCTION_PHASES)[number]
+
 /** The only reserved slug: releases always merge the generated WAF function. */
 export const RESERVED_FUNCTION_NAMES: readonly string[] = [WAF_FUNCTION_NAME]
 
@@ -60,6 +69,8 @@ export interface EdgeFunctionDraftFunction {
   readonly description?: string
   /** Disabled functions stay in the draft but never reach the wire. */
   readonly enabled: boolean
+  /** Execution phase; omitted = request_head (the wire default). */
+  readonly phase?: EdgeFunctionPhase
   readonly script: string
   readonly mounts: readonly EdgeFunctionMountDraft[]
 }

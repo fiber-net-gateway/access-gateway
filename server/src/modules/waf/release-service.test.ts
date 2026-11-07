@@ -397,6 +397,58 @@ test('create merges handwritten functions with the generated WAF function', asyn
   )
 })
 
+test('create carries request_body phase onto the wire and validates scripts per phase', async () => {
+  const functionsDraft: EdgeFunctionsDraft = {
+    schemaVersion: 1,
+    functions: [
+      {
+        name: 'body-scan',
+        enabled: true,
+        phase: 'request_body',
+        script:
+          'if (strings.match($req.body, "forbidden")) { resp.send(403, "no"); }\nreturn true;',
+        mounts: [{ projects: { include: ['*'] }, priority: 300 }],
+      },
+      {
+        name: 'head-guard',
+        enabled: true,
+        phase: 'request_head',
+        script: 'return true;',
+        mounts: [{ projects: { include: ['*'] }, priority: 300 }],
+      },
+    ],
+  }
+  const { service, requests, created } = buildService({ functionsDraft })
+  await service.create(actor, { idempotencyKey: 'key-p' }, 'request-p')
+
+  const plan = created?.[0]?.plan
+  assert.ok(plan)
+  // Only the non-default phase appears on the wire (canonical bytes stay
+  // minimal); an explicit request_head is the same as omitting it.
+  // Order: waf mount priority 100 first, then the 300s by name.
+  assert.deepEqual(
+    plan.functions.map((entry) => [entry.name, entry.phase ?? null]),
+    [
+      ['waf', null],
+      ['body-scan', 'request_body'],
+      ['head-guard', null],
+    ],
+  )
+  assert.deepEqual(
+    plan.scripts.map((entry) => [entry.name, entry.phase ?? null]),
+    [
+      ['waf', null],
+      ['body-scan', 'request_body'],
+      ['head-guard', null],
+    ],
+  )
+  // The script validations run per phase; only body-scan compiles as body.
+  assert.deepEqual(
+    requests.filter((r) => r.kind === 'edge_function_script').map((r) => r.phase ?? null),
+    [null, 'request_body', null],
+  )
+})
+
 test('create publishes handwritten functions even when the WAF policy unmounts', async () => {
   const functionsDraft: EdgeFunctionsDraft = {
     schemaVersion: 1,
@@ -732,11 +784,18 @@ test('currentEdgeFunctions returns the live index and script bytes from rnacos',
     new Map([
       [
         EDGE_FUNCTIONS_DATA_ID,
-        liveIndexValue([{ name: 'waf', sha256: 'a'.repeat(64), mounts: [liveMount] }]),
+        liveIndexValue([
+          { name: 'waf', sha256: 'a'.repeat(64), mounts: [liveMount] },
+          { name: 'body-scan', sha256: 'a'.repeat(64), phase: 'request_body', mounts: [liveMount] },
+        ]),
       ],
       [
         liveScriptDataId,
         { exists: true, content: liveScript, sha256: 'a'.repeat(32), md5: 'a'.repeat(16) },
+      ],
+      [
+        edgeFunctionScriptDataId('body-scan'),
+        { exists: true, content: '// body', sha256: 'b'.repeat(32), md5: 'b'.repeat(16) },
       ],
     ]),
   )
@@ -747,15 +806,23 @@ test('currentEdgeFunctions returns the live index and script bytes from rnacos',
   assert.deepEqual(reads, [
     { dataId: EDGE_FUNCTIONS_DATA_ID, group: EDGE_FUNCTIONS_GROUP },
     { dataId: liveScriptDataId, group: EDGE_FUNCTIONS_GROUP },
+    { dataId: edgeFunctionScriptDataId('body-scan'), group: EDGE_FUNCTIONS_GROUP },
   ])
   assert.equal(view.index.exists, true)
   assert.equal(view.index.version, 7)
   assert.equal(view.index.parseError, null)
   assert.deepEqual(view.index.functions, [
-    { name: 'waf', sha256: 'a'.repeat(64), mounts: [{ ...liveMount, ratio: null }] },
+    { name: 'waf', sha256: 'a'.repeat(64), phase: null, mounts: [{ ...liveMount, ratio: null }] },
+    {
+      name: 'body-scan',
+      sha256: 'a'.repeat(64),
+      phase: 'request_body',
+      mounts: [{ ...liveMount, ratio: null }],
+    },
   ])
   assert.deepEqual(view.scripts, [
     { name: 'waf', exists: true, sha256: 'a'.repeat(32), content: liveScript },
+    { name: 'body-scan', exists: true, sha256: 'b'.repeat(32), content: '// body' },
   ])
 })
 

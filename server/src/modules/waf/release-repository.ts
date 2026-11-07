@@ -36,6 +36,8 @@ import {
 export interface WafWireIndexFunctionEntry {
   readonly name: string
   readonly sha256: string
+  /** Omitted = wire default request_head. */
+  readonly phase?: 'request_head' | 'request_body'
   readonly mounts: readonly {
     readonly projects: { readonly include: readonly string[]; readonly exclude: readonly string[] }
     readonly priority: number
@@ -48,6 +50,8 @@ export interface WafWireIndexFunctionEntry {
 export interface PreparedReleaseScript {
   readonly name: string
   readonly script: string
+  /** The index entry's phase — the validator compiles per phase. */
+  readonly phase?: 'request_head' | 'request_body'
 }
 
 /** Everything the repository needs to persist one compiled WAF release. */
@@ -166,6 +170,13 @@ function parseWireIndexFunctions(text: string): WafWireIndexFunctionEntry[] | nu
     ) {
       return null
     }
+    const phase =
+      record.phase === undefined
+        ? undefined
+        : record.phase === 'request_head' || record.phase === 'request_body'
+          ? record.phase
+          : null
+    if (phase === null) return null
     const mounts: WafWireIndexFunctionEntry['mounts'][number][] = []
     for (const mount of record.mounts) {
       if (!mount || typeof mount !== 'object' || Array.isArray(mount)) return null
@@ -196,7 +207,12 @@ function parseWireIndexFunctions(text: string): WafWireIndexFunctionEntry[] | nu
         ...(ratio !== undefined ? { ratio } : {}),
       })
     }
-    entries.push({ name: record.name, sha256: record.sha256, mounts })
+    entries.push({
+      name: record.name,
+      sha256: record.sha256,
+      ...(phase !== undefined ? { phase } : {}),
+      mounts,
+    })
   }
   return entries
 }
@@ -670,6 +686,9 @@ export class WafReleaseRepository {
     )
     const scripts: PreparedReleaseScript[] = []
     const scriptDigests = new Map<string, string>()
+    // The Data ID carries only the name, so the entry phase comes from the
+    // parsed index — rollback revalidates each script in its own phase.
+    const phasesByName = new Map(functions.map((entry) => [entry.name, entry.phase]))
     for (const scriptRow of scriptRows) {
       const name = scriptRow.data_id.startsWith(EDGE_FUNCTION_SCRIPT_DATA_ID_PREFIX)
         ? scriptRow.data_id.slice(EDGE_FUNCTION_SCRIPT_DATA_ID_PREFIX.length)
@@ -686,7 +705,8 @@ export class WafReleaseRepository {
       if (scriptRow.target_sha256 && digest !== scriptRow.target_sha256.toString('hex')) {
         throw invalid(`the script payload digest for "${name}" does not match the release record`)
       }
-      scripts.push({ name, script: scriptText })
+      const phase = phasesByName.get(name)
+      scripts.push({ name, script: scriptText, ...(phase ? { phase } : {}) })
       scriptDigests.set(name, digest)
     }
     if (scripts.length !== new Set(scripts.map((entry) => entry.name)).size) {

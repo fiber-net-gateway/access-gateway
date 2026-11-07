@@ -76,6 +76,8 @@ export interface QueueWafPublicationResult {
 export interface WafEdgeFunctionIndexEntryView {
   name: string
   sha256: string | null
+  /** 'request_body' or 'request_head' (including explicit); null = absent. */
+  phase: 'request_head' | 'request_body' | null
   mounts: readonly {
     projects: { include: readonly string[]; exclude: readonly string[] }
     priority: number | null

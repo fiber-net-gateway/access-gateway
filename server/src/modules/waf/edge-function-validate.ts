@@ -6,6 +6,7 @@
 // compile-preview and release time.
 
 import {
+  EDGE_FUNCTION_PHASES,
   EDGE_FUNCTION_PRIORITY_MAX,
   EDGE_FUNCTION_PRIORITY_MIN,
   EDGE_FUNCTION_RATIO_MAX,
@@ -123,6 +124,17 @@ export function validateEdgeFunctionsDraft(draft: unknown): EdgeFunctionValidati
         field: `${path}.enabled`,
         code: 'invalid_field',
         message: 'enabled must be a boolean',
+      })
+    }
+
+    if (
+      function_.phase !== undefined &&
+      !EDGE_FUNCTION_PHASES.includes(function_.phase as (typeof EDGE_FUNCTION_PHASES)[number])
+    ) {
+      issues.push({
+        field: `${path}.phase`,
+        code: 'invalid_field',
+        message: `phase must be one of ${EDGE_FUNCTION_PHASES.join(', ')}`,
       })
     }
 

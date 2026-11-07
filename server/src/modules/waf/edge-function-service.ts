@@ -29,6 +29,8 @@ export interface SaveEdgeFunctionDraftInput {
 
 export interface EdgeFunctionCompileResult {
   readonly name: string
+  /** Execution phase the script was compiled in (always concrete here). */
+  readonly phase: 'request_head' | 'request_body'
   /** sha256 over the exact script bytes the release would publish. */
   readonly scriptSha256: string
   readonly scriptValid: boolean
@@ -149,12 +151,16 @@ export class DefaultEdgeFunctionService implements EdgeFunctionService {
     const results: EdgeFunctionCompileResult[] = []
     let lastValidator: { contractVersion: number; revision: string } | null = null
     for (const fn of functions) {
+      // The phase decides whether $req.body resolves: a head-phase script
+      // referencing it must fail the preview, not pass and break at runtime.
+      const phase = fn.phase ?? 'request_head'
       const native = await this.#validator.validate(
         {
           requestId,
           kind: 'edge_function_script',
           project: '',
           payload: Buffer.from(fn.script, 'utf8'),
+          ...(phase !== 'request_head' ? { phase } : {}),
         },
         signal,
       )
@@ -164,6 +170,7 @@ export class DefaultEdgeFunctionService implements EdgeFunctionService {
       }
       results.push({
         name: fn.name,
+        phase,
         scriptSha256: sha256(fn.script).toString('hex'),
         scriptValid: native.valid,
         errors: native.errors.map((error) => ({

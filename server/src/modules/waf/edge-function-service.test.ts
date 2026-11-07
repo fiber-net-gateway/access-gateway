@@ -258,6 +258,50 @@ test('compilePreview reports field-level issues without calling the validator', 
   assert.equal(requests.length, 0)
 })
 
+test('compilePreview compiles each function in its declared phase', async () => {
+  const { validator, requests } = validatorFake()
+  const service: EdgeFunctionService = new DefaultEdgeFunctionService(
+    draftsFake(),
+    environmentsFake(),
+    validator,
+  )
+  const twoPhases: EdgeFunctionsDraft = {
+    schemaVersion: 1,
+    functions: [
+      {
+        name: 'head-guard',
+        enabled: true,
+        script: 'return true;',
+        mounts: [{ projects: { include: ['*'] } }],
+      },
+      {
+        name: 'body-scan',
+        enabled: true,
+        phase: 'request_body',
+        script: 'if (strings.match($req.body, "x")) { resp.send(403, "no"); } return true;',
+        mounts: [{ projects: { include: ['*'] } }],
+      },
+    ],
+  }
+
+  const view = await service.compilePreview(actor, twoPhases, 'request-1')
+
+  assert.deepEqual(
+    requests.map((request) => [request.phase, Buffer.from(request.payload).toString('utf8')]),
+    [
+      [undefined, 'return true;'],
+      ['request_body', twoPhases.functions[1]!.script],
+    ],
+  )
+  assert.deepEqual(
+    view.functions.map((fn) => [fn.name, fn.phase]),
+    [
+      ['head-guard', 'request_head'],
+      ['body-scan', 'request_body'],
+    ],
+  )
+})
+
 test('the unavailable service fails closed', async () => {
   const unavailable: EdgeFunctionService = new UnavailableEdgeFunctionService()
   await assert.rejects(unavailable.getDraft(actor), /MySQL is not configured/)

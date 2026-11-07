@@ -26,7 +26,7 @@ test('GET /api/health returns deterministic service metadata', async (context) =
   })
 })
 
-test('system status serializes the complete native limits schema v4', async (context) => {
+test('system status serializes the complete native limits schema v5', async (context) => {
   const app = Fastify()
   registerSystemRoutes(app, {
     async get() {
@@ -55,12 +55,13 @@ test('system status serializes the complete native limits schema v4', async (con
   const response = await app.inject({ method: 'GET', url: '/api/system/status' })
   assert.equal(response.statusCode, 200)
   const limits = response.json().dependencies.nativeValidator.limits
-  assert.equal(limits.schemaVersion, 4)
+  assert.equal(limits.schemaVersion, 5)
   assert.equal(limits.projectRoute.maxUpstreamTlsProfiles, 256)
   assert.equal(limits.projectRoute.maxUpstreamTlsCaPemBytes, 524_288)
   assert.equal(limits.edgeFunctions.maxScriptPayloadBytes, 1_048_576)
   assert.equal(limits.edgeFunctions.maxFunctions, 64)
   assert.equal(limits.edgeFunctions.maxFunctionNameBytes, 64)
+  assert.equal(limits.edgeFunctions.maxBodyPhaseBytes, 1_048_576)
 })
 
 test('unknown API routes return a stable machine-readable error', async (context) => {
