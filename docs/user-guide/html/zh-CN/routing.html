@@ -501,6 +501,14 @@ service: report-service/stable
       <td>大于 0 时允许 WebSocket tunnel，并作为隧道读写 timeout</td>
     </tr>
     <tr>
+      <td><code>edge_function_body</code></td>
+      <td>PROXY</td>
+      <td>
+        可选；<code>true</code> 为 <code>request_body</code> 阶段边缘函数开启请求体缓冲重放（白名单
+        content-type、限额内缓冲，超限跳过函数）
+      </td>
+    </tr>
+    <tr>
       <td><code>flush</code></td>
       <td>PROXY</td>
       <td>

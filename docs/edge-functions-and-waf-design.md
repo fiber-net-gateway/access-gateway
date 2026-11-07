@@ -80,6 +80,7 @@ WAF/边缘函数是全新能力，**没有 Java wire 兼容包袱**：错误码�
 | -------- | ------ | ---- | ---------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
 | `name`   | string | 是   | `[a-z0-9-]` 1-64 字节，首尾必须字母数字，索引内唯一（重复 = conflict） | slug 身份；脚本 Data ID = `ploto.unified-access.edge-function.` + `name`，watcher/validator 派生，不上线 |
 | `sha256` | string | 是   | 恰 64 个小写十六进制字符                                               | 对发布写入的脚本文本字节（UTF-8）计算；内容寻址编译缓存的键；watcher 逐脚本校验                          |
+| `phase`  | string | 否   | `"request_head"`（缺省）或 `"request_body"`，其它拒绝                  | 执行阶段（P3 ①，已实施）：head 阶段脚本引用 `$req.body` 编译失败（fail-closed）；body 阶段语义见 §3.2    |
 | `mounts` | array  | 是   | 非空，≤ 16 条                                                          | 挂载条目（下表）；纯挂载语义，无策略含义                                                                 |
 
 挂载条目（`functions[i].mounts[j]`）：
@@ -96,11 +97,11 @@ glob 规则：非空可打印文本、不含 `;`（项目列表 wire 以分号�
 
 **挂载采样（`ratio`，2026-11-06 修订新增）**：缺省/10000 = 必跑（作者视图的 `must`）；< 10000 = 按比例采样执行（作者视图的 `maybe`，比例 = `ratio`/10000）；0 = 挂载保留但禁用（订阅与证据不断，比卸载再重挂温和）。采样判定为**粘性单次抽签**：请求期至多计算一次 `crc32(对端 IP 原始字节) % 10000`（CRC-32，zlib 多项式/Java zip 同构，`fiber::util::Crc32`，v4/v6 字节数组直算），该请求命中的全部采样挂载用**同一抽签值**对比各自阈值，未达阈值即跳过该函数（计入 `function_sampled_out_total`，不执行、不进 GcHeap）。粘性带来两个必然性质：同一客户端行为一致（block 灰度期不会一半请求拦一半放）；阈值单调（ratio 从 1000 提到 2000 只增不减，原命中者继续命中，指标前后可比）。快照内该项目命中的函数列表全部必跑时不抽签——纯必跑 fleet 零额外成本。已知限制：独立阈值**不是互斥分群**（表达不了"90% 老 + 10% 新、绝不双跑"）——新内容灰度走"新名 `maybe` 小比例试用 → 转正换必跑"，试用期新旧函数会在部分请求上双跑（先发送者赢，log 模式无感）；互斥分群留 v2。
 
-**作者格式与 wire 格式分离**（对齐 web 路由 YAML → JSON wire 的既有先例）。P3 ② 实施后控制台的作者格式是**函数优先草稿**（环境级单例：`functions[]` = `name`/`description`/`enabled`/`script`/`mounts[]`，mount 含 `include`/`exclude` glob、`priority`、`ratio`），发布时由 server 合并 WAF 生成条目、按声明序+最低挂载优先级排序、对脚本内容计算 sha256、套上 `version`；wire 只认函数优先 + 严格 JSON（无注释、未知字段拒绝）。早期设想的 mount-first 作者视图（`temp/edge-functions.json` 的 `must`/`maybe` 条目）被该草稿模型覆盖，其 `must` ≡ 缺省 `ratio` 10000、`maybe` ≡ `ratio < 10000`，表达力等价（一函数多挂载直接写在函数条目内）。
+**作者格式与 wire 格式分离**（对齐 web 路由 YAML → JSON wire 的既有先例）。P3 ② 实施后控制台的作者格式是**函数优先草稿**（环境级单例：`functions[]` = `name`/`description`/`enabled`/`phase`（缺省 `request_head`，P3 ①）/`script`/`mounts[]`，mount 含 `include`/`exclude` glob、`priority`、`ratio`），发布时由 server 合并 WAF 生成条目、按声明序+最低挂载优先级排序、对脚本内容计算 sha256、套上 `version`；wire 只认函数优先 + 严格 JSON（无注释、未知字段拒绝）。早期设想的 mount-first 作者视图（`temp/edge-functions.json` 的 `must`/`maybe` 条目）被该草稿模型覆盖，其 `must` ≡ 缺省 `ratio` 10000、`maybe` ≡ `ratio < 10000`，表达力等价（一函数多挂载直接写在函数条目内）。编译预览与发布校验都**按各自 phase** 走原生 validator（`edge_function_script` 请求带 `phase` 字段，缺省 = request_head）：head 阶段引用 `$req.body` 在预览即失败，不会拖到发布或运行期。
 
 脚本 Data ID（每函数一个）：内容为纯脚本文本，sha256 必须与索引一致（不一致 = 组装失败，全或无保留旧快照）；空串/NotFound = 该函数保持当前（keep-current），与索引的 keep-current 语义对齐。limits：索引 payload ≤ 256 KiB、单脚本 ≤ 1 MiB、快照内全部脚本合计 ≤ 8 MiB。
 
-limits 同步修订：`maxFunctionIdBytes` 删除（身份只剩一个），`maxFunctionNameBytes` 128 → 64（从展示名上限变为 slug 上限），`--describe-config-limits` schemaVersion 3 → 4；`ratio` 为固定值域 [0,10000]（同 `priority` 的 [0,1000000]），不设 limits 字段。P1 已提交的 codec/validator/server 镜像（master `23c2388`）仍是修订前形态（`id` + 可空 `name` + `dataId`、无 `ratio`），本修订的实现变更为下一步（未部署、P2 未消费，零迁移）。
+limits 同步修订：`maxFunctionIdBytes` 删除（身份只剩一个），`maxFunctionNameBytes` 128 → 64（从展示名上限变为 slug 上限），`--describe-config-limits` schemaVersion 3 → 4；`ratio` 为固定值域 [0,10000]（同 `priority` 的 [0,1000000]），不设 limits 字段。P1 已提交的 codec/validator/server 镜像（master `23c2388`）仍是修订前形态（`id` + 可空 `name` + `dataId`、无 `ratio`），本修订的实现变更为下一步（未部署、P2 未消费，零迁移）。body phase（P3 ①）追加 `edgeFunctions.maxBodyPhaseBytes`（缺省 1 MiB），schemaVersion 4 → 5。
 
 - 项目级 WAF mode（off/log/block）**不设 wire 字段**：由生成器折叠——mode 为 `off` 的项目直接进 `exclude`（零执行成本），`log`/`block` 项目共享同一脚本，脚本头部按 `$ctx.project` 查表。
 - 脚本 Data ID 的身份 = 索引中的 `sha256`；脚本文本不变则 hash 不变，watcher 编译产物按内容寻址复用（改挂载只 bump 索引版本，不重写脚本）。
@@ -128,6 +129,16 @@ gray matcher → host match → host policy（X-Entry / HTTPS 强制）→ 【�
 5. 未挂载函数的项目零成本（索引为空，不进入任何脚本路径）。
 6. 函数异常/中止：fail-open（§6）。
 
+**body 阶段管线锚点（P3 ①，已实施）**：`request_body` 函数在 route match 命中后、代理执行前运行，且仅当**该路由为 PROXY 且配置 `edge_function_body: true`**（route YAML 字段，wire `edge_function_body` 可空 Java bool）。门前依次为：
+
+1. 项目未挂载任何 body 阶段函数（快照双链：head 链在路由前、body 链在路由后，`mounted_body_for`）——零成本，不读交换状态；
+2. 路由非 PROXY（`not_proxy`）或未 opt-in（`route_opt_out`）——跳过，不触碰请求体；
+3. content-type 白名单（`content_type`）——固定代码表 v1：`application/json`、`application/x-www-form-urlencoded`、`text/plain`、`application/xml`、`text/xml`（按 `;` 截参数、去空白、ASCII 大小写不敏感）；无 content-type 头同样跳过；
+4. 声明式 Content-Length 超上限（`content_length`，`maxBodyPhaseBytes`）——跳过，不读一个字节；
+5. 流式读取超过上限（`stream_overflow`）——**保留已缓冲前缀、跳过函数**，前缀 + 未读尾部照常拼进上游请求：缓冲对无上限上传也有界（219 大文件分块上传的前车之鉴，绝不全量缓冲）；未溢出则函数以 `$req.body` 常量（原生字符串零拷贝视图）求值，缓冲副本随后重放进代理（prefetch 链先于交换读被消费，预算/完整性分类与真实读一致）。
+
+全部跳过原因进 `access_server_function_body_skipped_total{project, reason}`（动态序列 LRU 2048），缓冲字节数进 `access_server_function_body_buffered_bytes_total`。预读用与代理 body 管道相同的空闲超时（`max(60s, route timeout)`），慢涓流不会钉死 worker 槽。空 body + 命中白名单 content-type 仍执行函数（`$req.body` 为空串）。
+
 ### 3.3 v1 执行契约（写死，只增不收）
 
 | #   | 契约                                                                                                                                                                                  | 实现方式                                                                                                                                                                                                                                                                                                                                                                                                                           |
@@ -136,11 +147,13 @@ gray matcher → host match → host policy（X-Entry / HTTPS 强制）→ 【�
 | 2   | 提前响应：`resp.*` 全量可用                                                                                                                                                           | 复用现有 route script 语义                                                                                                                                                                                                                                                                                                                                                                                                         |
 | 3   | 事件上报：仅 `ctx.report(event, label)`                                                                                                                                               | 新增宿主函数，见 §3.5                                                                                                                                                                                                                                                                                                                                                                                                              |
 | 4   | CIDR 集合：`directive x = cidr "…"; x.contains(ip)`                                                                                                                                   | app 侧脚本扩展，见 §3.4                                                                                                                                                                                                                                                                                                                                                                                                            |
-| 5   | 不消费 body：`req.readJson/readBinary/discardBody` 不可用                                                                                                                             | 前置函数使用**受限 Library** 编译：不注册 body 读取函数。函数名为编译期静态解析，未注册即编译失败——fail-closed                                                                                                                                                                                                                                                                                                                     |
+| 5   | 不消费 body：`req.readJson/readBinary/discardBody` 不可用；`$req.body` 常量仅 body 阶段存在                                                                                           | 前置函数使用**受限 Library** 编译：不注册 body 读取函数。函数名为编译期静态解析，未注册即编译失败——fail-closed。P3 ① 起 Library 按 phase 编译：body 阶段把 `$req.body` 注册为指向缓冲副本的零拷贝原生字符串常量；head 阶段不注册（引用即编译失败，与 fail-closed 同构），编译缓存键 = `<sha256>:<phase>`                                                                                                                           |
 | 6   | 无上游访问：不注册 `http` directive                                                                                                                                                   | 同上，函数不能发起上游请求、不能变代理                                                                                                                                                                                                                                                                                                                                                                                             |
 | 7   | 无函数间通信、无可变上下文                                                                                                                                                            | 无对应 API                                                                                                                                                                                                                                                                                                                                                                                                                         |
 
 契约 5/6 的实现要点：为边缘函数构建专用 `StdLibrary`（在 `AccessScriptCompiler` 旁），注册 `req.*` 读函数、`resp.*`、`ctx.report` 与 cidr directive 扩展，并组合 `RouteScriptExtension`（空 path vars、`http_directives_enabled=false`）提供 `$header/$query/$cookie` 动态常量；`EdgeFunctionProgram` 持有 `shared_ptr<const ConstPackage>` 作生命周期锚（脚本的 constant 引用指向包内存储，包须与脚本一同长寿）。常量键只接受标识符字符集——**写规范化形式（小写、`-` 写作 `_`），运行期经 normalize 匹配真实 header/cookie/query 名**；连字符会按减法解析成未定义全局算术，运行期 TypeError（编译不报错，属已知脚枪，规则作者需用规范化拼写）。`$req`/`$conn` 复用 `ExchangeConstExtension`，`$ctx = {project, host}` 为新增运行期常量组（客户端 IP 直接用 `$conn.remote_addr`）。`$context` 仍为项目路由专属（app 侧 `TraceContextConstExtension` 经每请求 services 指针读 trace 状态），边缘函数不开放。编译一律 `allow_assign=false`。**cidr directive 只在边缘函数 Library 开放，不进 route condition**——避免路由配置语义漂移。
+
+**方言脚枪（P3 ① 实施期实证，规则作者须知）**：`contains` 中缀运算符在 `if (...)` 条件内**语法不合法**（parser 报 unexpected token，head/body 阶段一致，属既有文法非 bug）；文本匹配的规范写法是函数形式 `strings.match($req.uri, "…")` / `strings.match($req.body, "…")`（RE2，`(?i)` 等内联 flag 可用）。`resp.addHeader(name, value)` 为驼峰拼写（`add_header` 未注册）；且 setHeader/addHeader 只在脚本**自行 send** 时才上线路——代理路径上脚本未短路时这些挂起 header 被丢弃，改写响应头需 v2 契约显式设计。
 
 ### 3.4 cidr directive
 
@@ -243,7 +256,7 @@ projectWaf:
 - WAF 页：规则表格 + 结构化编辑 + `match` 表达式 CodeMirror 编辑器 + 即时编译校验（server → validator）。
 - 项目策略页：per-project mode 与豁免管理（豁免带原因，可审计）。
 - 发布预览：编译两个已存草稿（WAF 策略 + 手写函数）得到 planned 索引，与 rnacos live 索引**逐函数对比**（新增 / 不变 / 变更（脚本|挂载，含脚本 diff）/ 残留），全部脚本可编译才允许创建 Release。
-- 边缘函数页：手写函数工作区（函数列表 + 脚本 CodeMirror 编辑 + 挂载编辑 + 去抖逐函数原生编译预览 + If-Match 乐观并发保存），rnacos 实时快照折叠只读保留（§7 P3 ②，已实施）。
+- 边缘函数页：手写函数工作区（函数列表 + 脚本 CodeMirror 编辑 + 挂载编辑 + 执行阶段选择（P3 ①）+ 去抖逐函数原生编译预览（按 phase）+ If-Match 乐观并发保存），rnacos 实时快照折叠只读保留（§7 P3 ②，已实施；实时快照含 phase 展示）。
 
 ## 5. 性能预算
 
@@ -264,18 +277,19 @@ projectWaf:
 
 ## 7. 阶段计划
 
-| 阶段          | 内容                                                                                                                                                                                                                                                                                                                            |
-| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| P0            | fleet 升级至 pin ≥ 4a5f12b8；上游建议（step budget、script-guide 文档）                                                                                                                                                                                                                                                         |
-| P1 native     | `EdgeFunctionLimits` + 索引/脚本 codec + validator 扩展 → `EdgeFunctionsWatcher`（hash 校验 + 内容寻址编译缓存 + 全或无组装）+ 联合索引 → 受限 Library（含 cidr directive 扩展）+ 编译 → 管线钩子 + 短路 → `ctx.report` + metrics + 事件日志 → CTest 覆盖（含黄金 fixture 的 native 侧编译断言、cidr directive 编译期失败用例） |
-| P2 server+web | `modules/waf` + 转义器/生成器 + 黄金 fixtures + 发布资源条目（先脚本后索引）+ 激活证据；WAF 页 + 项目策略页 + 发布预览；边缘函数只读页                                                                                                                                                                                          |
-| P3            | body phase（缓冲-重放、per-route opt-in、content-type 白名单、大小上限——219 大文件分块上传的前车之鉴，绝不全量缓冲）；手写边缘函数开放（先扛住 step budget / 基数上限硬约束）；fail-close 选项；起手规则包（SQLi/XSS/路径穿越/扫描器 UA/畸形 URI，纯数据）；控制台命中统计页（server 集成 Prometheus 查询）                     |
+| 阶段          | 内容                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| P0            | fleet 升级至 pin ≥ 4a5f12b8；上游建议（step budget、script-guide 文档）                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| P1 native     | `EdgeFunctionLimits` + 索引/脚本 codec + validator 扩展 → `EdgeFunctionsWatcher`（hash 校验 + 内容寻址编译缓存 + 全或无组装）+ 联合索引 → 受限 Library（含 cidr directive 扩展）+ 编译 → 管线钩子 + 短路 → `ctx.report` + metrics + 事件日志 → CTest 覆盖（含黄金 fixture 的 native 侧编译断言、cidr directive 编译期失败用例）                                                                                                                                                                                               |
+| P2 server+web | `modules/waf` + 转义器/生成器 + 黄金 fixtures + 发布资源条目（先脚本后索引）+ 激活证据；WAF 页 + 项目策略页 + 发布预览；边缘函数只读页                                                                                                                                                                                                                                                                                                                                                                                        |
+| P3            | body phase（缓冲-重放、per-route opt-in `edge_function_body`、content-type 白名单、大小上限`maxBodyPhaseBytes`——219 大文件分块上传的前车之鉴，绝不全量缓冲；溢出保留有界前缀拼活尾部）**① 已实施**（native `52682b3` + server `3d2a048` + web）；手写边缘函数开放（先扛住 step budget / 基数上限硬约束）**② 已实施**；fail-close 选项**⑤ 已实施**（`908a1d2`）；起手规则包（SQLi/XSS/路径穿越/扫描器 UA/畸形 URI，纯数据）**③ 已实施**（`ca691d8`）；控制台命中统计页（server 集成 Prometheus 查询）**④ 已实施**（`a093da2`） |
 
 ## 8. 开放项
 
 - **孤儿脚本 Data ID 清理**（发布侧）：函数从索引移除后其脚本 Data ID 仍留在 rnacos（数据面按索引组装、直接忽略孤儿，无正确性影响，但字节残留且快照上限按索引内函数计）。console 的 NacosClient 只有 read/write，`release_resources` 的 remove 操作在发布 worker 中未实现（worker 只认 `required_resource = TRUE`）。需要：nacos delete 集成 + worker remove 路径 + 移除资源与失败语义设计。
 
 - ~~**上游备忘失效缺陷**：`ScriptExchangeCtx::set_path_vars()` 不清除已备忘的 `$path` 常量~~ **已解决**（上游 `625f0b46`，随本设计实施一同 pin）：`set_path_vars()` 现重置整个常量备忘（单条摘除会断线性探测链），各候选条件读到自己的捕获；`AccessRequestHandlerTest.PathVarConditionSeesEachCandidatesOwnCapture` 已解封守护。
+- **body 阶段 v2 候选**（P3 ① 后仍开放）：content-type 白名单为代码固定 v1（console/数据面均不可配置——可配置清单是配置面攻击面，先固定观察）；`multipart/form-data`、`application/octet-stream` 等是否纳入待真实规则需求；脚本在代理路径上改写响应头（`resp.setHeader` 未 send 即丢弃，见 §3.3 方言脚枪）需要显式契约；`$req.body` 目前整体原样视图（无解析后的 JSON 常量，规则用 `strings.match` 匹配原始字节）。
 - CAT 事务标记形态（函数短路是否独立 transaction type 或仅 trace 标记）。
 - 函数能否读 trace context（`$context` 已含 trace cluster；开放给 `$ctx` 的范围待实现时定）。
 - 响应阶段函数（`phase: response`）与请求改写（`phase: request_rewrite`）的契约扩展——远期，先留枚举位不实现。

@@ -522,6 +522,14 @@ service: report-service/stable
       <td>Positive value enables WebSocket tunneling and sets tunnel I/O timeout</td>
     </tr>
     <tr>
+      <td><code>edge_function_body</code></td>
+      <td>PROXY</td>
+      <td>
+        Optional; <code>true</code> opts the route into request_body-phase edge functions
+        (whitelisted content types, bounded buffering, over-cap bodies skip the functions)
+      </td>
+    </tr>
+    <tr>
       <td><code>flush</code></td>
       <td>PROXY</td>
       <td><code>true</code> reduces local buffering and adds <code>X-Accel-Buffering: no</code></td>
