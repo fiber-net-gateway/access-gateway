@@ -8,6 +8,7 @@ import { CapabilityStrip } from '../components/CapabilityStrip'
 const wafNavigation = [
   { path: '/waf', label: '策略', detail: '规则与编译预览', end: true },
   { path: '/waf/releases', label: '发布', detail: '脚本 diff 与 Release', end: false },
+  { path: '/waf/hits', label: '命中统计', detail: 'Prometheus 聚合', end: false },
   { path: '/waf/edge-functions', label: '边缘函数', detail: '当前索引只读', end: false },
 ]
 

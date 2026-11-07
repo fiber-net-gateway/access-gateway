@@ -10,6 +10,7 @@ import type { TlsSniService } from './modules/tls/service.js'
 import type { TlsCertificateReleaseService } from './modules/tls/release-service.js'
 import type { ConfigurationVersionService } from './modules/versions/service.js'
 import type { WafService } from './modules/waf/service.js'
+import type { WafHitsService } from './modules/waf/hits-service.js'
 import type { WafReleaseService } from './modules/waf/release-service.js'
 
 export interface ApplicationServices {
@@ -26,6 +27,7 @@ export interface ApplicationServices {
   tlsReleases: TlsCertificateReleaseService
   waf: WafService
   wafReleases: WafReleaseService
+  wafHits: WafHitsService
 }
 
 export interface ApplicationRuntime {

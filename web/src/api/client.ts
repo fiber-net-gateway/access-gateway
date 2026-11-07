@@ -21,6 +21,8 @@ import type {
   TlsCertificateReleaseView,
   WafCompilePreviewView,
   WafEdgeFunctionsView,
+  WafHitsView,
+  WafHitsWindow,
   WafRulePackView,
   WafMode,
   WafPolicy,
@@ -1061,6 +1063,29 @@ function isWafRulePack(value: unknown): value is WafRulePackView {
 
 export async function fetchWafRulePack(signal?: AbortSignal): Promise<WafRulePackView> {
   return requestJson('/api/waf/rule-pack', { signal }, isWafRulePack)
+}
+
+function isWafHits(value: unknown): value is WafHitsView {
+  return (
+    isRecord(value) &&
+    (value.window === '1h' || value.window === '24h' || value.window === '7d') &&
+    typeof value.queriedAt === 'string' &&
+    Array.isArray(value.rows) &&
+    value.rows.every(
+      (row) =>
+        isRecord(row) &&
+        typeof row.ruleId === 'string' &&
+        typeof row.event === 'string' &&
+        typeof row.count === 'number',
+    )
+  )
+}
+
+export async function fetchWafHits(
+  window: WafHitsWindow,
+  signal?: AbortSignal,
+): Promise<WafHitsView> {
+  return requestJson(`/api/waf/hits?window=${window}`, { signal }, isWafHits)
 }
 
 export async function fetchWafPolicyDraft(signal?: AbortSignal): Promise<WafPolicyDraftView> {

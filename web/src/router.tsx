@@ -13,6 +13,7 @@ import { ProjectVersionsPage } from './pages/ProjectVersionsPage'
 import { ProjectWafPolicyPage } from './pages/ProjectWafPolicyPage'
 import { ProjectsIndexPage } from './pages/ProjectsIndexPage'
 import { WafEdgeFunctionsPage } from './pages/WafEdgeFunctionsPage'
+import { WafHitsPage } from './pages/WafHitsPage'
 import { WafLayout } from './pages/WafLayout'
 import { WafPolicyPage } from './pages/WafPolicyPage'
 import { WafReleasesPage } from './pages/WafReleasesPage'
@@ -43,6 +44,7 @@ export const appRoutes = [
         children: [
           { index: true, element: <WafPolicyPage /> },
           { path: 'releases', element: <WafReleasesPage /> },
+          { path: 'hits', element: <WafHitsPage /> },
           { path: 'edge-functions', element: <WafEdgeFunctionsPage /> },
         ],
       },

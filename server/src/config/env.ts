@@ -66,6 +66,12 @@ export interface ActivationCollectorConfig {
   concurrency: number
 }
 
+export interface PrometheusConfig {
+  endpoint: string | null
+  requestTimeoutMillis: number
+  maxResponseBytes: number
+}
+
 export interface ServerConfig {
   host: string
   port: number
@@ -78,6 +84,7 @@ export interface ServerConfig {
   nativeValidator: NativeValidatorConfig
   publication: PublicationConfig
   activation: ActivationCollectorConfig
+  prometheus: PrometheusConfig
 }
 
 function isLogLevel(value: string): value is LogLevel {
@@ -533,5 +540,22 @@ export function loadServerConfig(env: NodeJS.ProcessEnv = process.env): ServerCo
       ),
     },
     activation,
+    prometheus: {
+      endpoint: parseOptionalHttpEndpoint(env.PROMETHEUS_URL, 'PROMETHEUS_URL'),
+      requestTimeoutMillis: parseBoundedPositiveInteger(
+        env.PROMETHEUS_REQUEST_TIMEOUT_MILLIS,
+        'PROMETHEUS_REQUEST_TIMEOUT_MILLIS',
+        5_000,
+        100,
+        60_000,
+      ),
+      maxResponseBytes: parseBoundedPositiveInteger(
+        env.PROMETHEUS_MAX_RESPONSE_BYTES,
+        'PROMETHEUS_MAX_RESPONSE_BYTES',
+        1_048_576,
+        4_096,
+        16_777_216,
+      ),
+    },
   }
 }

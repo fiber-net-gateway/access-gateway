@@ -496,3 +496,17 @@ export interface WafRulePackView {
   version: string
   rules: readonly WafRule[]
 }
+
+export type WafHitsWindow = '1h' | '24h' | '7d'
+
+export interface WafHitRow {
+  ruleId: string
+  event: string
+  count: number
+}
+
+export interface WafHitsView {
+  window: WafHitsWindow
+  queriedAt: string
+  rows: readonly WafHitRow[]
+}

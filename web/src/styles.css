@@ -2782,6 +2782,37 @@ button:disabled {
   color: #8ea396;
 }
 
+.waf-hits-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+}
+
+.waf-hits-table th,
+.waf-hits-table td {
+  padding: 8px 12px;
+  border-bottom: 1px solid #dfe4dd;
+  text-align: right;
+}
+
+.waf-hits-table thead th {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #6d7d75;
+}
+
+.waf-hits-table tbody th {
+  text-align: left;
+  font-weight: 600;
+}
+
+.waf-hits-table tbody th small {
+  display: block;
+  font-weight: 400;
+  color: #6d7d75;
+}
+
 @media (max-width: 1080px) {
   .project-workspace {
     grid-template-columns: 250px minmax(0, 1fr);

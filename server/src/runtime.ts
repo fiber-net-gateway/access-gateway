@@ -15,6 +15,10 @@ import {
   UnavailableNativeValidator,
 } from './integrations/native-validator/subprocess.js'
 import { HttpNacosClient, UnavailableNacosClient } from './integrations/nacos/http.js'
+import {
+  HttpPrometheusQueryClient,
+  UnavailablePrometheusQueryClient,
+} from './integrations/prometheus/http.js'
 import { ActivationReadRepository } from './modules/activation/read-repository.js'
 import {
   DefaultActivationService,
@@ -51,6 +55,7 @@ import {
   DefaultConfigurationVersionService,
   UnavailableConfigurationVersionService,
 } from './modules/versions/service.js'
+import { DefaultWafHitsService, UnavailableWafHitsService } from './modules/waf/hits-service.js'
 import { WafPolicyDraftRepository } from './modules/waf/repository.js'
 import { WafReleaseRepository } from './modules/waf/release-repository.js'
 import {
@@ -140,6 +145,7 @@ function unavailableServices(
     tlsReleases: new UnavailableTlsCertificateReleaseService(),
     waf: new UnavailableWafService(),
     wafReleases: new UnavailableWafReleaseService(),
+    wafHits: new UnavailableWafHitsService(),
   }
 }
 
@@ -188,6 +194,13 @@ export async function createApplicationRuntime(config: ServerConfig): Promise<Ap
           endpointOverride: config.publication.endpointOverride,
         })
       : new UnavailableNacosClient()
+    const prometheus = config.prometheus.endpoint
+      ? new HttpPrometheusQueryClient({
+          endpoint: config.prometheus.endpoint,
+          timeoutMillis: config.prometheus.requestTimeoutMillis,
+          maxResponseBytes: config.prometheus.maxResponseBytes,
+        })
+      : new UnavailablePrometheusQueryClient()
     const releases = new ReleaseRepository(pool, documents, undefined, activationRead)
     const certificates = new CertificateRepository(pool, documents)
     const tlsSni = new TlsSniRepository(pool)
@@ -232,6 +245,7 @@ export async function createApplicationRuntime(config: ServerConfig): Promise<Ap
         validator,
         nacos,
       ),
+      wafHits: new DefaultWafHitsService(prometheus),
     }
     return {
       services,
