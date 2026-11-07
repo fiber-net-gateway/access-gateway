@@ -36,6 +36,7 @@ enum RequestField : std::uint8_t {
     Kind = 1U << 2U,
     Project = 1U << 3U,
     Payload = 1U << 4U,
+    Phase = 1U << 5U,
 };
 
 struct ValidatorRequest {
@@ -44,6 +45,9 @@ struct ValidatorRequest {
     std::string_view kind;
     std::string_view project;
     std::string_view payload_base64;
+    // Optional, kind=edge_function_script only: compile the script in the
+    // request_body phase so $req.body resolves (empty = request_head).
+    std::string_view phase;
     std::uint8_t present = 0;
 };
 
@@ -127,6 +131,12 @@ ObjectFieldStatus parse_request_field(std::string_view field, JsonParser &parser
             return ObjectFieldStatus::Error;
         }
         return json::to_object_field_status(json::parse_text(parser, pool, out.payload_base64));
+    }
+    if (field == "phase") {
+        if (!set_present(out, RequestField::Phase, parser)) {
+            return ObjectFieldStatus::Error;
+        }
+        return json::to_object_field_status(json::parse_text(parser, pool, out.phase));
     }
     (void) parser.fail("unknown validator request field");
     return ObjectFieldStatus::Error;
@@ -366,7 +376,7 @@ ValidationResult validate_edge_function_index(std::string_view payload) {
     };
 }
 
-ValidationResult validate_edge_function_script(std::string_view payload) {
+ValidationResult validate_edge_function_script(std::string_view payload, std::string_view phase) {
     if (payload.size() > kAccessConfigLimits.edge_functions.max_script_payload_bytes) {
         return ValidationResult{
                 .errors = {{
@@ -376,8 +386,20 @@ ValidationResult validate_edge_function_script(std::string_view payload) {
                 }},
         };
     }
+    const EdgeFunctionPhase compile_phase = phase.empty() || phase == "request_head" ? EdgeFunctionPhase::RequestHead
+                                            : phase == "request_body"                ? EdgeFunctionPhase::RequestBody
+                                                                                     : EdgeFunctionPhase::Count;
+    if (compile_phase == EdgeFunctionPhase::Count) {
+        return ValidationResult{
+                .errors = {{
+                        .code = "invalid_request",
+                        .field = "phase",
+                        .message = "phase must be request_head or request_body",
+                }},
+        };
+    }
     EdgeFunctionLibrary library;
-    auto program = library.compile(payload);
+    auto program = library.compile(payload, compile_phase);
     if (!program) {
         return ValidationResult{
                 .errors = {{
@@ -477,8 +499,9 @@ std::string encode_config_limits() {
               write_size(generator, "maxCidrsPerDirective", edge_functions.max_cidrs_per_directive) &&
               write_size(generator, "maxCidrBytes", edge_functions.max_cidr_bytes) &&
               write_size(generator, "maxInputFieldBytes", edge_functions.max_input_field_bytes) &&
+              write_size(generator, "maxBodyPhaseBytes", edge_functions.max_body_phase_bytes) &&
               generated(generator.map_close()) && generated(generator.map_close());
-    return ok ? output : std::string(R"({"schemaVersion":4,"error":"encoding_failed"})");
+    return ok ? output : std::string(R"({"schemaVersion":5,"error":"encoding_failed"})");
 }
 
 std::string encode_response(const ValidationResult &result) {
@@ -574,7 +597,7 @@ std::string process_native_validator_request(std::string_view input) {
     if (request.kind == "edge_function_index") {
         return encode_response(validate_edge_function_index(payload));
     }
-    return encode_response(validate_edge_function_script(payload));
+    return encode_response(validate_edge_function_script(payload, request.phase));
 }
 
 std::string native_validator_input_too_large_response() {

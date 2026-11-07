@@ -70,10 +70,13 @@ protected:
         exchange->uri().unparsed_uri = raw_uri;
     }
 
-    ExecOutcome run(std::string_view source, const AccessConfigLimits &limits = {}, bool with_edge_context = true) {
+    ExecOutcome
+    run(std::string_view source, const AccessConfigLimits &limits = {}, bool with_edge_context = true,
+        fiber::access_server::EdgeFunctionPhase phase = fiber::access_server::EdgeFunctionPhase::RequestHead,
+        std::string_view request_body = {}) {
         ExecOutcome outcome;
         EdgeFunctionLibrary library(limits);
-        auto program = library.compile(source);
+        auto program = library.compile(source, phase);
         if (!program) {
             outcome.compile_error = program.error().message;
             return outcome;
@@ -88,6 +91,7 @@ protected:
         TestEdgeContext edge;
         edge.project = "loan-web";
         edge.host = "loan.example.com";
+        edge.request_body = request_body;
         if (with_edge_context) {
             script_context.set_services(&edge);
         }
@@ -148,6 +152,40 @@ TEST(EdgeFunctionLibrary, BodyReadersAreCompileErrors) {
     EXPECT_FALSE(first_compile_error("req.readJson()").empty());
     EXPECT_FALSE(first_compile_error("req.readBinary()").empty());
     EXPECT_FALSE(first_compile_error("req.discardBody()").empty());
+}
+
+TEST(EdgeFunctionLibrary, BodyConstantIsHeadPhaseCompileError) {
+    // $req.body resolves only when compiling the request_body phase; a head
+    // script referencing it must fail to compile (fail-closed, design §7).
+    EXPECT_FALSE(first_compile_error("return $req.body;").empty());
+    EXPECT_FALSE(first_compile_error("$req.body contains 'loan'").empty());
+}
+
+TEST(EdgeFunctionLibrary, BodyConstantCompilesInBodyPhase) {
+    EdgeFunctionLibrary library;
+    EXPECT_TRUE(library.compile("return $req.body;", fiber::access_server::EdgeFunctionPhase::RequestBody).has_value());
+    EXPECT_TRUE(library.compile("$req.body contains 'loan'", fiber::access_server::EdgeFunctionPhase::RequestBody)
+                        .has_value());
+    // Other namespaces still compile in the body phase.
+    EXPECT_TRUE(library.compile("$header.foo == 'x' && $req.body contains 'loan'",
+                                fiber::access_server::EdgeFunctionPhase::RequestBody)
+                        .has_value());
+}
+
+TEST_F(EdgeFunctionLibraryTest, BodyConstantExposesRequestBody) {
+    const ExecOutcome outcome =
+            run("return $req.body;", {}, true, fiber::access_server::EdgeFunctionPhase::RequestBody, "{\"loan\":true}");
+    ASSERT_TRUE(outcome.compiled);
+    ASSERT_TRUE(outcome.is_value);
+    EXPECT_EQ(outcome.text, "{\"loan\":true}");
+}
+
+TEST_F(EdgeFunctionLibraryTest, BodyConstantEmptyWhenNothingPrefetched) {
+    const ExecOutcome outcome =
+            run("return $req.body == '';", {}, true, fiber::access_server::EdgeFunctionPhase::RequestBody);
+    ASSERT_TRUE(outcome.compiled);
+    ASSERT_TRUE(outcome.is_boolean);
+    EXPECT_TRUE(outcome.boolean);
 }
 
 TEST(EdgeFunctionLibrary, RouteConstantNamespacesCompileExceptContextAndPath) {

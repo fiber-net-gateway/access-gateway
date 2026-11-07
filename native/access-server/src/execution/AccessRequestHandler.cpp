@@ -1,14 +1,20 @@
 #include "AccessRequestHandler.h"
+#include "../config/AccessConfigLimits.h"
 #include "../observability/AccessRequestTelemetry.h"
 #include "EdgeFunctionExecutor.h"
+#include "ProxyExecutor.h"
 #include "ResponsePlan.h"
 
 #include <fiber/common/Assert.h>
+#include <fiber/common/mem/IoBufChain.h>
 #include <fiber/http/HttpBodySpec.h>
 #include <fiber/http/HttpExchange.h>
 #include <fiber/http/HttpHeaderHash.h>
 #include <fiber/http/HttpHeaders.h>
 
+#include <algorithm>
+#include <array>
+#include <string>
 #include <utility>
 
 namespace fiber::access_server {
@@ -46,6 +52,57 @@ bool uses_dynamic_response_compression(const CompiledRoute &route) noexcept {
         return true;
     }
     return route.response && route.response->body_kind == ResponseBodyKind::Template;
+}
+
+// v1 body-phase content-type whitelist (design §7): textual media types
+// only, parameters stripped at the first ';', comparison ASCII
+// case-insensitive. Binary payloads (uploads, protobuf, msgpack) never enter
+// the buffering path.
+bool body_phase_content_type_allowed(std::string_view value) noexcept {
+    const std::size_t semicolon = value.find(';');
+    std::string_view media = value.substr(0, semicolon == std::string_view::npos ? value.size() : semicolon);
+    while (!media.empty() && (media.front() == ' ' || media.front() == '\t')) {
+        media.remove_prefix(1);
+    }
+    while (!media.empty() && (media.back() == ' ' || media.back() == '\t')) {
+        media.remove_suffix(1);
+    }
+    static constexpr std::array<std::string_view, 5> kAllowedMedia{
+            "application/json", "application/x-www-form-urlencoded", "text/plain", "application/xml", "text/xml"};
+    for (const std::string_view allowed: kAllowedMedia) {
+        if (media.size() != allowed.size()) {
+            continue;
+        }
+        bool equal = true;
+        for (std::size_t i = 0; i < media.size(); ++i) {
+            const char c = media[i];
+            const char lower = c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c;
+            if (lower != allowed[i]) {
+                equal = false;
+                break;
+            }
+        }
+        if (equal) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Flattens the prefetched chain into one contiguous buffer for $req.body,
+// bounded by `bytes`. The chain itself stays the zero-copy forwarding source
+// for the proxy; this copy exists only for the script execution.
+std::string flatten_body_chain(const mem::IoBufChain &chain, std::size_t bytes) noexcept {
+    std::string flat;
+    flat.reserve(bytes);
+    for (const mem::IoBufNode *node = chain.front_node(); node != nullptr && flat.size() < bytes; node = node->next) {
+        const mem::IoBuf &buf = node->buf;
+        const std::size_t take = std::min(buf.readable(), bytes - flat.size());
+        if (take != 0) {
+            flat.append(reinterpret_cast<const char *>(buf.readable_data()), take);
+        }
+    }
+    return flat;
 }
 
 Result<void> evaluate_template(void *context, const script::Script &program, std::string_view expression,
@@ -393,6 +450,85 @@ async::Task<Result<void>> AccessRequestHandler::handle_impl(http::HttpExchange &
     }
     const std::size_t body_limit = route_policy.body_limit;
 
+    // Body-phase edge functions (design §3.2/§7): only PROXY routes that
+    // opted in, only whitelisted textual content types, never more than
+    // max_body_phase_bytes buffered. A declared Content-Length above the cap
+    // skips the chain without touching the exchange; a streaming body that
+    // crosses the cap keeps the buffered prefix, skips the functions, and the
+    // prefix plus the unread tail still flow to the proxy — the buffering is
+    // bounded even for unbounded uploads (the 219 chunked-upload lesson).
+    mem::IoBufChain prefetched_body;
+    bool body_prefetched = false;
+    const std::span<const EdgeFunctionMounted> edge_body_mounted =
+            snapshot->edge_functions().mounted_body_for(host_match.project->project());
+    if (!edge_body_mounted.empty()) {
+        const std::string_view body_skip_project = host_match.project->project();
+        if (route.type != RouteType::Proxy) {
+            telemetry.record_edge_function_body_skipped(body_skip_project, "not_proxy");
+        } else if (!route.edge_function_body) {
+            telemetry.record_edge_function_body_skipped(body_skip_project, "route_opt_out");
+        } else {
+            const http::HttpHeaders::HeaderField *const content_type = exchange.content_type_header();
+            const std::size_t body_phase_cap = kAccessConfigLimits.edge_functions.max_body_phase_bytes;
+            if (content_type == nullptr || !body_phase_content_type_allowed(content_type->value_view())) {
+                telemetry.record_edge_function_body_skipped(body_skip_project, "content_type");
+            } else if (body_spec.is_content_length() && body_spec.content_length() > body_phase_cap) {
+                telemetry.record_edge_function_body_skipped(body_skip_project, "content_length");
+            } else {
+                // Same per-read idle posture as the proxy body pipe, so a
+                // slow trickle cannot pin the worker slot here either.
+                const std::chrono::milliseconds body_read_timeout =
+                        body_read_idle_timeout(route.proxy->timeout_millis, std::chrono::milliseconds{60000});
+                bool body_overflow = false;
+                std::size_t buffered = 0;
+                while (true) {
+                    auto chunk = co_await exchange.read_body(64U * 1024U, body_read_timeout);
+                    if (!chunk) {
+                        co_return std::unexpected(Err::from_error(chunk.error()));
+                    }
+                    buffered += chunk->readable_bytes();
+                    const bool complete = chunk->complete();
+                    if (!prefetched_body.append_chain(std::move(*chunk))) {
+                        co_return std::unexpected(Err::from_error(common::IoErr::NoMem));
+                    }
+                    body_prefetched = true;
+                    if (complete) {
+                        break;
+                    }
+                    if (buffered > body_phase_cap) {
+                        body_overflow = true;
+                        break;
+                    }
+                }
+                if (body_overflow) {
+                    // Keep the prefix for the proxy splice; the functions do
+                    // not run for an over-cap body.
+                    telemetry.record_edge_function_body_skipped(body_skip_project, "stream_overflow");
+                } else {
+                    telemetry.record_edge_function_body_buffered(buffered);
+                    const std::string body_flat = flatten_body_chain(prefetched_body, buffered);
+                    if (!telemetry.finalize_response_headers()) {
+                        co_return std::unexpected(Err::from_error(common::IoErr::NoMem));
+                    }
+                    for (const http::HttpHeaders::HeaderField &field: telemetry.response_headers()) {
+                        telemetry.script_context().set_response_header(field.name_view(), field.value_view());
+                    }
+                    const EdgeFunctionOutcome body_outcome = co_await EdgeFunctionExecutor::run(
+                            edge_body_mounted, telemetry.script_context(), telemetry, host_match.project->project(),
+                            request_host.effective_host, options_.edge_function_fail_close, body_flat);
+                    switch (body_outcome) {
+                        case EdgeFunctionOutcome::Responded:
+                            co_return Result<void>{};
+                        case EdgeFunctionOutcome::Rejected:
+                            co_return std::unexpected(Err::from_exception(Exception::edge_function_fail_close()));
+                        case EdgeFunctionOutcome::Continue:
+                            break;
+                    }
+                }
+            }
+        }
+    }
+
     if (uses_dynamic_response_compression(route)) {
         const ResponseContentCoding coding = select_response_content_coding(exchange.request_headers());
         if (coding == ResponseContentCoding::NotAcceptable) {
@@ -427,14 +563,16 @@ async::Task<Result<void>> AccessRequestHandler::handle_impl(http::HttpExchange &
                 !request_host.origin_host.empty() && !route.proxy->proxy_headers.contains(kOriginHostHeader)
                         ? request_host.origin_host
                         : std::string_view{};
-        co_return co_await proxy_adapter_.execute(proxy_adapter_.context, exchange, *route.proxy,
-                                                  ProxyExecutionInput{
-                                                          .call_source = host_match.project->call_source(),
-                                                          .origin_host = origin_host,
-                                                          .template_evaluator = template_evaluator,
-                                                          .max_request_body_size = body_limit,
-                                                  },
-                                                  telemetry);
+        co_return co_await proxy_adapter_.execute(
+                proxy_adapter_.context, exchange, *route.proxy,
+                ProxyExecutionInput{
+                        .call_source = host_match.project->call_source(),
+                        .origin_host = origin_host,
+                        .template_evaluator = template_evaluator,
+                        .max_request_body_size = body_limit,
+                        .prefetched_body = body_prefetched ? &prefetched_body : nullptr,
+                },
+                telemetry);
     }
 
     if (route.type == RouteType::Script) {

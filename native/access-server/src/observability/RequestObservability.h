@@ -114,6 +114,9 @@ public:
     // A mount skipped before execution by sticky ratio sampling; the function
     // stays mounted and observable, only this execution was excluded.
     void record_edge_function_sampled_out(std::string_view function, std::string_view project) noexcept;
+    // Body-phase chain skip (per-request decision) and buffered-byte cost.
+    void record_edge_function_body_skipped(std::string_view project, std::string_view reason) noexcept;
+    void record_edge_function_body_buffered(std::uint64_t bytes) noexcept;
     // Raw input versus compressed wire output of the gzip response path, read
     // from the gzip writer stats when the telemetry is destroyed.
     void record_response_compression_bytes(std::uint64_t raw_bytes, std::uint64_t compressed_bytes) noexcept;

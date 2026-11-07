@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <future>
 #include <memory>
@@ -20,6 +21,7 @@
 #include <fiber/http/HttpExchange.h>
 #include "HttpTransportStub.h"
 #include "config/AccessConfig.h"
+#include "config/AccessConfigLimits.h"
 #include "execution/AccessRequestHandler.h"
 #include "observability/AccessRequestTelemetry.h"
 #include "routing/EdgeFunctionLibrary.h"
@@ -121,9 +123,11 @@ private:
 fiber::async::DetachedTask run_request_on_loop(fiber::event::EventLoop *loop, const RouteConfigStore *store,
                                                std::string request, std::string *output, std::promise<void> *done,
                                                fiber::net::SocketAddress remote_addr = {},
-                                               AccessRequestHandlerOptions handler_options = {}) {
+                                               AccessRequestHandlerOptions handler_options = {},
+                                               fiber::access_server::AccessProxyAdapter proxy_adapter = {}) {
     auto transport = std::make_unique<RecordingTransport>(*loop, std::move(request), *output, std::move(remote_addr));
-    fiber::access_server::AccessRequestHandler access_handler(store->snapshot_provider(), {}, handler_options, {});
+    fiber::access_server::AccessRequestHandler access_handler(store->snapshot_provider(), {}, handler_options,
+                                                              proxy_adapter);
     ClientMetadataResolver client_metadata_resolver(ClientMetadataResolverOptions{
             .mode = ClientMetadataMode::LegacyHeaders,
     });
@@ -139,7 +143,8 @@ fiber::async::DetachedTask run_request_on_loop(fiber::event::EventLoop *loop, co
 }
 
 std::string run_request(const RouteConfigStore &store, std::string request, fiber::net::SocketAddress remote_addr = {},
-                        AccessRequestHandlerOptions handler_options = {}) {
+                        AccessRequestHandlerOptions handler_options = {},
+                        fiber::access_server::AccessProxyAdapter proxy_adapter = {}) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
@@ -148,7 +153,7 @@ std::string run_request(const RouteConfigStore &store, std::string request, fibe
     auto completed = done.get_future();
     fiber::async::spawn(group.at(0), [&]() {
         return run_request_on_loop(&group.at(0), &store, std::move(request), &output, &done, std::move(remote_addr),
-                                   handler_options);
+                                   handler_options, proxy_adapter);
     });
 
     EXPECT_EQ(completed.wait_for(2s), std::future_status::ready);
@@ -473,6 +478,294 @@ return true;)",
     const std::string allowed_response = run_request(store, allowed);
     EXPECT_NE(allowed_response.find(" 200 "), std::string::npos) << allowed_response;
     EXPECT_NE(response_body(allowed_response).find("route-body"), std::string::npos) << allowed_response;
+}
+
+// ---- body-phase end-to-end (design §7) ----
+
+void publish_proxy_route(RouteConfigStore &store, bool edge_function_body) {
+    ProjectConfig config;
+    config.version = 1;
+    config.hosts = std::vector<HostConfigEntry>{HostConfigEntry{
+            .pattern = "api.example.com",
+            .strategy = HostStrategyConfig{},
+    }};
+    RouteConfig route;
+    route.path = "/anything";
+    route.service = "orders/gray";
+    route.edge_function_body = edge_function_body;
+    config.routes = std::vector<std::optional<RouteConfig>>{std::move(route)};
+    auto published = store.apply("orders", config);
+    EXPECT_TRUE(published) << (published ? "" : published.error().message);
+}
+
+void add_body_function(EdgeFunctionsState &state, EdgeFunctionLibrary &library, std::string name,
+                       std::string_view source, std::vector<EdgeFunctionMountConfig> mounts) {
+    auto compiled = library.compile(source, fiber::access_server::EdgeFunctionPhase::RequestBody);
+    ASSERT_TRUE(compiled.has_value()) << (compiled ? "" : compiled.error().message);
+    if (!compiled) {
+        return;
+    }
+    state.total_script_bytes += source.size();
+    state.programs.push_back(std::make_shared<EdgeFunctionProgram>(std::move(*compiled)));
+    EdgeFunctionIndexEntry entry;
+    entry.name = std::move(name);
+    entry.phase = fiber::access_server::EdgeFunctionPhase::RequestBody;
+    entry.mounts = std::move(mounts);
+    state.index.functions.push_back(std::move(entry));
+}
+
+// Mirrors ProxyRequestBodyReader's splice contract: drain the handler's
+// prefetched chain first, then keep reading the exchange until the body
+// completes. received_body must equal the full client body either way.
+struct CapturedBodyProxy {
+    std::string received_body;
+};
+
+fiber::async::Task<fiber::access_server::Result<void>>
+capture_spliced_body_proxy(void *context, fiber::http::HttpExchange &exchange,
+                           const fiber::access_server::CompiledProxyRoute &,
+                           fiber::access_server::ProxyExecutionInput input,
+                           fiber::access_server::AccessRequestTelemetry &telemetry) noexcept {
+    auto &capture = *static_cast<CapturedBodyProxy *>(context);
+    capture.received_body.clear();
+    if (input.prefetched_body != nullptr) {
+        while (input.prefetched_body->readable_bytes() != 0) {
+            fiber::mem::IoBufChain prefix;
+            if (!input.prefetched_body->take_prefix(
+                        std::min<std::size_t>(64U * 1024U, input.prefetched_body->readable_bytes()), prefix)) {
+                co_return std::unexpected(fiber::access_server::Err::from_error(fiber::common::IoErr::NoMem));
+            }
+            while (const fiber::mem::IoBuf *part = prefix.first_readable()) {
+                capture.received_body.append(reinterpret_cast<const char *>(part->readable_data()), part->readable());
+                prefix.consume_and_compact(part->readable());
+            }
+        }
+    }
+    if (!exchange.request_body_spec().is_none()) {
+        for (;;) {
+            auto body = co_await exchange.read_body(64U * 1024U);
+            if (!body) {
+                co_return std::unexpected(fiber::access_server::Err::from_error(body.error()));
+            }
+            const bool complete = body->complete();
+            while (const fiber::mem::IoBuf *part = body->first_readable()) {
+                capture.received_body.append(reinterpret_cast<const char *>(part->readable_data()), part->readable());
+                body->consume_and_compact(part->readable());
+            }
+            if (complete) {
+                break;
+            }
+        }
+    }
+    const std::string_view echoed = capture.received_body;
+    fiber::http::HttpHeaders &response_headers = telemetry.response_headers();
+    if (!response_headers.set("X-Proxy-Fixture", "captured") || !telemetry.finalize_response_headers()) {
+        co_return std::unexpected(fiber::access_server::Err::from_error(fiber::common::IoErr::NoMem));
+    }
+    auto sent_header = co_await telemetry.response_writer().send_header({
+            .kind = fiber::http::OutgoingHeaderKind::Final,
+            .status_code = 200,
+            .headers = &response_headers,
+            .body = fiber::http::HttpBodySpec::ContentLength(echoed.size()),
+            .connection_mode = fiber::http::ResponseConnectionMode::Auto,
+            .end_stream = false,
+    });
+    if (!sent_header) {
+        co_return std::unexpected(fiber::access_server::Err::from_error(sent_header.error()));
+    }
+    if (echoed.empty()) {
+        co_return fiber::access_server::Result<void>{};
+    }
+    auto sent_body = co_await telemetry.response_writer().write_all(
+            reinterpret_cast<const std::uint8_t *>(echoed.data()), echoed.size(), true);
+    if (!sent_body) {
+        co_return std::unexpected(fiber::access_server::Err::from_error(sent_body.error()));
+    }
+    co_return fiber::access_server::Result<void>{};
+}
+
+fiber::access_server::AccessProxyAdapter body_proxy_adapter(CapturedBodyProxy &capture) {
+    return fiber::access_server::AccessProxyAdapter{
+            .context = &capture,
+            .execute = capture_spliced_body_proxy,
+    };
+}
+
+// The dialect has no infix `contains` inside an if-condition; textual body
+// scans use strings.match (design §3.4 sample shape).
+const char *kBodyGuardScript = R"(if (strings.match($req.body, "forbidden")) {
+    resp.send(403, "body-blocked");
+}
+return true;)";
+
+constexpr std::size_t kBodyPhaseCap = fiber::access_server::kAccessConfigLimits.edge_functions.max_body_phase_bytes;
+
+std::string post_json(std::string_view body) {
+    std::string request = "POST /anything HTTP/1.1\r\n"
+                          "Host: api.example.com\r\n"
+                          "Content-Type: application/json\r\n";
+    request += "Content-Length: " + std::to_string(body.size()) + "\r\n";
+    request += "Connection: close\r\n\r\n";
+    request.append(body);
+    return request;
+}
+
+TEST(EdgeFunctionExecutor, BodyFunctionSeesBodyAndReplaysItToTheProxy) {
+    RouteConfigStore store;
+    publish_proxy_route(store, true);
+    EdgeFunctionLibrary library;
+    EdgeFunctionsState state;
+    add_body_function(state, library, "body-guard", kBodyGuardScript, {mounted_everywhere(0)});
+    store.set_edge_functions(std::make_shared<EdgeFunctionsState>(std::move(state)));
+
+    CapturedBodyProxy capture;
+    // A clean body reaches the function (empty $req.body baseline works) and
+    // is replayed verbatim to the proxy.
+    const std::string clean = run_request(store, post_json("{\"ok\":true}"), {}, {}, body_proxy_adapter(capture));
+    EXPECT_NE(clean.find(" 200 "), std::string::npos) << clean;
+    EXPECT_EQ(response_body(clean), "{\"ok\":true}") << clean;
+    EXPECT_EQ(capture.received_body, "{\"ok\":true}");
+
+    // The forbidden marker is visible through $req.body and short-circuits
+    // before the proxy runs.
+    const std::string blocked =
+            run_request(store, post_json("{\"v\":\"forbidden\"}"), {}, {}, body_proxy_adapter(capture));
+    EXPECT_NE(blocked.find(" 403 "), std::string::npos) << blocked;
+    EXPECT_NE(response_body(blocked).find("body-blocked"), std::string::npos) << blocked;
+}
+
+TEST(EdgeFunctionExecutor, BodyFunctionSkippedWithoutRouteOptIn) {
+    RouteConfigStore store;
+    publish_proxy_route(store, false);
+    EdgeFunctionLibrary library;
+    EdgeFunctionsState state;
+    add_body_function(state, library, "body-guard", kBodyGuardScript, {mounted_everywhere(0)});
+    store.set_edge_functions(std::make_shared<EdgeFunctionsState>(std::move(state)));
+
+    CapturedBodyProxy capture;
+    const std::string response = run_request(store, post_json("forbidden"), {}, {}, body_proxy_adapter(capture));
+    // The marker is present but the route never opted in, so the function
+    // does not run and the body still flows to the proxy untouched.
+    EXPECT_NE(response.find(" 200 "), std::string::npos) << response;
+    EXPECT_EQ(capture.received_body, "forbidden");
+}
+
+TEST(EdgeFunctionExecutor, BodyFunctionSkippedForNonWhitelistedContentType) {
+    RouteConfigStore store;
+    publish_proxy_route(store, true);
+    EdgeFunctionLibrary library;
+    EdgeFunctionsState state;
+    add_body_function(state, library, "body-guard", kBodyGuardScript, {mounted_everywhere(0)});
+    store.set_edge_functions(std::make_shared<EdgeFunctionsState>(std::move(state)));
+
+    const std::string request = "POST /anything HTTP/1.1\r\n"
+                                "Host: api.example.com\r\n"
+                                "Content-Type: application/octet-stream\r\n"
+                                "Content-Length: 9\r\n"
+                                "Connection: close\r\n\r\n"
+                                "forbidden";
+    CapturedBodyProxy capture;
+    const std::string response = run_request(store, request, {}, {}, body_proxy_adapter(capture));
+    EXPECT_NE(response.find(" 200 "), std::string::npos) << response;
+    EXPECT_EQ(capture.received_body, "forbidden");
+}
+
+TEST(EdgeFunctionExecutor, WhitelistStripsParametersAndIgnoresCase) {
+    RouteConfigStore store;
+    publish_proxy_route(store, true);
+    EdgeFunctionLibrary library;
+    EdgeFunctionsState state;
+    add_body_function(state, library, "body-guard", kBodyGuardScript, {mounted_everywhere(0)});
+    store.set_edge_functions(std::make_shared<EdgeFunctionsState>(std::move(state)));
+
+    const std::string request = "POST /anything HTTP/1.1\r\n"
+                                "Host: api.example.com\r\n"
+                                "Content-Type: APPLICATION/JSON; charset=utf-8\r\n"
+                                "Content-Length: 9\r\n"
+                                "Connection: close\r\n\r\n"
+                                "forbidden";
+    const std::string response = run_request(store, request);
+    // Parameters are stripped and the comparison is case-insensitive, so the
+    // function still sees the body and blocks.
+    EXPECT_NE(response.find(" 403 "), std::string::npos) << response;
+}
+
+TEST(EdgeFunctionExecutor, BodyFunctionSkippedWhenContentLengthExceedsCap) {
+    RouteConfigStore store;
+    publish_proxy_route(store, true);
+    EdgeFunctionLibrary library;
+    EdgeFunctionsState state;
+    add_body_function(state, library, "body-guard", kBodyGuardScript, {mounted_everywhere(0)});
+    store.set_edge_functions(std::make_shared<EdgeFunctionsState>(std::move(state)));
+
+    // One byte over max_body_phase_bytes (1 MiB): declared length skips the
+    // chain without touching the exchange, and the proxy still receives the
+    // entire body.
+    std::string body(kBodyPhaseCap + 1U, 'x');
+    body.append("forbidden");
+    CapturedBodyProxy capture;
+    const std::string response = run_request(store, post_json(body), {}, {}, body_proxy_adapter(capture));
+    EXPECT_NE(response.find(" 200 "), std::string::npos) << response;
+    EXPECT_EQ(capture.received_body, body);
+}
+
+TEST(EdgeFunctionExecutor, StreamingOverflowSkipsFunctionsAndSplicesWholeBody) {
+    RouteConfigStore store;
+    publish_proxy_route(store, true);
+    EdgeFunctionLibrary library;
+    EdgeFunctionsState state;
+    add_body_function(state, library, "body-guard", kBodyGuardScript, {mounted_everywhere(0)});
+    store.set_edge_functions(std::make_shared<EdgeFunctionsState>(std::move(state)));
+
+    // Chunked body over the cap: the prefetch keeps a bounded prefix, the
+    // functions are skipped, and the prefix plus the live tail still reach
+    // the proxy whole — never a full buffer, never a dropped byte.
+    const std::size_t cap = kBodyPhaseCap;
+    std::string first_chunk(cap + 1U, 'y');
+    std::string request = "POST /anything HTTP/1.1\r\n"
+                          "Host: api.example.com\r\n"
+                          "Content-Type: application/json\r\n"
+                          "Transfer-Encoding: chunked\r\n"
+                          "Connection: close\r\n\r\n";
+    request += std::format("{:x}\r\n", first_chunk.size());
+    request += first_chunk;
+    request += "\r\n5\r\ntail!\r\n0\r\n\r\n";
+
+    CapturedBodyProxy capture;
+    const std::string response = run_request(store, request, {}, {}, body_proxy_adapter(capture));
+    EXPECT_NE(response.find(" 200 "), std::string::npos) << response;
+    EXPECT_EQ(capture.received_body, first_chunk + "tail!");
+}
+
+TEST(EdgeFunctionExecutor, BodyFunctionRunsForEmptyBodyWithWhitelistedType) {
+    RouteConfigStore store;
+    publish_proxy_route(store, true);
+    EdgeFunctionLibrary library;
+    EdgeFunctionsState state;
+    add_body_function(state, library, "empty-guard", R"(if ($req.body == "") {
+    resp.send(200, "empty-body-seen");
+}
+return true;)",
+                      {mounted_everywhere(0)});
+    store.set_edge_functions(std::make_shared<EdgeFunctionsState>(std::move(state)));
+
+    const std::string response = run_request(store, post_json(""));
+    EXPECT_NE(response.find(" 200 "), std::string::npos) << response;
+    EXPECT_NE(response_body(response).find("empty-body-seen"), std::string::npos) << response;
+}
+
+TEST(EdgeFunctionExecutor, HeadFunctionsStillRunBeforeBodyPhase) {
+    RouteConfigStore store;
+    publish_proxy_route(store, true);
+    EdgeFunctionLibrary library;
+    EdgeFunctionsState state;
+    add_function(state, library, "head-first", R"(resp.send(200, "head-wins");)", {mounted_everywhere(0)});
+    add_body_function(state, library, "body-second", R"(resp.send(200, "body-wins");)", {mounted_everywhere(0)});
+    store.set_edge_functions(std::make_shared<EdgeFunctionsState>(std::move(state)));
+
+    const std::string response = run_request(store, post_json("x"));
+    EXPECT_NE(response_body(response).find("head-wins"), std::string::npos) << response;
+    EXPECT_EQ(response_body(response).find("body-wins"), std::string::npos) << response;
 }
 
 } // namespace

@@ -109,8 +109,10 @@ private:
     void emit_event(AccessConfigMetricEvent event) noexcept;
     void publish_evidence() const noexcept;
     void mark_active(std::size_t function_count, std::size_t script_bytes) noexcept;
-    [[nodiscard]] std::shared_ptr<EdgeFunctionProgram> compile_cached(const std::string &sha256_hex,
-                                                                      std::string_view source, bool &compiled);
+    // The cache key is "<sha256>:<phase>": identical script bytes compile
+    // differently per phase ($req.body resolves only in request_body).
+    [[nodiscard]] std::shared_ptr<EdgeFunctionProgram>
+    compile_cached(const std::string &sha256_hex, std::string_view source, bool &compiled, EdgeFunctionPhase phase);
 
     async::Watch<bool> readiness_{false};
     std::optional<async::Watch<bool>::Publisher> readiness_publisher_;

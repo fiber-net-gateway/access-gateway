@@ -156,6 +156,7 @@ constexpr std::size_t kFunctionErrorSeriesLimit = 2048;
 constexpr std::size_t kFunctionEventSeriesLimit = 8192;
 constexpr std::size_t kFunctionReportOverflowSeriesLimit = 1024;
 constexpr std::size_t kFunctionSampledOutSeriesLimit = 4096;
+constexpr std::size_t kFunctionBodySkipSeriesLimit = 2048;
 
 template<std::size_t N>
 bool register_labeled_series(prometheus::MetricsRegistry &registry, prometheus::FamilyId family,
@@ -415,6 +416,19 @@ void AccessServerMetrics::Worker::edge_function_sampled_out(std::string_view fun
     (void) function_sampled_out_dynamic_->inc(labels);
 }
 
+void AccessServerMetrics::Worker::edge_function_body_skipped(std::string_view project,
+                                                             std::string_view reason) noexcept {
+    if (!function_body_skip_dynamic_ || project.empty() || reason.empty()) {
+        return;
+    }
+    const std::array<std::string_view, 2> labels{project, reason};
+    (void) function_body_skip_dynamic_->inc(labels);
+}
+
+void AccessServerMetrics::Worker::edge_function_body_buffered(std::uint64_t bytes) noexcept {
+    function_body_buffered_bytes_.add(bytes);
+}
+
 AccessServerMetrics::AccessServerMetrics(event::EventLoopGroup &workers, const AccessRuntimeMetrics *runtime_metrics) :
     runtime_metrics_(runtime_metrics) {
     valid_ = initialize(workers);
@@ -611,6 +625,7 @@ bool AccessServerMetrics::initialize(event::EventLoopGroup &worker_group) {
     // per family; eviction resets the evicted series (see bounded-metrics.md).
     constexpr std::array<std::string_view, 3> kRouteRequestLabels{"host", "path", "status_code"};
     constexpr std::array<std::string_view, 2> kFunctionEvaluationLabels{"function", "project"};
+    constexpr std::array<std::string_view, 2> kFunctionBodySkipLabels{"project", "reason"};
     constexpr std::array<std::string_view, 1> kFunctionLabels{"function"};
     constexpr std::array<std::string_view, 2> kFunctionErrorLabels{"function", "reason"};
     constexpr std::array<std::string_view, 3> kFunctionEventLabels{"function", "event", "label"};
@@ -658,6 +673,10 @@ bool AccessServerMetrics::initialize(event::EventLoopGroup &worker_group) {
     const prometheus::SeriesOptions function_event_options{
             .mode = prometheus::SeriesMode::Lru,
             .max_series = kFunctionEventSeriesLimit,
+    };
+    const prometheus::SeriesOptions function_body_skip_options{
+            .mode = prometheus::SeriesMode::Lru,
+            .max_series = kFunctionBodySkipSeriesLimit,
     };
     const prometheus::SeriesOptions function_report_overflow_options{
             .mode = prometheus::SeriesMode::Lru,
@@ -718,6 +737,17 @@ bool AccessServerMetrics::initialize(event::EventLoopGroup &worker_group) {
                                        "Edge-function mounts skipped by sticky ratio sampling (peer bucket outside "
                                        "the mount ratio, or ratio 0 = disabled).",
                                        kFunctionEvaluationLabels, function_sampled_out_options);
+    auto function_body_skip =
+            registry_.register_counter("access_server_function_body_skipped_total",
+                                       "Body-phase edge-function chains mounted for the project but not executed, "
+                                       "by skip reason (route has no body opt-in, non-proxy route, content type "
+                                       "outside the whitelist, Content-Length above the buffer cap, or streaming "
+                                       "prefetch above the cap).",
+                                       kFunctionBodySkipLabels, function_body_skip_options);
+    auto function_body_buffered_bytes = registry_.register_counter(
+            "access_server_function_body_buffered_bytes_total",
+            "Request-body bytes buffered to feed body-phase edge functions; bounded per request by "
+            "max_body_phase_bytes.");
     if (!requests || !requests_by_status || !response_compression || !duration || !inflight || !proxy_executions ||
         !proxy_attempts || !proxy_attempts_inflight || !proxy_failures || !proxy_pool_acquires ||
         !proxy_dns_resolutions || !proxy_connect_attempts || !proxy_connect_candidates || !happy_eyeballs ||
@@ -725,7 +755,8 @@ bool AccessServerMetrics::initialize(event::EventLoopGroup &worker_group) {
         !route_requests || !provider_responses || !proxy_errors || !circuit_rejections || !request_body_bytes ||
         !response_body_bytes || !response_compression_bytes || !request_body_size || !response_body_size ||
         !route_body_bytes || !provider_body_bytes || !function_evaluations || !function_duration || !function_errors ||
-        !function_events || !function_report_overflow || !function_sampled_out) {
+        !function_events || !function_report_overflow || !function_sampled_out || !function_body_skip ||
+        !function_body_buffered_bytes) {
         return false;
     }
 
@@ -769,11 +800,13 @@ bool AccessServerMetrics::initialize(event::EventLoopGroup &worker_group) {
     auto inflight_series = registry_.register_series(*inflight);
     auto proxy_attempts_inflight_series = registry_.register_series(*proxy_attempts_inflight);
     auto proxy_connect_candidates_series = registry_.register_series(*proxy_connect_candidates);
+    auto function_body_buffered_bytes_series = registry_.register_series(*function_body_buffered_bytes);
     auto websocket_sessions_inflight_series = registry_.register_series(*websocket_sessions_inflight);
     auto request_body_size_series = registry_.register_series(*request_body_size);
     auto response_body_size_series = registry_.register_series(*response_body_size);
     if (!duration_series || !inflight_series || !proxy_attempts_inflight_series || !proxy_connect_candidates_series ||
-        !websocket_sessions_inflight_series || !request_body_size_series || !response_body_size_series) {
+        !function_body_buffered_bytes_series || !websocket_sessions_inflight_series || !request_body_size_series ||
+        !response_body_size_series) {
         return false;
     }
 
@@ -802,6 +835,7 @@ bool AccessServerMetrics::initialize(event::EventLoopGroup &worker_group) {
     auto function_events_dynamic = registry_.dynamic_counter(*function_events);
     auto function_report_overflow_dynamic = registry_.dynamic_counter(*function_report_overflow);
     auto function_sampled_out_dynamic = registry_.dynamic_counter(*function_sampled_out);
+    auto function_body_skip_dynamic = registry_.dynamic_counter(*function_body_skip);
     if (!route_requests_dynamic || !provider_responses_dynamic || !proxy_errors_dynamic ||
         !circuit_rejections_dynamic || !route_body_bytes_dynamic || !provider_body_bytes_dynamic ||
         !function_evaluations_dynamic || !function_duration_dynamic || !function_errors_dynamic ||
@@ -838,17 +872,20 @@ bool AccessServerMetrics::initialize(event::EventLoopGroup &worker_group) {
         auto inflight_value = shard->gauge(*inflight_series);
         auto proxy_attempts_inflight_value = shard->gauge(*proxy_attempts_inflight_series);
         auto proxy_connect_candidates_value = shard->counter(*proxy_connect_candidates_series);
+        auto function_body_buffered_bytes_value = shard->counter(*function_body_buffered_bytes_series);
         auto websocket_sessions_inflight_value = shard->gauge(*websocket_sessions_inflight_series);
         auto request_body_size_value = shard->histogram(*request_body_size_series);
         auto response_body_size_value = shard->histogram(*response_body_size_series);
         if (!duration_value || !inflight_value || !proxy_attempts_inflight_value || !proxy_connect_candidates_value ||
-            !websocket_sessions_inflight_value || !request_body_size_value || !response_body_size_value) {
+            !function_body_buffered_bytes_value || !websocket_sessions_inflight_value || !request_body_size_value ||
+            !response_body_size_value) {
             return false;
         }
         worker.request_duration_ = *duration_value;
         worker.inflight_ = *inflight_value;
         worker.proxy_attempts_inflight_ = *proxy_attempts_inflight_value;
         worker.proxy_connect_candidates_ = *proxy_connect_candidates_value;
+        worker.function_body_buffered_bytes_ = *function_body_buffered_bytes_value;
         worker.websocket_sessions_inflight_ = *websocket_sessions_inflight_value;
         worker.request_body_size_ = *request_body_size_value;
         worker.response_body_size_ = *response_body_size_value;
@@ -864,6 +901,7 @@ bool AccessServerMetrics::initialize(event::EventLoopGroup &worker_group) {
         worker.function_events_dynamic_ = *function_events_dynamic;
         worker.function_report_overflow_dynamic_ = *function_report_overflow_dynamic;
         worker.function_sampled_out_dynamic_ = *function_sampled_out_dynamic;
+        worker.function_body_skip_dynamic_ = *function_body_skip_dynamic;
     }
     return true;
 }

@@ -42,9 +42,13 @@ enum class EdgeFunctionOutcome : std::uint8_t {
 // execution later in the request is unaffected.
 class EdgeFunctionExecutor final {
 public:
+    // request_body is the prefetched, cap-bounded body view for the
+    // request_body phase (empty for the request_head phase, where a script
+    // referencing $req.body fails to compile); it must outlive this call.
     [[nodiscard]] static fiber::async::Task<EdgeFunctionOutcome>
     run(std::span<const EdgeFunctionMounted> mounted, http_script::ScriptExchangeCtx &script_context,
-        AccessRequestTelemetry &telemetry, std::string_view project, std::string_view host, bool fail_close) noexcept;
+        AccessRequestTelemetry &telemetry, std::string_view project, std::string_view host, bool fail_close,
+        std::string_view request_body = {}) noexcept;
 };
 
 } // namespace fiber::access_server

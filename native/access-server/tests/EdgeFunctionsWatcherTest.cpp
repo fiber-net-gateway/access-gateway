@@ -751,6 +751,42 @@ TEST(EdgeFunctionsWatcherTest, IndexUpdateStopsRemovedScriptAndReusesCompile) {
     EXPECT_TRUE(completed);
 }
 
+TEST(EdgeFunctionsWatcherTest, SameBytesInTwoPhasesCompileAndCacheSeparately) {
+    fiber::event::EventLoop loop;
+    FakeConfigService service;
+    fiber::access_server::RouteConfigStore store;
+    fiber::access_server::EdgeFunctionsWatcher watcher(loop, service, store);
+    bool completed = false;
+
+    fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
+        auto readiness = watcher.subscribe_readiness();
+        EXPECT_TRUE(watcher.start());
+
+        // Identical script bytes mounted twice — once per phase. The body
+        // entry must compile (phase joins the cache key) and the head entry
+        // stays usable; both programs live in the cache.
+        const std::string script = "return true;";
+        const std::string two_phases =
+                index_json(function_json("head-fn", sha256_hex(script)) + "," +
+                           "{\"name\": \"body-fn\", \"sha256\": \"" + sha256_hex(script) +
+                           "\", \"phase\": \"request_body\", \"mounts\": [{\"projects\": {\"include\": [\"*\"]}}]}");
+        service.push(fiber::access_server::kEdgeFunctionIndexDataId, two_phases, "idx-1");
+        service.push(script_data_id("head-fn"), script);
+        service.push(script_data_id("body-fn"), script);
+        ReadinessWatch::Snapshot snapshot;
+        co_await wait_for_readiness(readiness, snapshot, true);
+        EXPECT_EQ(store.pin()->edge_function_count(), 2u);
+        EXPECT_EQ(watcher.compiled_cache_size(), 2u);
+        EXPECT_EQ(watcher.successful_updates(), 1u);
+
+        co_await watcher.shutdown();
+        completed = true;
+        loop.stop();
+    });
+    loop.run();
+    EXPECT_TRUE(completed);
+}
+
 TEST(EdgeFunctionsWatcherTest, ScriptSubscriptionStartFailureIsReported) {
     fiber::event::EventLoop loop;
     FakeConfigService service;

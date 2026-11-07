@@ -214,6 +214,18 @@ DecodeResult<EdgeFunctionIndexEntry> index_entry(const AccessJsonValue &value, c
                 return std::unexpected(invalid_field(path, "expected 64 lowercase hex sha256 characters"));
             }
             entry.sha256_hex.assign(property.value.as_text());
+        } else if (property.key == "phase") {
+            if (!property.value.is_text()) {
+                return std::unexpected(invalid_field(path, "expected a phase string"));
+            }
+            const std::string_view phase = property.value.as_text();
+            if (phase == "request_head") {
+                entry.phase = EdgeFunctionPhase::RequestHead;
+            } else if (phase == "request_body") {
+                entry.phase = EdgeFunctionPhase::RequestBody;
+            } else {
+                return std::unexpected(invalid_field(path, "phase must be request_head or request_body"));
+            }
         } else if (property.key == "mounts") {
             have_mounts = true;
             if (!property.value.is_array() || property.value.as_array().empty()) {

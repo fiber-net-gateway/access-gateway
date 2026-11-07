@@ -180,7 +180,7 @@ TEST(NativeValidatorProtocolTest, ReportsStableLimitErrorsWithoutEchoingValues) 
 
 TEST(NativeValidatorProtocolTest, DescribesTheRuntimeConfigLimits) {
     const std::string response = fiber::access_server::native_validator_config_limits_response();
-    EXPECT_NE(response.find(R"("schemaVersion":4)"), std::string::npos) << response;
+    EXPECT_NE(response.find(R"("schemaVersion":5)"), std::string::npos) << response;
     EXPECT_NE(response.find(R"("maxUpstreamTlsProfiles":256)"), std::string::npos) << response;
     EXPECT_NE(response.find(R"("maxUpstreamTlsCaPemBytes":524288)"), std::string::npos) << response;
     EXPECT_NE(response.find(R"("maxPayloadBytes":4194304)"), std::string::npos) << response;
@@ -194,6 +194,7 @@ TEST(NativeValidatorProtocolTest, DescribesTheRuntimeConfigLimits) {
             << response;
     EXPECT_NE(response.find(R"("maxCidrDirectivesPerScript":16,"maxCidrsPerDirective":256)"), std::string::npos)
             << response;
+    EXPECT_NE(response.find(R"("maxInputFieldBytes":8192,"maxBodyPhaseBytes":1048576)"), std::string::npos) << response;
 }
 
 TEST(NativeValidatorProtocolTest, ValidatesEdgeFunctionIndexCandidates) {
@@ -268,6 +269,37 @@ TEST(NativeValidatorProtocolTest, ReportsEdgeScriptCompileErrorsWithoutEchoingSo
     EXPECT_NE(response.find(R"("field":"payloadBase64")"), std::string::npos) << response;
     EXPECT_NE(response.find(R"("offset":)"), std::string::npos) << response;
     EXPECT_EQ(response.find("secret_marker"), std::string::npos) << response;
+}
+
+std::string phase_request(std::string_view payload, std::string_view phase) {
+    const std::string encoded =
+            fiber::util::base64_encode(reinterpret_cast<const std::uint8_t *>(payload.data()), payload.size());
+    return R"({"contractVersion":1,"requestId":"test-request","kind":"edge_function_script","phase":")" +
+           std::string(phase) + R"(","project":"","payloadBase64":")" + encoded + R"("})";
+}
+
+TEST(NativeValidatorProtocolTest, PhaseFieldCompilesBodyScriptsAndRejectsUnknownValues) {
+    // $req.body only resolves in the request_body phase; the phase field
+    // selects the compilation mode (design §7).
+    const std::string body_ok = fiber::access_server::process_native_validator_request(
+            phase_request("return $req.body == \"\";", "request_body"));
+    EXPECT_NE(body_ok.find(R"("valid":true)"), std::string::npos) << body_ok;
+
+    const std::string head_rejected = fiber::access_server::process_native_validator_request(
+            phase_request("return $req.body == \"\";", "request_head"));
+    EXPECT_NE(head_rejected.find(R"("valid":false)"), std::string::npos) << head_rejected;
+    EXPECT_NE(head_rejected.find(R"("code":"script_compile_failed")"), std::string::npos) << head_rejected;
+
+    // Omitting the phase keeps the request_head default.
+    const std::string default_head = fiber::access_server::process_native_validator_request(
+            request("edge_function_script", "", "return $req.body == \"\";"));
+    EXPECT_NE(default_head.find(R"("valid":false)"), std::string::npos) << default_head;
+
+    const std::string bad_phase =
+            fiber::access_server::process_native_validator_request(phase_request("true", "response"));
+    EXPECT_NE(bad_phase.find(R"("valid":false)"), std::string::npos) << bad_phase;
+    EXPECT_NE(bad_phase.find(R"("code":"invalid_request")"), std::string::npos) << bad_phase;
+    EXPECT_NE(bad_phase.find(R"("field":"phase")"), std::string::npos) << bad_phase;
 }
 
 TEST(NativeValidatorProtocolTest, RejectsOversizedEdgeScriptPayload) {

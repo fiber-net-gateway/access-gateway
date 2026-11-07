@@ -777,6 +777,7 @@ std::expected<CompiledRoute, AccessConfigError> compile_route(std::string_view p
                                            "script is only valid for SCRIPT routes"));
     } else if (route.type == RouteType::Response) {
         route.max_client_body_size = source.max_client_body_size;
+        route.edge_function_body = source.edge_function_body.value_or(false);
         if (source.status < 100 || source.status >= 1000) {
             return std::unexpected(
                     route_error(AccessConfigErrorCode::OutOfRange, route_index, "status", "invalid status code"));
@@ -873,6 +874,7 @@ std::expected<CompiledRoute, AccessConfigError> compile_route(std::string_view p
         route.response.emplace(std::move(response));
     } else {
         route.max_client_body_size = source.max_client_body_size;
+        route.edge_function_body = source.edge_function_body.value_or(false);
         if (source.timeout_millis && *source.timeout_millis < 5) {
             return std::unexpected(
                     route_error(AccessConfigErrorCode::OutOfRange, route_index, "timeout", "timeout is too small"));

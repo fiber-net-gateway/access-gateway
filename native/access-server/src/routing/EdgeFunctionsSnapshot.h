@@ -27,7 +27,9 @@ struct EdgeFunctionsState {
     std::uint64_t total_script_bytes = 0;
 };
 
-// One function mounted on one project, ready for request-time execution.
+// One function mounted on one project, ready for request-time execution. The
+// chain a mounted entry belongs to carries its phase: mounted_for() returns
+// the request_head chain, mounted_body_for() the request_body chain.
 struct EdgeFunctionMounted {
     std::string_view name; // borrowed from the table's storage
     EdgeFunctionProgram *program; // borrowed; the table owns the shared_ptr
@@ -51,8 +53,11 @@ public:
     [[nodiscard]] static std::shared_ptr<const EdgeFunctionMountTable>
     build(const EdgeFunctionsState &state, std::span<const std::string_view> project_names);
 
-    // Sorted-project lookup; allocation-free.
+    // Sorted-project lookup; allocation-free. Head chain (runs before route
+    // matching) and body chain (runs for opted-in routes after the body was
+    // prefetched), each in priority order with declaration-order ties.
     [[nodiscard]] std::span<const EdgeFunctionMounted> mounted_for(std::string_view project) const noexcept;
+    [[nodiscard]] std::span<const EdgeFunctionMounted> mounted_body_for(std::string_view project) const noexcept;
 
     [[nodiscard]] bool empty() const noexcept { return entries_.empty(); }
     [[nodiscard]] std::size_t mounted_project_count() const noexcept { return project_names_.size(); }
@@ -70,6 +75,8 @@ private:
     std::vector<std::string> name_storage_;
     std::vector<EdgeFunctionMounted> entries_;
     std::vector<std::uint32_t> group_offsets_;
+    // Per project, where the request_body chain begins inside the group span.
+    std::vector<std::uint32_t> body_offsets_;
     std::vector<std::string_view> project_names_;
 };
 

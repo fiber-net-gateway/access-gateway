@@ -81,6 +81,14 @@ std::vector<std::string_view> mounted_names(const EdgeFunctionMountTable &table,
     return names;
 }
 
+std::vector<std::string_view> mounted_body_names(const EdgeFunctionMountTable &table, std::string_view project) {
+    std::vector<std::string_view> names;
+    for (const EdgeFunctionMounted &entry: table.mounted_body_for(project)) {
+        names.push_back(entry.name);
+    }
+    return names;
+}
+
 TEST(EdgeGlob, MatchesSingleStarSemantics) {
     EXPECT_TRUE(edge_glob_matches("*", "anything"));
     EXPECT_TRUE(edge_glob_matches("*", ""));
@@ -165,6 +173,54 @@ TEST(EdgeFunctionMountTable, PerProjectGroupsAreIndependent) {
     EXPECT_EQ(mounted_names(*table, "q"), std::vector<std::string_view>({"only-q"}));
     EXPECT_TRUE(table->mounted_for("r").empty());
     EXPECT_EQ(table->mounted_project_count(), 2U);
+}
+
+TEST(EdgeFunctionMountTable, BodyPhaseEntriesLandInTheBodyChain) {
+    EdgeFunctionIndexEntry head = function("waf", {mount({"loan-web"}, 100)});
+    EdgeFunctionIndexEntry body;
+    body.name = "body-scan";
+    body.phase = fiber::access_server::EdgeFunctionPhase::RequestBody;
+    body.mounts = {mount({"loan-web"}, 50)};
+    const EdgeFunctionsState state = state_with({head, body});
+    const std::vector<std::string> projects{"loan-web"};
+    const std::shared_ptr table = build_table(state, projects);
+    EXPECT_EQ(mounted_names(*table, "loan-web"), (std::vector<std::string_view>{"waf"}));
+    EXPECT_EQ(mounted_body_names(*table, "loan-web"), (std::vector<std::string_view>{"body-scan"}));
+}
+
+TEST(EdgeFunctionMountTable, BodyChainSortsByPriorityIndependently) {
+    EdgeFunctionIndexEntry low;
+    low.name = "body-low";
+    low.phase = fiber::access_server::EdgeFunctionPhase::RequestBody;
+    low.mounts = {mount({"loan-web"}, 200)};
+    EdgeFunctionIndexEntry high;
+    high.name = "body-high";
+    high.phase = fiber::access_server::EdgeFunctionPhase::RequestBody;
+    high.mounts = {mount({"loan-web"}, 10)};
+    EdgeFunctionIndexEntry head_between;
+    head_between.name = "head-between";
+    head_between.mounts = {mount({"loan-web"}, 100)};
+    const EdgeFunctionsState state = state_with({low, high, head_between});
+    const std::vector<std::string> projects{"loan-web"};
+    const std::shared_ptr table = build_table(state, projects);
+    // Head and body chains sort independently; a head function's priority
+    // never interleaves with the body chain.
+    EXPECT_EQ(mounted_names(*table, "loan-web"), (std::vector<std::string_view>{"head-between"}));
+    EXPECT_EQ(mounted_body_names(*table, "loan-web"), (std::vector<std::string_view>{"body-high", "body-low"}));
+}
+
+TEST(EdgeFunctionMountTable, BodyOnlyProjectStillExposesEmptyHeadChain) {
+    EdgeFunctionIndexEntry body;
+    body.name = "body-scan";
+    body.phase = fiber::access_server::EdgeFunctionPhase::RequestBody;
+    body.mounts = {mount({"trade-web"}, 0)};
+    const EdgeFunctionsState state = state_with({body});
+    const std::vector<std::string> projects{"trade-web"};
+    const std::shared_ptr table = build_table(state, projects);
+    EXPECT_TRUE(mounted_names(*table, "trade-web").empty());
+    EXPECT_EQ(mounted_body_names(*table, "trade-web"), (std::vector<std::string_view>{"body-scan"}));
+    // Unknown projects see neither chain.
+    EXPECT_TRUE(mounted_body_names(*table, "loan-web").empty());
 }
 
 TEST(EdgeFunctionMountTable, EmptyIndexUnmountsEverything) {
