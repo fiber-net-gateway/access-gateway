@@ -4,6 +4,7 @@ import { badRequest } from '../../shared/errors.js'
 import { requireActor } from '../auth/http.js'
 import type { AuthService } from '../auth/model.js'
 import type { WafCompilePreviewView, WafService } from './service.js'
+import type { WafReleaseService } from './release-service.js'
 
 function parseIfMatch(value: string | undefined): string {
   if (!value) {
@@ -221,7 +222,12 @@ interface SaveWafPolicyBody {
   policy: unknown
 }
 
-export function registerWafRoutes(app: FastifyInstance, auth: AuthService, waf: WafService): void {
+export function registerWafRoutes(
+  app: FastifyInstance,
+  auth: AuthService,
+  waf: WafService,
+  wafReleases: WafReleaseService,
+): void {
   app.get(
     '/api/waf/policy',
     { schema: { response: { 200: wafPolicyDraftResponseSchema } } },
@@ -293,5 +299,204 @@ export function registerWafRoutes(app: FastifyInstance, auth: AuthService, waf: 
       reply.header('cache-control', 'no-store')
       return result
     },
+  )
+
+  registerWafReleaseRoutes(app, auth, wafReleases)
+}
+
+const wafReleaseResourceSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['id', 'kind', 'dataId', 'group', 'status', 'verifiedSha256', 'verifiedAt'],
+  properties: {
+    id: { type: 'string', format: 'uuid' },
+    kind: { type: 'string', enum: ['edge_function_script', 'edge_function_index'] },
+    dataId: { type: 'string' },
+    group: { type: 'string' },
+    status: {
+      type: 'string',
+      enum: ['pending', 'running', 'verified', 'failed', 'conflict', 'conflict_after_partial'],
+    },
+    verifiedSha256: { type: ['string', 'null'], pattern: '^[0-9a-f]{64}$' },
+    verifiedAt: { type: ['string', 'null'], format: 'date-time' },
+  },
+} as const
+
+const activationSummarySchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: [
+    'status',
+    'targetCount',
+    'activeCount',
+    'pendingCount',
+    'degradedCount',
+    'unknownCount',
+    'evaluatedAt',
+  ],
+  properties: {
+    status: { type: 'string', enum: ['unknown', 'pending', 'active', 'degraded'] },
+    targetCount: { type: 'integer', minimum: 0 },
+    activeCount: { type: 'integer', minimum: 0 },
+    pendingCount: { type: 'integer', minimum: 0 },
+    degradedCount: { type: 'integer', minimum: 0 },
+    unknownCount: { type: 'integer', minimum: 0 },
+    evaluatedAt: { type: ['string', 'null'], format: 'date-time' },
+  },
+} as const
+
+const wafReleaseResponseSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: [
+    'id',
+    'sequence',
+    'status',
+    'functionName',
+    'mode',
+    'scriptSha256',
+    'ruleCount',
+    'indexVersion',
+    'resources',
+    'publication',
+    'activationStatus',
+    'activation',
+    'createdAt',
+    'publishedAt',
+  ],
+  properties: {
+    id: { type: 'string', format: 'uuid' },
+    sequence: { type: 'string', pattern: '^(0|[1-9][0-9]*)$' },
+    status: {
+      type: 'string',
+      enum: [
+        'creating',
+        'validating',
+        'validation_failed',
+        'ready',
+        'queued',
+        'publishing',
+        'published',
+        'partially_published',
+        'publish_failed',
+        'canceled',
+        'superseded',
+        'abandoned',
+      ],
+    },
+    functionName: { type: 'string' },
+    mode: { type: 'string', enum: ['mounted', 'unmount'] },
+    scriptSha256: { type: ['string', 'null'], pattern: '^[0-9a-f]{64}$' },
+    ruleCount: { type: 'integer', minimum: 0 },
+    indexVersion: { type: 'string', pattern: '^(0|[1-9][0-9]*)$' },
+    resources: { type: 'array', items: wafReleaseResourceSchema },
+    publication: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['jobId', 'state'],
+      properties: {
+        jobId: { type: ['string', 'null'], format: 'uuid' },
+        state: { type: ['string', 'null'] },
+      },
+    },
+    activationStatus: { type: 'string' },
+    activation: activationSummarySchema,
+    createdAt: { type: 'string', format: 'date-time' },
+    publishedAt: { type: ['string', 'null'], format: 'date-time' },
+  },
+} as const
+
+function parseIdempotencyKey(value: string | undefined): string {
+  const key = value?.trim() ?? ''
+  if (key.length < 1 || key.length > 128 || !/^[\x21-\x7e]+$/u.test(key)) {
+    throw badRequest(
+      'INVALID_IDEMPOTENCY_KEY',
+      'Idempotency-Key must contain 1-128 printable ASCII characters',
+    )
+  }
+  return key
+}
+
+const releaseParameters = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['releaseId'],
+  properties: { releaseId: { type: 'string', format: 'uuid' } },
+} as const
+
+const idempotencyHeaders = {
+  type: 'object',
+  required: ['idempotency-key'],
+  properties: { 'idempotency-key': { type: 'string', minLength: 1, maxLength: 128 } },
+} as const
+
+function registerWafReleaseRoutes(
+  app: FastifyInstance,
+  auth: AuthService,
+  wafReleases: WafReleaseService,
+): void {
+  app.get(
+    '/api/waf/releases',
+    {
+      schema: {
+        response: {
+          200: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['items'],
+            properties: { items: { type: 'array', items: wafReleaseResponseSchema } },
+          },
+        },
+      },
+    },
+    async () => wafReleases.list(await requireActor(auth)),
+  )
+
+  app.get<{ Params: { releaseId: string } }>(
+    '/api/waf/releases/:releaseId',
+    { schema: { params: releaseParameters, response: { 200: wafReleaseResponseSchema } } },
+    async (request) => wafReleases.get(await requireActor(auth), request.params.releaseId),
+  )
+
+  app.post<{ Headers: { 'idempotency-key'?: string } }>(
+    '/api/waf/releases',
+    { schema: { headers: idempotencyHeaders, response: { 201: wafReleaseResponseSchema } } },
+    async (request, reply) => {
+      const release = await wafReleases.create(
+        await requireActor(auth),
+        { idempotencyKey: parseIdempotencyKey(request.headers['idempotency-key']) },
+        String(request.id),
+      )
+      return reply.code(201).send(release)
+    },
+  )
+
+  app.post<{ Params: { releaseId: string }; Headers: { 'idempotency-key'?: string } }>(
+    '/api/waf/releases/:releaseId/publication',
+    {
+      schema: {
+        params: releaseParameters,
+        headers: idempotencyHeaders,
+        response: {
+          200: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['jobId', 'state', 'release'],
+            properties: {
+              jobId: { type: 'string', format: 'uuid' },
+              state: { type: 'string' },
+              release: wafReleaseResponseSchema,
+            },
+          },
+        },
+      },
+    },
+    async (request) =>
+      wafReleases.queuePublication(
+        await requireActor(auth),
+        request.params.releaseId,
+        parseIdempotencyKey(request.headers['idempotency-key']),
+        String(request.id),
+      ),
   )
 }
