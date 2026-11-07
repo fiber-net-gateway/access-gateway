@@ -13,6 +13,6 @@ produce the checked-in HTML fragments under `docs/user-guide/html/`. The Console
 fragments and exposes them under `/docs/zh-CN/...` and `/docs/en/...`. Run `npm run docs:check` to
 verify that generated HTML matches its source.
 
-These guides describe the repository-owned access-server and the pinned Fiber revision
-`0fda7764bf94944aca4b674ab5ab311184703118`. Production script-corpus differential verification and
+These guides describe the repository-owned access-server and the Fiber revision pinned by the
+`third_party/fiber-gateway-cpp` gitlink. Production script-corpus differential verification and
 the final cutover gates remain incomplete; the guide does not claim production cutover readiness.

@@ -197,7 +197,8 @@ schema version 1 限额 JSON。Console 在启动时探测该输出；完整数�
 
 ## 运行
 
-复制示例配置并至少修改 Nacos 地址：
+复制示例配置，至少修改 Nacos 地址，并把 `ACCESS_SERVER_NETWORK_ENTRY` 设为该实例服务的入口网络
+（缺失时启动失败）：
 
 ```bash
 cp native/access-server/access-server.env.example access-server.env
@@ -271,11 +272,12 @@ CAT 默认关闭；任一 `CAT_*` 设置非空后必须给出完整 app key、ho
 
 安全模式会在 EventLoop 启动前初始化 trust store，路径不存在或 bundle 无效时启动失败，错误和日志
 不回显路径。hostname endpoint 自动发送同名 SNI 并校验证书名；IP endpoint 不发送 IP-valued SNI，
-而是校验证书的 IP identity。该策略在进程生命周期内固定，因此当前连接池不会跨不同 trust profile
-复用连接。CA bundle 内容变更不作为热更新；需要滚动重启以重新验证文件并排空按旧 trust store
-建立的连接。路由级 CA、SNI 和独立校验名尚未开放；它们依赖 Fiber 连接池按 TLS transport
-profile 隔离，跟踪于
-[fiber-gateway-cpp #28](https://github.com/fiber-net-gateway/fiber-gateway-cpp/issues/28)。
+而是校验证书的 IP identity。该策略在进程生命周期内固定。CA bundle 内容变更不作为热更新；需要
+滚动重启以重新验证文件并排空按旧 trust store 建立的连接。
+
+PROXY Route 可用 `upstream_tls` profile 覆盖进程默认策略，单独配置校验模式、CA、SNI、校验名和
+mTLS 客户端身份。每个 profile 使用独立的连接池 affinity，不会与其他 profile 复用连接。字段规则和
+证书轮换顺序见[路由规则与详细用法](../../docs/user-guide/zh-CN/routing.md)。
 
 `ACCESS_SERVER_CLIENT_METADATA_MODE` 控制请求来源信任边界：
 

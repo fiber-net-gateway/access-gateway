@@ -2,110 +2,323 @@
 
 [English](README.md) | 简体中文
 
-Access Gateway 是由 C++23 数据面与 Web 管理控制台组成的高性能网关产品。数据面迁移自
-[`fiber-gateway-cpp/apps/access-server`](https://github.com/fiber-net-gateway/fiber-gateway-cpp/tree/master/apps/access-server)，
-并继续使用固定版本的 Fiber 框架作为运行时基础。控制面前后端均采用 TypeScript，前端
-使用 React，后端使用 Node.js。
+Access Gateway 是一个自托管的 HTTP 网关，由两部分组成：
+
+- **`access-server`**：基于 [Fiber](https://github.com/fiber-net-gateway/fiber-gateway-cpp) 框架的 C++23 数据面，负责接收客户端流量、选择路由，并响应或代理每个请求。
+- **Console**：基于 React 和 Fastify 的管理控制台，运维人员在这里编写、校验、发布和回滚配置，并确认哪些实例真正运行着这份配置。
+
+配置经由 rnacos（Nacos）从 Console 到达数据面。数据面迁移自 Java 网关 `ploto-unified-access`，并保留了它的配置 wire 格式。
+
+本文介绍产品的功能和运行方式。工作原理见[架构与原理](docs/architecture.md)。
 
 ## 项目状态
 
-本仓库同时持续开发两个一等组件：
+Access Gateway 正在积极开发中，尚不具备生产使用条件。
 
-- **Access Server**：原生运行时已支持默认开启的 HTTPS、HTTP/2 与 HTTP/3、Nacos 驱动的原子
-  TLS 证书快照、项目与路由配置、Host/Path/条件
-  匹配、带静态/动态响应 gzip 协商的 RESPONSE 执行、PROXY 执行、WebSocket 隧道、服务发现、
-  灰度路由、CAT 链路追踪、
-  Prometheus 指标和结构化访问日志。2026-07-31 测试环境有限语法快照已完成 352/352
-  decode + compile-only；完整生产语料差分验证与最终切流门槛仍未完成。
-- **Console**：首个基于 MySQL 的纵向链路已经可用，包括确定性 migration、开发身份与固定
-  部署 RBAC、不含环境参数的域名 Project API、加密的不可变配置版本、乐观锁、审计
-  事件，以及 route-first React 工作台。每条 Route 使用独立挂载的 CodeMirror YAML 编辑器，
-  并确定性编译为 native JSON wire model。Release/发布表、Release 状态机、发布冲突判定和
-  fail-closed Native Validator 适配器、当前/历史版本 Release 创建和带 lease/回读证据的 rnacos
-  发布 Worker 已经落地；Project 级版本化网络策略、独立加密 TLS 库存、不可变证书版本、基于
-  DNS SAN 的 ClientHello SNI 自动选择与解析预览也已实现，并支持 TLS 快照 Release、发布与回读
-  证据。Project 仍按 HTTP Host/`:authority` 选择，不与 SNI 绑定。Project/TLS Release 的认证、
-  有界逐实例生效证据和带租约采集器已经实现；OIDC、资源级发布重试与恢复仍待实现。
+- **数据面**：2026-07-31 的有限测试环境快照通过了 352/352 项解码和编译检查，但生产语料差分验证和最终切流门禁尚未完成，[切流门禁](native/access-server/docs/cutover-evidence-gate.md)状态为 `NOT_MET`。
+- **Console**：目前唯一可用的身份模式是本地开发管理员，文档加密使用本地密钥。`AUTH_MODE=oidc` 在 provider 适配器实现之前会拒绝启动。
 
-因此，对于尚无配套工作流的状态，控制台会明确显示“不可用”或“未知”，不会伪造发布或
-生效成功。
+完整清单见[已知限制](#已知限制)。
 
-## 架构
+## 数据面功能
 
-```mermaid
-flowchart LR
-    User[运维人员] --> Web[React Console]
-    Web --> API[Node.js / Fastify API]
-    API --> DB[(控制面数据库)]
-    Worker[发布 Worker] <--> DB
-    Collector[生效证据采集器] <--> DB
-    Worker --> Nacos[(Nacos / rnacos)]
-    Nacos --> Access[原生 Access Server]
-    Access --> Collector
-    Discovery[Nacos NamingService] --> Access
-    Client[网关客户端] --> Access
-    Access --> Upstream[上游服务]
-    Access --> Obs[CAT / Prometheus / 日志]
+### 监听器与协议
+
+| 监听器      | 默认地址           | 提供                                       |
+| ----------- | ------------------ | ------------------------------------------ |
+| 网关 TLS    | `0.0.0.0:8443/tcp` | HTTPS，通过 ALPN 协商 HTTP/1.1 和 HTTP/2   |
+| 网关 HTTP/3 | `0.0.0.0:8443/udp` | 基于 QUIC 的 HTTP/3，通过 `Alt-Svc` 发布   |
+| 明文        | `0.0.0.0:8000/tcp` | HTTP/1.1，可与 TLS 并行，也可作为唯一监听  |
+| 状态        | `0.0.0.0:8001`     | Prometheus `/metrics` 和可选的激活证据接口 |
+
+HTTP worker 数量根据进程 CPU affinity 和 cgroup v1/v2 配额自动确定。
+
+### Project 与 Host
+
+一个 Project 拥有一组 Host 模式和一个有序的路由列表。Host 匹配不区分大小写，匹配前去除端口和一个末尾的点，每个模式只能属于一个 Project。
+
+| 模式     | 示例              | 匹配                                                     |
+| -------- | ----------------- | -------------------------------------------------------- |
+| 精确     | `api.example.com` | 仅该 Host                                                |
+| 后缀通配 | `*.example.com`   | `a.example.com` 和 `a.b.example.com`，不含 `example.com` |
+| 全局通配 | `*`               | 任意合法 Host                                            |
+
+Project 由 HTTP `Host` 或 `:authority` 选择，与 TLS SNI 无关，所以一张证书可以服务多个 Project，反之亦然。
+
+### 路由匹配
+
+路由先按 Path 结构匹配，再判断可选的 method 和 condition。
+
+| Path 形式  | 示例            | 捕获                        |
+| ---------- | --------------- | --------------------------- |
+| 静态段     | `/users/me`     | 无                          |
+| 参数段     | `/users/:id`    | 一个段，读作 `$path.id`     |
+| 尾部通配段 | `/assets/*rest` | 剩余路径，读作 `$path.rest` |
+
+静态段优先于参数段，参数段优先于通配段。同一路径上的候选按配置顺序判断。`condition` 是编译后的表达式，可以读取 `$path`、`$query`、`$header`、`$cookie`、`$context`、`$req` 和 `$conn`：
+
+```yaml
+path: /api/orders/:id
+method: GET
+condition: '$header.x_tenant == "acme"'
+type: PROXY
+service: orders/stable
 ```
 
-Console 负责配置编写和发布流程，只有 `access-server` 位于网关流量链路中。草稿、已发布
-和已生效是相互独立的状态：Nacos 写入成功不代表某个服务实例已经启用新快照。
+### 路由类型
 
-## 仓库结构
+**RESPONSE** 由网关直接响应，不访问上游。响应体可以是 `TEXT`、`BASE64`（编译期解码）或 `TEMPLATE`（每个请求求值 `${...}` 表达式）。
 
-```text
-access-gateway/
-├── native/
-│   ├── CMakeLists.txt             # 原生构建与固定版本 Fiber 集成
-│   └── access-server/             # 本仓库维护的 C++23 数据面
-├── server/                        # TypeScript、Node.js、Fastify Console API
-├── web/                           # TypeScript、React、Vite Console 前端
-├── third_party/
-│   └── fiber-gateway-cpp/         # 固定版本、只读的 Git 子模块
-├── AGENTS.md                      # 仓库开发规范
-└── package.json                   # 根 npm 工作区与统一命令
+```yaml
+path: /healthz
+method: GET
+type: RESPONSE
+status: 200
+body:
+  type: TEXT
+  content: ok
+response_headers:
+  Content-Type: text/plain; charset=utf-8
 ```
 
-应用特有的数据面行为放在 `native/access-server`。可复用的 Fiber 运行时、HTTP、Nacos、
-CAT、Prometheus、JSON 和脚本组件来自固定版本的子模块。
+**PROXY** 转发到上游服务，支持路径改写和 header 模板。
 
-## 环境要求
+```yaml
+path: /api/orders/:id
+type: PROXY
+service: orders/stable
+timeout: 30s
+rewrite: '/internal/orders/${$path.id}'
+proxy_headers:
+  X-Tenant: '${$header.x_tenant}'
+response_headers:
+  Cache-Control: no-store
+```
 
-Console 开发需要：
+**SCRIPT** 运行类 JavaScript 程序，在配置加载时编译。脚本可以读取请求和 JSON、二进制请求体，设置 header 和 cookie，发送响应，并通过 `http` directive 调用固定的 HTTP 后端。标准库覆盖字符串、数组、二进制、哈希、数学、随机数、JSON 和 URL。它不是 Node.js：没有文件系统、定时器、模块和用户自定义函数。
 
-- Node.js 20.19 或更高版本；
-- 支持 workspace 的 npm。
+<!-- prettier-ignore -->
+```javascript
+return {
+    id: $path.id,
+    method: $req.method,
+    source: $query.source || "unknown"
+};
+```
 
-原生代码目前面向 Linux，需要：
+### 代理
 
-- CMake 4.1 或更高版本；
-- Ninja；
-- Clang 17 或更高版本，或者 GCC 13 或更高版本；
-- 支持 C++23 的工具链。
+- **上游**：NamingService 服务发现（`service`，可带 `/cluster` 后缀）或静态 `addresses` 列表。服务发现只使用 enabled、healthy 且权重为正的实例，并优先选择本 zone。
+- **负载均衡**：平滑加权轮询，带逐 endpoint 的熔断。
+- **重试**：连接失败时重新选择实例，最多尝试 4 次，且仅限请求头尚未开始发送时，所以请求不会被投递两次。
+- **连接**：连接池、有界 DNS resolver（没有隐式公共 DNS 回退），以及在单一连接期限内跨解析地址的 Happy Eyeballs。
+- **改写**：`rewrite`、`proxy_headers` 和 `response_headers` 模板；不配置 rewrite 时保留原始 URI 和百分号编码。`Location` 和 `Refresh` 自动改写，除非路由显式覆盖。
+- **流式传输**：双向流式转发请求体和响应体。`flush: true` 降低 SSE 和慢速上传的延迟。
+- **WebSocket**：配置了 `websocket_timeout` 的路由以原始字节隧道转发 HTTP/1.1 升级请求。
+- **限制**：路由级 `max_client_body_size`、`max_proxy_body_size` 和 `timeout`，未配置时使用服务默认值（请求 400 MiB，代理响应 600 MiB）。
 
-首次配置原生构建时可能下载第三方构建依赖。运行 CMake 前必须先初始化固定版本的子模块。
+### 上游 TLS
 
-## 克隆仓库
+进程级默认值由 `ACCESS_SERVER_UPSTREAM_TLS_MODE` 决定：`legacy_insecure`（默认，不校验证书）、`system_ca` 或 `custom_ca`。生产环境应使用校验模式。
 
-同时克隆仓库和 Fiber 依赖：
+PROXY 路由可以用不可变的 `upstream_tls` profile 覆盖默认值，设置校验模式、内联 CA、SNI 名称、独立的校验名称和 mTLS 客户端证书。客户端证书通过 Console 证书版本 UUID 引用，私钥不会出现在路由配置中。
+
+### 响应压缩
+
+`gzip: true`（级别 6）或 `gzip: 1`–`9` 可在任意路由类型上启用压缩。静态 `TEXT` 和 `BASE64` 响应体在编译期预压缩，模板、代理和脚本响应以流式压缩。网关按 `Accept-Encoding` 协商，使用固定的 MIME 白名单，合并 `Vary`，在所有表示都被拒绝时返回 406。
+
+### 访问策略
+
+| 策略         | 作用域 | 行为                                                                          |
+| ------------ | ------ | ----------------------------------------------------------------------------- |
+| HTTPS 重定向 | Host   | 以 301、302、307 或 308 重定向，并发送 `Strict-Transport-Security`            |
+| 入口网络     | Host   | 实例入口（`vdi`、`desktop`、`internet`）不被允许时返回 403                    |
+| 来源 CIDR    | Route  | `allows` 同时包含 allow 和 `!deny` 项，支持 IPv4 和 IPv6，deny 优先，返回 403 |
+| 请求体大小   | Route  | 超限返回 413，声明长度和流式长度都受限                                        |
+
+HTTPS 重定向在明文监听器上生效。在反向代理之后，客户端地址和 scheme 由 `ACCESS_SERVER_CLIENT_METADATA_MODE` 决定：
+
+- `direct`（默认）：使用 socket 对端和监听器真实的 TLS 状态，忽略全部转发头。
+- `trusted_proxy`：仅当对端位于 `ACCESS_SERVER_TRUSTED_PROXY_CIDRS` 内时解析 `Forwarded`、`X-Forwarded-For` 和 `X-Real-Ip`。转发链非法时回退到 socket 对端。
+- `legacy_headers`：保留 Java 行为，信任这些转发头，且 `X-Real-Ip` 缺失或非法时跳过 CIDR 检查。不要用在非受信客户端可达的监听器上。
+
+### 灰度与 cluster
+
+`ploto.unified-access.gray-match` 中的灰度规则把入口网络映射到比例（万分比）和 CIDR 列表，命中的请求进入 `gray` cluster。cluster 还可以来自路由的 `service/cluster`、`cluster` 字段或 `context` 映射。请求指定的 cluster 没有可用实例时，网关回退到配置的 cluster。
+
+`ACCESS_SERVER_TEST_MODE=true` 时，`api_gray.example.com` 这种 Host 形式按 `api.example.com` 路由并使用 `gray` cluster；Host 未指定 cluster 时由 `HI-TRACE-CLUSTER` 选择。此模式下灰度规则不生效。
+
+### 边缘函数
+
+边缘函数是挂载在一组 Project 上的脚本，可以检查请求，并在它进入路由的常规处理之前直接响应。WAF 基于边缘函数实现，也可以手写函数。
+
+- **阶段**：`request_head` 在路由匹配之前运行，所以未命中路由的路径同样受保护。`request_body` 在匹配之后运行，读取缓冲的 `$req.body`，仅限开启 `edge_function_body: true` 的 PROXY 路由，且限于 JSON、表单、文本和 XML 类型，上限 1 MiB。
+- **挂载**：每个挂载包含项目 `include` 和 `exclude` glob、执行 `priority`，以及按客户端 IP 粘性采样的 `ratio`。
+- **能力**：读取请求，通过 `resp.*` 提前响应，用 `ctx.report(event, label)` 计数事件，用 `cidr` directive 判断地址。函数不能修改请求，也不能调用上游。
+- **失败处理**：运行时错误默认 fail-open。设置 `ACCESS_SERVER_EDGE_FUNCTION_FAIL_CLOSE=true` 后改为返回 503。
+
+```javascript
+directive office = cidr "10.0.0.0/8;172.28.1.0/24";
+
+if (!office.contains($conn.remote_addr) && strings.match($req.uri, "(?i)union\\s+select")) {
+  ctx.report("waf.block", "sqli-0023");
+  resp.send(403, "blocked");
+}
+```
+
+### 配置热更新
+
+路由、Project 列表、灰度规则、TLS 证书和边缘函数都无需重启即可更新。
+
+- 候选配置完整解析和编译之后，才会替换运行中的快照。
+- 非法或超限的候选被拒绝，旧快照继续服务。
+- 版本相同的候选被忽略。
+- 进行中的请求在开始时的快照上完成。
+- 从列表移除 Project 会卸载它，这与更新失败是两回事。
+
+证书在 ClientHello 阶段按 SNI 选择，索引由每张 leaf 证书的 DNS SAN 构建。证书轮换是一次原子的快照切换。
+
+### 可观测性
+
+- **Prometheus**：固定 schema 的指标覆盖请求、延迟、按路由和按上游的流量、代理错误、熔断拒绝、配置结果、TLS 轮换、DNS、服务发现、WebSocket 和边缘函数。请求标签的指标家族有上限，并使用 LRU 逐出。详见[有界指标](native/access-server/docs/bounded-metrics.md)。
+- **Grafana**：[`deploy/grafana/`](deploy/grafana/) 提供两个面板：Request Handling 和 Runtime Health。
+- **链路追踪**：CAT 请求树、`HI-TRACE-ID` 延续，以及 W3C `traceparent` 和 `tracestate` 传播。
+- **访问日志**：与 Java 兼容的制表符分隔格式，每次代理尝试一行，异步写入，100 MB 轮转。日志队列满时丢弃新行，不阻塞请求。
+- **边缘函数事件**：每个函数事件写一条独立的结构化日志。
+
+### 升级
+
+`access-server-boss` 托管进程，`access-serverctl` 驱动预热升级。新代在旧代仍在服务时完成配置同步和 worker 初始化，然后接管 TCP 监听。这大幅缩短了服务中断窗口，但不能消除它；两代进程重叠期间 HTTP/3 请求可能失败。详见[升级文档](docs/access-server-prewarm-upgrade-design.md)。
+
+## Console 功能
+
+### Project 与路由
+
+Project 是一个规范化的域名。每条路由有独立的 CodeMirror 编辑器，可以写成 YAML mapping，也可以写成 JavaScript Route（path、method 和 gzip 在源码外设置）。路由支持拖动和键盘排序。保存之前可以预览精确的 native wire 输出，编辑器也会显示 native 资源限额。
+
+### 配置版本
+
+保存会创建新的不可变加密配置版本，由 `If-Match` 乐观锁和幂等键保护。任意版本都可以预览、恢复、作为新编辑的起点，或直接发布。
+
+### Host 与网络策略
+
+- **Host Policy**：固定的主域名，加上共享路由和 Release 的精确 Host 别名，以及 HTTPS 重定向模式。
+- **Network Policy**：Project 级的 allow 和 deny CIDR 列表，编译进每条路由。
+
+### 校验
+
+配置分三层检查：字段语法、跨资源关系，以及 Native Validator 的完整编译。Native Validator 与数据面运行同一份 codec 和编译器。创建 Release 要求 validator 可用，所以未经验证的配置无法发布。
+
+### Release 与发布
+
+- Release 从当前版本或任意历史版本创建，在发布之前不可变地落库。回滚就是发布一个旧版本。
+- 带租约的 worker 写入每个 rnacos Data ID 并回读，每次尝试单独记录。
+- 如果 rnacos 已偏离 Release 创建时的基线，发布以冲突终止，不会覆盖。
+- 下线 Project 是单独的 Release 类型，必须记录原因。
+
+### 激活证据
+
+已发布不等于已生效，所以 Console 分开跟踪这两件事。采集器轮询每个实例带鉴权的 `/v1/activation-evidence` 接口，把结果聚合到 Release 页面，并可按需查看逐实例详情。
+
+| 状态       | 含义                                       |
+| ---------- | ------------------------------------------ |
+| `active`   | 所有必需实例的证据新鲜，且精确匹配 Release |
+| `pending`  | 证据新鲜，但目标尚未进入活动快照           |
+| `degraded` | 采集失败，或实例拒绝了候选                 |
+| `unknown`  | 证据缺失或过期，绝不显示为成功             |
+
+### TLS 证书
+
+- **证书库存**：加密存储的证书，版本不可变，状态为 `valid`、`expiring`（30 天内到期）、`expired` 或 `superseded`。没有私钥下载接口。
+- **自动 SNI**：选择器来自证书的 DNS SAN，无需维护单独的绑定。预览功能显示某个 server name 解析到哪张证书。
+- **续期**：SAN 不变时直接切换。增减 SAN 会改变 SNI 覆盖范围，需要显式确认。
+- **TLS Release**：完整的证书快照像其他 Release 一样发布和跟踪。
+
+### WAF
+
+WAF 规则在 Console 中编写并编译成边缘函数，数据面没有任何 WAF 专用逻辑。
+
+- **规则组**：每个组有模式（`off`、`log` 或 `block`）、优先级，以及生效和豁免的 Project。豁免必须填写原因。每个生效的组发布为一个名为 `waf-<组>` 的边缘函数。
+- **规则**：匹配表达式，加上严重级别、动作，以及可选的 method、path 和来源 CIDR 范围。
+- **Project 覆盖**：按 Project 设置模式，覆盖它所属的各组。
+- **起手规则包**：六个组共九条规则（SQL 注入、RCE、XSS、路径穿越、探测、畸形请求）。导入时各组都是 `off`，启用之前不改变任何行为。
+- **拦截**：被拦截的请求收到 403 JSON 响应，包含代码 `WAF_BLOCKED` 和规则 ID。
+- **发布**：编译预览检查生成的脚本，发布预览把它们与 rnacos 上的线上内容逐函数比较。回滚从历史内容创建新的 Release。
+- **命中统计**：按规则统计 1 小时、24 小时或 7 天内的 `log` 和 `block` 次数，数据来自 Prometheus。此页面需要配置 `PROMETHEUS_URL`。
+
+推荐的上线顺序是：先在单个 Project 上用 `log` 模式，查看命中统计，再切换到 `block`。
+
+### 手写边缘函数
+
+专门的页面用于编辑函数脚本、阶段和挂载，并提供逐函数的 native 编译预览。手写函数和 WAF 生成的函数一起发布。`waf` 和 `waf-*` 是生成器的保留名，一份快照最多 64 个函数。
+
+### 权限与审计
+
+- **角色**：`admin` 和 `maintainer` 编辑配置；`admin` 和 `publisher` 创建和发布 Release；`auditor` 只读。
+- **审计**：配置、证书和发布变更都写入脱敏的审计事件。
+- **加密**：配置文档和私钥以 AES-256-GCM 信封加密存储。
+
+### 内置文档
+
+路由、脚本和脚本 API 指南在 Console 的 `/docs` 下提供，有简体中文和英文版本。
+
+## 已知限制
+
+**Console**
+
+- OIDC 尚未实现，因此无法进行生产登录。本地文档密钥仅用于开发；生产需要外部密钥提供方，目前也不存在。
+- 灰度规则和 Host 入口网络限制不能在 Console 中编辑，需要直接在 rnacos 中编写。
+- 失败或部分成功的发布是终态，没有自动的逐资源重试。恢复方式是创建新的 Release。
+- TLS Release 没有 WAF Release 那样的一键回滚。
+- 审计事件写入了数据库，但还没有查看页面或 API。
+- 角色成员关系没有管理页面或 API。
+- 已删除边缘函数的脚本 Data ID 会作为无害的孤儿留在 rnacos 中。
+
+**数据面**
+
+- 上游连接只支持 HTTP/1.1，WebSocket 要求客户端使用 HTTP/1.1 升级。
+- JavaScript Route 以 413 拒绝长度未知的请求体，其 `http` directive 不解析 NamingService 上游。
+- 边缘函数不能改写请求，脚本 VM 没有指令预算，目前依靠语言的静态限制和输入限额保护。
+- `/metrics` 没有鉴权，状态监听器应放在私有网络上。
+- 修改 DNS resolver 文件、进程 CA bundle 或激活 token 需要滚动重启。
+
+## 快速开始：Docker 演示
+
+演示环境运行完整的技术栈：Console 和 API、发布 Worker、激活证据采集器、MySQL 8.4、R-Nacos 和 `access-server`。它需要 Docker Compose、OpenSSL 和[开发环境要求](#环境要求)中的工具，因为二进制文件先在本地编译。
 
 ```bash
 git clone --recurse-submodules https://github.com/fiber-net-gateway/access-gateway.git
 cd access-gateway
+npm install
+npm run demo:init   # 生成本地密钥和自签名证书
+npm run demo:up     # 本地构建，然后启动整个环境
 ```
 
-对于已有工作区：
+首次构建会下载 native 依赖，可能需要几分钟；`NATIVE_BUILD_JOBS` 设置并行度（默认 2）。Compose 会执行 migration，上传演示证书，通过 Console 发布 TLS 快照和演示 Project，两者都进入 R-Nacos 后启动 `access-server`。
 
-```bash
-git submodule update --init --recursive
-```
+| 服务             | 地址                                                            |
+| ---------------- | --------------------------------------------------------------- |
+| Console          | `http://localhost:8088`                                         |
+| 网关 HTTPS/HTTP2 | `curl -k --http2 -H 'Host: demo.local' https://localhost:8443/` |
+| 网关明文         | `curl -H 'Host: demo.local' http://localhost:8000/`             |
+| 指标             | `http://localhost:8001/metrics`                                 |
+| R-Nacos 控制台   | `http://localhost:10848/rnacos/`                                |
+| MySQL            | `127.0.0.1:3307`                                                |
 
-日常构建不要使用 `git submodule update --remote`；依赖升级应作为明确的 gitlink 变更进行
-审查和提交。
+凭据保存在被忽略的本地 `.env` 文件中。用 `npm run demo:ps`、`npm run demo:logs` 和 `npm run demo:down` 操作环境。只有想删除全部演示数据时，才给 `docker compose down` 加 `--volumes`。
 
-## Console 开发
+在 WSL2 下从 Windows 浏览器测试 HTTP/3 时，要使用 `hostname -I` 得到的 WSL 地址，因为 WSL2 通常只转发 Windows `localhost` 的 TCP，不转发 UDP。把这个地址映射到 Windows hosts 文件中的 `demo.local`，并信任演示证书。不要在本地测试之外复用这张证书。在 `.env` 中设置 `ACCESS_SERVER_PUBLISHED_HOST=127.0.0.1` 可以让网关只在 WSL 内部可达。
 
-安装根工作区依赖，创建后端本地配置，然后同时启动前后端开发服务：
+## 开发
+
+### 环境要求
+
+- **Console**：Node.js 20.19 或更高版本，npm 支持 workspaces。
+- **Native（Linux）**：CMake 4.1 或更高版本、Ninja，以及支持 C++23 的 Clang 17+ 或 GCC 13+。
+
+克隆时使用 `--recurse-submodules`，已有 checkout 执行 `git submodule update --init --recursive`。不要使用 `git submodule update --remote`：Fiber 是固定版本，更新要通过评审过的 gitlink 变更完成。
+
+### Console
 
 ```bash
 npm install
@@ -113,194 +326,128 @@ cp server/.env.example server/.env
 npm run dev
 ```
 
-默认开发地址：
+这会启动 Console（`http://localhost:5173`）和 API（`http://127.0.0.1:3000`），Vite 代理 `/api`。用 `npm run dev:web` 或 `npm run dev:server` 可以只运行一侧。
 
-- Console：`http://localhost:5173`
-- Console API：`http://127.0.0.1:3000`
-- 健康检查：`http://127.0.0.1:3000/api/health`
-
-Vite 会把浏览器的 `/api` 请求代理到 Fastify。需要单独运行一端时，使用
-`npm run dev:web` 或 `npm run dev:server`。
-
-API 可以在未配置 MySQL 时启动，便于开发前后端联通；此时持久化接口返回 `503`，
-`/api/health/ready` 会报告降级。要启用持久化，请创建 MySQL 8.4 数据库，在
-`server/.env` 中设置 `MYSQL_ENABLED=true`、`MYSQL_PASSWORD` 和本地 32 字节文档密钥，
-然后先执行 migration：
+没有 MySQL 时，持久化接口返回 `503`，`/api/health/ready` 报告 degraded。要启用持久化，先创建 MySQL 8.4 数据库，然后在 `server/.env` 中设置 `MYSQL_ENABLED=true`、`MYSQL_PASSWORD` 和 `DOCUMENT_ENCRYPTION_KEY_BASE64`（由 `openssl rand -base64 32` 生成）：
 
 ```bash
-openssl rand -base64 32
-# 把结果写入 server/.env 的 DOCUMENT_ENCRYPTION_KEY_BASE64。
 npm run db:migrate
 npm run dev
 ```
 
-Migration 使用 checksum 防篡改，并通过 MySQL advisory lock 串行执行；API 不会自动迁移。
-`AUTH_MODE=development` 会建立本地平台管理员，且在 `NODE_ENV=production` 下被拒绝。
-生产 OIDC provider adapter 完成前，OIDC 模式会拒绝启动。
+API 不会自动执行 migration。新数据库没有工作区，需要发一次 `POST /api/environments` 创建；请求示例见 [`deploy/demo/bootstrap-console.mjs`](deploy/demo/bootstrap-console.mjs)。
 
-目前实现的控制面接口包括：
+| 能力         | 配置                                                                                                                      |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------- |
+| Native 校验  | `NATIVE_VALIDATOR_PATH`，指向 `access-gateway-validator` 的绝对路径                                                       |
+| 发布 Worker  | `PUBLICATION_WORKER_ENABLED=true`，用 `npm run publication-worker --workspace server` 运行                                |
+| 激活证据     | `ACTIVATION_COLLECTOR_ENABLED=true`、`ACTIVATION_TARGETS_JSON`，用 `npm run activation-collector --workspace server` 运行 |
+| WAF 命中统计 | `PROMETHEUS_URL`                                                                                                          |
 
-- `/api/health`、`/api/health/live`、`/api/health/ready` 和 `/api/system/status`；
-- 固定工作区获取，以及仅供部署 bootstrap 使用的一次性环境创建接口；
-- 不含环境参数的 `/api/projects` 列表/创建，以及 Project 详情；
-- 带 `If-Match` 与幂等键的 Configuration Version 列表、保存、详情、恢复和校验；
-- Project YAML Route 校验和确定性的 native wire 预览；
-- 从当前或历史版本创建 Release、加入发布队列和查询执行状态。
+Worker 和采集器从构建产物运行，所以要先执行 `npm run build`。全部配置项见 [`server/.env.example`](server/.env.example)。
 
-每个 Configuration Version 使用 schema v6，保存主域名之外的 Host alias、有序 Route ID 和精确 YAML 原文；旧的整份 Project JSON revision
-会在读取时升级为稳定的 YAML Route Item。模型文档在写入 MySQL 前使用 AES-256-GCM 信封加密。本地密钥配置只
-用于开发环境；生产环境应接入外部密钥服务。
-
-使用以下命令验证全部 Console 工作区：
-
-```bash
-npm run typecheck
-npm test
-npm run format:check
-npm run format:native
-npm run build
-```
-
-## 本机 Docker 演示
-
-仓库提供了完整的 Docker Compose 演示环境，包含合并部署的 React Console 与 Fastify API、
-MySQL 8.4、R-Nacos 和原生 Access Server。先生成仅保存在本机的随机 Secret 和自签名演示
-证书，再启动全部服务：
-
-```bash
-npm run demo:init
-npm run demo:up
-```
-
-首次构建原生镜像会下载固定版本的 C++ 构建依赖，可能需要几分钟。Compose 会自动执行
-MySQL migration，通过 Console API 幂等创建演示项目与 Configuration Version，由发布 Worker
-将 Release 写入 R-Nacos 并回读校验，成功后再启动 Access Server。
-
-Fastify 在同一个 Console 容器中同时提供 `/api/*` 接口和 React 单页应用。完整环境因此包含
-6 个长期运行容器和 3 个 migration/bootstrap 一次性容器。
-
-全部服务就绪后可访问：
-
-- Console：`http://localhost:8088`
-- Access Server HTTPS/HTTP2 演示：`curl -k --http2 -H 'Host: demo.local' https://localhost:16688/`
-- Access Server 指标：`http://localhost:16689/metrics`
-- R-Nacos Console：`http://localhost:10848/rnacos/`
-- MySQL：`127.0.0.1:3307`
-
-R-Nacos Console 凭据和数据库 Secret 只保存在 Git 已忽略的本机 `.env` 文件中，自签名证书
-位于同样被忽略的 `deploy/demo/certs/`。Access Server 的 16688 端口同时发布 TCP（HTTPS、
-HTTP/2）和 UDP（HTTP/3），并默认绑定全部 WSL 接口；其他演示端口仍只绑定环回地址。
-WSL2 的 NAT 模式通常只为 Windows `localhost` 自动转发 TCP。要从 Windows 浏览器验证
-HTTP/3，可在 WSL 运行 `hostname -I` 取得 WSL 地址，在 Windows hosts 文件中临时加入
-`<WSL-IP> demo.local`，然后访问 `https://demo.local:16688/`。如只需在 WSL 内访问，可在
-`.env` 设置 `ACCESS_SERVER_PUBLISHED_HOST=127.0.0.1` 收紧监听范围。
-浏览器只有在信任该演示证书时才会协商 QUIC；不要在生产环境信任或复用这个本机自签名证书。
-demo bootstrap 通过 Console API 创建 Configuration Version 和 Release，发布 Worker 负责写入
-R-Nacos 并回读校验。独立采集器随后认证访问 demo Access Server，并单独报告精确的 route/TLS
-生效版本；缺少或过期证据仍如实显示“激活未知”。可使用
-`npm run demo:ps`、`npm run demo:logs` 和 `npm run demo:down`
-管理演示环境。只有在确定要删除全部演示数据时，才为 `docker compose down` 添加 `--volumes`。
-
-`npm run demo:up` 会先在宿主机执行 TypeScript/Vite 和 C++ Release 编译，再把
-`server/dist/`、`web/dist/`、`native/build/apps/access-server` 和
-`native/build/apps/access-gateway-validator` 复制进运行镜像。Docker 构建本身不安装编译器，
-也不编译项目源码。宿主机应使用与目标镜像兼容的 Linux ABI；演示运行镜像为 Debian trixie，
-并安装原生程序所需的 `libstdc++6`、`libgcc`、glibc 和 CA 证书。仅重新生成本地产物可运行
-`npm run demo:build`。
-
-## 构建和测试 Access Server
-
-根工作区提供了常用的原生开发流程：
+### Native
 
 ```bash
 npm run configure:native
-npm run build:native
-npm run build:native-validator
+npm run build:native             # native/build/apps/access-server
+npm run build:native-validator   # native/build/apps/access-gateway-validator
 npm run test:native
 ```
 
-`npm run format:native` 使用固定的 Fiber 风格格式化有改动的仓库自有 C/C++ 文件；
-`npm run format:native:all` 格式化全部仓库自有 C/C++ 文件。两者使用仓库锁定的 clang-format 22
-开发依赖，且不会修改 `third_party/`。
+其他命令：`npm run test:native:sanitizers`、`npm run test:native:interop`、`npm run benchmark:native` 和 `npm run verify:native:cutover`。
 
-等价的 CMake 命令是：
+### 验证
 
-```bash
-cmake -S native -B native/build -G Ninja \
-  -DCMAKE_BUILD_TYPE=Release -DFIBER_BUILD_TESTS=ON
-cmake --build native/build --target fiber_app_access_server --parallel
-cmake --build native/build --target fiber_app_access_gateway_validator --parallel
-cmake --build native/build --target fiber_access_server_tests --parallel
-ctest --test-dir native/build --output-on-failure -L access-server
-```
+| 变更范围                | 运行                                                                     |
+| ----------------------- | ------------------------------------------------------------------------ |
+| `web/`、`server/`       | `npm run typecheck`、`npm test`、`npm run format:check`、`npm run build` |
+| `native/access-server/` | `npm run test:native`、`npm run format:native`，并检查 diff              |
 
-可执行文件输出到 `native/build/apps/access-server`。
-离线控制面校验器输出到 `native/build/apps/access-gateway-validator`，通过绝对路径
-`NATIVE_VALIDATOR_PATH` 配置。它从 stdin 读取一条有大小上限、带版本的 JSON 请求，并在
-stdout 返回一条 JSON 结果；校验直接复用原生 codec、脚本编译器和 compiled route model，
-不会连接 Nacos 或外部服务。
+完整矩阵和全部编码规范见 [AGENTS.md](AGENTS.md)。
 
-## 运行 Access Server
-
-复制原生示例配置，挂载 PEM 证书/私钥，并至少按环境修改 Nacos 地址：
+## 运行 access-server
 
 ```bash
 cp native/access-server/access-server.env.example access-server.env
+# 设置 NACOS_SERVER_ADDRESSES 和 ACCESS_SERVER_NETWORK_ENTRY（见下文）。
 ./native/build/apps/access-server access-server.env
 ```
 
-未传参数时，进程读取当前目录下的 `access-server.env`。默认监听地址为：
+不带参数时，进程读取当前目录的 `access-server.env`。格式是严格的 `KEY=VALUE`，未知或重复的键会使启动失败。不要提交这个文件。
 
-- 网关 HTTPS：`0.0.0.0:16688/tcp`，通过 ALPN 支持 HTTP/1.1 与 HTTP/2；
-- 网关 HTTP/3：`0.0.0.0:16688/udp`；
-- Prometheus 指标：`0.0.0.0:16689`。
+开始服务之前，进程最多等待 `ACCESS_SERVER_INITIAL_CONFIG_TIMEOUT_MILLIS`，直到拿到有效的 Project 列表和它引用的全部路由；启用 TLS 时还需要有效的证书快照。之后绑定监听器、注册到 Nacos，注册成功后开始接收流量。配置缺失或非法、证书过期或绑定失败都会终止启动。
 
-TLS 和 HTTP/3 默认开启；Access Server 从 Nacos 的
-`ploto.unified-access.tls-certificates` / `ACCESS-SERVER` 等待首个有效完整快照，并在更新后按
-leaf DNS SAN 无锁选择证书。快照缺失、证书过期、私钥不匹配或 TCP/UDP 任一绑定失败都会使启动
-失败。文件证书配置已移除；明文 HTTP 部署必须同时显式设置
-`ACCESS_SERVER_TLS_ENABLED=false` 和 `ACCESS_SERVER_HTTP3_ENABLED=false`。配置文件采用严格的 `KEY=VALUE` 格式，未知键和重复键
-都会导致启动失败。不要提交本地环境文件、证书私钥或凭据。全部配置项参见
-[`native/access-server/access-server.env.example`](native/access-server/access-server.env.example)。
+| 领域       | 配置                                                                                                                   |
+| ---------- | ---------------------------------------------------------------------------------------------------------------------- |
+| 必填       | `NACOS_SERVER_ADDRESSES`（IP 字面量）、`ACCESS_SERVER_NETWORK_ENTRY`                                                   |
+| 监听器     | `ACCESS_SERVER_TLS_*`、`ACCESS_SERVER_HTTP3_ENABLED`、`ACCESS_SERVER_PLAIN_LISTEN_*`、`ACCESS_SERVER_METRICS_LISTEN_*` |
+| 客户端信任 | `ACCESS_SERVER_CLIENT_METADATA_MODE`、`ACCESS_SERVER_TRUSTED_PROXY_CIDRS`                                              |
+| 上游       | `ACCESS_SERVER_UPSTREAM_*`、`ACCESS_SERVER_HAPPY_EYEBALLS_*`、`ACCESS_SERVER_DNS_*`                                    |
+| 限制       | `ACCESS_SERVER_MAX_REQUEST_BODY_SIZE`、`ACCESS_SERVER_MAX_RESPONSE_BODY_SIZE`                                          |
+| 边缘函数   | `ACCESS_SERVER_EDGE_FUNCTION_FAIL_CLOSE`（默认 `false`）                                                               |
+| 激活证据   | `ACCESS_SERVER_ACTIVATION_EVIDENCE_ENABLED`、`ACCESS_SERVER_INSTANCE_ID`、`ACCESS_SERVER_ACTIVATION_TOKEN`             |
+| 注册       | `ACCESS_SERVER_SERVICE_NAME`、`ACCESS_SERVER_CLUSTER`、`ACCESS_SERVER_ADVERTISE_ADDRESS`、`ACCESS_SERVER_ZONE`         |
+| 日志与 CAT | `ACCESS_SERVER_ACCESS_LOG_DIR`、`CAT_*`                                                                                |
 
-## Nacos 配置契约
+`ACCESS_SERVER_NETWORK_ENTRY` 声明该实例服务的入口网络（例如 `internet`、`vdi` 或 `desktop`），缺失时进程拒绝启动。实例根据这个值和连接信息设置 `X-Entry`、`X-Real-Ip`、`X-Forwarded-Proto` 和 `X-Forwarded-For`，并覆盖客户端提交的 `X-Entry`。`internet` 入口还会信任 CDN 的 `EO-Connecting-IP` 作为 `X-Real-Ip`。
 
-原生 codec 是输入值、默认值和更新行为的事实来源。默认兼容契约如下：
+只运行明文时，设置 `ACCESS_SERVER_TLS_ENABLED=false` 和 `ACCESS_SERVER_HTTP3_ENABLED=false`。
 
-| 用途         | Data ID                                | Group           |
-| ------------ | -------------------------------------- | --------------- |
-| 项目列表     | `ploto.unified-access.projects`        | `ACCESS-SERVER` |
-| 项目路由     | `ploto.unified-access.route.<project>` | `ACCESS-SERVER` |
-| 生产灰度规则 | `ploto.unified-access.gray-match`      | `DEFAULT_GROUP` |
+默认值和各配置项说明见 [`access-server.env.example`](native/access-server/access-server.env.example)。
 
-项目列表是分号分隔的字符串，而不是 JSON。路由和灰度规则载荷保持 Java 兼容的 wire 行为。
-候选配置必须先完成全部解析和编译，再以不可变快照发布；候选无效时继续保留上一份生效快照。
+## rnacos 契约
+
+| 用途                    | Data ID                                     | Group           |
+| ----------------------- | ------------------------------------------- | --------------- |
+| Project 列表            | `ploto.unified-access.projects`             | `ACCESS-SERVER` |
+| Project 路由            | `ploto.unified-access.route.<project>`      | `ACCESS-SERVER` |
+| TLS 证书                | `ploto.unified-access.tls-certificates`     | `ACCESS-SERVER` |
+| 边缘函数索引            | `ploto.unified-access.edge-functions`       | `ACCESS-SERVER` |
+| 边缘函数脚本            | `ploto.unified-access.edge-function.<name>` | `ACCESS-SERVER` |
+| 灰度规则                | `ploto.unified-access.gray-match`           | `DEFAULT_GROUP` |
+| 测试环境 cluster 白名单 | `ploto.test.temp-cluster-apps`              | `DEFAULT_GROUP` |
+
+Project 列表是分号分隔的字符串，不是 JSON。可接受的值和默认值以 native codec 为准。`ploto.test.temp-cluster-apps` 只在 `ACCESS_SERVER_TEST_MODE=true` 时读取。
+
+## 仓库结构
+
+```text
+access-gateway/
+├── native/access-server/        # C++23 数据面、测试和 native 文档
+├── server/                      # Fastify 控制面 API、Worker 和采集器
+├── web/                         # React 和 Vite 控制台
+├── deploy/                      # Dockerfile、演示 bootstrap、Grafana 面板
+├── docs/                        # 架构、设计文档和用户指南
+├── third_party/fiber-gateway-cpp/  # 固定版本的只读 Fiber 子模块
+└── AGENTS.md                    # 开发规范
+```
 
 ## 文档
 
-### 用户文档
+**从这里开始**
 
-[完整用户文档索引](docs/user-guide/README.md)及当前维护的主题均提供简体中文和英文版本：
+- [架构与原理](docs/architecture.md)
+- [用户指南索引](docs/user-guide/README.md)，提供简体中文和英文版本：[路由](docs/user-guide/zh-CN/routing.md)、[脚本路由](docs/user-guide/zh-CN/script-routing.md)和[脚本参考](docs/user-guide/zh-CN/script-reference.md)
 
-| 主题           | 简体中文                                                         | English                                                                     |
-| -------------- | ---------------------------------------------------------------- | --------------------------------------------------------------------------- |
-| 路由规则与用法 | [路由规则与详细用法](docs/user-guide/zh-CN/routing.md)           | [Route rules and usage](docs/user-guide/en/routing.md)                      |
-| 脚本路由用法   | [脚本路由用法](docs/user-guide/zh-CN/script-routing.md)          | [Script route usage](docs/user-guide/en/script-routing.md)                  |
-| 脚本语言与 API | [脚本语法与 API 参考](docs/user-guide/zh-CN/script-reference.md) | [Script language and API reference](docs/user-guide/en/script-reference.md) |
+**设计**
 
-### 工程文档
+- [边缘函数与 WAF](docs/edge-functions-and-waf-design.md)
+- [实例激活证据](docs/activation-evidence.md)
+- [网络策略与证书](docs/network-policy-and-certificate-design.md)
+- [预热升级](docs/access-server-prewarm-upgrade-design.md)
+- [Console 需求](docs/console-requirements.md)和[详细设计](docs/console-detailed-design.md)
 
-- [Console 产品需求](docs/console-requirements.md)
-- [Console 详细设计](docs/console-detailed-design.md)
-- [固定工作区与安全监听器设计](docs/fixed-workspace-and-secure-listener-design.md)
+**数据面**
+
 - [Access Server 指南](native/access-server/README.md)
-- [兼容性契约](native/access-server/docs/compatibility-contract.md)
-- [迁移计划](native/access-server/docs/migration-plan.md)
-- [脚本语料差分状态](native/access-server/docs/script-corpus-differential.md)
-- [上游来源记录](native/access-server/UPSTREAM.md)
-- [开发规范](AGENTS.md)
+- [兼容契约](native/access-server/docs/compatibility-contract.md)
+- [配置编译](native/access-server/docs/config-compilation.md)和[资源上限](native/access-server/docs/config-resource-limits.md)
+- [有界指标](native/access-server/docs/bounded-metrics.md)
+- [性能基准](native/access-server/docs/benchmark-baselines.md)
+- [迁移计划](native/access-server/docs/migration-plan.md)和[切流证据门禁](native/access-server/docs/cutover-evidence-gate.md)
+- [上游来源](native/access-server/UPSTREAM.md)
 
 ## 许可证
 
-本项目使用 [Apache License 2.0](LICENSE)。迁移的应用代码保留了对应的
-[上游许可证声明](native/access-server/LICENSE.upstream)。
+本项目采用 [Apache License 2.0](LICENSE) 许可。迁移的应用保留其[上游许可声明](native/access-server/LICENSE.upstream)。

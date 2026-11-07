@@ -3,8 +3,8 @@
 本文是 Access Gateway Route condition、template 和 JavaScript Route 使用的完整脚本参考。文中的
 TypeScript 只用于描述参数与返回值；运行时不是 TypeScript/JavaScript 引擎，也不读取 `.d.ts` 文件。
 
-实现来源是当前仓库的 `native/access-server/src/runtime/AccessScriptRuntime.cpp`，以及固定 Fiber revision
-`0fda7764bf94944aca4b674ab5ab311184703118` 中的 `script` 和 `http_script` 模块。
+实现来源是当前仓库的 `native/access-server/src/runtime/AccessScriptRuntime.cpp`，以及
+`third_party/fiber-gateway-cpp` gitlink 固定的 Fiber revision 中的 `script` 和 `http_script` 模块。
 
 ## 1. 运行时概览
 

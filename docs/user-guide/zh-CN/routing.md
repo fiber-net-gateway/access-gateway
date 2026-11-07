@@ -4,8 +4,8 @@
 Method、条件、CIDR、`RESPONSE`、`PROXY` 和发布语义。配置的最终判定者是
 `native/access-server` 的 wire codec、路由编译器和 Native Validator，而不是浏览器中的语法提示。
 
-> 资格说明：本文以仓库自有的 C++ data plane 和固定 Fiber revision
-> `0fda7764bf94944aca4b674ab5ab311184703118` 为准。生产脚本 corpus 差分和最终切流门禁仍未全部完成；
+> 资格说明：本文以仓库自有的 C++ data plane 和 `third_party/fiber-gateway-cpp` gitlink 固定的
+> Fiber revision 为准。生产脚本 corpus 差分和最终切流门禁仍未全部完成；
 > 本文不代表已经具备生产切流资格。
 
 ## 1. 核心模型
