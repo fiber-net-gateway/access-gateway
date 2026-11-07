@@ -57,12 +57,15 @@ function validatorFake(overrides: Partial<NativeValidationResult> = {}) {
 
 function policy(overrides: Partial<WafPolicy> = {}): WafPolicy {
   return {
-    schemaVersion: 1,
-    defaultMode: 'log',
+    schemaVersion: 2,
+    groups: [
+      { id: 'core', name: 'core', mode: 'log', priority: 100, projects: { include: ['*'] } },
+    ],
     rules: [
       {
         id: 'probe-0001',
         name: 'probe',
+        group: 'core',
         severity: 'high',
         priority: 100,
         action: 'block',
@@ -246,8 +249,72 @@ test('compilePreview compiles a valid policy through the native validator', asyn
   assert.equal(request.kind, 'edge_function_script')
   assert.equal(request.project, '')
   if (result.compilation?.kind === 'mounted') {
-    assert.equal(Buffer.from(request.payload).toString('utf8'), result.compilation.script)
+    assert.equal(
+      Buffer.from(request.payload).toString('utf8'),
+      result.compilation.functions[0]?.script,
+    )
   }
+})
+
+test('compilePreview compiles every group and pins errors to their own function', async () => {
+  const input = policy({
+    groups: [...policy().groups, { ...policy().groups[0]!, id: 'other', priority: 200 }],
+    rules: [
+      policy().rules[0]!,
+      { ...policy().rules[0]!, id: 'probe-0002', group: 'other', match: '$req.path == "/bad"' },
+    ],
+  })
+  const validator = {
+    available: true,
+    contractVersion: 1,
+    revision: 'deadbeef',
+    limits: null,
+    validate: async (request: NativeValidationRequest): Promise<NativeValidationResult> => {
+      const text = Buffer.from(request.payload).toString('utf8')
+      const bad = text.indexOf('$req.path == "/bad"')
+      return {
+        valid: bad < 0,
+        errors: bad < 0 ? [] : [{ code: 'script_compile_failed', offset: bad, message: 'nope' }],
+        contractVersion: 1,
+        validatorRevision: 'deadbeef',
+      }
+    },
+  } as unknown as NativeValidator
+  const service = new DefaultWafService(
+    {} as unknown as WafPolicyDraftRepository,
+    environmentsFake(),
+    validator,
+  )
+
+  const result = await service.compilePreview(actor, input, 'request-1')
+  assert.equal(result.scriptValid, false)
+  assert.deepEqual(
+    result.scriptErrors.map(({ functionName, field }) => [functionName, field]),
+    [['waf-other', 'rules[1].match']],
+  )
+})
+
+test('compilePreview only revalidates the scripts an edit changed', async () => {
+  const { validator, requests } = validatorFake()
+  const service = new DefaultWafService(
+    {} as unknown as WafPolicyDraftRepository,
+    environmentsFake(),
+    validator,
+  )
+  const withOtherMatch = (match: string) =>
+    policy({
+      groups: [...policy().groups, { ...policy().groups[0]!, id: 'other' }],
+      rules: [
+        policy().rules[0]!,
+        { ...policy().rules[0]!, id: 'probe-0002', group: 'other', match },
+      ],
+    })
+
+  await service.compilePreview(actor, withOtherMatch('$req.path == "/a"'), 'request-1')
+  assert.equal(requests.length, 2)
+  await service.compilePreview(actor, withOtherMatch('$req.path == "/b"'), 'request-2')
+  assert.equal(requests.length, 3)
+  assert.ok(Buffer.from(requests[2]!.payload).toString('utf8').includes('"/b"'))
 })
 
 test('compilePreview surfaces native script compile errors', async () => {
@@ -265,7 +332,12 @@ test('compilePreview surfaces native script compile errors', async () => {
   assert.equal(result.valid, true)
   assert.equal(result.scriptValid, false)
   assert.deepEqual(result.scriptErrors, [
-    { code: 'script_compile_failed', offset: 42, message: 'unexpected escape' },
+    {
+      code: 'script_compile_failed',
+      offset: 42,
+      message: 'unexpected escape',
+      functionName: 'waf-core',
+    },
   ])
   assert.equal(result.compilation?.kind, 'mounted')
 })
@@ -277,7 +349,7 @@ test('compilePreview attributes script errors inside a rule block to that rule',
   if (compilation.kind !== 'mounted') {
     return
   }
-  const offset = compilation.ruleSpans[0]!.matchStart + 'strings.'.length
+  const offset = compilation.functions[0]!.ruleSpans[0]!.matchStart + 'strings.'.length
   const { validator } = validatorFake({
     valid: false,
     errors: [
@@ -294,6 +366,7 @@ test('compilePreview attributes script errors inside a rule block to that rule',
   assert.deepEqual(result.scriptErrors, [
     {
       code: 'script_compile_failed',
+      functionName: 'waf-core',
       field: 'rules[0].match',
       offset,
       line: 1,
@@ -313,7 +386,11 @@ test('compilePreview treats unmount candidates as valid with no script to compil
 
   const result = await service.compilePreview(actor, policy({ rules: [] }), 'request-1')
   assert.equal(result.valid, true)
-  assert.deepEqual(result.compilation, { kind: 'unmount', reason: 'no-rules' })
+  assert.deepEqual(result.compilation, {
+    kind: 'unmount',
+    reason: 'no-rules',
+    skipped: [{ groupId: 'core', reason: 'no-rules' }],
+  })
   assert.equal(result.scriptValid, null)
   assert.deepEqual(requests, [])
 })

@@ -112,14 +112,46 @@ test('loadRollbackSource rebuilds a mounted plan from verified payload documents
     generatorRevision: 'waf-generator-v1',
     plan: {
       mode: 'mounted',
-      functionName: 'waf',
-      script: scriptText,
-      scriptSha256,
+      wafFunctions: [{ name: 'waf', scriptSha256 }],
       functions,
       scripts: [{ name: 'waf', script: scriptText }],
       ruleCount: 3,
     },
   } satisfies WafRollbackSource)
+})
+
+test('loadRollbackSource reads the generated functions of a grouped release', async () => {
+  const otherScript = 'return true;'
+  const otherSha = sha256(otherScript).toString('hex')
+  const grouped = [
+    { name: 'waf-core', sha256: scriptSha256, mounts: functions[0]!.mounts },
+    { name: 'waf-other', sha256: otherSha, mounts: functions[0]!.mounts },
+    { name: 'bot-trap', sha256: otherSha, mounts: functions[0]!.mounts },
+  ]
+  const { repository } = buildRepository({
+    diffSummary: {
+      wafFunctions: [
+        { name: 'waf-core', scriptSha256 },
+        { name: 'waf-other', scriptSha256: otherSha },
+      ],
+      mode: 'mounted',
+      ruleCount: 3,
+      indexVersion: '4',
+    },
+    indexText: canonicalJson({ version: 4, functions: grouped }),
+    scripts: [
+      { name: 'waf-core', script: scriptText },
+      { name: 'waf-other', script: otherScript },
+      { name: 'bot-trap', script: otherScript },
+    ],
+  })
+
+  const source = await repository.loadRollbackSource(environmentInternalId, releasePublicId)
+
+  assert.deepEqual(source?.plan.wafFunctions, [
+    { name: 'waf-core', scriptSha256 },
+    { name: 'waf-other', scriptSha256: otherSha },
+  ])
 })
 
 test('loadRollbackSource rebuilds a multi-function plan with every script', async () => {
@@ -152,8 +184,7 @@ test('loadRollbackSource rebuilds a multi-function plan with every script', asyn
   ])
   // Publication order follows publish_order, so the rebuilt script list
   // preserves the resource order (waf first in this fixture).
-  assert.equal(source?.plan.script, scriptText)
-  assert.equal(source?.plan.scriptSha256, scriptSha256)
+  assert.deepEqual(source?.plan.wafFunctions, [{ name: 'waf', scriptSha256 }])
 })
 
 test('loadRollbackSource rebuilds an unmount plan with empty functions', async () => {
@@ -172,7 +203,7 @@ test('loadRollbackSource rebuilds an unmount plan with empty functions', async (
   const source = await repository.loadRollbackSource(environmentInternalId, releasePublicId)
 
   assert.equal(source?.plan.mode, 'unmount')
-  assert.equal(source?.plan.script, null)
+  assert.deepEqual(source?.plan.wafFunctions, [])
   assert.deepEqual(source?.plan.functions, [])
   assert.deepEqual(source?.plan.scripts, [])
 })

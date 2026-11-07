@@ -21,6 +21,7 @@ import { unknownActivationSummary } from '../activation/model.js'
 import type { ActivationReadRepository } from '../activation/read-repository.js'
 import { AuditRepository } from '../audit/repository.js'
 import type { Actor } from '../auth/model.js'
+import { LEGACY_WAF_FUNCTION_NAME } from './model.js'
 import {
   EDGE_FUNCTIONS_DATA_ID,
   EDGE_FUNCTION_SCRIPT_DATA_ID_PREFIX,
@@ -29,6 +30,7 @@ import {
   isScriptDataIdSafeName,
   type QueueWafPublicationResult,
   type WafReleaseResourceView,
+  type WafReleaseFunctionView,
   type WafReleaseView,
 } from './release-model.js'
 
@@ -57,12 +59,11 @@ export interface PreparedReleaseScript {
 /** Everything the repository needs to persist one compiled WAF release. */
 export interface PreparedWafReleasePlan {
   readonly mode: 'mounted' | 'unmount'
-  readonly functionName: string
-  readonly script: string | null
-  readonly scriptSha256: string | null
+  /** The generated subset of `functions`; empty exactly when mode is unmount. */
+  readonly wafFunctions: readonly WafReleaseFunctionView[]
   readonly functions: readonly WafWireIndexFunctionEntry[]
   /**
-   * Script payload for every index entry — the generated WAF function plus
+   * Script payload for every index entry — the generated WAF functions plus
    * handwritten functions. Must cover `functions` exactly (same names,
    * digests matching each entry's sha256).
    */
@@ -85,8 +86,7 @@ interface ReleaseRow extends RowDataPacket {
   status: WafReleaseView['status']
   description: string
   mode: WafReleaseView['mode']
-  function_name: string
-  script_sha256: Buffer | null
+  diff_summary_json: unknown
   rule_count: number
   index_version: string
   job_public_id: Buffer | null
@@ -111,8 +111,7 @@ const selectRelease = `
     rel.id AS internal_id, rel.public_id, rel.sequence_no, rel.status,
     rel.description,
     JSON_UNQUOTE(JSON_EXTRACT(item.diff_summary_json, '$.mode')) AS mode,
-    JSON_UNQUOTE(JSON_EXTRACT(item.diff_summary_json, '$.functionName')) AS function_name,
-    UNHEX(JSON_UNQUOTE(JSON_EXTRACT(item.diff_summary_json, '$.scriptSha256'))) AS script_sha256,
+    item.diff_summary_json,
     CAST(JSON_UNQUOTE(JSON_EXTRACT(item.diff_summary_json, '$.ruleCount')) AS UNSIGNED)
       AS rule_count,
     CAST(JSON_UNQUOTE(JSON_EXTRACT(item.diff_summary_json, '$.indexVersion')) AS CHAR)
@@ -124,6 +123,37 @@ const selectRelease = `
     ON item.release_id = rel.id AND item.kind = 'edge_functions'
   LEFT JOIN publication_jobs job ON job.release_id = rel.id
 `
+
+// mysql2 hands JSON columns back already parsed; fake pools hand back strings.
+function parseDiffSummary(value: unknown): Record<string, unknown> | null {
+  try {
+    const parsed: unknown = typeof value === 'string' ? JSON.parse(value) : value
+    return typeof parsed === 'object' && parsed !== null
+      ? (parsed as Record<string, unknown>)
+      : null
+  } catch {
+    return null
+  }
+}
+
+// Releases created before rule groups recorded a single generated function in
+// `functionName`/`scriptSha256`. Returns null for a summary naming neither.
+function summaryWafFunctions(
+  summary: Record<string, unknown>,
+): readonly WafReleaseFunctionView[] | null {
+  const { wafFunctions, mode, functionName, scriptSha256 } = summary
+  if (Array.isArray(wafFunctions)) {
+    const valid = wafFunctions.every(
+      (entry: Partial<WafReleaseFunctionView> | null) =>
+        typeof entry?.name === 'string' && typeof entry.scriptSha256 === 'string',
+    )
+    return valid ? (wafFunctions as WafReleaseFunctionView[]) : null
+  }
+  if (mode === 'unmount') return []
+  return typeof functionName === 'string' && typeof scriptSha256 === 'string'
+    ? [{ name: functionName, scriptSha256 }]
+    : null
+}
 
 function publishedIndexVersion(base: NacosResourceValue): bigint {
   if (!base.exists || base.content === null) return 0n
@@ -241,13 +271,14 @@ function verifyPlanInvariant(plan: PreparedWafReleasePlan): void {
   if (scriptsByName.size !== functionNames.size) {
     throw new Error('Release plan carries scripts not referenced by the index')
   }
-  if (plan.mode === 'mounted') {
-    const wafScript = scriptsByName.get(plan.functionName)
-    if (plan.script !== null && wafScript !== plan.script) {
-      throw new Error('Mounted WAF release plan script disagrees with its script payload')
+  if ((plan.mode === 'mounted') !== plan.wafFunctions.length > 0) {
+    throw new Error('WAF release plan mode disagrees with its generated functions')
+  }
+  for (const { name, scriptSha256 } of plan.wafFunctions) {
+    const script = scriptsByName.get(name)
+    if (script === undefined || sha256(script).toString('hex') !== scriptSha256) {
+      throw new Error(`WAF release plan function "${name}" disagrees with its script payload`)
     }
-  } else if (plan.script !== null) {
-    throw new Error('Unmount WAF release plan must not carry a WAF script')
   }
 }
 
@@ -323,9 +354,6 @@ export class WafReleaseRepository {
   ): Promise<WafReleaseView> {
     verifyPlanInvariant(plan)
     verifyBasesCoverPlan(plan, bases)
-    if (plan.mode === 'mounted' && (plan.script === null || plan.scriptSha256 === null)) {
-      throw new Error('Mounted WAF release plan is missing its script')
-    }
 
     let releasePublicId = createPublicId()
     await withTransaction(
@@ -493,9 +521,8 @@ export class WafReleaseRepository {
             indexDocument.internalId,
             Number(sequence),
             JSON.stringify({
-              functionName: plan.functionName,
+              wafFunctions: plan.wafFunctions,
               mode: plan.mode,
-              scriptSha256: plan.mode === 'mounted' ? plan.scriptSha256 : null,
               ruleCount: plan.ruleCount,
               indexVersion: sequence.toString(),
               functionCount: plan.functions.length,
@@ -580,8 +607,7 @@ export class WafReleaseRepository {
           summary: {
             sequence: sequence.toString(),
             mode: plan.mode,
-            functionName: plan.functionName,
-            scriptSha256: plan.mode === 'mounted' ? plan.scriptSha256 : null,
+            wafFunctions: plan.wafFunctions,
             ruleCount: plan.ruleCount,
             functions: plan.functions.map((entry) => entry.name),
             ...(input.rollbackOfSequence ? { rollbackOf: input.rollbackOfSequence } : {}),
@@ -628,27 +654,16 @@ export class WafReleaseRepository {
         `The historical WAF release payload is unusable: ${detail}`,
       )
 
-    let summary: {
-      mode?: unknown
-      functionName?: unknown
-      scriptSha256?: unknown
-      ruleCount?: unknown
-    }
-    try {
-      // mysql2 hands JSON columns back already parsed.
-      summary = (
-        typeof row.diff_summary_json === 'string'
-          ? JSON.parse(row.diff_summary_json)
-          : row.diff_summary_json
-      ) as typeof summary
-    } catch {
+    const summary = parseDiffSummary(row.diff_summary_json)
+    if (!summary) {
       throw invalid('the diff summary is not valid JSON')
     }
     if (summary.mode !== 'mounted' && summary.mode !== 'unmount') {
       throw invalid('the diff summary mode is unknown')
     }
-    if (typeof summary.functionName !== 'string' || summary.functionName.length === 0) {
-      throw invalid('the diff summary function name is missing')
+    const wafFunctions = summaryWafFunctions(summary)
+    if (!wafFunctions) {
+      throw invalid('the diff summary does not name its WAF functions')
     }
     if (
       typeof summary.ruleCount !== 'number' ||
@@ -728,25 +743,25 @@ export class WafReleaseRepository {
       throw invalid('the release carries scripts not referenced by the stored index')
     }
 
-    const wafScript = scriptDigests.has(summary.functionName)
-      ? scripts.find((entry) => entry.name === summary.functionName)!.script
-      : null
-    if (summary.mode === 'mounted' && wafScript === null) {
+    if (
+      summary.mode === 'mounted' &&
+      (wafFunctions.length === 0 || wafFunctions.some(({ name }) => !scriptDigests.has(name)))
+    ) {
       throw invalid('the mounted release is missing its WAF function script')
     }
-    if (summary.mode === 'unmount' && wafScript !== null) {
+    if (summary.mode === 'unmount' && scriptDigests.has(LEGACY_WAF_FUNCTION_NAME)) {
       throw invalid('the unmount release must not carry a WAF function script')
     }
-    const wafSha = wafScript === null ? null : scriptDigests.get(summary.functionName)!
     return {
       publicId: bufferToPublicId(row.public_id),
       sequence: row.sequence_no,
       generatorRevision: row.compiler_revision,
       plan: {
         mode: summary.mode,
-        functionName: summary.functionName,
-        script: wafScript,
-        scriptSha256: wafSha ?? null,
+        wafFunctions: wafFunctions.map(({ name }) => ({
+          name,
+          scriptSha256: scriptDigests.get(name)!,
+        })),
         functions,
         scripts,
         ruleCount: summary.ruleCount,
@@ -890,9 +905,8 @@ export class WafReleaseRepository {
       id: bufferToPublicId(row.public_id),
       sequence: row.sequence_no,
       status: row.status,
-      functionName: row.function_name,
+      wafFunctions: summaryWafFunctions(parseDiffSummary(row.diff_summary_json) ?? {}) ?? [],
       mode: row.mode === 'unmount' ? 'unmount' : 'mounted',
-      scriptSha256: row.script_sha256?.toString('hex') ?? null,
       ruleCount: Number(row.rule_count),
       indexVersion: row.index_version,
       description: row.description ?? '',

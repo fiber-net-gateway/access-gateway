@@ -1,13 +1,18 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { Link } from 'react-router'
 
 import { compileWafPolicyPreview, fetchWafRulePack } from '../api/client'
-import type { WafCompilePreviewView, WafMode, WafRule } from '../api/types'
+import type { WafCompilePreviewView, WafGroup, WafPolicy, WafRule } from '../api/types'
 import { useUnsavedChangesGuard } from '../routes/useUnsavedChangesGuard'
 import { useWafPolicyDraft } from './useWafPolicyDraft'
+import { WafGroupDialog } from './WafGroupDialog'
 import { WafRuleDialog } from './WafRuleDialog'
 import {
   actionLabels,
+  groupChange,
+  groupsInExecutionOrder,
+  includeSummary,
+  modeLabels,
   newWafRule,
   problemsByRuleId,
   ruleChange,
@@ -19,26 +24,34 @@ import {
 } from './wafRuleForm'
 
 const MAX_RULES = 256
-
-const modeLabels: Record<WafMode, string> = {
-  off: '关闭',
-  log: '仅记录',
-  block: '拦截',
-}
+const MAX_GROUPS = 32
 
 const unmountReasonLabels: Record<string, string> = {
   'no-rules': '策略中没有规则',
-  'no-mounted-projects': '没有任何 Project 挂载该函数',
+  'no-mounted-groups': '含规则的规则组都已关闭',
+}
+
+const skipReasonLabels: Record<string, string> = {
+  off: '已关闭',
+  'no-rules': '没有规则',
 }
 
 type RuleDialogTarget = { mode: 'add'; rule: WafRule } | { mode: 'edit'; ruleId: string }
+type GroupDialogTarget = { mode: 'add' } | { mode: 'edit'; groupId: string }
 
-// Issue paths are positional; rules are shown by name and in execution order.
-function fieldLocation(field: string | undefined, rules: readonly WafRule[]): string {
-  const located = /^rules\[(\d+)\](?:\.(.+))?$/u.exec(field ?? '')
-  if (located?.[1] === undefined) return field === 'payloadBase64' ? 'script' : (field ?? 'script')
-  const rule = rules[Number(located[1])]
-  return [rule?.name || rule?.id || field, located[2]].filter(Boolean).join(' · ')
+// Issue paths are positional; groups and rules are shown by name.
+function fieldLocation(
+  field: string | undefined,
+  policy: WafPolicy,
+  functionName?: string,
+): string {
+  const located = /^(rules|groups)\[(\d+)\](?:\.(.+))?$/u.exec(field ?? '')
+  if (located?.[2] === undefined) {
+    const fallback = functionName ?? 'script'
+    return field === 'payloadBase64' ? fallback : (field ?? fallback)
+  }
+  const target = (located[1] === 'rules' ? policy.rules : policy.groups)[Number(located[2])]
+  return [target?.name || target?.id || field, located[3]].filter(Boolean).join(' · ')
 }
 
 export function WafPolicyPage() {
@@ -59,6 +72,7 @@ export function WafPolicyPage() {
     new Map(),
   )
   const [dialogTarget, setDialogTarget] = useState<RuleDialogTarget | null>(null)
+  const [groupDialogTarget, setGroupDialogTarget] = useState<GroupDialogTarget | null>(null)
   const [dialogDirty, setDialogDirty] = useState(false)
   const [previewError, setPreviewError] = useState<string | null>(null)
   const [previewLoading, setPreviewLoading] = useState(false)
@@ -97,6 +111,7 @@ export function WafPolicyPage() {
 
   const closeDialog = useCallback((): void => {
     setDialogTarget(null)
+    setGroupDialogTarget(null)
     setDialogDirty(false)
   }, [])
 
@@ -118,35 +133,60 @@ export function WafPolicyPage() {
     closeDialog()
   }
 
+  const applyGroup = (next: WafGroup): void => {
+    updatePolicy((current) => ({
+      ...current,
+      groups: current.groups.some((group) => group.id === next.id)
+        ? current.groups.map((group) => (group.id === next.id ? next : group))
+        : [...current.groups, next],
+    }))
+    closeDialog()
+  }
+
+  const removeGroup = (groupId: string): void => {
+    updatePolicy((current) => ({
+      ...current,
+      groups: current.groups.filter((group) => group.id !== groupId),
+      rules: current.rules.filter((rule) => rule.group !== groupId),
+    }))
+    closeDialog()
+  }
+
   // Import the curated starter pack into the working copy: rules whose id
   // already exists are skipped so re-importing never duplicates or overwrites
-  // operator edits. The result stays a dirty draft — review, then save.
+  // operator edits, and a group is only added for rules that need it. Pack
+  // groups arrive off. The result stays a dirty draft — review, then save.
   const importRulePack = (): void => {
     if (policy === null) return
     setImportingPack(true)
     void fetchWafRulePack()
       .then((pack) => {
-        const existing = new Set(policy.rules.map((rule) => rule.id))
-        const room = MAX_RULES - policy.rules.length
-        const additions: WafRule[] = []
-        let skipped = 0
-        let overflowed = 0
-        for (const rule of pack.rules) {
-          if (existing.has(rule.id)) {
-            skipped += 1
-          } else if (additions.length < room) {
-            additions.push(rule)
-          } else {
-            overflowed += 1
-          }
-        }
+        const existingRules = new Set(policy.rules.map((rule) => rule.id))
+        const existingGroups = new Set(policy.groups.map((group) => group.id))
+        const candidates = pack.rules.filter((rule) => !existingRules.has(rule.id))
+        const newGroups = pack.groups
+          .filter(
+            (group) =>
+              !existingGroups.has(group.id) && candidates.some((rule) => rule.group === group.id),
+          )
+          .slice(0, MAX_GROUPS - policy.groups.length)
+        const usableGroups = new Set([...existingGroups, ...newGroups.map((group) => group.id)])
+        const additions = candidates
+          .filter((rule) => usableGroups.has(rule.group))
+          .slice(0, MAX_RULES - policy.rules.length)
+        const skipped = pack.rules.length - candidates.length
+        const overflowed = candidates.length - additions.length
         if (additions.length > 0) {
-          updatePolicy((current) => ({ ...current, rules: [...current.rules, ...additions] }))
+          updatePolicy((current) => ({
+            ...current,
+            groups: [...current.groups, ...newGroups],
+            rules: [...current.rules, ...additions],
+          }))
         }
         setPackMessage(
-          `已导入 ${additions.length} 条（${pack.version}），跳过已存在 ${skipped} 条` +
-            (overflowed > 0 ? `，超出 256 条上限未导入 ${overflowed} 条` : '') +
-            '——导入后为未保存草稿，请检查后保存。',
+          `已导入 ${additions.length} 条规则、${newGroups.length} 个规则组（${pack.version}），跳过已存在 ${skipped} 条` +
+            (overflowed > 0 ? `，超出上限未导入 ${overflowed} 条` : '') +
+            '——规则组默认关闭，导入后为未保存草稿，请检查后保存。',
         )
       })
       .catch((error: unknown) => {
@@ -161,6 +201,11 @@ export function WafPolicyPage() {
     () => new Map(savedPolicy?.rules.map((rule) => [rule.id, rule])),
     [savedPolicy],
   )
+  const savedGroups = useMemo(
+    () => new Map(savedPolicy?.groups.map((group) => [group.id, group])),
+    [savedPolicy],
+  )
+  const orderedGroups = useMemo(() => groupsInExecutionOrder(policy?.groups ?? []), [policy])
   const orderedRules = useMemo(() => rulesInExecutionOrder(policy?.rules ?? []), [policy])
   const changes = useMemo(() => {
     const rules = policy?.rules ?? []
@@ -177,6 +222,10 @@ export function WafPolicyPage() {
     dialogTarget?.mode === 'add'
       ? dialogTarget.rule
       : policy?.rules.find((rule) => rule.id === dialogTarget?.ruleId)
+  const dialogGroup =
+    groupDialogTarget?.mode === 'edit'
+      ? (policy?.groups.find((group) => group.id === groupDialogTarget.groupId) ?? null)
+      : null
 
   if (loading) {
     return <div className="route-empty-state page-loading-state">正在加载 WAF 策略…</div>
@@ -188,7 +237,10 @@ export function WafPolicyPage() {
         <div>
           <p className="eyebrow">WAF POLICY DRAFT</p>
           <h2 id="waf-policy-title">WAF 策略</h2>
-          <p>规则保存为草稿后，由发布页编译成边缘函数脚本；match 表达式使用 Access 脚本语言。</p>
+          <p>
+            规则按组管理：每个规则组决定生效与豁免的 Project，并发布为一个边缘函数；match 表达式使用
+            Access 脚本语言。
+          </p>
         </div>
         <div className="header-actions">
           <Link className="button-secondary inline-button-link" to="/waf/releases">
@@ -236,32 +288,11 @@ export function WafPolicyPage() {
             </div>
           </section>
 
-          <section className="settings-card" aria-labelledby="waf-default-mode-title">
-            <h3 id="waf-default-mode-title">默认模式</h3>
-            <p className="settings-note">
-              未单独设置模式的 Project 使用默认模式；每个 Project 可在自己的 WAF
-              策略页覆盖或申请豁免。
-            </p>
-            <div className="policy-option" role="radiogroup" aria-label="默认模式">
-              {(['off', 'log', 'block'] as const).map((mode) => (
-                <label key={mode}>
-                  <input
-                    checked={policy.defaultMode === mode}
-                    name="waf-default-mode"
-                    onChange={() => updatePolicy((current) => ({ ...current, defaultMode: mode }))}
-                    type="radio"
-                    value={mode}
-                  />
-                  {modeLabels[mode]}
-                </label>
-              ))}
-            </div>
-          </section>
-
-          <section aria-labelledby="waf-rules-title">
+          <section aria-labelledby="waf-groups-title">
             <header className="route-toolbar">
-              <h3 id="waf-rules-title">
-                规则（{policy.rules.length}/{MAX_RULES}）
+              <h3 id="waf-groups-title">
+                规则组（{policy.groups.length}/{MAX_GROUPS}）· 规则（{policy.rules.length}/
+                {MAX_RULES}）
               </h3>
               <div className="header-actions">
                 <button
@@ -274,11 +305,11 @@ export function WafPolicyPage() {
                 </button>
                 <button
                   className="button-secondary"
-                  disabled={policy.rules.length >= MAX_RULES}
-                  onClick={() => setDialogTarget({ mode: 'add', rule: newWafRule() })}
+                  disabled={policy.groups.length >= MAX_GROUPS}
+                  onClick={() => setGroupDialogTarget({ mode: 'add' })}
                   type="button"
                 >
-                  + 添加规则
+                  + 新建规则组
                 </button>
               </div>
             </header>
@@ -289,30 +320,43 @@ export function WafPolicyPage() {
               </p>
             ) : null}
 
-            {policy.rules.length === 0 ? (
+            {policy.groups.length === 0 ? (
               <div className="route-empty-state">
-                <h3>尚无规则</h3>
-                <p>添加规则后，发布时会生成 WAF 边缘函数脚本。</p>
+                <h3>尚无规则组</h3>
+                <p>新建规则组或导入起手规则包；规则组开启后，发布时会生成对应的边缘函数。</p>
               </div>
             ) : (
               <>
                 <p className="settings-note waf-rule-list-note">
-                  按执行顺序排列，优先级数字小的先执行
+                  按执行顺序排列，优先级数字小的先执行；前面的规则组拦截后，后面的不再执行
                   {changes.added + changes.modified + changes.removed > 0
-                    ? `。未保存：新增 ${changes.added} · 修改 ${changes.modified} · 移除 ${changes.removed}`
+                    ? `。未保存规则：新增 ${changes.added} · 修改 ${changes.modified} · 移除 ${changes.removed}`
                     : ''}
                 </p>
-                <ol className="waf-rule-list">
-                  {orderedRules.map((rule) => (
-                    <RuleRow
-                      change={ruleChange(rule, savedRules.get(rule.id))}
-                      key={rule.id}
-                      problems={ruleProblems.get(rule.id) ?? []}
-                      rule={rule}
-                      onEdit={() => setDialogTarget({ mode: 'edit', ruleId: rule.id })}
-                    />
+                <div className="waf-group-list">
+                  {orderedGroups.map((group) => (
+                    <GroupCard
+                      addDisabled={policy.rules.length >= MAX_RULES}
+                      change={groupChange(group, savedGroups.get(group.id))}
+                      group={group}
+                      key={group.id}
+                      onAddRule={() => setDialogTarget({ mode: 'add', rule: newWafRule(group.id) })}
+                      onEdit={() => setGroupDialogTarget({ mode: 'edit', groupId: group.id })}
+                    >
+                      {orderedRules
+                        .filter((rule) => rule.group === group.id)
+                        .map((rule) => (
+                          <RuleRow
+                            change={ruleChange(rule, savedRules.get(rule.id))}
+                            key={rule.id}
+                            problems={ruleProblems.get(rule.id) ?? []}
+                            rule={rule}
+                            onEdit={() => setDialogTarget({ mode: 'edit', ruleId: rule.id })}
+                          />
+                        ))}
+                    </GroupCard>
                   ))}
-                </ol>
+                </div>
               </>
             )}
           </section>
@@ -346,17 +390,17 @@ export function WafPolicyPage() {
                   {preview.compilation === null
                     ? '修复下列问题后才能生成脚本。'
                     : preview.compilation.kind === 'mounted'
-                      ? `挂载函数 ${preview.compilation.functionName} · 脚本 ${
-                          preview.compilation.script.split('\n').length
-                        } 行 · sha256 ${preview.compilation.scriptSha256.slice(0, 16)}…`
-                      : `不生成脚本（${unmountReasonLabels[preview.compilation.reason] ?? preview.compilation.reason}），将发布空函数索引卸载。`}
+                      ? `将发布 ${preview.compilation.functions.length} 个边缘函数`
+                      : `不生成脚本（${unmountReasonLabels[preview.compilation.reason] ?? preview.compilation.reason}），发布后不挂载 WAF 函数。`}
                 </p>
-                {preview.compilation?.kind === 'mounted' &&
-                preview.compilation.directives.length > 0 ? (
+                {preview.compilation !== null && preview.compilation.skipped.length > 0 ? (
                   <p>
-                    CIDR 指令：
-                    {preview.compilation.directives
-                      .map((directive) => `${directive.name}（${directive.cidrs.length} 段）`)
+                    不发布：
+                    {preview.compilation.skipped
+                      .map(
+                        ({ groupId, reason }) =>
+                          `${policy.groups.find((group) => group.id === groupId)?.name ?? groupId}（${skipReasonLabels[reason]}）`,
+                      )
                       .join('、')}
                   </p>
                 ) : null}
@@ -364,7 +408,7 @@ export function WafPolicyPage() {
                   <ul className="route-issues waf-preview-issues">
                     {preview.issues.map((issue) => (
                       <li key={`${issue.field}-${issue.code}`}>
-                        <span>{fieldLocation(issue.field, policy.rules)}</span>
+                        <span>{fieldLocation(issue.field, policy)}</span>
                         <span>{issue.code}</span>
                         <span>{issue.message}</span>
                       </li>
@@ -375,7 +419,7 @@ export function WafPolicyPage() {
                   <ul className="route-issues waf-preview-issues">
                     {preview.scriptErrors.map((error, errorIndex) => (
                       <li key={`${error.code}-${errorIndex}`}>
-                        <span>{fieldLocation(error.field, policy.rules)}</span>
+                        <span>{fieldLocation(error.field, policy, error.functionName)}</span>
                         <span>{error.code}</span>
                         <span>
                           {error.line !== undefined
@@ -389,12 +433,19 @@ export function WafPolicyPage() {
                     ))}
                   </ul>
                 ) : null}
-                {preview.compilation?.kind === 'mounted' ? (
-                  <details className="wire-preview">
-                    <summary>查看生成脚本</summary>
-                    <pre>{preview.compilation.script}</pre>
-                  </details>
-                ) : null}
+                {preview.compilation?.kind === 'mounted'
+                  ? preview.compilation.functions.map((fn) => (
+                      <details className="wire-preview" key={fn.functionName}>
+                        <summary>
+                          {fn.functionName} · {fn.ruleOrder.length} 条规则 · 脚本{' '}
+                          {fn.script.split('\n').length} 行
+                          {fn.directives.length > 0 ? ` · CIDR 指令 ${fn.directives.length}` : ''} ·
+                          sha256 {fn.scriptSha256.slice(0, 16)}…
+                        </summary>
+                        <pre>{fn.script}</pre>
+                      </details>
+                    ))
+                  : null}
               </div>
             )}
           </section>
@@ -404,10 +455,24 @@ export function WafPolicyPage() {
               key={dialogRule.id}
               mode={dialogTarget.mode}
               rule={dialogRule}
+              groups={orderedGroups}
               onApply={applyRule}
               onClose={closeDialog}
               onDirtyChange={setDialogDirty}
               onRemove={() => removeRule(dialogRule.id)}
+            />
+          ) : null}
+
+          {groupDialogTarget !== null ? (
+            <WafGroupDialog
+              key={dialogGroup?.id ?? 'new'}
+              existingIds={policy.groups.map((group) => group.id)}
+              group={dialogGroup}
+              ruleCount={policy.rules.filter((rule) => rule.group === dialogGroup?.id).length}
+              onApply={applyGroup}
+              onClose={closeDialog}
+              onDirtyChange={setDialogDirty}
+              onRemove={() => dialogGroup && removeGroup(dialogGroup.id)}
             />
           ) : null}
         </>
@@ -421,6 +486,71 @@ const changeChips: Record<NonNullable<WafRuleChange>, { label: string; tone: str
   modified: { label: '已修改', tone: 'unknown' },
 }
 
+const groupModeChips: Record<WafGroup['mode'], string> = {
+  off: 'unknown',
+  log: 'pending',
+  block: 'ready',
+}
+
+interface GroupCardProps {
+  group: WafGroup
+  change: WafRuleChange
+  addDisabled: boolean
+  onEdit(): void
+  onAddRule(): void
+  children: ReactNode[]
+}
+
+function GroupCard({ group, change, addDisabled, onEdit, onAddRule, children }: GroupCardProps) {
+  const exemptCount = group.projects.exempt?.length ?? 0
+  return (
+    <section aria-label={`规则组 ${group.name}`} className="waf-group">
+      <header className="waf-group-header">
+        <div className="waf-rule-row-main">
+          <div className="waf-rule-row-title">
+            <strong title={group.name}>{group.name}</strong>
+            <span className={`status-chip status-chip-${groupModeChips[group.mode]}`}>
+              {modeLabels[group.mode]}
+            </span>
+            {change !== null ? (
+              <span className={`status-chip status-chip-${changeChips[change].tone}`}>
+                {changeChips[change].label}
+              </span>
+            ) : null}
+          </div>
+          <code className="waf-rule-row-detail">
+            waf-{group.id} · 优先级 {group.priority} · {includeSummary(group)} · 豁免 {exemptCount}
+          </code>
+        </div>
+        <div className="header-actions">
+          <button
+            aria-label={`编辑规则组 ${group.name}`}
+            className="button-secondary"
+            onClick={onEdit}
+            type="button"
+          >
+            编辑组
+          </button>
+          <button
+            aria-label={`向 ${group.name} 添加规则`}
+            className="button-secondary"
+            disabled={addDisabled}
+            onClick={onAddRule}
+            type="button"
+          >
+            + 添加规则
+          </button>
+        </div>
+      </header>
+      {children.length > 0 ? (
+        <ol className="waf-rule-list">{children}</ol>
+      ) : (
+        <p className="settings-note waf-group-empty">本组还没有规则，发布时不会生成函数。</p>
+      )}
+    </section>
+  )
+}
+
 interface RuleRowProps {
   rule: WafRule
   change: WafRuleChange
@@ -429,7 +559,6 @@ interface RuleRowProps {
 }
 
 function RuleRow({ rule, change, problems, onEdit }: RuleRowProps) {
-  const exclusionCount = rule.exclusions?.length ?? 0
   return (
     <li className="waf-rule-row">
       <span className={`status-chip waf-severity-${rule.severity}`}>
@@ -460,7 +589,6 @@ function RuleRow({ rule, change, problems, onEdit }: RuleRowProps) {
         <span>{actionLabels[rule.action]}</span>
         <span>优先级 {rule.priority}</span>
         <span title={scopeSummary(rule)}>{scopeSummary(rule)}</span>
-        <span>豁免 {exclusionCount}</span>
       </div>
       <button
         aria-label={`编辑规则 ${rule.name}`}

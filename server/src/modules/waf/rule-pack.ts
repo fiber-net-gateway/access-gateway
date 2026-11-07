@@ -11,11 +11,13 @@
 //   畸形 URI (+ high-signal RCE probe).
 // - Rules default to `block` only where false positives are unlikely; noisy
 //   families (scanner UA, sensitive-file probing) stay `log` for review.
-// - Project modes gate actual blocking (§4.2): on a fresh draft
-//   (defaultMode off) an imported pack changes nothing until an operator
-//   turns a mode on — 灰度顺序 单项目 log → block.
-// - Stable ids: operators reference them in metrics labels, logs, and
-//   exclusions; never rename an id, retire it and add a new one.
+// - Groups follow those families, because exempting a project is a group-level
+//   decision: a false positive costs one family, not the whole pack.
+// - Group modes gate actual blocking (§4.2): every pack group imports as off,
+//   so an import changes nothing until an operator turns a group on — 灰度顺序
+//   单项目 log → block.
+// - Stable ids: operators reference them in metrics labels and logs; never
+//   rename an id, retire it and add a new one.
 //
 // Dialect authoring constraints (match expressions are embedded verbatim as
 // Access 脚本语言 source): string literals only accept the dialect escape set
@@ -26,14 +28,28 @@
 // has `-` (`$header.user_agent`): ConstPackage normalizes `-`→`_` on both the
 // script side and the request side, so they meet.
 
-import type { WafRule } from './model.js'
+import type { WafGroup, WafRule } from './model.js'
 
-export const WAF_RULE_PACK_VERSION = 'waf-rule-pack-v1'
+export const WAF_RULE_PACK_VERSION = 'waf-rule-pack-v2'
+
+function packGroup(id: string, name: string, priority: number): WafGroup {
+  return { id, name, mode: 'off', priority, projects: { include: ['*'] } }
+}
+
+export const WAF_RULE_PACK_GROUPS: readonly WafGroup[] = [
+  packGroup('sqli', 'SQL 注入', 100),
+  packGroup('rce', '远程代码执行', 120),
+  packGroup('xss', 'XSS', 200),
+  packGroup('traversal', '路径穿越', 300),
+  packGroup('probe', '扫描与探测', 400),
+  packGroup('malformed', '畸形请求', 500),
+]
 
 export const WAF_RULE_PACK: readonly WafRule[] = [
   {
     id: 'sqli-union-select',
     name: 'union select 注入探测',
+    group: 'sqli',
     severity: 'critical',
     priority: 100,
     action: 'block',
@@ -43,6 +59,7 @@ export const WAF_RULE_PACK: readonly WafRule[] = [
   {
     id: 'sqli-time-function',
     name: 'SQL 延时函数探测',
+    group: 'sqli',
     severity: 'high',
     priority: 110,
     action: 'block',
@@ -52,6 +69,7 @@ export const WAF_RULE_PACK: readonly WafRule[] = [
   {
     id: 'rce-jndi-probe',
     name: 'JNDI 注入探测（log4shell 形态）',
+    group: 'rce',
     severity: 'critical',
     priority: 120,
     action: 'block',
@@ -62,6 +80,7 @@ export const WAF_RULE_PACK: readonly WafRule[] = [
   {
     id: 'xss-script-marker',
     name: 'XSS 脚本标记探测',
+    group: 'xss',
     severity: 'high',
     priority: 200,
     action: 'block',
@@ -72,6 +91,7 @@ export const WAF_RULE_PACK: readonly WafRule[] = [
   {
     id: 'traversal-encoded-dotdot',
     name: '路径穿越探测（含编码变体）',
+    group: 'traversal',
     severity: 'high',
     priority: 300,
     action: 'block',
@@ -81,6 +101,7 @@ export const WAF_RULE_PACK: readonly WafRule[] = [
   {
     id: 'scanner-user-agent',
     name: '扫描器 User-Agent',
+    group: 'probe',
     severity: 'medium',
     priority: 400,
     action: 'log',
@@ -91,6 +112,7 @@ export const WAF_RULE_PACK: readonly WafRule[] = [
   {
     id: 'probe-sensitive-file',
     name: '敏感文件与管理端探测',
+    group: 'probe',
     severity: 'medium',
     priority: 410,
     action: 'log',
@@ -101,6 +123,7 @@ export const WAF_RULE_PACK: readonly WafRule[] = [
   {
     id: 'malformed-control-chars',
     name: 'URI 控制字符',
+    group: 'malformed',
     severity: 'medium',
     priority: 500,
     action: 'block',
@@ -110,6 +133,7 @@ export const WAF_RULE_PACK: readonly WafRule[] = [
   {
     id: 'malformed-triple-encoding',
     name: '三重百分号编码探测',
+    group: 'malformed',
     severity: 'low',
     priority: 510,
     action: 'log',
@@ -120,9 +144,10 @@ export const WAF_RULE_PACK: readonly WafRule[] = [
 
 export interface WafRulePackView {
   version: string
+  groups: readonly WafGroup[]
   rules: readonly WafRule[]
 }
 
 export function wafRulePackView(): WafRulePackView {
-  return { version: WAF_RULE_PACK_VERSION, rules: WAF_RULE_PACK }
+  return { version: WAF_RULE_PACK_VERSION, groups: WAF_RULE_PACK_GROUPS, rules: WAF_RULE_PACK }
 }

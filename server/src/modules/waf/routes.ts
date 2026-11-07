@@ -23,7 +23,7 @@ function parseIfMatch(value: string | undefined): string {
 const wafRuleSchema = {
   type: 'object',
   additionalProperties: false,
-  required: ['id', 'name', 'severity', 'priority', 'action', 'phase', 'match'],
+  required: ['id', 'name', 'group', 'severity', 'priority', 'action', 'phase', 'match'],
   properties: {
     id: {
       type: 'string',
@@ -32,6 +32,7 @@ const wafRuleSchema = {
       pattern: '^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$',
     },
     name: { type: 'string', minLength: 1, maxLength: 255 },
+    group: { type: 'string', minLength: 1, maxLength: 60 },
     severity: { type: 'string', enum: ['critical', 'high', 'medium', 'low'] },
     priority: { type: 'integer', minimum: 0, maximum: 1000000 },
     action: { type: 'string', enum: ['log', 'block'] },
@@ -58,16 +59,46 @@ const wafRuleSchema = {
         },
       },
     },
-    exclusions: {
-      type: 'array',
-      maxItems: 64,
-      items: {
-        type: 'object',
-        additionalProperties: false,
-        required: ['project', 'reason'],
-        properties: {
-          project: { type: 'string', minLength: 1, maxLength: 255 },
-          reason: { type: 'string', minLength: 1, maxLength: 255 },
+  },
+} as const
+
+const wafGroupSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['id', 'name', 'mode', 'priority', 'projects'],
+  properties: {
+    id: {
+      type: 'string',
+      minLength: 1,
+      maxLength: 60,
+      pattern: '^[a-z0-9](?:[a-z0-9-]{0,58}[a-z0-9])?$',
+    },
+    name: { type: 'string', minLength: 1, maxLength: 255 },
+    mode: { type: 'string', enum: ['off', 'log', 'block'] },
+    priority: { type: 'integer', minimum: 0, maximum: 1000000 },
+    projects: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['include'],
+      properties: {
+        include: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 256,
+          items: { type: 'string', minLength: 1, maxLength: 255 },
+        },
+        exempt: {
+          type: 'array',
+          maxItems: 256,
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['project', 'reason'],
+            properties: {
+              project: { type: 'string', minLength: 1, maxLength: 255 },
+              reason: { type: 'string', minLength: 1, maxLength: 255 },
+            },
+          },
         },
       },
     },
@@ -79,10 +110,10 @@ const wafRuleSchema = {
 const wafPolicySchema = {
   type: 'object',
   additionalProperties: false,
-  required: ['schemaVersion', 'defaultMode', 'rules', 'projectModes'],
+  required: ['schemaVersion', 'groups', 'rules', 'projectModes'],
   properties: {
-    schemaVersion: { type: 'integer', const: 1 },
-    defaultMode: { type: 'string', enum: ['off', 'log', 'block'] },
+    schemaVersion: { type: 'integer', const: 2 },
+    groups: { type: 'array', maxItems: 32, items: wafGroupSchema },
     rules: { type: 'array', maxItems: 256, items: wafRuleSchema },
     projectModes: {
       type: 'object',
@@ -106,6 +137,7 @@ const valueConstraintKeywords = new Set([
   'maxLength',
   'maxProperties',
   'maximum',
+  'minItems',
   'minLength',
   'minimum',
   'pattern',
@@ -142,9 +174,10 @@ const wafPolicyDraftResponseSchema = {
 const wafRulePackResponseSchema = {
   type: 'object',
   additionalProperties: false,
-  required: ['version', 'rules'],
+  required: ['version', 'groups', 'rules'],
   properties: {
     version: { type: 'string', minLength: 1, maxLength: 64 },
+    groups: { type: 'array', items: wafGroupSchema },
     rules: { type: 'array', items: wafRuleSchema },
   },
 } as const
@@ -173,61 +206,87 @@ const wafHitsResponseSchema = {
   },
 } as const
 
+const wafSkippedGroupsSchema = {
+  type: 'array',
+  items: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['groupId', 'reason'],
+    properties: {
+      groupId: { type: 'string' },
+      reason: { type: 'string', enum: ['off', 'no-rules'] },
+    },
+  },
+} as const
+
 const wafCompilationSchema = {
   anyOf: [
     {
       type: 'object',
       additionalProperties: false,
-      required: ['kind', 'reason'],
+      required: ['kind', 'reason', 'skipped'],
       properties: {
         kind: { type: 'string', const: 'unmount' },
-        reason: { type: 'string', enum: ['no-rules', 'no-mounted-projects'] },
+        reason: { type: 'string', enum: ['no-rules', 'no-mounted-groups'] },
+        skipped: wafSkippedGroupsSchema,
       },
     },
     {
       type: 'object',
       additionalProperties: false,
-      required: [
-        'kind',
-        'script',
-        'scriptSha256',
-        'functionName',
-        'mountPriority',
-        'mounts',
-        'ruleOrder',
-        'directives',
-      ],
+      required: ['kind', 'functions', 'skipped'],
       properties: {
         kind: { type: 'string', const: 'mounted' },
-        script: { type: 'string' },
-        scriptSha256: { type: 'string', pattern: '^[0-9a-f]{64}$' },
-        functionName: { type: 'string' },
-        mountPriority: { type: 'integer' },
-        mounts: {
+        functions: {
           type: 'array',
           items: {
             type: 'object',
             additionalProperties: false,
-            required: ['include', 'exclude'],
+            required: [
+              'groupId',
+              'functionName',
+              'script',
+              'scriptSha256',
+              'mountPriority',
+              'mounts',
+              'ruleOrder',
+              'directives',
+            ],
             properties: {
-              include: { type: 'array', items: { type: 'string' } },
-              exclude: { type: 'array', items: { type: 'string' } },
+              groupId: { type: 'string' },
+              functionName: { type: 'string' },
+              script: { type: 'string' },
+              scriptSha256: { type: 'string', pattern: '^[0-9a-f]{64}$' },
+              mountPriority: { type: 'integer' },
+              mounts: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  additionalProperties: false,
+                  required: ['include', 'exclude'],
+                  properties: {
+                    include: { type: 'array', items: { type: 'string' } },
+                    exclude: { type: 'array', items: { type: 'string' } },
+                  },
+                },
+              },
+              ruleOrder: { type: 'array', items: { type: 'string' } },
+              directives: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  additionalProperties: false,
+                  required: ['name', 'cidrs'],
+                  properties: {
+                    name: { type: 'string' },
+                    cidrs: { type: 'array', items: { type: 'string' } },
+                  },
+                },
+              },
             },
           },
         },
-        ruleOrder: { type: 'array', items: { type: 'string' } },
-        directives: {
-          type: 'array',
-          items: {
-            type: 'object',
-            additionalProperties: false,
-            required: ['name', 'cidrs'],
-            properties: {
-              name: { type: 'string' },
-              cidrs: { type: 'array', items: { type: 'string' } },
-            },
-          },
-        },
+        skipped: wafSkippedGroupsSchema,
       },
     },
   ],
@@ -260,9 +319,10 @@ const wafCompilePreviewResponseSchema = {
       items: {
         type: 'object',
         additionalProperties: false,
-        required: ['code', 'message'],
+        required: ['code', 'message', 'functionName'],
         properties: {
           code: { type: 'string' },
+          functionName: { type: 'string' },
           field: { type: 'string' },
           offset: { type: 'integer' },
           line: { type: 'integer' },
@@ -674,9 +734,8 @@ const wafReleaseResponseSchema = {
     'id',
     'sequence',
     'status',
-    'functionName',
+    'wafFunctions',
     'mode',
-    'scriptSha256',
     'ruleCount',
     'indexVersion',
     'description',
@@ -707,9 +766,19 @@ const wafReleaseResponseSchema = {
         'abandoned',
       ],
     },
-    functionName: { type: 'string' },
+    wafFunctions: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['name', 'scriptSha256'],
+        properties: {
+          name: { type: 'string' },
+          scriptSha256: { type: 'string', pattern: '^[0-9a-f]{64}$' },
+        },
+      },
+    },
     mode: { type: 'string', enum: ['mounted', 'unmount'] },
-    scriptSha256: { type: ['string', 'null'], pattern: '^[0-9a-f]{64}$' },
     ruleCount: { type: 'integer', minimum: 0 },
     indexVersion: { type: 'string', pattern: '^(0|[1-9][0-9]*)$' },
     description: { type: 'string' },

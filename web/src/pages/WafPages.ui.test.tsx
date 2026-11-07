@@ -37,18 +37,36 @@ const projectId = '00000000-0000-4000-8000-000000000001'
 const releaseId = '00000000-0000-4000-8000-00000000000c'
 
 const policy = {
-  schemaVersion: 1,
-  defaultMode: 'log',
+  schemaVersion: 2,
+  groups: [
+    {
+      id: 'core',
+      name: '核心规则',
+      mode: 'log',
+      priority: 100,
+      projects: {
+        include: ['*'],
+        exempt: [{ project: 'api.example.com', reason: '误报待修' }],
+      },
+    },
+    {
+      id: 'loan',
+      name: '贷款规则',
+      mode: 'block',
+      priority: 50,
+      projects: { include: ['loan-*'] },
+    },
+  ],
   rules: [
     {
       id: 'probe-0001',
       name: '路径穿越探测',
+      group: 'core',
       severity: 'high',
       priority: 100,
       action: 'block',
       phase: 'request_head',
       match: 'strings.contains($req.path, "../")',
-      exclusions: [{ project: 'api.example.com', reason: '误报待修' }],
     },
   ],
   projectModes: { 'legacy.example.com': 'off' },
@@ -68,13 +86,19 @@ const compilePreview = {
   issues: [],
   compilation: {
     kind: 'mounted',
-    script: 'function waf() {\n  return 1\n}\n',
-    scriptSha256: 'a'.repeat(64),
-    functionName: 'waf',
-    mountPriority: 100,
-    mounts: [{ include: ['*'], exclude: ['legacy.example.com'] }],
-    ruleOrder: ['probe-0001'],
-    directives: [],
+    functions: [
+      {
+        groupId: 'core',
+        functionName: 'waf-core',
+        script: 'function waf() {\n  return 1\n}\n',
+        scriptSha256: 'a'.repeat(64),
+        mountPriority: 100,
+        mounts: [{ include: ['*'], exclude: ['api.example.com', 'legacy.example.com'] }],
+        ruleOrder: ['probe-0001'],
+        directives: [],
+      },
+    ],
+    skipped: [{ groupId: 'loan', reason: 'no-rules' }],
   },
   scriptValid: true,
   scriptErrors: [],
@@ -85,9 +109,8 @@ const releaseView = {
   id: releaseId,
   sequence: '5',
   status: 'ready',
-  functionName: 'waf',
+  wafFunctions: [{ name: 'waf-core', scriptSha256: '1'.repeat(64) }],
   mode: 'mounted',
-  scriptSha256: '1'.repeat(64),
   ruleCount: 1,
   indexVersion: '5',
   description: '',
@@ -95,7 +118,7 @@ const releaseView = {
     {
       id: '00000000-0000-4000-8000-000000000010',
       kind: 'edge_function_script',
-      dataId: 'ploto.unified-access.edge-function.waf',
+      dataId: 'ploto.unified-access.edge-function.waf-core',
       group: 'ACCESS-SERVER',
       status: 'verified',
       verifiedSha256: '1'.repeat(64),
@@ -134,12 +157,12 @@ const edgeFunctions = {
     version: 5,
     functions: [
       {
-        name: 'waf',
+        name: 'waf-core',
         sha256: '1'.repeat(64),
         phase: null,
         mounts: [
           {
-            projects: { include: ['*'], exclude: ['legacy.example.com'] },
+            projects: { include: ['*'], exclude: ['api.example.com', 'legacy.example.com'] },
             priority: 100,
             ratio: null,
           },
@@ -156,7 +179,7 @@ const edgeFunctions = {
   },
   scripts: [
     {
-      name: 'waf',
+      name: 'waf-core',
       exists: true,
       sha256: '1'.repeat(64),
       content: 'function waf() {\n  return 0\n}\n',
@@ -207,12 +230,18 @@ const edgeCompilePreview = {
 }
 
 const rulePack = {
-  version: 'waf-rule-pack-v1',
+  version: 'waf-rule-pack-v2',
+  groups: [
+    { id: 'sqli', name: 'SQL 注入', mode: 'off', priority: 100, projects: { include: ['*'] } },
+    // Only holds a rule that already exists, so it must not be added.
+    { id: 'unused', name: '已有规则', mode: 'off', priority: 300, projects: { include: ['*'] } },
+  ],
   rules: [
-    policy.rules[0], // same id as the draft rule → skipped on import
+    { ...policy.rules[0], group: 'unused' }, // same id as the draft rule → skipped on import
     {
       id: 'sqli-union-select',
       name: 'union select 注入探测',
+      group: 'sqli',
       severity: 'critical',
       priority: 100,
       action: 'block',
@@ -387,7 +416,7 @@ async function openPolicyPage(awaitPreview = true) {
   const user = userEvent.setup()
   render(<RouterProvider router={router} />)
   expect(await screen.findByRole('heading', { name: 'WAF 策略' })).toBeTruthy()
-  if (awaitPreview) expect(await screen.findByText(/挂载函数 waf · 脚本 \d+ 行/u)).toBeTruthy()
+  if (awaitPreview) expect(await screen.findByText(/将发布 1 个边缘函数/u)).toBeTruthy()
   return user
 }
 
@@ -401,10 +430,15 @@ function savedPolicyBody(fetchMock: MockedFetch) {
   return (
     JSON.parse(String(call[1]?.body)) as {
       policy: {
+        groups: {
+          id: string
+          mode: string
+          projects: { include: string[]; exempt?: unknown }
+        }[]
         rules: {
           name: string
+          group: string
           scope?: unknown
-          exclusions?: unknown
         }[]
       }
     }
@@ -416,7 +450,10 @@ function previewBodies(fetchMock: MockedFetch) {
     .filter(([url]) => url === '/api/waf/policy/compile-preview')
     .map(
       ([, init]) =>
-        JSON.parse(String(init?.body)) as { defaultMode: string; rules: { name: string }[] },
+        JSON.parse(String(init?.body)) as {
+          groups: { id: string; mode: string }[]
+          rules: { name: string }[]
+        },
     )
 }
 
@@ -435,17 +472,24 @@ describe('WAF console pages', () => {
     expect(screen.queryByRole('textbox', { name: 'match 表达式' })).toBeNull()
 
     // The debounced compile preview renders the mounted compilation summary.
-    expect(await screen.findByText(/挂载函数 waf · 脚本 \d+ 行/u)).toBeTruthy()
+    expect(await screen.findByText(/将发布 1 个边缘函数/u)).toBeTruthy()
+    expect(screen.getByText('不发布：贷款规则（没有规则）')).toBeTruthy()
+    expect(screen.getByText(/waf-core · 1 条规则 · 脚本 \d+ 行/u)).toBeTruthy()
 
     // Importing the starter rule pack skips the existing id and appends the rest
     // into the dirty working copy.
     await user.click(screen.getByRole('button', { name: '导入起手规则包' }))
     expect(
-      await screen.findByText(/已导入 1 条（waf-rule-pack-v1），跳过已存在 1 条/u),
+      await screen.findByText(/已导入 1 条规则、1 个规则组（waf-rule-pack-v2），跳过已存在 1 条/u),
     ).toBeTruthy()
     expect(await screen.findByText('union select 注入探测')).toBeTruthy()
+    expect(screen.getByRole('region', { name: '规则组 SQL 注入' })).toBeTruthy()
 
-    await user.click(screen.getByRole('radio', { name: /关闭/u }))
+    await user.click(screen.getByRole('button', { name: '编辑规则组 核心规则' }))
+    const dialog = await screen.findByRole('dialog', { name: '编辑规则组' })
+    await user.selectOptions(within(dialog).getByRole('combobox', { name: '模式' }), 'off')
+    await user.click(within(dialog).getByRole('button', { name: '应用到草稿' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
     await user.click(screen.getByRole('button', { name: '保存策略草稿' }))
 
     await waitFor(() => {
@@ -455,12 +499,17 @@ describe('WAF console pages', () => {
       expect(saveCall).toBeTruthy()
       expect(new Headers(saveCall?.[1]?.headers).get('If-Match')).toBe('"3"')
       const body = JSON.parse(String(saveCall?.[1]?.body)) as { policy: typeof policy }
-      expect(body.policy.defaultMode).toBe('off')
-      expect(body.policy.rules.length).toBe(2)
-      expect(body.policy.rules[1]?.id).toBe('sqli-union-select')
-      expect(body.policy.rules[0]?.exclusions).toEqual([
+      expect(body.policy.groups.map((group) => [group.id, group.mode])).toEqual([
+        ['core', 'off'],
+        ['loan', 'block'],
+        ['sqli', 'off'],
+      ])
+      expect(body.policy.groups[0]?.projects.exempt).toEqual([
         { project: 'api.example.com', reason: '误报待修' },
       ])
+      expect(body.policy.rules.length).toBe(2)
+      expect(body.policy.rules[1]?.id).toBe('sqli-union-select')
+      expect(body.policy.rules[1]?.group).toBe('sqli')
     })
   })
 
@@ -471,9 +520,8 @@ describe('WAF console pages', () => {
     await user.click(screen.getByRole('button', { name: '编辑规则 路径穿越探测' }))
     const dialog = await screen.findByRole('dialog', { name: '编辑规则' })
 
-    // The rule's exclusion is listed; adding one lives on the project page.
-    expect(within(dialog).getByText('api.example.com')).toBeTruthy()
-    expect(within(dialog).getByText(/新增豁免请到对应 Project/u)).toBeTruthy()
+    // Project scope belongs to the group: the rule dialog has no exemptions.
+    expect(within(dialog).queryByText('api.example.com')).toBeNull()
 
     await user.clear(within(dialog).getByRole('textbox', { name: '规则名称' }))
     await user.type(within(dialog).getByRole('textbox', { name: '规则名称' }), '路径穿越')
@@ -490,7 +538,7 @@ describe('WAF console pages', () => {
     // Applying only changes the working copy; the row says so until saved.
     expect(screen.getByText('路径穿越')).toBeTruthy()
     expect(screen.getByText('已修改')).toBeTruthy()
-    expect(screen.getByText(/未保存：新增 0 · 修改 1 · 移除 0/u)).toBeTruthy()
+    expect(screen.getByText(/未保存规则：新增 0 · 修改 1 · 移除 0/u)).toBeTruthy()
     expect(savedPolicyBody(fetchMock)).toBeUndefined()
 
     await user.click(screen.getByRole('button', { name: '保存策略草稿' }))
@@ -501,7 +549,6 @@ describe('WAF console pages', () => {
         methods: ['GET', 'POST'],
         sourceCidrs: ['10.0.0.0/8', '192.168.0.0/16'],
       })
-      expect(rule?.exclusions).toEqual([{ project: 'api.example.com', reason: '误报待修' }])
     })
     await waitFor(() => expect(screen.queryByText('已修改')).toBeNull())
   })
@@ -510,7 +557,7 @@ describe('WAF console pages', () => {
     const fetchMock = installApiMock()
     const user = await openPolicyPage()
 
-    await user.click(screen.getByRole('button', { name: '+ 添加规则' }))
+    await user.click(screen.getByRole('button', { name: '向 核心规则 添加规则' }))
     const dialog = await screen.findByRole('dialog', { name: '添加规则' })
     expect(within(dialog).queryByRole('button', { name: '删除规则' })).toBeNull()
 
@@ -518,7 +565,7 @@ describe('WAF console pages', () => {
     await user.click(within(dialog).getByRole('button', { name: '应用到草稿' }))
     expect(await within(dialog).findByText('请填写规则名称')).toBeTruthy()
     expect(within(dialog).getByText('请填写 match 表达式')).toBeTruthy()
-    expect(screen.getByText('规则（1/256）')).toBeTruthy()
+    expect(screen.getByText(/规则（1\/256）/u)).toBeTruthy()
 
     await user.type(within(dialog).getByRole('textbox', { name: '规则名称' }), '封禁扫描器')
     await user.clear(within(dialog).getByRole('textbox', { name: '优先级' }))
@@ -530,7 +577,7 @@ describe('WAF console pages', () => {
     await user.click(within(dialog).getByRole('button', { name: '应用到草稿' }))
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
 
-    expect(screen.getByText('规则（2/256）')).toBeTruthy()
+    expect(screen.getByText(/规则（2\/256）/u)).toBeTruthy()
     expect(screen.getByText('新增')).toBeTruthy()
 
     // Priority 5 runs first, so it is listed first.
@@ -542,7 +589,7 @@ describe('WAF console pages', () => {
     // The check compiled the rule alone, in a mode that always yields a script.
     const checked = previewBodies(fetchMock).find((body) => body.rules[0]?.name === '封禁扫描器')
     expect(checked?.rules.length).toBe(1)
-    expect(checked?.defaultMode).toBe('log')
+    expect(checked?.groups).toMatchObject([{ id: 'core', mode: 'log' }])
   })
 
   test('blocks applying a rule the validator rejects and points at the rule field', async () => {
@@ -560,6 +607,7 @@ describe('WAF console pages', () => {
           scriptErrors: [
             {
               code: 'script_compile_failed',
+              functionName: 'waf-core',
               field: 'rules[0].match',
               offset: 321,
               line: 1,
@@ -673,24 +721,94 @@ describe('WAF console pages', () => {
     await user.click(within(dialog).getByRole('button', { name: '删除规则' }))
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
     expect(screen.queryByText('路径穿越探测')).toBeNull()
-    expect(screen.getByText('规则（0/256）')).toBeTruthy()
+    expect(screen.getByText(/规则（0\/256）/u)).toBeTruthy()
   })
 
-  test('removes an exclusion from the rule dialog', async () => {
-    installApiMock()
+  test('edits a group scope and exemptions in its dialog', async () => {
+    const fetchMock = installApiMock()
     const user = await openPolicyPage()
-    expect(screen.getByText('豁免 1')).toBeTruthy()
+    expect(screen.getByText('waf-core · 优先级 100 · 全部 Project · 豁免 1')).toBeTruthy()
 
-    await user.click(screen.getByRole('button', { name: '编辑规则 路径穿越探测' }))
-    const dialog = await screen.findByRole('dialog', { name: '编辑规则' })
+    await user.click(screen.getByRole('button', { name: '编辑规则组 核心规则' }))
+    const dialog = await screen.findByRole('dialog', { name: '编辑规则组' })
+    // The id is the wire identity: a group can never be renamed in place.
+    expect(
+      (within(dialog).getByRole('textbox', { name: '组 ID' }) as HTMLInputElement).disabled,
+    ).toBe(true)
+
     await user.click(within(dialog).getByRole('button', { name: '移除豁免' }))
-    expect(within(dialog).queryByText('api.example.com')).toBeNull()
-    expect(within(dialog).getByText('Project 豁免（0）')).toBeTruthy()
+    expect(within(dialog).getByText('豁免 Project（0）')).toBeTruthy()
+
+    await user.type(within(dialog).getByRole('textbox', { name: '豁免 Project' }), 'loan-*')
+    const add = within(dialog).getByRole('button', { name: '添加豁免' })
+    expect((add as HTMLButtonElement).disabled).toBe(true)
+    await user.type(within(dialog).getByRole('textbox', { name: '豁免原因' }), '贷款线单独治理')
+    await user.click(add)
+    expect(within(dialog).getByText('贷款线单独治理')).toBeTruthy()
+
+    const include = within(dialog).getByRole('textbox', { name: /生效 Project/u })
+    await user.clear(include)
+    await user.type(include, 'loan-*, trade-web，api.example.com')
 
     await user.click(within(dialog).getByRole('button', { name: '应用到草稿' }))
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
-    expect(screen.getByText('豁免 0')).toBeTruthy()
+    expect(screen.getByText('waf-core · 优先级 100 · 3 条 Project 匹配 · 豁免 1')).toBeTruthy()
     expect(screen.getByText('已修改')).toBeTruthy()
+
+    await user.click(screen.getByRole('button', { name: '保存策略草稿' }))
+    await waitFor(() => {
+      expect(savedPolicyBody(fetchMock)?.groups[0]?.projects).toEqual({
+        include: ['loan-*', 'trade-web', 'api.example.com'],
+        exempt: [{ project: 'loan-*', reason: '贷款线单独治理' }],
+      })
+    })
+  })
+
+  test('creates a group, moves a rule into it, and deletes a group with its rules', async () => {
+    installApiMock()
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    const user = await openPolicyPage()
+
+    await user.click(screen.getByRole('button', { name: '+ 新建规则组' }))
+    let dialog = await screen.findByRole('dialog', { name: '新建规则组' })
+
+    await user.click(within(dialog).getByRole('button', { name: '应用到草稿' }))
+    expect(await within(dialog).findByText('请填写组名称')).toBeTruthy()
+    await user.type(within(dialog).getByRole('textbox', { name: '组 ID' }), 'core')
+    expect(await within(dialog).findByText('组 ID core 已存在')).toBeTruthy()
+
+    await user.type(within(dialog).getByRole('textbox', { name: '组名称' }), '灰度规则')
+    await user.clear(within(dialog).getByRole('textbox', { name: '组 ID' }))
+    await user.type(within(dialog).getByRole('textbox', { name: '组 ID' }), 'canary')
+    expect(within(dialog).getByText('waf-canary')).toBeTruthy()
+    await user.click(within(dialog).getByRole('button', { name: '应用到草稿' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+
+    // A new group starts off so creating it changes nothing on the wire.
+    const created = screen.getByRole('region', { name: '规则组 灰度规则' })
+    expect(within(created).getByText('关闭')).toBeTruthy()
+    expect(within(created).getByText(/本组还没有规则/u)).toBeTruthy()
+
+    await user.click(screen.getByRole('button', { name: '编辑规则 路径穿越探测' }))
+    dialog = await screen.findByRole('dialog', { name: '编辑规则' })
+    await user.selectOptions(within(dialog).getByRole('combobox', { name: '规则组' }), 'canary')
+    await user.click(within(dialog).getByRole('button', { name: '应用到草稿' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    expect(
+      within(screen.getByRole('region', { name: '规则组 灰度规则' })).getByText('路径穿越探测'),
+    ).toBeTruthy()
+
+    await user.click(screen.getByRole('button', { name: '编辑规则组 灰度规则' }))
+    dialog = await screen.findByRole('dialog', { name: '编辑规则组' })
+    await user.click(within(dialog).getByRole('button', { name: '删除规则组' }))
+    expect(confirm).toHaveBeenCalledWith('删除该规则组及其 1 条规则吗？')
+    expect(screen.getByRole('dialog', { name: '编辑规则组' })).toBeTruthy()
+
+    confirm.mockReturnValue(true)
+    await user.click(within(dialog).getByRole('button', { name: '删除规则组' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    expect(screen.queryByRole('region', { name: '规则组 灰度规则' })).toBeNull()
+    expect(screen.queryByText('路径穿越探测')).toBeNull()
   })
 
   test('saving from the editor shortcut applies the rule', async () => {
@@ -742,7 +860,7 @@ describe('WAF console pages', () => {
     render(<RouterProvider router={router} />)
 
     expect(await screen.findByText('R5')).toBeTruthy()
-    expect(screen.getByText(/挂载函数 waf · 1 条规则/u)).toBeTruthy()
+    expect(screen.getByText(/挂载 1 个 WAF 函数 · 1 条规则/u)).toBeTruthy()
     expect(screen.getByText('函数脚本')).toBeTruthy()
     expect(screen.getByText('函数索引')).toBeTruthy()
     // The preview compares the planned index (WAF + handwritten drafts)
@@ -841,7 +959,7 @@ describe('WAF console pages', () => {
 
     // The live rnacos snapshot stays visible below the authoring surface.
     expect(screen.getByText('索引版本：5')).toBeTruthy()
-    expect(screen.getByText(/exclude=legacy\.example\.com/u)).toBeTruthy()
+    expect(screen.getByText(/exclude=api\.example\.com,legacy\.example\.com/u)).toBeTruthy()
     expect(screen.getByText(/old-fn/u)).toBeTruthy()
     expect(screen.getByText(/请求体阶段/u)).toBeTruthy()
   })
@@ -856,6 +974,7 @@ describe('WAF console pages', () => {
     // Rows are grouped by rule and joined with the draft policy (probe-0001 → 路径穿越探测);
     // unknown ids stay visible as historical rules.
     expect(await screen.findByText('路径穿越探测')).toBeTruthy()
+    expect(screen.getByText('核心规则')).toBeTruthy()
     expect(screen.getByText(/共 2 条规则 · 拦截 11 次 · 记录 4 次/u)).toBeTruthy()
     expect(screen.getByText(/retired-rule · 历史规则或外部函数事件/u)).toBeTruthy()
     expect(screen.getByText(/已不在当前策略/u)).toBeTruthy()
@@ -873,14 +992,27 @@ describe('WAF console pages', () => {
     const user = userEvent.setup()
     render(<RouterProvider router={router} />)
 
-    expect(await screen.findByText('生效模式：仅记录（跟随环境默认）')).toBeTruthy()
-    // The environment rule excludes this project with an auditable reason.
+    expect(await screen.findByText('跟随各规则组模式')).toBeTruthy()
+    // This project is exempt from one group and outside the other.
     expect(screen.getByText('误报待修')).toBeTruthy()
+    expect(screen.getByText('未包含该 Project')).toBeTruthy()
 
-    await user.click(screen.getByRole('radio', { name: /^关闭/u }))
-    expect(await screen.findByText('生效模式：关闭（本项目覆盖）')).toBeTruthy()
+    await user.click(screen.getByRole('radio', { name: /^仅记录/u }))
+    expect(await screen.findByText('模式覆盖：仅记录')).toBeTruthy()
 
+    // Once the exemption is gone the group applies, under the override.
     await user.click(screen.getByRole('button', { name: '移除豁免' }))
+    expect(await screen.findByText('模式：仅记录')).toBeTruthy()
+    expect(screen.queryByText('误报待修')).toBeNull()
+
+    // Only groups that apply can be exempted from.
+    const groupSelect = screen.getByRole('combobox', { name: '选择要豁免的规则组' })
+    expect(within(groupSelect).queryByRole('option', { name: '贷款规则' })).toBeNull()
+    await user.selectOptions(groupSelect, 'core')
+    await user.type(screen.getByRole('textbox', { name: '豁免原因' }), '接口回放误报')
+    await user.click(screen.getByRole('button', { name: '添加豁免' }))
+    expect(await screen.findByText('接口回放误报')).toBeTruthy()
+
     await user.click(screen.getByRole('button', { name: '保存到环境草稿' }))
 
     await waitFor(() => {
@@ -892,9 +1024,95 @@ describe('WAF console pages', () => {
       const body = JSON.parse(String(saveCall?.[1]?.body)) as { policy: typeof policy }
       expect(body.policy.projectModes).toEqual({
         'legacy.example.com': 'off',
-        'api.example.com': 'off',
+        'api.example.com': 'log',
       })
-      expect(body.policy.rules[0]?.exclusions).toEqual([])
+      expect(body.policy.groups[0]?.projects).toEqual({
+        include: ['*'],
+        exempt: [{ project: 'api.example.com', reason: '接口回放误报' }],
+      })
+      expect(body.policy.groups[1]?.projects).toEqual({ include: ['loan-*'] })
     })
+  })
+
+  test('never reports a group as in effect while it cannot run on the project', async () => {
+    const fetchMock = installApiMock()
+    const respond = fetchMock.getMockImplementation()!
+    const openWith = async (draftPolicy: unknown) => {
+      fetchMock.mockImplementation(async (url, init) =>
+        url === '/api/waf/policy' && !init?.method
+          ? jsonResponse({ ...policyDraft, policy: draftPolicy })
+          : respond(url, init),
+      )
+      render(
+        <RouterProvider
+          router={createMemoryRouter(appRoutes, {
+            initialEntries: [`/projects/${projectId}/waf-policy`],
+          })}
+        />,
+      )
+    }
+
+    const core = { ...policy.groups[0], projects: { include: ['*'] } }
+    await openWith({ ...policy, groups: [{ ...core, mode: 'off' }] })
+    expect(await screen.findByText('规则组已关闭')).toBeTruthy()
+    expect(screen.getByText('未开启')).toBeTruthy()
+    expect(screen.queryByText('生效')).toBeNull()
+    cleanup()
+
+    await openWith({
+      ...policy,
+      groups: [core],
+      projectModes: { 'api.example.com': 'off' },
+    })
+    expect(await screen.findByText('该 Project 的模式覆盖为关闭')).toBeTruthy()
+    expect(screen.queryByText('生效')).toBeNull()
+  })
+
+  test('points a project exempted by a glob at the WAF page', async () => {
+    const fetchMock = installApiMock()
+    const respond = fetchMock.getMockImplementation()!
+    fetchMock.mockImplementation(async (url, init) =>
+      url === '/api/waf/policy' && !init?.method
+        ? jsonResponse({
+            ...policyDraft,
+            policy: {
+              ...policy,
+              groups: [
+                {
+                  ...policy.groups[0],
+                  projects: {
+                    include: ['*'],
+                    exempt: [{ project: '*.example.com', reason: '站点统一豁免' }],
+                  },
+                },
+              ],
+            },
+          })
+        : respond(url, init),
+    )
+    render(
+      <RouterProvider
+        router={createMemoryRouter(appRoutes, {
+          initialEntries: [`/projects/${projectId}/waf-policy`],
+        })}
+      />,
+    )
+
+    expect(
+      await screen.findByText('由 *.example.com 豁免：站点统一豁免（请在 WAF 页修改）'),
+    ).toBeTruthy()
+    expect(screen.getByText('已豁免')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: '移除豁免' })).toBeNull()
+  })
+
+  test('reserves generated function names in the handwritten workspace', async () => {
+    installApiMock()
+    const router = createMemoryRouter(appRoutes, { initialEntries: ['/waf/edge-functions'] })
+    const user = userEvent.setup()
+    render(<RouterProvider router={router} />)
+
+    await user.type(await screen.findByRole('textbox', { name: '新函数名' }), 'waf-sqli')
+    await user.click(screen.getByRole('button', { name: '+ 新增函数' }))
+    expect(await screen.findByText(/waf 与 waf-\* 为生成函数保留/u)).toBeTruthy()
   })
 })

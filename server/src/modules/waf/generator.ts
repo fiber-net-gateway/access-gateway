@@ -1,18 +1,21 @@
 // WAF policy → edge-function compilation (docs/edge-functions-and-waf-design.md
 // §4.2). Pure and deterministic: the same policy always compiles to the same
-// script bytes, so the script sha256 (the wire identity) changes only when the
-// policy semantics change.
+// script bytes, so a script sha256 (the wire identity) changes only when its
+// group's semantics change.
 //
-// Shape of the generated script:
+// Each group with rules and a mode other than off compiles to one edge function
+// `waf-<group id>`: the group's project selector becomes the wire mount, and
+// its rules become the script. Shape of a generated script:
 //   - `cidr` directive declarations at the top (shared, deduplicated across
-//     rules by identical CIDR set, named net1..netN in canonical order);
+//     the group's rules by identical CIDR set, named net1..netN in canonical
+//     order);
 //   - one `if` per rule in priority order (ties keep declaration order),
-//     condition parts ordered cheapest-first: exclusions, methods, path
-//     prefix/equality chain, CIDR membership, then the authored match
-//     expression (always parenthesized);
+//     condition parts ordered cheapest-first: methods, path prefix/equality
+//     chain, CIDR membership, then the authored match expression (always
+//     parenthesized);
 //   - `action: block` rules gate on the project's effective mode: block mode
-//     reports `waf.block` and answers 403 JSON, log mode reports `waf.log`
-//     only (no response is sent);
+//     reports `waf.block`, answers 403 JSON and returns, so one request is
+//     blocked once; log mode reports `waf.log` only (no response is sent);
 //   - `action: log` rules always report `waf.log`.
 //
 // Preconditions: the policy passed validateWafPolicy (charset/enum/shape
@@ -21,18 +24,19 @@
 
 import { createHash } from 'node:crypto'
 
-import type { WafPolicy, WafProjectMode, WafRule } from './model.js'
-import { WAF_FUNCTION_NAME, WAF_MOUNT_PRIORITY } from './model.js'
+import {
+  groupModeSets,
+  groupMountSelector,
+  type WafModeSets,
+  type WafMountSelector,
+} from './group-scope.js'
+import type { WafGroup, WafPolicy, WafRule } from './model.js'
+import { wafFunctionName } from './model.js'
 import { cidrDirectiveLiteral, dialectStringLiteral } from './escaper.js'
 
 export interface WafDirective {
   readonly name: string
   readonly cidrs: readonly string[]
-}
-
-export interface WafMountSelector {
-  readonly include: readonly string[]
-  readonly exclude: readonly string[]
 }
 
 // Where one rule landed in the generated script. Validator errors carry script
@@ -48,47 +52,37 @@ export interface WafRuleSpan {
   readonly matchStart: number
 }
 
+export interface WafFunctionCompilation {
+  readonly groupId: string
+  readonly functionName: string
+  readonly script: string
+  readonly scriptSha256: string
+  readonly mountPriority: number
+  readonly mounts: readonly WafMountSelector[]
+  /** Rule ids in generated execution order (priority asc, declaration ties). */
+  readonly ruleOrder: readonly string[]
+  readonly directives: readonly WafDirective[]
+  readonly ruleSpans: readonly WafRuleSpan[]
+}
+
+/** A group that publishes nothing, and why. */
+export interface WafSkippedGroup {
+  readonly groupId: string
+  readonly reason: 'off' | 'no-rules'
+}
+
 export type WafCompilation =
-  | { readonly kind: 'unmount'; readonly reason: 'no-rules' | 'no-mounted-projects' }
+  | {
+      readonly kind: 'unmount'
+      readonly reason: 'no-rules' | 'no-mounted-groups'
+      readonly skipped: readonly WafSkippedGroup[]
+    }
   | {
       readonly kind: 'mounted'
-      readonly script: string
-      readonly scriptSha256: string
-      readonly functionName: string
-      readonly mountPriority: number
-      readonly mounts: readonly WafMountSelector[]
-      /** Rule ids in generated execution order (priority asc, declaration ties). */
-      readonly ruleOrder: readonly string[]
-      readonly directives: readonly WafDirective[]
-      readonly ruleSpans: readonly WafRuleSpan[]
+      /** Ascending mount priority, ties by group id: the wire declaration order. */
+      readonly functions: readonly WafFunctionCompilation[]
+      readonly skipped: readonly WafSkippedGroup[]
     }
-
-interface ModeSets {
-  readonly off: readonly string[]
-  readonly log: readonly string[]
-  readonly block: readonly string[]
-}
-
-function modeSets(policy: WafPolicy): ModeSets {
-  const sets: Record<Exclude<WafProjectMode, never>, string[]> = { off: [], log: [], block: [] }
-  for (const [project, mode] of Object.entries(policy.projectModes ?? {})) {
-    if (mode === 'off' || mode === 'log' || mode === 'block') {
-      sets[mode].push(project)
-    }
-  }
-  return {
-    off: [...sets.off].sort(),
-    log: [...sets.log].sort(),
-    block: [...sets.block].sort(),
-  }
-}
-
-function mountedSelector(policy: WafPolicy, sets: ModeSets): WafMountSelector {
-  if (policy.defaultMode === 'off') {
-    return { include: [...sets.log, ...sets.block].sort(), exclude: [] }
-  }
-  return { include: ['*'], exclude: sets.off }
-}
 
 // Enumeration predicates for the effective mode. `enumeration === null` means
 // "every mounted project" for that side.
@@ -141,10 +135,6 @@ function matchExpression(rule: WafRule): string {
 function ruleCondition(rule: WafRule, directiveByCidrKey: ReadonlyMap<string, string>): string {
   const parts: string[] = []
 
-  for (const exclusion of rule.exclusions ?? []) {
-    parts.push(`$ctx.project != ${dialectStringLiteral(exclusion.project)}`)
-  }
-
   const methods = rule.scope?.methods ?? []
   if (methods.length > 0) {
     parts.push(joinOr(methods.map((method) => `$req.method == ${dialectStringLiteral(method)}`)))
@@ -184,6 +174,7 @@ function blockStatements(rule: WafRule, indent: string): string[] {
   return [
     `${indent}${reportStatement(rule, 'waf.block')}`,
     `${indent}resp.sendJson(403, {code: ${dialectStringLiteral('WAF_BLOCKED')}, ruleId: ${dialectStringLiteral(rule.id)}});`,
+    `${indent}return true;`,
   ]
 }
 
@@ -221,21 +212,17 @@ function ruleSpans(lines: readonly string[], blocks: readonly RuleBlock[]): WafR
   })
 }
 
-export function compileWafPolicy(policy: WafPolicy): WafCompilation {
-  if (policy.rules.length === 0) {
-    return { kind: 'unmount', reason: 'no-rules' }
-  }
-
-  const sets = modeSets(policy)
-  const selector = mountedSelector(policy, sets)
-  if (policy.defaultMode === 'off' && selector.include.length === 0) {
-    return { kind: 'unmount', reason: 'no-mounted-projects' }
-  }
+function compileGroup(
+  group: WafGroup,
+  sets: WafModeSets,
+  rules: readonly { rule: WafRule; index: number }[],
+): WafFunctionCompilation {
+  const functionName = wafFunctionName(group.id)
 
   // Directives: deduplicate by canonical (sorted) CIDR set, then name them in
   // canonical order so author reorderings keep the script hash stable.
   const cidrSets = new Map<string, string[]>()
-  for (const rule of policy.rules) {
+  for (const { rule } of rules) {
     const cidrs = rule.scope?.sourceCidrs ?? []
     if (cidrs.length === 0) {
       continue
@@ -254,19 +241,20 @@ export function compileWafPolicy(policy: WafPolicy): WafCompilation {
   )
 
   // Effective-mode reachability over the mounted set (off projects never
-  // execute: they are excluded from the mount). With include='*' the full
-  // project list is unknown here, so a non-default mode is "possible" — any
-  // unlisted project carries the default. The runtime gate expression below
-  // decides per request; these flags only choose which branches to emit.
-  const blockPossible = policy.defaultMode === 'block' || sets.block.length > 0
-  const logPossible = policy.defaultMode === 'log' || sets.log.length > 0
+  // execute: they are excluded from the mount). Include globs leave the full
+  // project list unknown here, so a non-default mode is "possible" — any
+  // project without an override carries the group mode. The runtime gate
+  // expression below decides per request; these flags only choose which
+  // branches to emit.
+  const blockPossible = group.mode === 'block' || sets.block.length > 0
+  const logPossible = group.mode === 'log' || sets.log.length > 0
 
   const lines: string[] = []
   lines.push(
-    `// ${WAF_FUNCTION_NAME}: generated by the access-gateway console from the WAF policy; do not edit.`,
+    `// ${functionName}: generated by the access-gateway console from WAF group ${group.id}; do not edit.`,
   )
   lines.push(
-    `// rules=${String(policy.rules.length)} default-mode=${policy.defaultMode} explicit-modes block=${String(sets.block.length)}/log=${String(sets.log.length)}/off=${String(sets.off.length)}`,
+    `// rules=${String(rules.length)} group-mode=${group.mode} explicit-modes block=${String(sets.block.length)}/log=${String(sets.log.length)}/off=${String(sets.off.length)}`,
   )
   for (const directive of directives) {
     lines.push(`directive ${directive.name} = cidr ${cidrDirectiveLiteral(directive.cidrs)};`)
@@ -278,18 +266,16 @@ export function compileWafPolicy(policy: WafPolicy): WafCompilation {
   let blockGate: string | null = null
   if (blockPossible && logPossible) {
     blockGate =
-      policy.defaultMode === 'block'
+      group.mode === 'block'
         ? projectNotInEnumeration(sets.log)!
         : projectInEnumeration(sets.block)!
   }
 
-  const orderedRules = policy.rules
-    .map((rule, index) => ({ rule, index }))
-    .sort((left, right) =>
-      left.rule.priority !== right.rule.priority
-        ? left.rule.priority - right.rule.priority
-        : left.index - right.index,
-    )
+  const orderedRules = [...rules].sort((left, right) =>
+    left.rule.priority !== right.rule.priority
+      ? left.rule.priority - right.rule.priority
+      : left.index - right.index,
+  )
 
   const ruleBlocks: RuleBlock[] = []
   for (const { rule, index } of orderedRules) {
@@ -325,15 +311,42 @@ export function compileWafPolicy(policy: WafPolicy): WafCompilation {
   const scriptSha256 = createHash('sha256').update(Buffer.from(script, 'utf8')).digest('hex')
 
   return {
-    kind: 'mounted',
+    groupId: group.id,
+    functionName,
     script,
     scriptSha256,
-    functionName: WAF_FUNCTION_NAME,
-    mountPriority: WAF_MOUNT_PRIORITY,
-    mounts: [selector],
+    mountPriority: group.priority,
+    mounts: [groupMountSelector(group, sets)],
     ruleOrder: orderedRules.map(({ rule }) => rule.id),
     directives,
     ruleSpans: ruleSpans(lines, ruleBlocks),
+  }
+}
+
+export function compileWafPolicy(policy: WafPolicy): WafCompilation {
+  const functions: WafFunctionCompilation[] = []
+  const skipped: WafSkippedGroup[] = []
+  const indexedRules = policy.rules.map((rule, index) => ({ rule, index }))
+  const groups = [...policy.groups].sort(
+    (left, right) => left.priority - right.priority || (left.id < right.id ? -1 : 1),
+  )
+  for (const group of groups) {
+    const rules = indexedRules.filter(({ rule }) => rule.group === group.id)
+    if (group.mode === 'off') {
+      skipped.push({ groupId: group.id, reason: 'off' })
+    } else if (rules.length === 0) {
+      skipped.push({ groupId: group.id, reason: 'no-rules' })
+    } else {
+      functions.push(compileGroup(group, groupModeSets(policy, group), rules))
+    }
+  }
+  if (functions.length > 0) {
+    return { kind: 'mounted', functions, skipped }
+  }
+  return {
+    kind: 'unmount',
+    reason: policy.rules.length === 0 ? 'no-rules' : 'no-mounted-groups',
+    skipped,
   }
 }
 
@@ -348,7 +361,7 @@ export interface WafScriptLocation {
 // generated `{`), so offsets beyond the match clamp to its end.
 export function locateScriptOffset(
   policy: WafPolicy,
-  compilation: Extract<WafCompilation, { kind: 'mounted' }>,
+  compilation: WafFunctionCompilation,
   offset: number,
 ): WafScriptLocation | null {
   const span = compilation.ruleSpans.find(({ start, end }) => offset >= start && offset < end)

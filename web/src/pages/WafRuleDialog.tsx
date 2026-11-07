@@ -10,7 +10,7 @@ import {
 } from 'react'
 
 import { compileWafPolicyPreview } from '../api/client'
-import type { WafRule, WafSeverity } from '../api/types'
+import type { WafGroup, WafRule, WafSeverity } from '../api/types'
 import type { YamlCodeEditorDiagnostic } from '../components/YamlCodeEditor'
 import {
   actionLabels,
@@ -31,6 +31,7 @@ const YamlCodeEditor = lazy(async () => {
 
 const fieldLabels: Record<string, string> = {
   name: '规则名称',
+  group: '规则组',
   severity: '严重级别',
   priority: '优先级',
   action: '动作',
@@ -38,7 +39,6 @@ const fieldLabels: Record<string, string> = {
   'scope.methods': 'Method',
   'scope.paths': 'Path',
   'scope.sourceCidrs': '来源 CIDR',
-  exclusions: '豁免',
 }
 
 const focusableSelector =
@@ -65,7 +65,7 @@ async function checkRule(rule: WafRule, signal?: AbortSignal): Promise<RuleCheck
   }
 }
 
-function keepFocusInside(event: KeyboardEvent<HTMLElement>): void {
+export function keepFocusInside(event: KeyboardEvent<HTMLElement>): void {
   const focusable = event.currentTarget.querySelectorAll<HTMLElement>(focusableSelector)
   const first = focusable[0]
   const last = focusable[focusable.length - 1]
@@ -82,6 +82,7 @@ function keepFocusInside(event: KeyboardEvent<HTMLElement>): void {
 interface WafRuleDialogProps {
   mode: 'add' | 'edit'
   rule: WafRule
+  groups: readonly WafGroup[]
   onApply(rule: WafRule): void
   onRemove(): void
   onClose(): void
@@ -91,6 +92,7 @@ interface WafRuleDialogProps {
 export function WafRuleDialog({
   mode,
   rule,
+  groups,
   onApply,
   onRemove,
   onClose,
@@ -249,6 +251,19 @@ export function WafRuleDialog({
               />
             </label>
             <label>
+              规则组
+              <select
+                value={form.group}
+                onChange={(event) => update({ group: event.target.value })}
+              >
+                {groups.map((group) => (
+                  <option key={group.id} value={group.id}>
+                    {group.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
               严重级别
               <select
                 value={form.severity}
@@ -266,7 +281,7 @@ export function WafRuleDialog({
               <input
                 aria-invalid={invalid('priority')}
                 inputMode="numeric"
-                title="数字越小越先执行"
+                title="组内数字越小越先执行"
                 value={form.priority}
                 onChange={(event) => update({ priority: event.target.value })}
               />
@@ -348,41 +363,6 @@ export function WafRuleDialog({
               </label>
             </div>
           </details>
-
-          {mode === 'edit' ? (
-            <details className="waf-rule-section" open={(rule.exclusions ?? []).length > 0}>
-              <summary>Project 豁免（{form.exclusions.length}）</summary>
-              <div className="waf-exclusions">
-                {form.exclusions.length > 0 ? (
-                  <ul>
-                    {form.exclusions.map((exclusion) => (
-                      <li key={exclusion.project}>
-                        <span>
-                          <strong>{exclusion.project}</strong>
-                          <small>{exclusion.reason}</small>
-                        </span>
-                        <button
-                          className="button-link"
-                          onClick={() =>
-                            update({
-                              exclusions: form.exclusions.filter(
-                                (existing) => existing.project !== exclusion.project,
-                              ),
-                            })
-                          }
-                          title={`移除豁免 ${exclusion.project}`}
-                          type="button"
-                        >
-                          移除豁免
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
-                ) : null}
-                <p className="settings-note">新增豁免请到对应 Project 的 WAF 策略页操作。</p>
-              </div>
-            </details>
-          ) : null}
         </div>
 
         {problems.length > 0 ? (

@@ -81,6 +81,10 @@ export function WafHitsPage() {
     }
     return names
   }, [policy])
+  const ruleGroupNames = useMemo(() => {
+    const groups = new Map(policy?.groups.map((group) => [group.id, group.name]))
+    return new Map(policy?.rules.map((rule) => [rule.id, groups.get(rule.group)]))
+  }, [policy])
 
   const grouped = useMemo(() => (hits ? groupByRule(hits.rows) : []), [hits])
   const totalBlocks = useMemo(
@@ -164,6 +168,7 @@ export function WafHitsPage() {
               <thead>
                 <tr>
                   <th>规则</th>
+                  <th>规则组</th>
                   <th>拦截</th>
                   <th>仅记录</th>
                   <th>合计</th>
@@ -181,6 +186,7 @@ export function WafHitsPage() {
                           {!policyLoading && name === undefined ? ' · 历史规则或外部函数事件' : ''}
                         </small>
                       </th>
+                      <td>{ruleGroupNames.get(entry.ruleId) ?? '—'}</td>
                       <td>{Math.round(entry.blockCount)}</td>
                       <td>{Math.round(entry.logCount)}</td>
                       <td>{Math.round(entry.blockCount + entry.logCount)}</td>

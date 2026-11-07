@@ -19,6 +19,7 @@ import { mysqlDateTimeToRfc3339 } from '../../shared/time.js'
 import { AuditRepository } from '../audit/repository.js'
 import type { Actor } from '../auth/model.js'
 import { emptyWafPolicy, type WafPolicy } from './model.js'
+import { upgradeWafPolicy } from './policy-upgrade.js'
 import { validateWafPolicy } from './validate.js'
 
 export interface WafPolicyDraftView {
@@ -204,6 +205,7 @@ export class WafPolicyDraftRepository {
           result: 'success',
           summary: {
             policySha256: document.sha256.toString('hex'),
+            groups: policy.groups.length,
             rules: policy.rules.length,
           },
         })
@@ -225,7 +227,9 @@ export class WafPolicyDraftRepository {
     }
     const parsed: unknown = JSON.parse(plaintext.toString('utf8'))
     const policy =
-      Array.isArray(parsed) || typeof parsed !== 'object' || parsed === null ? null : parsed
+      Array.isArray(parsed) || typeof parsed !== 'object' || parsed === null
+        ? null
+        : upgradeWafPolicy(parsed)
     if (!policy || validateWafPolicy(policy as WafPolicy).length > 0) {
       throw new Error('Stored WAF policy is invalid')
     }

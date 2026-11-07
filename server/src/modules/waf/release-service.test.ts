@@ -149,9 +149,8 @@ const releaseView: WafReleaseView = {
   id: '00000000-0000-4000-8000-00000000000c',
   sequence: '5',
   status: 'ready',
-  functionName: 'waf',
+  wafFunctions: [{ name: 'waf-core', scriptSha256: '1'.repeat(64) }],
   mode: 'mounted',
-  scriptSha256: '1'.repeat(64),
   ruleCount: 1,
   indexVersion: '5',
   description: '',
@@ -201,14 +200,19 @@ function releasesFake() {
   return { repository, created }
 }
 
+const emptyPolicy: WafPolicy = { schemaVersion: 2, groups: [], rules: [], projectModes: {} }
+
 function mountedPolicy(): WafPolicy {
   return {
-    schemaVersion: 1,
-    defaultMode: 'log',
+    schemaVersion: 2,
+    groups: [
+      { id: 'core', name: 'core', mode: 'log', priority: 100, projects: { include: ['*'] } },
+    ],
     rules: [
       {
         id: 'probe-0001',
         name: 'probe',
+        group: 'core',
         severity: 'high',
         priority: 100,
         action: 'block',
@@ -272,11 +276,12 @@ test('create compiles a mounted policy into script + index payloads and reads bo
   const plan = created?.[0]?.plan
   assert.ok(plan)
   assert.equal(plan.mode, 'mounted')
-  assert.equal(plan.functionName, 'waf')
   assert.equal(plan.ruleCount, 1)
-  assert.ok(plan.script)
+  assert.equal(plan.wafFunctions.length, 1)
+  const [generated] = plan.wafFunctions
+  assert.equal(generated?.name, 'waf-core')
   // The validator saw the exact script bytes that become the script payload.
-  assert.equal(Buffer.from(scriptRequest.payload).toString('utf8'), plan.script)
+  assert.equal(Buffer.from(scriptRequest.payload).toString('utf8'), plan.scripts[0]?.script)
   // The validated index is structurally identical to the published one; only
   // the version integer differs (repository embeds the allocated sequence).
   const validatedIndex = JSON.parse(Buffer.from(indexRequest.payload).toString('utf8')) as {
@@ -286,8 +291,8 @@ test('create compiles a mounted policy into script + index payloads and reads bo
   assert.equal(validatedIndex.version, 1)
   assert.deepEqual(validatedIndex.functions, [
     {
-      name: 'waf',
-      sha256: plan.scriptSha256,
+      name: 'waf-core',
+      sha256: generated?.scriptSha256,
       mounts: [{ projects: { include: ['*'], exclude: ['loan-admin-legacy'] }, priority: 100 }],
     },
   ])
@@ -295,13 +300,13 @@ test('create compiles a mounted policy into script + index payloads and reads bo
 
   assert.deepEqual(reads, [
     { dataId: EDGE_FUNCTIONS_DATA_ID, group: EDGE_FUNCTIONS_GROUP },
-    { dataId: edgeFunctionScriptDataId('waf'), group: EDGE_FUNCTIONS_GROUP },
+    { dataId: edgeFunctionScriptDataId('waf-core'), group: EDGE_FUNCTIONS_GROUP },
   ])
   const bases = created?.[0]?.bases
   assert.ok(bases?.index)
   assert.deepEqual(
     bases?.scripts.map((entry) => entry.name),
-    ['waf'],
+    ['waf-core'],
   )
 
   const input = created?.[0]?.input
@@ -312,7 +317,7 @@ test('create compiles a mounted policy into script + index payloads and reads bo
 
 test('create compiles an empty policy into an unmount release with only an index resource', async () => {
   const { service, requests, reads, created } = buildService({
-    policy: { schemaVersion: 1, defaultMode: 'off', rules: [], projectModes: {} },
+    policy: emptyPolicy,
   })
   await service.create(actor, { idempotencyKey: 'key-2' }, 'request-2')
 
@@ -326,7 +331,7 @@ test('create compiles an empty policy into an unmount release with only an index
   assert.deepEqual(reads, [{ dataId: EDGE_FUNCTIONS_DATA_ID, group: EDGE_FUNCTIONS_GROUP }])
   const plan = created?.[0]?.plan
   assert.equal(plan?.mode, 'unmount')
-  assert.equal(plan?.script, null)
+  assert.deepEqual(plan?.wafFunctions, [])
   assert.deepEqual(created?.[0]?.bases.scripts, [])
 })
 
@@ -363,7 +368,7 @@ test('create merges handwritten functions with the generated WAF function', asyn
   // Deterministic order: ascending lowest-mount priority, then name.
   assert.deepEqual(
     plan.functions.map((entry) => entry.name),
-    ['before-waf', 'waf', 'after-waf'],
+    ['before-waf', 'waf-core', 'after-waf'],
   )
   // ratio omitted on the wire at the 10000 default, emitted otherwise.
   assert.deepEqual(
@@ -372,7 +377,7 @@ test('create merges handwritten functions with the generated WAF function', asyn
   )
   assert.deepEqual(
     plan.scripts.map((entry) => entry.name),
-    ['waf', 'after-waf', 'before-waf'],
+    ['waf-core', 'after-waf', 'before-waf'],
   )
   // Each index entry's digest matches its script payload bytes.
   const beforeWafScript = plan.scripts.find((entry) => entry.name === 'before-waf')!.script
@@ -386,15 +391,92 @@ test('create merges handwritten functions with the generated WAF function', asyn
     reads.map((read) => read.dataId),
     [
       EDGE_FUNCTIONS_DATA_ID,
-      edgeFunctionScriptDataId('waf'),
+      edgeFunctionScriptDataId('waf-core'),
       edgeFunctionScriptDataId('after-waf'),
       edgeFunctionScriptDataId('before-waf'),
     ],
   )
   assert.deepEqual(
     created?.[0]?.bases.scripts.map((entry) => entry.name),
-    ['waf', 'after-waf', 'before-waf'],
+    ['waf-core', 'after-waf', 'before-waf'],
   )
+})
+
+test('create publishes one function per enabled group, each with its own mount', async () => {
+  const base = mountedPolicy()
+  const policy: WafPolicy = {
+    ...base,
+    groups: [
+      { ...base.groups[0]!, priority: 200 },
+      {
+        id: 'loan',
+        name: 'loan',
+        mode: 'block',
+        priority: 100,
+        projects: {
+          include: ['loan-*'],
+          exempt: [{ project: 'loan-web', reason: 'reports' }],
+        },
+      },
+      { ...base.groups[0]!, id: 'paused', mode: 'off' },
+    ],
+    rules: [
+      base.rules[0]!,
+      { ...base.rules[0]!, id: 'loan-rule', group: 'loan' },
+      { ...base.rules[0]!, id: 'loan-rule-2', group: 'loan' },
+      { ...base.rules[0]!, id: 'paused-rule', group: 'paused' },
+    ],
+  }
+  const { service, requests, created } = buildService({ policy })
+  await service.create(actor, { idempotencyKey: 'key-g' }, 'request-g')
+
+  const plan = created?.[0]?.plan
+  assert.ok(plan)
+  assert.deepEqual(
+    plan.functions.map((entry) => [entry.name, entry.mounts]),
+    [
+      [
+        'waf-loan',
+        [
+          {
+            projects: { include: ['loan-*'], exclude: ['loan-admin-legacy', 'loan-web'] },
+            priority: 100,
+          },
+        ],
+      ],
+      [
+        'waf-core',
+        [{ projects: { include: ['*'], exclude: ['loan-admin-legacy'] }, priority: 200 }],
+      ],
+    ],
+  )
+  assert.deepEqual(
+    plan.wafFunctions.map((entry) => entry.name),
+    ['waf-loan', 'waf-core'],
+  )
+  // The off group's rule is not published, so it is not counted.
+  assert.equal(plan.ruleCount, 3)
+  assert.equal(requests.filter((r) => r.kind === 'edge_function_script').length, 2)
+})
+
+test('create refuses a handwritten function the WAF now owns the name of', async () => {
+  const functionsDraft: EdgeFunctionsDraft = {
+    schemaVersion: 1,
+    functions: [
+      {
+        name: 'waf-candidate',
+        enabled: true,
+        script: 'return true;',
+        mounts: [{ projects: { include: ['*'] } }],
+      },
+    ],
+  }
+  const { service, created } = buildService({ functionsDraft })
+  await assert.rejects(
+    service.create(actor, { idempotencyKey: 'key-r' }, 'request-r'),
+    (error: unknown) => error instanceof AppError && error.code === 'EDGE_FUNCTION_NAME_RESERVED',
+  )
+  assert.deepEqual(created, [])
 })
 
 test('create carries request_body phase onto the wire and validates scripts per phase', async () => {
@@ -425,11 +507,11 @@ test('create carries request_body phase onto the wire and validates scripts per 
   assert.ok(plan)
   // Only the non-default phase appears on the wire (canonical bytes stay
   // minimal); an explicit request_head is the same as omitting it.
-  // Order: waf mount priority 100 first, then the 300s by name.
+  // Order: the waf-core mount priority 100 first, then the 300s by name.
   assert.deepEqual(
     plan.functions.map((entry) => [entry.name, entry.phase ?? null]),
     [
-      ['waf', null],
+      ['waf-core', null],
       ['body-scan', 'request_body'],
       ['head-guard', null],
     ],
@@ -437,7 +519,7 @@ test('create carries request_body phase onto the wire and validates scripts per 
   assert.deepEqual(
     plan.scripts.map((entry) => [entry.name, entry.phase ?? null]),
     [
-      ['waf', null],
+      ['waf-core', null],
       ['body-scan', 'request_body'],
       ['head-guard', null],
     ],
@@ -462,14 +544,14 @@ test('create publishes handwritten functions even when the WAF policy unmounts',
     ],
   }
   const { service, created } = buildService({
-    policy: { schemaVersion: 1, defaultMode: 'off', rules: [], projectModes: {} },
+    policy: emptyPolicy,
     functionsDraft,
   })
   await service.create(actor, { idempotencyKey: 'key-u' }, 'request-u')
 
   const plan = created?.[0]?.plan
   assert.equal(plan?.mode, 'unmount')
-  assert.equal(plan?.script, null)
+  assert.deepEqual(plan?.wafFunctions, [])
   assert.deepEqual(
     plan?.functions.map((entry) => entry.name),
     ['bot-trap'],
@@ -584,9 +666,7 @@ function rollbackSourceMounted(): WafRollbackSource {
     generatorRevision: 'waf-generator-v0-old',
     plan: {
       mode: 'mounted',
-      functionName: 'waf',
-      script: historicalScript,
-      scriptSha256: sha256(historicalScript).toString('hex'),
+      wafFunctions: [{ name: 'waf', scriptSha256: sha256(historicalScript).toString('hex') }],
       functions: [
         {
           name: 'waf',
@@ -676,9 +756,7 @@ test('rollback of an unmount source validates and reads only the index', async (
     generatorRevision: 'waf-generator-v1',
     plan: {
       mode: 'unmount',
-      functionName: 'waf',
-      script: null,
-      scriptSha256: null,
+      wafFunctions: [],
       functions: [],
       scripts: [],
       ruleCount: 0,

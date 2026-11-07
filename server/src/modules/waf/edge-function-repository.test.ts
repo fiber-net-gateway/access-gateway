@@ -153,6 +153,23 @@ test('findByEnvironmentInternalId rejects a stored draft that fails validation',
   )
 })
 
+test('findByEnvironmentInternalId still loads a draft whose name the WAF later reserved', async () => {
+  const reserved = {
+    ...sampleDraft(),
+    functions: [{ ...sampleDraft().functions[0]!, name: 'waf-candidate' }],
+  }
+  const documents = documentsFake(new Map([['doc-1', canonicalJson(reserved)]]))
+  const { pool } = buildPool((sql) => {
+    if (sql.includes('FROM edge_function_drafts')) return [draftRow()]
+    return undefined
+  })
+  const repository = new EdgeFunctionDraftRepository(pool, documents as never)
+
+  const view = await repository.findByEnvironmentInternalId(environmentInternalId)
+
+  assert.equal(view?.draft.functions[0]?.name, 'waf-candidate')
+})
+
 test('save refuses a stale lock version before touching documents', async () => {
   const documents = documentsFake(new Map([['doc-1', canonicalJson(sampleDraft())]]))
   const { pool } = buildPool((sql) => {

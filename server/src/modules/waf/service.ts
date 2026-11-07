@@ -1,17 +1,18 @@
 // WAF policy service: staged validation → draft persistence → compile
 // preview. Field syntax and cross-resource checks (validate.ts) gate saves;
-// the native validator compile of the generated script (kind
+// the native validator compile of each generated script (kind
 // 'edge_function_script') is the fail-closed authority for dialect and CIDR
 // semantics and runs on every compile preview ahead of publication wiring.
 
 import type {
   NativeValidationError,
+  NativeValidationResult,
   NativeValidator,
 } from '../../integrations/native-validator/model.js'
 import { badRequest, forbidden, notFound, unavailable } from '../../shared/errors.js'
 import type { Actor } from '../auth/model.js'
 import { EnvironmentRepository } from '../environments/repository.js'
-import type { WafCompilation } from './generator.js'
+import type { WafCompilation, WafFunctionCompilation } from './generator.js'
 import { compileWafPolicy, locateScriptOffset } from './generator.js'
 import type { WafPolicy } from './model.js'
 import { WafPolicyDraftRepository, type WafPolicyDraftView } from './repository.js'
@@ -28,9 +29,14 @@ type MountedCompilation = Extract<WafCompilation, { kind: 'mounted' }>
 
 // Rule spans only serve offset attribution here; the view stays the public shape.
 export type WafCompilationView =
-  Exclude<WafCompilation, MountedCompilation> | Omit<MountedCompilation, 'ruleSpans'>
+  | Exclude<WafCompilation, MountedCompilation>
+  | (Omit<MountedCompilation, 'functions'> & {
+      functions: readonly Omit<WafFunctionCompilation, 'ruleSpans'>[]
+    })
 
 export interface WafScriptError extends NativeValidationError {
+  /** The generated function whose script failed. */
+  functionName: string
   /** 1-based position inside the rule's match text, when the error is in it. */
   line?: number
   column?: number
@@ -68,18 +74,24 @@ export interface WafService {
 // same rules[i].* paths field issues use.
 function attributeScriptError(
   policy: WafPolicy,
-  compilation: MountedCompilation,
+  compilation: WafFunctionCompilation,
   error: NativeValidationError,
 ): WafScriptError {
+  const { functionName } = compilation
   const location =
     error.offset === undefined ? null : locateScriptOffset(policy, compilation, error.offset)
   if (location === null) {
-    return error
+    return { ...error, functionName }
   }
   return location.match
-    ? { ...error, field: `rules[${location.ruleIndex}].match`, ...location.match }
-    : { ...error, field: `rules[${location.ruleIndex}]` }
+    ? { ...error, functionName, field: `rules[${location.ruleIndex}].match`, ...location.match }
+    : { ...error, functionName, field: `rules[${location.ruleIndex}]` }
 }
+
+// The validator is a subprocess per call and every edit recompiles the whole
+// policy, while one edit changes one group's script: unchanged scripts reuse
+// their verdict. Bounded far above what one policy holds.
+const maxCachedScriptVerdicts = 256
 
 function parseWafPolicy(value: unknown): WafPolicy {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
@@ -109,6 +121,7 @@ export class DefaultWafService implements WafService {
   readonly #drafts: WafPolicyDraftRepository
   readonly #environments: EnvironmentRepository
   readonly #validator: NativeValidator
+  readonly #scriptVerdicts = new Map<string, NativeValidationResult>()
 
   constructor(
     drafts: WafPolicyDraftRepository,
@@ -191,7 +204,40 @@ export class DefaultWafService implements WafService {
         validator: null,
       }
     }
-    const native = await this.#validator.validate(
+    const verdicts = await Promise.all(
+      compilation.functions.map((fn) => this.#validateScript(fn, requestId, signal)),
+    )
+    const [first] = verdicts
+    return {
+      valid: true,
+      issues: [],
+      compilation: {
+        ...compilation,
+        functions: compilation.functions.map(({ ruleSpans: _ruleSpans, ...view }) => view),
+      },
+      scriptValid: verdicts.every((native) => native.valid),
+      scriptErrors: verdicts.flatMap((native, index) =>
+        native.errors.map((error) =>
+          attributeScriptError(policy as WafPolicy, compilation.functions[index]!, error),
+        ),
+      ),
+      validator: first
+        ? { contractVersion: first.contractVersion, revision: first.validatorRevision }
+        : null,
+    }
+  }
+
+  async #validateScript(
+    compilation: WafFunctionCompilation,
+    requestId: string,
+    signal?: AbortSignal,
+  ): Promise<NativeValidationResult> {
+    const key = `${this.#validator.revision ?? ''}:${compilation.scriptSha256}`
+    const cached = this.#scriptVerdicts.get(key)
+    if (cached) {
+      return cached
+    }
+    const verdict = await this.#validator.validate(
       {
         requestId,
         kind: 'edge_function_script',
@@ -200,17 +246,11 @@ export class DefaultWafService implements WafService {
       },
       signal,
     )
-    const { ruleSpans: _ruleSpans, ...compilationView } = compilation
-    return {
-      valid: true,
-      issues: [],
-      compilation: compilationView,
-      scriptValid: native.valid,
-      scriptErrors: native.errors.map((error) =>
-        attributeScriptError(policy as WafPolicy, compilation, error),
-      ),
-      validator: { contractVersion: native.contractVersion, revision: native.validatorRevision },
+    if (this.#scriptVerdicts.size >= maxCachedScriptVerdicts) {
+      this.#scriptVerdicts.clear()
     }
+    this.#scriptVerdicts.set(key, verdict)
+    return verdict
   }
 
   async #requireWorkspace(actor: Actor): Promise<{ internalId: string; publicId: string }> {

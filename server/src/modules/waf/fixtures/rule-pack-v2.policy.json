@@ -1,10 +1,66 @@
 {
-  "schemaVersion": 1,
-  "defaultMode": "log",
+  "schemaVersion": 2,
+  "groups": [
+    {
+      "id": "sqli",
+      "name": "SQL 注入",
+      "mode": "log",
+      "priority": 100,
+      "projects": {
+        "include": ["*"]
+      }
+    },
+    {
+      "id": "rce",
+      "name": "远程代码执行",
+      "mode": "log",
+      "priority": 120,
+      "projects": {
+        "include": ["*"]
+      }
+    },
+    {
+      "id": "xss",
+      "name": "XSS",
+      "mode": "log",
+      "priority": 200,
+      "projects": {
+        "include": ["*"]
+      }
+    },
+    {
+      "id": "traversal",
+      "name": "路径穿越",
+      "mode": "log",
+      "priority": 300,
+      "projects": {
+        "include": ["*"]
+      }
+    },
+    {
+      "id": "probe",
+      "name": "扫描与探测",
+      "mode": "log",
+      "priority": 400,
+      "projects": {
+        "include": ["*"]
+      }
+    },
+    {
+      "id": "malformed",
+      "name": "畸形请求",
+      "mode": "log",
+      "priority": 500,
+      "projects": {
+        "include": ["*"]
+      }
+    }
+  ],
   "rules": [
     {
       "id": "sqli-union-select",
       "name": "union select 注入探测",
+      "group": "sqli",
       "severity": "critical",
       "priority": 100,
       "action": "block",
@@ -14,6 +70,7 @@
     {
       "id": "sqli-time-function",
       "name": "SQL 延时函数探测",
+      "group": "sqli",
       "severity": "high",
       "priority": 110,
       "action": "block",
@@ -23,6 +80,7 @@
     {
       "id": "rce-jndi-probe",
       "name": "JNDI 注入探测（log4shell 形态）",
+      "group": "rce",
       "severity": "critical",
       "priority": 120,
       "action": "block",
@@ -32,6 +90,7 @@
     {
       "id": "xss-script-marker",
       "name": "XSS 脚本标记探测",
+      "group": "xss",
       "severity": "high",
       "priority": 200,
       "action": "block",
@@ -41,6 +100,7 @@
     {
       "id": "traversal-encoded-dotdot",
       "name": "路径穿越探测（含编码变体）",
+      "group": "traversal",
       "severity": "high",
       "priority": 300,
       "action": "block",
@@ -50,6 +110,7 @@
     {
       "id": "scanner-user-agent",
       "name": "扫描器 User-Agent",
+      "group": "probe",
       "severity": "medium",
       "priority": 400,
       "action": "log",
@@ -59,6 +120,7 @@
     {
       "id": "probe-sensitive-file",
       "name": "敏感文件与管理端探测",
+      "group": "probe",
       "severity": "medium",
       "priority": 410,
       "action": "log",
@@ -68,6 +130,7 @@
     {
       "id": "malformed-control-chars",
       "name": "URI 控制字符",
+      "group": "malformed",
       "severity": "medium",
       "priority": 500,
       "action": "block",
@@ -77,6 +140,7 @@
     {
       "id": "malformed-triple-encoding",
       "name": "三重百分号编码探测",
+      "group": "malformed",
       "severity": "low",
       "priority": 510,
       "action": "log",

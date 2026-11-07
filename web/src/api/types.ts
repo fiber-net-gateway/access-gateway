@@ -365,26 +365,40 @@ export interface WafRuleScope {
   sourceCidrs?: readonly string[]
 }
 
-export interface WafRuleExclusion {
-  project: string
-  reason: string
-}
-
 export interface WafRule {
   id: string
   name: string
+  /** Id of the one group this rule belongs to. */
+  group: string
   severity: WafSeverity
   priority: number
   action: 'log' | 'block'
   phase: 'request_head'
   match: string
   scope?: WafRuleScope
-  exclusions?: readonly WafRuleExclusion[]
+}
+
+export interface WafGroupExemption {
+  /** Project name or glob. */
+  project: string
+  reason: string
+}
+
+export interface WafGroup {
+  id: string
+  name: string
+  /** Mode for projects without an override; off publishes no function. */
+  mode: WafMode
+  priority: number
+  projects: {
+    include: readonly string[]
+    exempt?: readonly WafGroupExemption[]
+  }
 }
 
 export interface WafPolicy {
-  schemaVersion: 1
-  defaultMode: WafMode
+  schemaVersion: 2
+  groups: readonly WafGroup[]
   rules: readonly WafRule[]
   projectModes: Readonly<Record<string, WafMode>>
 }
@@ -406,6 +420,8 @@ export interface WafPolicyIssue {
 
 export interface WafScriptError {
   code: string
+  /** The generated function whose script failed; absent for handwritten previews. */
+  functionName?: string
   /** rules[i].match or rules[i] once attributed to a rule; else the validator's field. */
   field?: string
   offset?: number
@@ -415,20 +431,32 @@ export interface WafScriptError {
   message: string
 }
 
-export interface WafMountedCompilation {
-  kind: 'mounted'
+export interface WafFunctionCompilation {
+  groupId: string
+  functionName: string
   script: string
   scriptSha256: string
-  functionName: string
   mountPriority: number
   mounts: readonly { include: readonly string[]; exclude: readonly string[] }[]
   ruleOrder: readonly string[]
   directives: readonly { name: string; cidrs: readonly string[] }[]
 }
 
+export interface WafSkippedGroup {
+  groupId: string
+  reason: 'off' | 'no-rules'
+}
+
+export interface WafMountedCompilation {
+  kind: 'mounted'
+  functions: readonly WafFunctionCompilation[]
+  skipped: readonly WafSkippedGroup[]
+}
+
 export interface WafUnmountCompilation {
   kind: 'unmount'
-  reason: 'no-rules' | 'no-mounted-projects'
+  reason: 'no-rules' | 'no-mounted-groups'
+  skipped: readonly WafSkippedGroup[]
 }
 
 export type WafCompilation = WafMountedCompilation | WafUnmountCompilation
@@ -457,9 +485,9 @@ export interface WafReleaseView {
   id: string
   sequence: string
   status: ReleaseStatus
-  functionName: string
+  /** Empty when no group publishes: an 'unmount' release. */
+  wafFunctions: readonly { name: string; scriptSha256: string }[]
   mode: 'mounted' | 'unmount'
-  scriptSha256: string | null
   ruleCount: number
   indexVersion: string
   description: string
@@ -549,6 +577,7 @@ export interface WafEdgeFunctionsView {
 
 export interface WafRulePackView {
   version: string
+  groups: readonly WafGroup[]
   rules: readonly WafRule[]
 }
 

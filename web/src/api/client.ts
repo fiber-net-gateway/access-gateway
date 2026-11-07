@@ -25,6 +25,8 @@ import type {
   WafEdgeFunctionsDraft,
   WafEdgeFunctionsDraftView,
   WafEdgeFunctionsView,
+  WafFunctionCompilation,
+  WafGroup,
   WafHitsView,
   WafHitsWindow,
   WafRulePackView,
@@ -878,33 +880,45 @@ function isWafRule(value: unknown): value is WafRule {
       (value.scope.methods === undefined || isStringList(value.scope.methods)) &&
       (value.scope.paths === undefined || isStringList(value.scope.paths)) &&
       (value.scope.sourceCidrs === undefined || isStringList(value.scope.sourceCidrs)))
-  const exclusionsOk =
-    value.exclusions === undefined ||
-    (Array.isArray(value.exclusions) &&
-      value.exclusions.every(
-        (exclusion) =>
-          isRecord(exclusion) &&
-          typeof exclusion.project === 'string' &&
-          typeof exclusion.reason === 'string',
-      ))
   return (
     typeof value.id === 'string' &&
     typeof value.name === 'string' &&
+    typeof value.group === 'string' &&
     ['critical', 'high', 'medium', 'low'].includes(String(value.severity)) &&
     typeof value.priority === 'number' &&
     (value.action === 'log' || value.action === 'block') &&
     value.phase === 'request_head' &&
     typeof value.match === 'string' &&
-    scopeOk &&
-    exclusionsOk
+    scopeOk
+  )
+}
+
+function isWafGroup(value: unknown): value is WafGroup {
+  if (!isRecord(value) || !isRecord(value.projects)) return false
+  const { include, exempt } = value.projects
+  return (
+    typeof value.id === 'string' &&
+    typeof value.name === 'string' &&
+    isWafMode(value.mode) &&
+    typeof value.priority === 'number' &&
+    isStringList(include) &&
+    (exempt === undefined ||
+      (Array.isArray(exempt) &&
+        exempt.every(
+          (exemption) =>
+            isRecord(exemption) &&
+            typeof exemption.project === 'string' &&
+            typeof exemption.reason === 'string',
+        )))
   )
 }
 
 function isWafPolicy(value: unknown): value is WafPolicy {
   return (
     isRecord(value) &&
-    value.schemaVersion === 1 &&
-    isWafMode(value.defaultMode) &&
+    value.schemaVersion === 2 &&
+    Array.isArray(value.groups) &&
+    value.groups.every(isWafGroup) &&
     Array.isArray(value.rules) &&
     value.rules.every(isWafRule) &&
     isRecord(value.projectModes) &&
@@ -1013,32 +1027,45 @@ function isWafPolicyIssue(value: unknown): value is WafPolicyIssue {
   )
 }
 
+function isWafFunctionCompilation(value: unknown): value is WafFunctionCompilation {
+  return (
+    isRecord(value) &&
+    typeof value.groupId === 'string' &&
+    typeof value.functionName === 'string' &&
+    typeof value.script === 'string' &&
+    typeof value.scriptSha256 === 'string' &&
+    typeof value.mountPriority === 'number' &&
+    Array.isArray(value.mounts) &&
+    value.mounts.every(
+      (mount) => isRecord(mount) && isStringList(mount.include) && isStringList(mount.exclude),
+    ) &&
+    isStringList(value.ruleOrder) &&
+    Array.isArray(value.directives) &&
+    value.directives.every(
+      (directive) =>
+        isRecord(directive) && typeof directive.name === 'string' && isStringList(directive.cidrs),
+    )
+  )
+}
+
 function isWafCompilePreview(value: unknown): value is WafCompilePreviewView {
   if (!isRecord(value)) return false
   const compilation = value.compilation
   const compilationOk =
     compilation === null ||
     (isRecord(compilation) &&
+      Array.isArray(compilation.skipped) &&
+      compilation.skipped.every(
+        (group) =>
+          isRecord(group) &&
+          typeof group.groupId === 'string' &&
+          (group.reason === 'off' || group.reason === 'no-rules'),
+      ) &&
       (compilation.kind === 'unmount'
-        ? compilation.reason === 'no-rules' || compilation.reason === 'no-mounted-projects'
+        ? compilation.reason === 'no-rules' || compilation.reason === 'no-mounted-groups'
         : compilation.kind === 'mounted' &&
-          typeof compilation.script === 'string' &&
-          typeof compilation.scriptSha256 === 'string' &&
-          typeof compilation.functionName === 'string' &&
-          typeof compilation.mountPriority === 'number' &&
-          Array.isArray(compilation.mounts) &&
-          compilation.mounts.every(
-            (mount) =>
-              isRecord(mount) && isStringList(mount.include) && isStringList(mount.exclude),
-          ) &&
-          isStringList(compilation.ruleOrder) &&
-          Array.isArray(compilation.directives) &&
-          compilation.directives.every(
-            (directive) =>
-              isRecord(directive) &&
-              typeof directive.name === 'string' &&
-              isStringList(directive.cidrs),
-          )))
+          Array.isArray(compilation.functions) &&
+          compilation.functions.every(isWafFunctionCompilation)))
   return (
     typeof value.valid === 'boolean' &&
     Array.isArray(value.issues) &&
@@ -1050,6 +1077,7 @@ function isWafCompilePreview(value: unknown): value is WafCompilePreviewView {
       (error) =>
         isRecord(error) &&
         typeof error.code === 'string' &&
+        typeof error.functionName === 'string' &&
         (error.field === undefined || typeof error.field === 'string') &&
         (error.offset === undefined || typeof error.offset === 'number') &&
         (error.line === undefined || typeof error.line === 'number') &&
@@ -1082,9 +1110,11 @@ function isWafRelease(value: unknown): value is WafReleaseView {
     typeof value.id === 'string' &&
     typeof value.sequence === 'string' &&
     typeof value.status === 'string' &&
-    typeof value.functionName === 'string' &&
+    Array.isArray(value.wafFunctions) &&
+    value.wafFunctions.every(
+      (fn) => isRecord(fn) && typeof fn.name === 'string' && typeof fn.scriptSha256 === 'string',
+    ) &&
     (value.mode === 'mounted' || value.mode === 'unmount') &&
-    (value.scriptSha256 === null || typeof value.scriptSha256 === 'string') &&
     typeof value.ruleCount === 'number' &&
     typeof value.indexVersion === 'string' &&
     typeof value.description === 'string' &&
@@ -1149,6 +1179,8 @@ function isWafRulePack(value: unknown): value is WafRulePackView {
   return (
     isRecord(value) &&
     typeof value.version === 'string' &&
+    Array.isArray(value.groups) &&
+    value.groups.every(isWafGroup) &&
     Array.isArray(value.rules) &&
     value.rules.every(isWafRule)
   )

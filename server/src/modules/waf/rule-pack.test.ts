@@ -4,8 +4,13 @@ import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 
 import { compileWafPolicy } from './generator.js'
-import type { WafPolicy, WafRule } from './model.js'
-import { WAF_RULE_PACK, WAF_RULE_PACK_VERSION, wafRulePackView } from './rule-pack.js'
+import type { WafGroup, WafPolicy, WafRule } from './model.js'
+import {
+  WAF_RULE_PACK,
+  WAF_RULE_PACK_GROUPS,
+  WAF_RULE_PACK_VERSION,
+  wafRulePackView,
+} from './rule-pack.js'
 import { validateWafPolicy } from './validate.js'
 
 const ruleIdPattern = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/u
@@ -39,40 +44,53 @@ test('rule pack rules carry curated actions and stay in the request-head phase',
 test('rule pack view exposes the version and the exact rule data', () => {
   const view = wafRulePackView()
   assert.equal(view.version, WAF_RULE_PACK_VERSION)
+  assert.equal(view.groups, WAF_RULE_PACK_GROUPS)
   assert.equal(view.rules, WAF_RULE_PACK)
+})
+
+test('rule pack groups follow the families and every group holds rules', () => {
+  const ids = WAF_RULE_PACK_GROUPS.map((group) => group.id)
+  assert.equal(new Set(ids).size, ids.length)
+  assert.deepEqual([...new Set(WAF_RULE_PACK.map((rule) => rule.group))].sort(), [...ids].sort())
 })
 
 test('the rule pack imports into a fresh draft without changing anything', () => {
   const policy: WafPolicy = {
-    schemaVersion: 1,
-    defaultMode: 'off',
+    schemaVersion: 2,
+    groups: [...WAF_RULE_PACK_GROUPS],
     rules: [...WAF_RULE_PACK],
     projectModes: {},
   }
-  // A fresh draft is defaultMode=off: the pack validates cleanly and the
-  // function is not mounted anywhere — nothing changes until an operator
-  // turns a mode on (灰度顺序 单项目 log → block).
+  // Every pack group is off: the pack validates cleanly and no function is
+  // mounted — nothing changes until an operator turns a group on (灰度顺序
+  // 单项目 log → block).
   assert.deepEqual(validateWafPolicy(policy), [])
   const unmounted = compileWafPolicy(policy)
   assert.equal(unmounted.kind, 'unmount')
-  assert.equal(unmounted.reason, 'no-mounted-projects')
+  assert.equal(unmounted.reason, 'no-mounted-groups')
 
-  // With log enabled the pack compiles mounted, ordered by priority.
-  const logging: WafPolicy = { ...policy, defaultMode: 'log' }
+  // With log enabled, group order keeps the pack's rule priority order.
+  const logging: WafPolicy = {
+    ...policy,
+    groups: policy.groups.map((group) => ({ ...group, mode: 'log' })),
+  }
   const compilation = compileWafPolicy(logging)
   assert.equal(compilation.kind, 'mounted')
   assert.deepEqual(
-    compilation.ruleOrder,
+    compilation.functions.flatMap((fn) => fn.ruleOrder),
     [...WAF_RULE_PACK].sort((a, b) => a.priority - b.priority).map((rule) => rule.id),
   )
 })
 
 test('the committed golden fixture pins the live rule pack data', async () => {
-  const fixturePath = fileURLToPath(new URL('./fixtures/rule-pack-v1.policy.json', import.meta.url))
+  const fixturePath = fileURLToPath(new URL('./fixtures/rule-pack-v2.policy.json', import.meta.url))
   const fixture = JSON.parse(await readFile(fixturePath, 'utf8')) as {
-    version?: string
+    groups: WafGroup[]
     rules: WafRule[]
   }
-  assert.equal(fixture.rules.length, WAF_RULE_PACK.length)
   assert.deepEqual(fixture.rules, WAF_RULE_PACK)
+  assert.deepEqual(
+    fixture.groups.map((group) => ({ ...group, mode: 'off' })),
+    WAF_RULE_PACK_GROUPS,
+  )
 })

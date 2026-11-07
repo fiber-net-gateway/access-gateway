@@ -128,8 +128,8 @@ export function WafEdgeFunctionsPage() {
       setNameError('函数名需为小写字母/数字/连字符，1-64 字符，且首尾为字母或数字')
       return
     }
-    if (functions.some((fn) => fn.name === name) || name === 'waf') {
-      setNameError('函数名已存在（waf 为生成函数保留）')
+    if (functions.some((fn) => fn.name === name) || name === 'waf' || name.startsWith('waf-')) {
+      setNameError('函数名已存在（waf 与 waf-* 为生成函数保留）')
       return
     }
     updateFunctions((current) => [...current, newFunction(name)])
@@ -437,7 +437,7 @@ function FunctionEditor({ func, diagnostics, onUpdate, onRemove }: FunctionEdito
         </Suspense>
       </div>
 
-      <div className="waf-exclusions">
+      <div className="waf-function-mounts">
         <strong>
           挂载（{func.mounts.length}/{maxMountsPerFunction}）
         </strong>
