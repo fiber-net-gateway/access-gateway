@@ -32,6 +32,7 @@ AccessWorkerResources::AccessWorkerResources(event::EventLoopGroup &workers, con
                      .default_max_request_body_size = options.default_max_request_body_size,
                      .gray_matcher = cluster_matcher,
                      .test_mode = options.test_mode,
+                     .edge_function_fail_close = options.edge_function_fail_close,
              },
              executor_.adapter()),
     metrics_(workers, options.runtime_metrics), cat_client_(options.cat_client),

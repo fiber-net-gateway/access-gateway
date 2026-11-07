@@ -125,6 +125,7 @@ AccessDataPlaneService::prepare(AccessControlPlaneReady ready) noexcept {
                     .activation_endpoint = std::move(options_.activation_endpoint),
                     .cat_client = cat_client_,
                     .test_mode = options_.test_mode,
+                    .edge_function_fail_close = options_.edge_function_fail_close,
                     .http_server = options_.http_server,
                     .http3_alt_svc =
                             options_.http_server.http3_enabled

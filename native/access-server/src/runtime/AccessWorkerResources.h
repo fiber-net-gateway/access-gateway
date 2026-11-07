@@ -41,6 +41,7 @@ struct AccessWorkerResourcesOptions {
     const AccessRuntimeMetrics *runtime_metrics = nullptr;
     cat::CatClient *cat_client = nullptr;
     bool test_mode = false;
+    bool edge_function_fail_close = false;
     std::string http3_alt_svc;
 };
 

@@ -348,11 +348,16 @@ async::Task<Result<void>> AccessRequestHandler::handle_impl(http::HttpExchange &
         for (const http::HttpHeaders::HeaderField &field: telemetry.response_headers()) {
             telemetry.script_context().set_response_header(field.name_view(), field.value_view());
         }
-        const bool edge_short_circuit =
-                co_await EdgeFunctionExecutor::run(edge_mounted, telemetry.script_context(), telemetry,
-                                                   host_match.project->project(), request_host.effective_host);
-        if (edge_short_circuit) {
-            co_return Result<void>{};
+        const EdgeFunctionOutcome edge_outcome = co_await EdgeFunctionExecutor::run(
+                edge_mounted, telemetry.script_context(), telemetry, host_match.project->project(),
+                request_host.effective_host, options_.edge_function_fail_close);
+        switch (edge_outcome) {
+            case EdgeFunctionOutcome::Responded:
+                co_return Result<void>{};
+            case EdgeFunctionOutcome::Rejected:
+                co_return std::unexpected(Err::from_exception(Exception::edge_function_fail_close()));
+            case EdgeFunctionOutcome::Continue:
+                break;
         }
     }
 

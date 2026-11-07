@@ -255,7 +255,7 @@ projectWaf:
 
 ## 6. 安全与失败语义
 
-- **fail-open**：函数 Exception/Abort → 放行 + `function_errors_total` 计数 + 日志（WAF 挂了不能打死网关）。严格模式（fail-close）留作 P3 配置项。
+- **fail-open**：函数 Exception/Abort → 放行 + `function_errors_total` 计数 + 日志（WAF 挂了不能打死网关）。严格模式为实例级配置项 `ACCESS_SERVER_EDGE_FUNCTION_FAIL_CLOSE=true`（P3 已实现）：函数在写出任何响应**之前**出错 → 整个请求以 503 `EDGE_FUNCTION_FAIL_CLOSE` 拒绝（错误仍计数+记日志，链路停止）；脚本已提交的响应不可撤回，已发送即生效。watcher 组装失败仍保持旧快照——fail-close 只约束执行期错误，不因配置面故障拒绝流量。
 - 输入截断：进入脚本的每个字符串字段截取前 N KiB（默认 8KiB，limits 可调），防长 header/URI 拖慢求值。
 - **VM 无 step budget**（`InterpreterVm` 无指令预算；`ScriptAbortReason::Timeout` 仅有枚举位）。v1 缓解：方言静态封堵（无函数定义/递归/`while`，唯一循环是 for-of over 有限容器）+ 表达式/脚本/产物上限 + 输入截断。根治手段是**上游建议**：InterpreterVm 增加可选 step budget/deadline；顺带建议上游更新 `docs/script-guide`（`strings.match/findAll` 在当前 pin 已注册，文档仍写"未注册"）。
 - 正则：`strings.match` 为 RE2 线性实现 + 编译缓存 + WorkBudget，无回溯炸弹。CIDR 经 directive 编译期解析，畸形 CIDR 在发布期失败。

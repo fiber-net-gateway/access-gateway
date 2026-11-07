@@ -31,6 +31,7 @@ AccessServer::AccessServer(event::EventLoop &accept_loop, event::EventLoopGroup 
                               .runtime_metrics = options.runtime_metrics,
                               .cat_client = options.cat_client,
                               .test_mode = options.test_mode,
+                              .edge_function_fail_close = options.edge_function_fail_close,
                               .http3_alt_svc = std::move(options.http3_alt_svc),
                       }),
     http_options_(options.http_server), plain_options_(options.plain_http_server),

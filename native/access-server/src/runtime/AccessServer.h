@@ -40,6 +40,7 @@ struct AccessServerOptions {
     AccessActivationEndpointOptions activation_endpoint;
     cat::CatClient *cat_client = nullptr;
     bool test_mode = false;
+    bool edge_function_fail_close = false;
     AccessHttpListenerOptions http_server;
     std::string http3_alt_svc;
     bool plain_listen_enabled = false;
