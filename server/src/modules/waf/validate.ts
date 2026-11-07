@@ -36,7 +36,8 @@ function byteLength(value: string): number {
 
 // JSON permits lone surrogate escapes; UTF-8 encoding would silently replace
 // them with U+FFFD, so every authoring text field must reject them up front.
-function hasLoneSurrogate(value: string): boolean {
+// Shared with the edge-function draft validation (edge-function-validate.ts).
+export function hasLoneSurrogate(value: string): boolean {
   for (let index = 0; index < value.length; index += 1) {
     const codeUnit = value.charCodeAt(index)
     if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
@@ -52,7 +53,7 @@ function hasLoneSurrogate(value: string): boolean {
   return false
 }
 
-function isPrintableSingleLine(value: string): boolean {
+export function isPrintableSingleLine(value: string): boolean {
   for (let index = 0; index < value.length; index += 1) {
     const codeUnit = value.charCodeAt(index)
     if (codeUnit < 0x20 || codeUnit === 0x7f) {

@@ -56,6 +56,11 @@ import {
   UnavailableConfigurationVersionService,
 } from './modules/versions/service.js'
 import { DefaultWafHitsService, UnavailableWafHitsService } from './modules/waf/hits-service.js'
+import {
+  DefaultEdgeFunctionService,
+  UnavailableEdgeFunctionService,
+} from './modules/waf/edge-function-service.js'
+import { EdgeFunctionDraftRepository } from './modules/waf/edge-function-repository.js'
 import { WafPolicyDraftRepository } from './modules/waf/repository.js'
 import { WafReleaseRepository } from './modules/waf/release-repository.js'
 import {
@@ -146,6 +151,7 @@ function unavailableServices(
     waf: new UnavailableWafService(),
     wafReleases: new UnavailableWafReleaseService(),
     wafHits: new UnavailableWafHitsService(),
+    edgeFunctions: new UnavailableEdgeFunctionService(),
   }
 }
 
@@ -186,6 +192,7 @@ export async function createApplicationRuntime(config: ServerConfig): Promise<Ap
     const drafts = new DraftRepository(pool, documents)
     const versions = new ConfigurationVersionRepository(pool, documents)
     const wafDrafts = new WafPolicyDraftRepository(pool, documents)
+    const edgeFunctionDrafts = new EdgeFunctionDraftRepository(pool, documents)
     const wafReleasesRepo = new WafReleaseRepository(pool, documents, undefined, activationRead)
     const nacos = config.publication.enabled
       ? new HttpNacosClient({
@@ -246,6 +253,7 @@ export async function createApplicationRuntime(config: ServerConfig): Promise<Ap
         nacos,
       ),
       wafHits: new DefaultWafHitsService(prometheus),
+      edgeFunctions: new DefaultEdgeFunctionService(edgeFunctionDrafts, environments, validator),
     }
     return {
       services,

@@ -3,6 +3,7 @@ import type { FastifyInstance } from 'fastify'
 import { badRequest } from '../../shared/errors.js'
 import { requireActor } from '../auth/http.js'
 import type { AuthService } from '../auth/model.js'
+import type { EdgeFunctionService } from './edge-function-service.js'
 import { isWafHitsWindow, type WafHitsService } from './hits-service.js'
 import type { WafReleaseService } from './release-service.js'
 import { wafRulePackView } from './rule-pack.js'
@@ -258,12 +259,153 @@ interface SaveWafPolicyBody {
   policy: unknown
 }
 
+// Coarse shape only: the service re-validates with precise field paths
+// (edge-function-validate.ts) and the native validator compiles each script.
+const edgeFunctionMountSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['projects'],
+  properties: {
+    projects: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['include'],
+      properties: {
+        include: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 256,
+          items: { type: 'string', minLength: 1, maxLength: 255 },
+        },
+        exclude: {
+          type: 'array',
+          maxItems: 256,
+          items: { type: 'string', minLength: 1, maxLength: 255 },
+        },
+      },
+    },
+    priority: { type: 'integer', minimum: 0, maximum: 1000000 },
+    ratio: { type: 'integer', minimum: 0, maximum: 10000 },
+  },
+} as const
+
+const edgeFunctionDraftFunctionSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['name', 'enabled', 'script', 'mounts'],
+  properties: {
+    name: {
+      type: 'string',
+      minLength: 1,
+      maxLength: 64,
+      pattern: '^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$',
+    },
+    description: { type: 'string', minLength: 1, maxLength: 255 },
+    enabled: { type: 'boolean' },
+    script: { type: 'string', minLength: 1, maxLength: 1048576 },
+    mounts: { type: 'array', maxItems: 16, items: edgeFunctionMountSchema },
+  },
+} as const
+
+const edgeFunctionsDraftSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['schemaVersion', 'functions'],
+  properties: {
+    schemaVersion: { type: 'integer', const: 1 },
+    functions: { type: 'array', maxItems: 64, items: edgeFunctionDraftFunctionSchema },
+  },
+} as const
+
+const edgeFunctionsDraftResponseSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['id', 'draft', 'draftSha256', 'lockVersion', 'createdAt', 'updatedAt'],
+  properties: {
+    id: { type: 'string', format: 'uuid' },
+    draft: edgeFunctionsDraftSchema,
+    draftSha256: { type: 'string', pattern: '^[0-9a-f]{64}$' },
+    lockVersion: { type: 'string', pattern: '^(0|[1-9][0-9]*)$' },
+    createdAt: { type: 'string', format: 'date-time' },
+    updatedAt: { type: 'string', format: 'date-time' },
+  },
+} as const
+
+const edgeFunctionCompilePreviewResponseSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['valid', 'issues', 'functions', 'validator'],
+  properties: {
+    valid: { type: 'boolean' },
+    issues: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['field', 'code', 'message'],
+        properties: {
+          field: { type: 'string' },
+          code: { type: 'string' },
+          message: { type: 'string' },
+        },
+      },
+    },
+    functions: {
+      type: 'array',
+      maxItems: 64,
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['name', 'scriptSha256', 'scriptValid', 'errors'],
+        properties: {
+          name: { type: 'string' },
+          scriptSha256: { type: 'string', pattern: '^[0-9a-f]{64}$' },
+          scriptValid: { type: 'boolean' },
+          errors: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              required: ['code', 'message'],
+              properties: {
+                code: { type: 'string' },
+                field: { type: 'string' },
+                offset: { type: 'integer' },
+                message: { type: 'string' },
+              },
+            },
+          },
+        },
+      },
+    },
+    validator: {
+      anyOf: [
+        { type: 'null' },
+        {
+          type: 'object',
+          additionalProperties: false,
+          required: ['contractVersion', 'revision'],
+          properties: {
+            contractVersion: { type: 'integer' },
+            revision: { type: 'string' },
+          },
+        },
+      ],
+    },
+  },
+} as const
+
+interface SaveEdgeFunctionsDraftBody {
+  draft: unknown
+}
+
 export function registerWafRoutes(
   app: FastifyInstance,
   auth: AuthService,
   waf: WafService,
   wafReleases: WafReleaseService,
   wafHits: WafHitsService,
+  edgeFunctions: EdgeFunctionService,
 ): void {
   app.get(
     '/api/waf/policy',
@@ -345,6 +487,79 @@ export function registerWafRoutes(
       // Static curated data shipped with the console build; viewer-readable.
       await requireActor(auth)
       return wafRulePackView()
+    },
+  )
+
+  app.get(
+    '/api/waf/edge-functions/draft',
+    { schema: { response: { 200: edgeFunctionsDraftResponseSchema } } },
+    async (_request, reply) => {
+      const result = await edgeFunctions.getDraft(await requireActor(auth))
+      reply.header('etag', `"${result.lockVersion}"`)
+      return result
+    },
+  )
+
+  app.post(
+    '/api/waf/edge-functions/draft',
+    { schema: { response: { 201: edgeFunctionsDraftResponseSchema } } },
+    async (request, reply) => {
+      const result = await edgeFunctions.createDraft(await requireActor(auth), String(request.id))
+      reply.header('etag', `"${result.lockVersion}"`)
+      return reply.code(201).send(result)
+    },
+  )
+
+  app.put<{ Headers: { 'if-match'?: string }; Body: SaveEdgeFunctionsDraftBody }>(
+    '/api/waf/edge-functions/draft',
+    {
+      schema: {
+        headers: {
+          type: 'object',
+          required: ['if-match'],
+          properties: { 'if-match': { type: 'string' } },
+        },
+        body: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['draft'],
+          properties: {
+            draft: edgeFunctionsDraftSchema,
+          },
+        },
+        response: { 200: edgeFunctionsDraftResponseSchema },
+      },
+    },
+    async (request, reply) => {
+      const result = await edgeFunctions.saveDraft(
+        await requireActor(auth),
+        {
+          lockVersion: parseIfMatch(request.headers['if-match']),
+          draft: request.body.draft,
+        },
+        String(request.id),
+      )
+      reply.header('etag', `"${result.lockVersion}"`)
+      return result
+    },
+  )
+
+  app.post<{ Body: unknown }>(
+    '/api/waf/edge-functions/compile-preview',
+    {
+      schema: {
+        body: edgeFunctionsDraftSchema,
+        response: { 200: edgeFunctionCompilePreviewResponseSchema },
+      },
+    },
+    async (request, reply) => {
+      const result = await edgeFunctions.compilePreview(
+        await requireActor(auth),
+        request.body,
+        String(request.id),
+      )
+      reply.header('cache-control', 'no-store')
+      return result
     },
   )
 
