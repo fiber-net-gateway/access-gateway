@@ -120,10 +120,10 @@ private:
 
 fiber::async::DetachedTask run_request_on_loop(fiber::event::EventLoop *loop, const RouteConfigStore *store,
                                                std::string request, std::string *output, std::promise<void> *done,
-                                               fiber::net::SocketAddress remote_addr = {}) {
+                                               fiber::net::SocketAddress remote_addr = {},
+                                               AccessRequestHandlerOptions handler_options = {}) {
     auto transport = std::make_unique<RecordingTransport>(*loop, std::move(request), *output, std::move(remote_addr));
-    fiber::access_server::AccessRequestHandler access_handler(store->snapshot_provider(), {},
-                                                              AccessRequestHandlerOptions{}, {});
+    fiber::access_server::AccessRequestHandler access_handler(store->snapshot_provider(), {}, handler_options, {});
     ClientMetadataResolver client_metadata_resolver(ClientMetadataResolverOptions{
             .mode = ClientMetadataMode::LegacyHeaders,
     });
@@ -138,8 +138,8 @@ fiber::async::DetachedTask run_request_on_loop(fiber::event::EventLoop *loop, co
     co_return;
 }
 
-std::string run_request(const RouteConfigStore &store, std::string request,
-                        fiber::net::SocketAddress remote_addr = {}) {
+std::string run_request(const RouteConfigStore &store, std::string request, fiber::net::SocketAddress remote_addr = {},
+                        AccessRequestHandlerOptions handler_options = {}) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
@@ -147,7 +147,8 @@ std::string run_request(const RouteConfigStore &store, std::string request,
     std::promise<void> done;
     auto completed = done.get_future();
     fiber::async::spawn(group.at(0), [&]() {
-        return run_request_on_loop(&group.at(0), &store, std::move(request), &output, &done, std::move(remote_addr));
+        return run_request_on_loop(&group.at(0), &store, std::move(request), &output, &done, std::move(remote_addr),
+                                   handler_options);
     });
 
     EXPECT_EQ(completed.wait_for(2s), std::future_status::ready);
@@ -331,6 +332,51 @@ TEST(EdgeFunctionExecutor, ExceptionContinuesChainToNextFunction) {
     const std::string response = run_request(store, request());
     EXPECT_NE(response.find(" 403 "), std::string::npos) << response;
     EXPECT_NE(response_body(response).find("second-function"), std::string::npos) << response;
+}
+
+TEST(EdgeFunctionExecutor, FailCloseRejectsWhenFunctionErrorsBeforeResponse) {
+    // Strict posture (ACCESS_SERVER_EDGE_FUNCTION_FAIL_CLOSE=true): the first
+    // function error rejects with 503 instead of failing open into routing.
+    AccessRequestHandlerOptions options;
+    options.edge_function_fail_close = true;
+
+    RouteConfigStore store;
+    publish_response_route(store);
+    EdgeFunctionLibrary library;
+    EdgeFunctionsState state;
+    add_function(state, library, "broken", R"(ctx.report(1, "x"); true)", {mounted_everywhere(1)});
+    add_function(state, library, "responder", R"(resp.send(403, "second-function");)", {mounted_everywhere(2)});
+    store.set_edge_functions(std::make_shared<EdgeFunctionsState>(std::move(state)));
+
+    const std::string response = run_request(store, request(), {}, options);
+    EXPECT_NE(response.find(" 503 "), std::string::npos) << response;
+    EXPECT_NE(response.find("EDGE_FUNCTION_FAIL_CLOSE"), std::string::npos) << response;
+    // The chain stopped at the error: the later function never ran.
+    EXPECT_EQ(response.find("second-function"), std::string::npos) << response;
+    EXPECT_EQ(response_body(response).find("route-body"), std::string::npos) << response;
+}
+
+TEST(EdgeFunctionExecutor, FailCloseKeepsCommittedResponseAndDefaultStaysFailOpen) {
+    RouteConfigStore store;
+    publish_response_route(store);
+    EdgeFunctionLibrary library;
+    EdgeFunctionsState state;
+    // resp.send commits the response; the exception afterwards cannot un-send
+    // it, so even strict mode keeps the 403 the function already produced.
+    add_function(state, library, "sent-then-broken", R"(resp.send(403, "already-sent"); ctx.report(1, "x"))",
+                 {mounted_everywhere(1)});
+    store.set_edge_functions(std::make_shared<EdgeFunctionsState>(std::move(state)));
+
+    AccessRequestHandlerOptions strict;
+    strict.edge_function_fail_close = true;
+    const std::string committed = run_request(store, request(), {}, strict);
+    EXPECT_NE(committed.find(" 403 "), std::string::npos) << committed;
+    EXPECT_NE(response_body(committed).find("already-sent"), std::string::npos) << committed;
+
+    // Default (flag off) keeps the documented fail-open behavior.
+    const std::string fail_open = run_request(store, request());
+    EXPECT_NE(fail_open.find(" 403 "), std::string::npos) << fail_open;
+    EXPECT_NE(response_body(fail_open).find("already-sent"), std::string::npos) << fail_open;
 }
 
 TEST(EdgeFunctionExecutor, ValueWithoutResponseContinues) {

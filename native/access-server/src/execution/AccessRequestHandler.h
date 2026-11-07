@@ -54,6 +54,11 @@ struct AccessRequestHandlerOptions {
     // and the compat access log read the final value back from there.
     ProxyClusterMatcher gray_matcher{};
     bool test_mode = false;
+    // Strict edge-function posture (design §6): when true, a function that
+    // errors before writing any response rejects the request (503) instead of
+    // failing open into routing. Default stays fail-open — a broken WAF must
+    // not take the gateway down.
+    bool edge_function_fail_close = false;
 };
 
 struct ProxyExecutionInput {

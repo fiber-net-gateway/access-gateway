@@ -72,12 +72,13 @@ private:
 
 } // namespace
 
-fiber::async::Task<bool> EdgeFunctionExecutor::run(std::span<const EdgeFunctionMounted> mounted,
-                                                   http_script::ScriptExchangeCtx &script_context,
-                                                   AccessRequestTelemetry &telemetry, std::string_view project,
-                                                   std::string_view host) noexcept {
+fiber::async::Task<EdgeFunctionOutcome> EdgeFunctionExecutor::run(std::span<const EdgeFunctionMounted> mounted,
+                                                                  http_script::ScriptExchangeCtx &script_context,
+                                                                  AccessRequestTelemetry &telemetry,
+                                                                  std::string_view project, std::string_view host,
+                                                                  bool fail_close) noexcept {
     if (mounted.empty()) {
-        co_return false;
+        co_return EdgeFunctionOutcome::Continue;
     }
     RequestEdgeContext edge(telemetry);
     edge.project = project;
@@ -120,7 +121,7 @@ fiber::async::Task<bool> EdgeFunctionExecutor::run(std::span<const EdgeFunctionM
             LOG(LOG_EDGE_FUNCTION, INFO) << "edge_function_short_circuit"
                                          << " trace_id=\"" << telemetry.trace_id() << "\"" << " project=\"" << project
                                          << "\"" << " host=\"" << host << "\"" << " function=\"" << entry.name << "\"";
-            co_return true;
+            co_return EdgeFunctionOutcome::Responded;
         }
         switch (result.kind) {
             case script::ScriptResultKind::Void:
@@ -133,6 +134,9 @@ fiber::async::Task<bool> EdgeFunctionExecutor::run(std::span<const EdgeFunctionM
                         << "edge_function_error"
                         << " trace_id=\"" << telemetry.trace_id() << "\"" << " project=\"" << project << "\""
                         << " function=\"" << entry.name << "\"" << " reason=\"" << kErrorReasonException << "\"";
+                if (fail_close) {
+                    co_return EdgeFunctionOutcome::Rejected;
+                }
                 break;
             case script::ScriptResultKind::Abort:
                 telemetry.record_edge_function_error(entry.name, kErrorReasonAbort);
@@ -141,10 +145,13 @@ fiber::async::Task<bool> EdgeFunctionExecutor::run(std::span<const EdgeFunctionM
                         << " trace_id=\"" << telemetry.trace_id() << "\"" << " project=\"" << project << "\""
                         << " function=\"" << entry.name << "\"" << " reason=\"" << kErrorReasonAbort << "\" detail=\""
                         << script::abort_reason_name(result.abort().reason) << "\"";
+                if (fail_close) {
+                    co_return EdgeFunctionOutcome::Rejected;
+                }
                 break;
         }
     }
-    co_return false;
+    co_return EdgeFunctionOutcome::Continue;
 }
 
 } // namespace fiber::access_server

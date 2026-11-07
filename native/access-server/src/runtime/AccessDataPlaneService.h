@@ -42,6 +42,7 @@ struct AccessDataPlaneOptions {
     ProxyExecutorOptions executor;
     std::size_t default_max_request_body_size = 0;
     bool test_mode = false;
+    bool edge_function_fail_close = false;
 };
 
 class AccessDataPlaneService final : public common::NonCopyable, public common::NonMovable {
