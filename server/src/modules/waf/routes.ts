@@ -757,7 +757,7 @@ function registerWafReleaseRoutes(
                           items: {
                             type: 'object',
                             additionalProperties: false,
-                            required: ['projects', 'priority'],
+                            required: ['projects', 'priority', 'ratio'],
                             properties: {
                               projects: {
                                 type: 'object',
@@ -769,6 +769,7 @@ function registerWafReleaseRoutes(
                                 },
                               },
                               priority: { type: ['integer', 'null'] },
+                              ratio: { type: ['integer', 'null'], minimum: 0, maximum: 10000 },
                             },
                           },
                         },

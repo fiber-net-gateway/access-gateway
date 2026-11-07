@@ -12,6 +12,13 @@ export function edgeFunctionScriptDataId(functionName: string): string {
   return `${EDGE_FUNCTION_SCRIPT_DATA_ID_PREFIX}${functionName}`
 }
 
+/** The native function-name charset: [a-z0-9-], alphanumeric edges, ≤64. */
+const scriptDataIdSafeNamePattern = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/u
+
+export function isScriptDataIdSafeName(name: string): boolean {
+  return scriptDataIdSafeNamePattern.test(name)
+}
+
 export type WafReleaseResourceStatus =
   'pending' | 'running' | 'verified' | 'failed' | 'conflict' | 'conflict_after_partial'
 
@@ -64,14 +71,16 @@ export interface QueueWafPublicationResult {
 }
 
 // Read-only live view of what the data plane currently sees in rnacos
-// (§4.4 边缘函数页 v1 只读). The index is parsed lightly — a hand-edited or
-// foreign index must still render, with a parse error instead of a 500.
+// (§4.4 边缘函数页). The index is parsed lightly — a hand-edited or foreign
+// index must still render, with a parse error instead of a 500.
 export interface WafEdgeFunctionIndexEntryView {
   name: string
   sha256: string | null
   mounts: readonly {
     projects: { include: readonly string[]; exclude: readonly string[] }
     priority: number | null
+    /** Sticky sampling ratio; null = absent on the wire (default 10000). */
+    ratio: number | null
   }[]
 }
 

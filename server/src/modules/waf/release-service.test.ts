@@ -15,6 +15,10 @@ import { AppError } from '../../shared/errors.js'
 import { canonicalJson, sha256 } from '../../shared/json.js'
 import type { Actor } from '../auth/model.js'
 import { EnvironmentRepository } from '../environments/repository.js'
+import type { EdgeFunctionDraftView } from './edge-function-repository.js'
+import { EdgeFunctionDraftRepository } from './edge-function-repository.js'
+import type { EdgeFunctionsDraft } from './edge-function-model.js'
+import { emptyEdgeFunctionsDraft } from './edge-function-model.js'
 import type { WafPolicy } from './model.js'
 import {
   EDGE_FUNCTIONS_DATA_ID,
@@ -126,6 +130,21 @@ function draftsFake(policy: WafPolicy | null) {
   } as unknown as WafPolicyDraftRepository
 }
 
+const functionDraftView = (draft: EdgeFunctionsDraft): EdgeFunctionDraftView => ({
+  id: '00000000-0000-4000-8000-000000000010',
+  draft,
+  draftSha256: '0'.repeat(64),
+  lockVersion: '1',
+  createdAt: '2026-11-07T00:00:00.000Z',
+  updatedAt: '2026-11-07T00:00:00.000Z',
+})
+
+function functionDraftsFake(draft: EdgeFunctionsDraft | null) {
+  return {
+    findByEnvironmentInternalId: async () => (draft === null ? null : functionDraftView(draft)),
+  } as unknown as EdgeFunctionDraftRepository
+}
+
 const releaseView: WafReleaseView = {
   id: '00000000-0000-4000-8000-00000000000c',
   sequence: '5',
@@ -156,7 +175,7 @@ function releasesFake() {
   const created: {
     environmentInternalId: string
     plan: PreparedWafReleasePlan
-    bases: { index: NacosResourceValue; script: NacosResourceValue | null }
+    bases: { index: NacosResourceValue; scripts: { name: string; base: NacosResourceValue }[] }
     input: Record<string, unknown>
   }[] = []
   const repository = {
@@ -164,7 +183,7 @@ function releasesFake() {
       actorArg: unknown,
       environmentInternalId: string,
       plan: PreparedWafReleasePlan,
-      bases: { index: NacosResourceValue; script: NacosResourceValue | null },
+      bases: { index: NacosResourceValue; scripts: { name: string; base: NacosResourceValue }[] },
       input: Record<string, unknown>,
     ) => {
       assert.equal(actorArg, actor)
@@ -203,6 +222,7 @@ function mountedPolicy(): WafPolicy {
 
 function buildService(overrides: {
   policy?: WafPolicy | null
+  functionsDraft?: EdgeFunctionsDraft | null
   role?: string | null
   validatorOverrides?: Partial<NativeValidationResult>
   validatorAvailable?: boolean
@@ -227,6 +247,9 @@ function buildService(overrides: {
   const subject = new DefaultWafReleaseService(
     overrides.drafts ??
       draftsFake(overrides.policy === undefined ? mountedPolicy() : overrides.policy),
+    functionDraftsFake(
+      overrides.functionsDraft === undefined ? emptyEdgeFunctionsDraft() : overrides.functionsDraft,
+    ),
     repository,
     environmentsFake(overrides.role),
     validator,
@@ -276,7 +299,10 @@ test('create compiles a mounted policy into script + index payloads and reads bo
   ])
   const bases = created?.[0]?.bases
   assert.ok(bases?.index)
-  assert.ok(bases?.script)
+  assert.deepEqual(
+    bases?.scripts.map((entry) => entry.name),
+    ['waf'],
+  )
 
   const input = created?.[0]?.input
   assert.equal(input?.generatorRevision, WAF_GENERATOR_REVISION)
@@ -301,7 +327,108 @@ test('create compiles an empty policy into an unmount release with only an index
   const plan = created?.[0]?.plan
   assert.equal(plan?.mode, 'unmount')
   assert.equal(plan?.script, null)
-  assert.equal(created?.[0]?.bases.script, null)
+  assert.deepEqual(created?.[0]?.bases.scripts, [])
+})
+
+test('create merges handwritten functions with the generated WAF function', async () => {
+  const functionsDraft: EdgeFunctionsDraft = {
+    schemaVersion: 1,
+    functions: [
+      {
+        name: 'after-waf',
+        enabled: true,
+        script:
+          'if (($header.user_agent contains "zgrab")) { ctx.report("bot.hit", "zgrab"); }\nreturn true;',
+        mounts: [{ projects: { include: ['*'] }, priority: 300, ratio: 1000 }],
+      },
+      {
+        name: 'before-waf',
+        enabled: true,
+        script: 'return true;',
+        mounts: [{ projects: { include: ['loan-*'] }, priority: 50 }],
+      },
+      {
+        name: 'parked',
+        enabled: false,
+        script: 'return true;',
+        mounts: [],
+      },
+    ],
+  }
+  const { service, requests, reads, created } = buildService({ functionsDraft })
+  await service.create(actor, { idempotencyKey: 'key-h' }, 'request-h')
+
+  const plan = created?.[0]?.plan
+  assert.ok(plan)
+  // Deterministic order: ascending lowest-mount priority, then name.
+  assert.deepEqual(
+    plan.functions.map((entry) => entry.name),
+    ['before-waf', 'waf', 'after-waf'],
+  )
+  // ratio omitted on the wire at the 10000 default, emitted otherwise.
+  assert.deepEqual(
+    plan.functions.map((entry) => entry.mounts.map((mount) => mount.ratio ?? null)),
+    [[null], [null], [1000]],
+  )
+  assert.deepEqual(
+    plan.scripts.map((entry) => entry.name),
+    ['waf', 'after-waf', 'before-waf'],
+  )
+  // Each index entry's digest matches its script payload bytes.
+  const beforeWafScript = plan.scripts.find((entry) => entry.name === 'before-waf')!.script
+  assert.equal(plan.functions[0]!.sha256, sha256(beforeWafScript).toString('hex'))
+
+  // Three scripts plus the index all validate through the native validator.
+  assert.equal(requests.filter((r) => r.kind === 'edge_function_script').length, 3)
+  assert.equal(requests.filter((r) => r.kind === 'edge_function_index').length, 1)
+  // Preflight reads the index plus every script Data ID.
+  assert.deepEqual(
+    reads.map((read) => read.dataId),
+    [
+      EDGE_FUNCTIONS_DATA_ID,
+      edgeFunctionScriptDataId('waf'),
+      edgeFunctionScriptDataId('after-waf'),
+      edgeFunctionScriptDataId('before-waf'),
+    ],
+  )
+  assert.deepEqual(
+    created?.[0]?.bases.scripts.map((entry) => entry.name),
+    ['waf', 'after-waf', 'before-waf'],
+  )
+})
+
+test('create publishes handwritten functions even when the WAF policy unmounts', async () => {
+  const functionsDraft: EdgeFunctionsDraft = {
+    schemaVersion: 1,
+    functions: [
+      {
+        name: 'bot-trap',
+        enabled: true,
+        script: 'return true;',
+        mounts: [{ projects: { include: ['*'] }, ratio: 0 }],
+      },
+    ],
+  }
+  const { service, created } = buildService({
+    policy: { schemaVersion: 1, defaultMode: 'off', rules: [], projectModes: {} },
+    functionsDraft,
+  })
+  await service.create(actor, { idempotencyKey: 'key-u' }, 'request-u')
+
+  const plan = created?.[0]?.plan
+  assert.equal(plan?.mode, 'unmount')
+  assert.equal(plan?.script, null)
+  assert.deepEqual(
+    plan?.functions.map((entry) => entry.name),
+    ['bot-trap'],
+  )
+  assert.deepEqual(plan?.functions[0]?.mounts, [
+    { projects: { include: ['*'], exclude: [] }, priority: 0, ratio: 0 },
+  ])
+  assert.deepEqual(
+    plan?.scripts.map((entry) => entry.name),
+    ['bot-trap'],
+  )
 })
 
 test('create fails closed when the compiled script does not validate', async () => {
@@ -415,6 +542,7 @@ function rollbackSourceMounted(): WafRollbackSource {
           mounts: [{ projects: { include: ['*'], exclude: [] }, priority: 100 }],
         },
       ],
+      scripts: [{ name: 'waf', script: historicalScript }],
       ruleCount: 3,
     },
   }
@@ -423,7 +551,7 @@ function rollbackSourceMounted(): WafRollbackSource {
 interface CreatedCapture {
   environmentInternalId: string
   plan: PreparedWafReleasePlan
-  bases: { index: NacosResourceValue; script: NacosResourceValue | null }
+  bases: { index: NacosResourceValue; scripts: { name: string; base: NacosResourceValue }[] }
   input: Record<string, unknown>
 }
 
@@ -436,7 +564,7 @@ function rollbackRepositoryFake(source: WafRollbackSource | null) {
       _actor: unknown,
       environmentInternalId: string,
       plan: PreparedWafReleasePlan,
-      bases: { index: NacosResourceValue; script: NacosResourceValue | null },
+      bases: { index: NacosResourceValue; scripts: { name: string; base: NacosResourceValue }[] },
       input: Record<string, unknown>,
     ) => {
       created.push({ environmentInternalId, plan, bases, input })
@@ -500,6 +628,7 @@ test('rollback of an unmount source validates and reads only the index', async (
       script: null,
       scriptSha256: null,
       functions: [],
+      scripts: [],
       ruleCount: 0,
     },
   }
@@ -512,7 +641,7 @@ test('rollback of an unmount source validates and reads only the index', async (
   assert.equal(requests[0]?.kind, 'edge_function_index')
   assert.deepEqual(reads, [{ dataId: EDGE_FUNCTIONS_DATA_ID, group: EDGE_FUNCTIONS_GROUP }])
   assert.equal(created[0]?.plan.mode, 'unmount')
-  assert.equal(created[0]?.bases.script, null)
+  assert.deepEqual(created[0]?.bases.scripts, [])
 })
 
 test('rollback fails closed on stale payloads and unknown releases', async () => {
@@ -623,7 +752,7 @@ test('currentEdgeFunctions returns the live index and script bytes from rnacos',
   assert.equal(view.index.version, 7)
   assert.equal(view.index.parseError, null)
   assert.deepEqual(view.index.functions, [
-    { name: 'waf', sha256: 'a'.repeat(64), mounts: [liveMount] },
+    { name: 'waf', sha256: 'a'.repeat(64), mounts: [{ ...liveMount, ratio: null }] },
   ])
   assert.deepEqual(view.scripts, [
     { name: 'waf', exists: true, sha256: 'a'.repeat(32), content: liveScript },

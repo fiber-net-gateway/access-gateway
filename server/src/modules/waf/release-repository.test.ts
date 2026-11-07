@@ -23,12 +23,19 @@ const functions = [
 ]
 const mountedIndexText = canonicalJson({ version: 4, functions })
 
+interface ScriptResourceFixture {
+  name: string
+  script: string
+  targetOverride?: Buffer
+  /** Omit the payload document (simulates an unreadable/missing document). */
+  dropDocument?: boolean
+}
+
 interface Fixture {
   diffSummary: Record<string, unknown>
   indexText: string | null
-  scriptText: string | null
+  scripts: ScriptResourceFixture[]
   indexTargetOverride?: Buffer
-  scriptTargetOverride?: Buffer
 }
 
 function rollbackRow(fixture: Fixture): RowDataPacket {
@@ -38,11 +45,6 @@ function rollbackRow(fixture: Fixture): RowDataPacket {
     sequence_no: '4',
     compiler_revision: 'waf-generator-v1',
     diff_summary_json: JSON.stringify(fixture.diffSummary),
-    script_document_id: fixture.scriptText === null ? null : 'script-doc',
-    script_target_sha256:
-      fixture.scriptText === null
-        ? null
-        : (fixture.scriptTargetOverride ?? Buffer.from(scriptSha256, 'hex')),
     index_document_id: fixture.indexText === null ? null : 'index-doc',
     index_target_sha256:
       fixture.indexText === null
@@ -52,21 +54,29 @@ function rollbackRow(fixture: Fixture): RowDataPacket {
   } as RowDataPacket
 }
 
+function scriptResourceRows(fixture: Fixture): RowDataPacket[] {
+  return fixture.scripts.map((script, index) => ({
+    data_id: `ploto.unified-access.edge-function.${script.name}`,
+    payload_document_id: `script-doc-${index}`,
+    target_sha256:
+      script.targetOverride ?? Buffer.from(sha256(script.script).toString('hex'), 'hex'),
+  })) as RowDataPacket[]
+}
+
 function buildRepository(fixture: Fixture) {
   const documents = new Map<string, string>([
     ['index-doc', fixture.indexText ?? ''],
-    ['script-doc', fixture.scriptText ?? ''],
+    ...fixture.scripts.map((script, index): [string, string] => [
+      `script-doc-${index}`,
+      script.dropDocument ? '' : script.script,
+    ]),
   ])
   const pool = {
-    async execute() {
-      return [
-        [
-          {
-            ...rollbackRow(fixture),
-          },
-        ],
-        [],
-      ] as unknown as [RowDataPacket[], unknown[]]
+    async execute(sql: string) {
+      const rows = sql.includes('FROM release_resources')
+        ? scriptResourceRows(fixture)
+        : [rollbackRow(fixture)]
+      return [rows, []] as unknown as [RowDataPacket[], unknown[]]
     },
   } as unknown as DatabasePool
   const documentRepository = {
@@ -91,7 +101,7 @@ test('loadRollbackSource rebuilds a mounted plan from verified payload documents
   const { repository } = buildRepository({
     diffSummary: mountedSummary,
     indexText: mountedIndexText,
-    scriptText,
+    scripts: [{ name: 'waf', script: scriptText }],
   })
 
   const source = await repository.loadRollbackSource(environmentInternalId, releasePublicId)
@@ -106,9 +116,44 @@ test('loadRollbackSource rebuilds a mounted plan from verified payload documents
       script: scriptText,
       scriptSha256,
       functions,
+      scripts: [{ name: 'waf', script: scriptText }],
       ruleCount: 3,
     },
   } satisfies WafRollbackSource)
+})
+
+test('loadRollbackSource rebuilds a multi-function plan with every script', async () => {
+  const trapScript =
+    'if (($header.user_agent contains "zgrab")) { ctx.report("bot.hit", "zgrab"); }\nreturn true;'
+  const trapSha = sha256(trapScript).toString('hex')
+  const multiFunctions = [
+    { name: 'bot-trap', sha256: trapSha, mounts: [{ projects: { include: ['*'] }, priority: 50 }] },
+    ...functions,
+  ]
+  const { repository } = buildRepository({
+    diffSummary: mountedSummary,
+    indexText: canonicalJson({ version: 4, functions: multiFunctions }),
+    scripts: [
+      { name: 'waf', script: scriptText },
+      { name: 'bot-trap', script: trapScript },
+    ],
+  })
+
+  const source = await repository.loadRollbackSource(environmentInternalId, releasePublicId)
+
+  assert.equal(source?.plan.mode, 'mounted')
+  assert.deepEqual(
+    source?.plan.functions.map((entry) => entry.name),
+    ['bot-trap', 'waf'],
+  )
+  assert.deepEqual(source?.plan.scripts, [
+    { name: 'waf', script: scriptText },
+    { name: 'bot-trap', script: trapScript },
+  ])
+  // Publication order follows publish_order, so the rebuilt script list
+  // preserves the resource order (waf first in this fixture).
+  assert.equal(source?.plan.script, scriptText)
+  assert.equal(source?.plan.scriptSha256, scriptSha256)
 })
 
 test('loadRollbackSource rebuilds an unmount plan with empty functions', async () => {
@@ -121,7 +166,7 @@ test('loadRollbackSource rebuilds an unmount plan with empty functions', async (
       indexVersion: '2',
     },
     indexText: canonicalJson({ version: 2, functions: [] }),
-    scriptText: null,
+    scripts: [],
   })
 
   const source = await repository.loadRollbackSource(environmentInternalId, releasePublicId)
@@ -129,6 +174,7 @@ test('loadRollbackSource rebuilds an unmount plan with empty functions', async (
   assert.equal(source?.plan.mode, 'unmount')
   assert.equal(source?.plan.script, null)
   assert.deepEqual(source?.plan.functions, [])
+  assert.deepEqual(source?.plan.scripts, [])
 })
 
 test('loadRollbackSource rejects tampered payload documents', async () => {
@@ -150,7 +196,7 @@ test('loadRollbackSource rejects tampered payload documents', async () => {
     {
       diffSummary: mountedSummary,
       indexText: canonicalJson({ version: 4, functions: [] }),
-      scriptText,
+      scripts: [{ name: 'waf', script: scriptText }],
       indexTargetOverride: Buffer.from(sha256(mountedIndexText).toString('hex'), 'hex'),
     },
     'index digest mismatch',
@@ -160,11 +206,13 @@ test('loadRollbackSource rejects tampered payload documents', async () => {
     {
       diffSummary: mountedSummary,
       indexText: mountedIndexText,
-      scriptText: '-- tampered script',
+      scripts: [
+        { name: 'waf', script: scriptText, targetOverride: Buffer.from('f'.repeat(64), 'hex') },
+      ],
     },
     'script digest mismatch',
   )
-  // The stored index does not reference the script bytes.
+  // The stored index references bytes the release does not carry.
   await expectsInvalid(
     {
       diffSummary: mountedSummary,
@@ -172,27 +220,46 @@ test('loadRollbackSource rejects tampered payload documents', async () => {
         version: 4,
         functions: [{ ...functions[0]!, sha256: 'e'.repeat(64) }],
       }),
-      scriptText,
+      scripts: [{ name: 'waf', script: scriptText }],
     },
     'index does not reference script',
   )
-  // An unmount release must not carry mounted functions.
+  // A release carrying a script the index does not reference is unusable.
+  await expectsInvalid(
+    {
+      diffSummary: mountedSummary,
+      indexText: canonicalJson({ version: 4, functions: [] }),
+      scripts: [{ name: 'waf', script: scriptText }],
+    },
+    'script not referenced by index',
+  )
+  // An unmount release whose index still carries the WAF function is a
+  // contradiction (the release may not publish what its own summary unmounted).
   await expectsInvalid(
     {
       diffSummary: { ...mountedSummary, mode: 'unmount' },
       indexText: mountedIndexText,
-      scriptText: null,
+      scripts: [{ name: 'waf', script: scriptText }],
     },
-    'unmount with functions',
+    'unmount with waf script',
   )
   // A mounted release without a script document is unusable.
   await expectsInvalid(
     {
       diffSummary: mountedSummary,
       indexText: mountedIndexText,
-      scriptText: null,
+      scripts: [],
     },
     'mounted without script',
+  )
+  // A script payload document that cannot be decrypted is unusable.
+  await expectsInvalid(
+    {
+      diffSummary: mountedSummary,
+      indexText: mountedIndexText,
+      scripts: [{ name: 'waf', script: scriptText, dropDocument: true }],
+    },
+    'script document unreadable',
   )
 })
 
@@ -213,7 +280,7 @@ test('loadRollbackSource rejects malformed stored payloads', async () => {
     {
       diffSummary: mountedSummary,
       indexText: '{"version":4,"functions":"nope"}',
-      scriptText,
+      scripts: [{ name: 'waf', script: scriptText }],
     },
     'index not a function array',
   )
@@ -221,7 +288,7 @@ test('loadRollbackSource rejects malformed stored payloads', async () => {
     {
       diffSummary: { ...mountedSummary, mode: 'mystery' },
       indexText: mountedIndexText,
-      scriptText,
+      scripts: [{ name: 'waf', script: scriptText }],
     },
     'unknown diff mode',
   )
@@ -229,7 +296,7 @@ test('loadRollbackSource rejects malformed stored payloads', async () => {
     {
       diffSummary: { ...mountedSummary, ruleCount: -1 },
       indexText: mountedIndexText,
-      scriptText,
+      scripts: [{ name: 'waf', script: scriptText }],
     },
     'invalid rule count',
   )

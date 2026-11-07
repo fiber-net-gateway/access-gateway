@@ -247,6 +247,7 @@ export async function createApplicationRuntime(config: ServerConfig): Promise<Ap
       waf: new DefaultWafService(wafDrafts, environments, validator),
       wafReleases: new DefaultWafReleaseService(
         wafDrafts,
+        edgeFunctionDrafts,
         wafReleasesRepo,
         environments,
         validator,

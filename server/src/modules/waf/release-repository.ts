@@ -23,8 +23,10 @@ import { AuditRepository } from '../audit/repository.js'
 import type { Actor } from '../auth/model.js'
 import {
   EDGE_FUNCTIONS_DATA_ID,
+  EDGE_FUNCTION_SCRIPT_DATA_ID_PREFIX,
   EDGE_FUNCTIONS_GROUP,
   edgeFunctionScriptDataId,
+  isScriptDataIdSafeName,
   type QueueWafPublicationResult,
   type WafReleaseResourceView,
   type WafReleaseView,
@@ -37,7 +39,15 @@ export interface WafWireIndexFunctionEntry {
   readonly mounts: readonly {
     readonly projects: { readonly include: readonly string[]; readonly exclude: readonly string[] }
     readonly priority: number
+    /** Omitted = wire default 10000 (always run). */
+    readonly ratio?: number
   }[]
+}
+
+/** Script payload for one index entry; published before the index. */
+export interface PreparedReleaseScript {
+  readonly name: string
+  readonly script: string
 }
 
 /** Everything the repository needs to persist one compiled WAF release. */
@@ -47,6 +57,12 @@ export interface PreparedWafReleasePlan {
   readonly script: string | null
   readonly scriptSha256: string | null
   readonly functions: readonly WafWireIndexFunctionEntry[]
+  /**
+   * Script payload for every index entry — the generated WAF function plus
+   * handwritten functions. Must cover `functions` exactly (same names,
+   * digests matching each entry's sha256).
+   */
+  readonly scripts: readonly PreparedReleaseScript[]
   readonly ruleCount: number
 }
 
@@ -164,14 +180,80 @@ function parseWireIndexFunctions(text: string): WafWireIndexFunctionEntry[] | nu
       if (typeof mountRecord.priority !== 'number' || !Number.isSafeInteger(mountRecord.priority)) {
         return null
       }
+      const ratio =
+        mountRecord.ratio === undefined
+          ? undefined
+          : typeof mountRecord.ratio === 'number' &&
+              Number.isSafeInteger(mountRecord.ratio) &&
+              mountRecord.ratio >= 0 &&
+              mountRecord.ratio <= 10_000
+            ? mountRecord.ratio
+            : null
+      if (ratio === null) return null
       mounts.push({
         projects: { include: [...include], exclude: [...exclude] },
         priority: mountRecord.priority,
+        ...(ratio !== undefined ? { ratio } : {}),
       })
     }
     entries.push({ name: record.name, sha256: record.sha256, mounts })
   }
   return entries
+}
+
+// Programming-error guards (not user input): scripts must cover the index
+// functions exactly — same names, each entry's sha256 matching the payload
+// bytes — and bases must observe every Data ID the release will write.
+function verifyPlanInvariant(plan: PreparedWafReleasePlan): void {
+  const scriptsByName = new Map(plan.scripts.map((entry) => [entry.name, entry.script]))
+  if (scriptsByName.size !== plan.scripts.length) {
+    throw new Error('Release plan carries duplicate script names')
+  }
+  const functionNames = new Set(plan.functions.map((entry) => entry.name))
+  if (functionNames.size !== plan.functions.length) {
+    throw new Error('Release plan index carries duplicate function names')
+  }
+  for (const entry of plan.functions) {
+    const script = scriptsByName.get(entry.name)
+    if (script === undefined) {
+      throw new Error(`Release plan is missing the script for "${entry.name}"`)
+    }
+    if (sha256(script).toString('hex') !== entry.sha256) {
+      throw new Error(`Release plan script digest mismatch for "${entry.name}"`)
+    }
+  }
+  if (scriptsByName.size !== functionNames.size) {
+    throw new Error('Release plan carries scripts not referenced by the index')
+  }
+  if (plan.mode === 'mounted') {
+    const wafScript = scriptsByName.get(plan.functionName)
+    if (plan.script !== null && wafScript !== plan.script) {
+      throw new Error('Mounted WAF release plan script disagrees with its script payload')
+    }
+  } else if (plan.script !== null) {
+    throw new Error('Unmount WAF release plan must not carry a WAF script')
+  }
+}
+
+function verifyBasesCoverPlan(
+  plan: PreparedWafReleasePlan,
+  bases: {
+    index: NacosResourceValue
+    scripts: readonly { name: string; base: NacosResourceValue }[]
+  },
+): void {
+  const baseNames = new Set(bases.scripts.map((entry) => entry.name))
+  if (baseNames.size !== bases.scripts.length) {
+    throw new Error('Release bases carry duplicate script names')
+  }
+  for (const entry of plan.scripts) {
+    if (!baseNames.has(entry.name)) {
+      throw new Error(`Release base observation is missing for "${entry.name}"`)
+    }
+  }
+  if (baseNames.size !== plan.scripts.length) {
+    throw new Error('Release bases observe scripts the plan does not publish')
+  }
 }
 
 interface RollbackSourceRow extends RowDataPacket {
@@ -208,7 +290,10 @@ export class WafReleaseRepository {
     actor: Actor,
     environmentInternalId: string,
     plan: PreparedWafReleasePlan,
-    bases: { index: NacosResourceValue; script: NacosResourceValue | null },
+    bases: {
+      index: NacosResourceValue
+      scripts: readonly { name: string; base: NacosResourceValue }[]
+    },
     input: {
       idempotencyKey: string
       requestSha256: Buffer
@@ -220,11 +305,10 @@ export class WafReleaseRepository {
     },
     requestId: string,
   ): Promise<WafReleaseView> {
+    verifyPlanInvariant(plan)
+    verifyBasesCoverPlan(plan, bases)
     if (plan.mode === 'mounted' && (plan.script === null || plan.scriptSha256 === null)) {
       throw new Error('Mounted WAF release plan is missing its script')
-    }
-    if (plan.mode === 'unmount' && bases.script !== null) {
-      throw new Error('Unmount WAF release plan must not carry a script base observation')
     }
 
     let releasePublicId = createPublicId()
@@ -275,7 +359,6 @@ export class WafReleaseRepository {
           functions: plan.functions,
         })
         const indexSha256 = sha256(indexJson)
-        const scriptDataId = edgeFunctionScriptDataId(plan.functionName)
 
         const indexDocument = await this.#documents.insert(transaction, {
           environmentInternalId,
@@ -284,35 +367,34 @@ export class WafReleaseRepository {
           schemaVersion: 1,
           encrypted: this.#documents.encrypt(Buffer.from(indexJson, 'utf8')),
         })
-        let scriptDocumentId: string | null = null
-        if (plan.mode === 'mounted' && plan.script !== null) {
-          const scriptDocument = await this.#documents.insert(transaction, {
+        const scriptDocuments = new Map<string, string>()
+        for (const entry of plan.scripts) {
+          const document = await this.#documents.insert(transaction, {
             environmentInternalId,
             purpose: 'release_payload',
             contentType: 'text/plain',
             schemaVersion: 1,
-            encrypted: this.#documents.encrypt(Buffer.from(plan.script, 'utf8')),
+            encrypted: this.#documents.encrypt(Buffer.from(entry.script, 'utf8')),
           })
-          scriptDocumentId = scriptDocument.internalId
+          scriptDocuments.set(entry.name, document.internalId)
         }
 
-        const observations: { kind: 'edge_function_index' | 'edge_function_script'; id: string }[] =
-          []
+        const observations: {
+          kind: 'edge_function_index' | 'edge_function_script'
+          dataId: string
+          id: string
+        }[] = []
         for (const observed of [
           {
             kind: 'edge_function_index' as const,
             dataId: EDGE_FUNCTIONS_DATA_ID,
             base: bases.index,
           },
-          ...(bases.script
-            ? [
-                {
-                  kind: 'edge_function_script' as const,
-                  dataId: scriptDataId,
-                  base: bases.script,
-                },
-              ]
-            : []),
+          ...bases.scripts.map((entry) => ({
+            kind: 'edge_function_script' as const,
+            dataId: edgeFunctionScriptDataId(entry.name),
+            base: entry.base,
+          })),
         ]) {
           let baseDocumentId: string | null = null
           if (observed.base.exists && observed.base.content !== null) {
@@ -342,15 +424,21 @@ export class WafReleaseRepository {
               observed.base.sha256 ? Buffer.from(observed.base.sha256, 'hex') : null,
             ],
           )
-          observations.push({ kind: observed.kind, id: observation.insertId.toString() })
+          observations.push({
+            kind: observed.kind,
+            dataId: observed.dataId,
+            id: observation.insertId.toString(),
+          })
         }
         const indexObservationId = observations.find(
           (observation) => observation.kind === 'edge_function_index',
         )?.id
-        const scriptObservationId = observations.find(
-          (observation) => observation.kind === 'edge_function_script',
-        )?.id
         if (!indexObservationId) throw new Error('Index base observation is missing')
+        const observationIdByDataId = new Map(
+          observations
+            .filter((observation) => observation.kind === 'edge_function_script')
+            .map((observation) => [observation.dataId, observation.id]),
+        )
 
         await transaction.execute(
           'UPDATE environments SET last_release_sequence = ? WHERE id = ?',
@@ -394,58 +482,74 @@ export class WafReleaseRepository {
               scriptSha256: plan.mode === 'mounted' ? plan.scriptSha256 : null,
               ruleCount: plan.ruleCount,
               indexVersion: sequence.toString(),
+              functionCount: plan.functions.length,
+              functionNames: plan.functions.map((entry) => entry.name),
             }),
           ],
         )
 
-        let scriptResourceId: string | null = null
-        if (
-          plan.mode === 'mounted' &&
-          scriptDocumentId !== null &&
-          scriptObservationId !== undefined &&
-          plan.scriptSha256 !== null
-        ) {
+        // Scripts first, chained so no script publishes before its
+        // predecessor verified; the index goes last and depends on the final
+        // script, so the wire never shows an index referencing missing bytes.
+        let previousScriptResourceId: string | null = null
+        for (const [index, entry] of plan.scripts.entries()) {
+          const dataId = edgeFunctionScriptDataId(entry.name)
+          const payloadDocumentId = scriptDocuments.get(entry.name)
+          const baseObservationId = observationIdByDataId.get(dataId)
+          if (payloadDocumentId === undefined || baseObservationId === undefined) {
+            throw new Error(`Release resource inputs are missing for "${entry.name}"`)
+          }
           const [scriptResource] = await transaction.execute<ResultSetHeader>(
             `INSERT INTO release_resources
               (public_id, release_id, project_id, kind, data_id, group_name, operation,
                publish_order, required_resource, payload_document_id, base_observation_id,
                target_sha256, allocated_project_version, status)
-             VALUES (?, ?, NULL, 'edge_function_script', ?, ?, 'upsert', 10, TRUE, ?, ?, ?, ?, 'pending')`,
+             VALUES (?, ?, NULL, 'edge_function_script', ?, ?, 'upsert', ?, TRUE, ?, ?, ?, ?, 'pending')`,
             [
               publicIdToBuffer(createPublicId()),
               releaseInternalId,
-              scriptDataId,
+              dataId,
               EDGE_FUNCTIONS_GROUP,
-              scriptDocumentId,
-              scriptObservationId,
-              Buffer.from(plan.scriptSha256, 'hex'),
+              10 * (index + 1),
+              payloadDocumentId,
+              baseObservationId,
+              sha256(entry.script),
               Number(sequence),
             ],
           )
-          scriptResourceId = scriptResource.insertId.toString()
+          const scriptResourceId = scriptResource.insertId.toString()
+          if (previousScriptResourceId) {
+            await transaction.execute(
+              `INSERT INTO release_resource_dependencies (resource_id, depends_on_resource_id)
+               VALUES (?, ?)`,
+              [scriptResourceId, previousScriptResourceId],
+            )
+          }
+          previousScriptResourceId = scriptResourceId
         }
         const [indexResource] = await transaction.execute<ResultSetHeader>(
           `INSERT INTO release_resources
             (public_id, release_id, project_id, kind, data_id, group_name, operation,
              publish_order, required_resource, payload_document_id, base_observation_id,
              target_sha256, allocated_project_version, status)
-           VALUES (?, ?, NULL, 'edge_function_index', ?, ?, 'upsert', 20, TRUE, ?, ?, ?, ?, 'pending')`,
+           VALUES (?, ?, NULL, 'edge_function_index', ?, ?, 'upsert', ?, TRUE, ?, ?, ?, ?, 'pending')`,
           [
             publicIdToBuffer(createPublicId()),
             releaseInternalId,
             EDGE_FUNCTIONS_DATA_ID,
             EDGE_FUNCTIONS_GROUP,
+            10 * (plan.scripts.length + 1),
             indexDocument.internalId,
             indexObservationId,
             indexSha256,
             Number(sequence),
           ],
         )
-        if (scriptResourceId) {
+        if (previousScriptResourceId) {
           await transaction.execute(
             `INSERT INTO release_resource_dependencies (resource_id, depends_on_resource_id)
              VALUES (?, ?)`,
-            [indexResource.insertId.toString(), scriptResourceId],
+            [indexResource.insertId.toString(), previousScriptResourceId],
           )
         }
 
@@ -463,6 +567,7 @@ export class WafReleaseRepository {
             functionName: plan.functionName,
             scriptSha256: plan.mode === 'mounted' ? plan.scriptSha256 : null,
             ruleCount: plan.ruleCount,
+            functions: plan.functions.map((entry) => entry.name),
             ...(input.rollbackOfSequence ? { rollbackOf: input.rollbackOfSequence } : {}),
           },
         })
@@ -487,15 +592,11 @@ export class WafReleaseRepository {
     const [rows] = await this.#pool.execute<RollbackSourceRow[]>(
       `SELECT rel.id AS internal_id, rel.public_id, rel.sequence_no,
               rel.compiler_revision, item.diff_summary_json,
-              script_res.payload_document_id AS script_document_id,
-              script_res.target_sha256 AS script_target_sha256,
               index_res.payload_document_id AS index_document_id,
               index_res.target_sha256 AS index_target_sha256
        FROM releases rel
        INNER JOIN release_items item
          ON item.release_id = rel.id AND item.kind = 'edge_functions'
-       LEFT JOIN release_resources script_res
-         ON script_res.release_id = rel.id AND script_res.kind = 'edge_function_script'
        LEFT JOIN release_resources index_res
          ON index_res.release_id = rel.id AND index_res.kind = 'edge_function_index'
        WHERE rel.public_id = ? AND rel.environment_id = ? AND rel.kind = 'edge_functions'
@@ -551,49 +652,78 @@ export class WafReleaseRepository {
     const functions = parseWireIndexFunctions(indexText)
     if (!functions) throw invalid('the index payload is not a function index')
 
-    if (summary.mode === 'unmount') {
-      if (functions.length !== 0) throw invalid('the unmount release carries mounted functions')
-      return {
-        publicId: bufferToPublicId(row.public_id),
-        sequence: row.sequence_no,
-        generatorRevision: row.compiler_revision,
-        plan: {
-          mode: 'unmount',
-          functionName: summary.functionName,
-          script: null,
-          scriptSha256: null,
-          functions,
-          ruleCount: summary.ruleCount,
-        },
+    // Every script resource of the release is a payload; the function name is
+    // its Data ID suffix. Digests are verified against the recorded targets,
+    // and the rebuilt script set must cover the stored index exactly.
+    const [scriptRows] = await this.#pool.execute<
+      (RowDataPacket & {
+        data_id: string
+        payload_document_id: string
+        target_sha256: Buffer | null
+      })[]
+    >(
+      `SELECT data_id, payload_document_id, target_sha256
+       FROM release_resources
+       WHERE release_id = ? AND kind = 'edge_function_script'
+       ORDER BY publish_order, id`,
+      [row.internal_id],
+    )
+    const scripts: PreparedReleaseScript[] = []
+    const scriptDigests = new Map<string, string>()
+    for (const scriptRow of scriptRows) {
+      const name = scriptRow.data_id.startsWith(EDGE_FUNCTION_SCRIPT_DATA_ID_PREFIX)
+        ? scriptRow.data_id.slice(EDGE_FUNCTION_SCRIPT_DATA_ID_PREFIX.length)
+        : ''
+      if (!isScriptDataIdSafeName(name)) {
+        throw invalid(`the script resource Data ID "${scriptRow.data_id}" is not derivable`)
+      }
+      const scriptText =
+        (
+          await this.#documents.decryptByInternalId(this.#pool, scriptRow.payload_document_id)
+        )?.toString('utf8') ?? null
+      if (scriptText === null) throw invalid(`the script payload for "${name}" is unreadable`)
+      const digest = sha256(scriptText).toString('hex')
+      if (scriptRow.target_sha256 && digest !== scriptRow.target_sha256.toString('hex')) {
+        throw invalid(`the script payload digest for "${name}" does not match the release record`)
+      }
+      scripts.push({ name, script: scriptText })
+      scriptDigests.set(name, digest)
+    }
+    if (scripts.length !== new Set(scripts.map((entry) => entry.name)).size) {
+      throw invalid('the release carries duplicate script resources')
+    }
+    for (const entry of functions) {
+      if (scriptDigests.get(entry.name) !== entry.sha256) {
+        throw invalid(
+          `the stored index references a script not carried by the release: "${entry.name}"`,
+        )
       }
     }
+    if (scriptDigests.size !== functions.length) {
+      throw invalid('the release carries scripts not referenced by the stored index')
+    }
 
-    if (!row.script_document_id) throw invalid('the script payload document is missing')
-    const scriptText =
-      (await this.#documents.decryptByInternalId(this.#pool, row.script_document_id))?.toString(
-        'utf8',
-      ) ?? null
-    if (scriptText === null) throw invalid('the script payload document is unreadable')
-    const scriptSha256 = sha256(scriptText).toString('hex')
-    if (row.script_target_sha256 && scriptSha256 !== row.script_target_sha256.toString('hex')) {
-      throw invalid('the script payload digest does not match the release record')
+    const wafScript = scriptDigests.has(summary.functionName)
+      ? scripts.find((entry) => entry.name === summary.functionName)!.script
+      : null
+    if (summary.mode === 'mounted' && wafScript === null) {
+      throw invalid('the mounted release is missing its WAF function script')
     }
-    // The stored index must reference exactly these script bytes under the
-    // release's function name (single-function v1 generator output).
-    const indexed = functions.filter((entry) => entry.sha256 === scriptSha256)
-    if (indexed.length !== 1 || indexed[0]!.name !== summary.functionName) {
-      throw invalid('the stored index does not reference the release script')
+    if (summary.mode === 'unmount' && wafScript !== null) {
+      throw invalid('the unmount release must not carry a WAF function script')
     }
+    const wafSha = wafScript === null ? null : scriptDigests.get(summary.functionName)!
     return {
       publicId: bufferToPublicId(row.public_id),
       sequence: row.sequence_no,
       generatorRevision: row.compiler_revision,
       plan: {
-        mode: 'mounted',
+        mode: summary.mode,
         functionName: summary.functionName,
-        script: scriptText,
-        scriptSha256,
+        script: wafScript,
+        scriptSha256: wafSha ?? null,
         functions,
+        scripts,
         ruleCount: summary.ruleCount,
       },
     }
