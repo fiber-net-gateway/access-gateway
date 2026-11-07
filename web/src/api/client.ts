@@ -19,6 +19,15 @@ import type {
   TlsSniCertificateSummary,
   TlsSniResolutionView,
   TlsCertificateReleaseView,
+  WafCompilePreviewView,
+  WafEdgeFunctionsView,
+  WafMode,
+  WafPolicy,
+  WafPolicyDraftView,
+  WafPolicyIssue,
+  WafReleaseResourceView,
+  WafReleaseView,
+  WafRule,
 } from './types'
 import { createUuid } from '../shared/uuid'
 
@@ -839,4 +848,288 @@ export async function queueReleasePublication(releaseId: string): Promise<Projec
       isProjectRelease(value.release),
   )
   return result.release
+}
+
+// ---------------------------------------------------------------------------
+// WAF policy + edge-function releases
+// ---------------------------------------------------------------------------
+
+function isWafMode(value: unknown): value is WafMode {
+  return value === 'off' || value === 'log' || value === 'block'
+}
+
+function isStringList(value: unknown): value is unknown[] {
+  return Array.isArray(value) && value.every((item) => typeof item === 'string')
+}
+
+function isWafRule(value: unknown): value is WafRule {
+  if (!isRecord(value)) return false
+  const scopeOk =
+    value.scope === undefined ||
+    (isRecord(value.scope) &&
+      (value.scope.methods === undefined || isStringList(value.scope.methods)) &&
+      (value.scope.paths === undefined || isStringList(value.scope.paths)) &&
+      (value.scope.sourceCidrs === undefined || isStringList(value.scope.sourceCidrs)))
+  const exclusionsOk =
+    value.exclusions === undefined ||
+    (Array.isArray(value.exclusions) &&
+      value.exclusions.every(
+        (exclusion) =>
+          isRecord(exclusion) &&
+          typeof exclusion.project === 'string' &&
+          typeof exclusion.reason === 'string',
+      ))
+  return (
+    typeof value.id === 'string' &&
+    typeof value.name === 'string' &&
+    ['critical', 'high', 'medium', 'low'].includes(String(value.severity)) &&
+    typeof value.priority === 'number' &&
+    (value.action === 'log' || value.action === 'block') &&
+    value.phase === 'request_head' &&
+    typeof value.match === 'string' &&
+    scopeOk &&
+    exclusionsOk
+  )
+}
+
+function isWafPolicy(value: unknown): value is WafPolicy {
+  return (
+    isRecord(value) &&
+    value.schemaVersion === 1 &&
+    isWafMode(value.defaultMode) &&
+    Array.isArray(value.rules) &&
+    value.rules.every(isWafRule) &&
+    isRecord(value.projectModes) &&
+    Object.values(value.projectModes).every(isWafMode)
+  )
+}
+
+function isWafPolicyDraft(value: unknown): value is WafPolicyDraftView {
+  return (
+    isRecord(value) &&
+    typeof value.id === 'string' &&
+    isWafPolicy(value.policy) &&
+    typeof value.policySha256 === 'string' &&
+    typeof value.lockVersion === 'string' &&
+    typeof value.createdAt === 'string' &&
+    typeof value.updatedAt === 'string'
+  )
+}
+
+function isWafPolicyIssue(value: unknown): value is WafPolicyIssue {
+  return (
+    isRecord(value) &&
+    typeof value.field === 'string' &&
+    typeof value.code === 'string' &&
+    typeof value.message === 'string'
+  )
+}
+
+function isWafCompilePreview(value: unknown): value is WafCompilePreviewView {
+  if (!isRecord(value)) return false
+  const compilation = value.compilation
+  const compilationOk =
+    isRecord(compilation) &&
+    (compilation.kind === 'unmount'
+      ? compilation.reason === 'no-rules' || compilation.reason === 'no-mounted-projects'
+      : compilation.kind === 'mounted' &&
+        typeof compilation.script === 'string' &&
+        typeof compilation.scriptSha256 === 'string' &&
+        typeof compilation.functionName === 'string' &&
+        typeof compilation.mountPriority === 'number' &&
+        Array.isArray(compilation.mounts) &&
+        compilation.mounts.every(
+          (mount) => isRecord(mount) && isStringList(mount.include) && isStringList(mount.exclude),
+        ) &&
+        isStringList(compilation.ruleOrder) &&
+        Array.isArray(compilation.directives) &&
+        compilation.directives.every(
+          (directive) =>
+            isRecord(directive) &&
+            typeof directive.name === 'string' &&
+            isStringList(directive.cidrs),
+        ))
+  return (
+    typeof value.valid === 'boolean' &&
+    Array.isArray(value.issues) &&
+    value.issues.every(isWafPolicyIssue) &&
+    compilationOk &&
+    (value.scriptValid === null || typeof value.scriptValid === 'boolean') &&
+    Array.isArray(value.scriptErrors) &&
+    value.scriptErrors.every(
+      (error) =>
+        isRecord(error) &&
+        typeof error.code === 'string' &&
+        (error.field === undefined || typeof error.field === 'string') &&
+        (error.offset === undefined || typeof error.offset === 'number') &&
+        typeof error.message === 'string',
+    ) &&
+    (value.validator === null ||
+      (isRecord(value.validator) &&
+        typeof value.validator.contractVersion === 'number' &&
+        typeof value.validator.revision === 'string'))
+  )
+}
+
+function isWafReleaseResource(value: unknown): value is WafReleaseResourceView {
+  return (
+    isRecord(value) &&
+    typeof value.id === 'string' &&
+    (value.kind === 'edge_function_script' || value.kind === 'edge_function_index') &&
+    typeof value.dataId === 'string' &&
+    typeof value.group === 'string' &&
+    typeof value.status === 'string' &&
+    (value.verifiedSha256 === null || typeof value.verifiedSha256 === 'string') &&
+    (value.verifiedAt === null || typeof value.verifiedAt === 'string')
+  )
+}
+
+function isWafRelease(value: unknown): value is WafReleaseView {
+  return (
+    isRecord(value) &&
+    typeof value.id === 'string' &&
+    typeof value.sequence === 'string' &&
+    typeof value.status === 'string' &&
+    typeof value.functionName === 'string' &&
+    (value.mode === 'mounted' || value.mode === 'unmount') &&
+    (value.scriptSha256 === null || typeof value.scriptSha256 === 'string') &&
+    typeof value.ruleCount === 'number' &&
+    typeof value.indexVersion === 'string' &&
+    typeof value.description === 'string' &&
+    Array.isArray(value.resources) &&
+    value.resources.every(isWafReleaseResource) &&
+    isRecord(value.publication) &&
+    (value.publication.jobId === null || typeof value.publication.jobId === 'string') &&
+    (value.publication.state === null || typeof value.publication.state === 'string') &&
+    typeof value.activationStatus === 'string' &&
+    isActivationSummary(value.activation) &&
+    typeof value.createdAt === 'string' &&
+    (value.publishedAt === null || typeof value.publishedAt === 'string')
+  )
+}
+
+function isWafEdgeFunctions(value: unknown): value is WafEdgeFunctionsView {
+  if (
+    !isRecord(value) ||
+    !isRecord(value.index) ||
+    typeof value.index.exists !== 'boolean' ||
+    (value.index.sha256 !== null && typeof value.index.sha256 !== 'string') ||
+    (value.index.md5 !== null && typeof value.index.md5 !== 'string') ||
+    (value.index.version !== null && typeof value.index.version !== 'number') ||
+    (value.index.parseError !== null && typeof value.index.parseError !== 'string') ||
+    !Array.isArray(value.index.functions) ||
+    !value.index.functions.every(
+      (entry) =>
+        isRecord(entry) &&
+        typeof entry.name === 'string' &&
+        (entry.sha256 === null || typeof entry.sha256 === 'string') &&
+        Array.isArray(entry.mounts) &&
+        entry.mounts.every(
+          (mount) =>
+            isRecord(mount) &&
+            isRecord(mount.projects) &&
+            isStringList(mount.projects.include) &&
+            isStringList(mount.projects.exclude) &&
+            (mount.priority === null || typeof mount.priority === 'number'),
+        ),
+    )
+  ) {
+    return false
+  }
+  return (
+    Array.isArray(value.scripts) &&
+    value.scripts.every(
+      (script) =>
+        isRecord(script) &&
+        typeof script.name === 'string' &&
+        typeof script.exists === 'boolean' &&
+        (script.sha256 === null || typeof script.sha256 === 'string') &&
+        (script.content === null || typeof script.content === 'string'),
+    )
+  )
+}
+
+export async function fetchWafPolicyDraft(signal?: AbortSignal): Promise<WafPolicyDraftView> {
+  return requestJson('/api/waf/policy', { signal }, isWafPolicyDraft)
+}
+
+export async function createWafPolicyDraft(): Promise<WafPolicyDraftView> {
+  return requestJson('/api/waf/policy', { method: 'POST' }, isWafPolicyDraft)
+}
+
+export async function saveWafPolicyDraft(
+  policy: WafPolicy,
+  lockVersion: string,
+): Promise<WafPolicyDraftView> {
+  return requestJson(
+    '/api/waf/policy',
+    {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        'If-Match': `"${lockVersion}"`,
+      },
+      body: JSON.stringify({ policy }),
+    },
+    isWafPolicyDraft,
+  )
+}
+
+export async function compileWafPolicyPreview(
+  policy: WafPolicy,
+  signal?: AbortSignal,
+): Promise<WafCompilePreviewView> {
+  return requestJson(
+    '/api/waf/policy/compile-preview',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(policy),
+      signal,
+    },
+    isWafCompilePreview,
+  )
+}
+
+export async function fetchWafReleases(signal?: AbortSignal): Promise<readonly WafReleaseView[]> {
+  const result = await requestJson(
+    '/api/waf/releases',
+    { signal },
+    (value): value is { items: WafReleaseView[] } =>
+      isRecord(value) && Array.isArray(value.items) && value.items.every(isWafRelease),
+  )
+  return result.items
+}
+
+export async function createWafRelease(): Promise<WafReleaseView> {
+  return requestJson(
+    '/api/waf/releases',
+    { method: 'POST', headers: { 'Idempotency-Key': createUuid() } },
+    isWafRelease,
+  )
+}
+
+export async function rollbackWafRelease(releaseId: string): Promise<WafReleaseView> {
+  return requestJson(
+    `/api/waf/releases/${encodeURIComponent(releaseId)}/rollback`,
+    { method: 'POST', headers: { 'Idempotency-Key': createUuid() } },
+    isWafRelease,
+  )
+}
+
+export async function queueWafReleasePublication(releaseId: string): Promise<WafReleaseView> {
+  const result = await requestJson(
+    `/api/waf/releases/${encodeURIComponent(releaseId)}/publication`,
+    { method: 'POST', headers: { 'Idempotency-Key': createUuid() } },
+    (value): value is { jobId: string; state: string; release: WafReleaseView } =>
+      isRecord(value) &&
+      typeof value.jobId === 'string' &&
+      typeof value.state === 'string' &&
+      isWafRelease(value.release),
+  )
+  return result.release
+}
+
+export async function fetchWafEdgeFunctions(signal?: AbortSignal): Promise<WafEdgeFunctionsView> {
+  return requestJson('/api/waf/edge-functions', { signal }, isWafEdgeFunctions)
 }

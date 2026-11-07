@@ -62,3 +62,33 @@ export interface QueueWafPublicationResult {
   state: string
   release: WafReleaseView
 }
+
+// Read-only live view of what the data plane currently sees in rnacos
+// (§4.4 边缘函数页 v1 只读). The index is parsed lightly — a hand-edited or
+// foreign index must still render, with a parse error instead of a 500.
+export interface WafEdgeFunctionIndexEntryView {
+  name: string
+  sha256: string | null
+  mounts: readonly {
+    projects: { include: readonly string[]; exclude: readonly string[] }
+    priority: number | null
+  }[]
+}
+
+export interface WafEdgeFunctionsView {
+  index: {
+    exists: boolean
+    sha256: string | null
+    md5: string | null
+    version: number | null
+    functions: readonly WafEdgeFunctionIndexEntryView[]
+    /** Set when the stored index bytes are not a parseable function index. */
+    parseError: string | null
+  }
+  scripts: readonly {
+    name: string
+    exists: boolean
+    sha256: string | null
+    content: string | null
+  }[]
+}

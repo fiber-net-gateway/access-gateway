@@ -438,6 +438,86 @@ function registerWafReleaseRoutes(
   wafReleases: WafReleaseService,
 ): void {
   app.get(
+    '/api/waf/edge-functions',
+    {
+      schema: {
+        response: {
+          200: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['index', 'scripts'],
+            properties: {
+              index: {
+                type: 'object',
+                additionalProperties: false,
+                required: ['exists', 'sha256', 'md5', 'version', 'functions', 'parseError'],
+                properties: {
+                  exists: { type: 'boolean' },
+                  sha256: { type: ['string', 'null'] },
+                  md5: { type: ['string', 'null'] },
+                  version: { type: ['integer', 'null'] },
+                  functions: {
+                    type: 'array',
+                    items: {
+                      type: 'object',
+                      additionalProperties: false,
+                      required: ['name', 'sha256', 'mounts'],
+                      properties: {
+                        name: { type: 'string' },
+                        sha256: { type: ['string', 'null'] },
+                        mounts: {
+                          type: 'array',
+                          items: {
+                            type: 'object',
+                            additionalProperties: false,
+                            required: ['projects', 'priority'],
+                            properties: {
+                              projects: {
+                                type: 'object',
+                                additionalProperties: false,
+                                required: ['include', 'exclude'],
+                                properties: {
+                                  include: { type: 'array', items: { type: 'string' } },
+                                  exclude: { type: 'array', items: { type: 'string' } },
+                                },
+                              },
+                              priority: { type: ['integer', 'null'] },
+                            },
+                          },
+                        },
+                      },
+                    },
+                  },
+                  parseError: { type: ['string', 'null'] },
+                },
+              },
+              scripts: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  additionalProperties: false,
+                  required: ['name', 'exists', 'sha256', 'content'],
+                  properties: {
+                    name: { type: 'string' },
+                    exists: { type: 'boolean' },
+                    sha256: { type: ['string', 'null'] },
+                    content: { type: ['string', 'null'] },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+    async (_request, reply) => {
+      const view = await wafReleases.currentEdgeFunctions(await requireActor(auth))
+      reply.header('cache-control', 'no-store')
+      return view
+    },
+  )
+
+  app.get(
     '/api/waf/releases',
     {
       schema: {

@@ -16,6 +16,7 @@ interface NavigationItem {
 
 const navigation: NavigationItem[] = [
   { label: 'Projects', detail: '域名与路由', href: '/projects' },
+  { label: 'WAF', detail: '边缘函数与防护', href: '/waf' },
   { label: 'TLS', detail: '证书与自动 SNI', href: '/certificates' },
   { label: 'Docs', detail: '中英文使用指南', href: '/docs' },
   { label: 'Releases', detail: '版本与 rnacos 发布' },
