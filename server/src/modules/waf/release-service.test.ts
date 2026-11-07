@@ -207,6 +207,7 @@ function buildService(overrides: {
   validatorOverrides?: Partial<NativeValidationResult>
   validatorAvailable?: boolean
   nacosAvailable?: boolean
+  nacos?: NacosClient
   drafts?: WafPolicyDraftRepository
   releases?: WafReleaseRepository
 }) {
@@ -214,7 +215,9 @@ function buildService(overrides: {
   if (overrides.validatorAvailable === false) {
     ;(validator as { available: boolean }).available = false
   }
-  const { nacos, reads } = nacosFake()
+  const { nacos, reads } = overrides.nacos
+    ? { nacos: overrides.nacos, reads: [] as { dataId: string; group: string }[] }
+    : nacosFake()
   if (overrides.nacosAvailable === false) {
     ;(nacos as { available: boolean }).available = false
   }
@@ -558,6 +561,176 @@ test('rollback requires the publisher role and rejects rollbacks while unavailab
   const unavailableService = new UnavailableWafReleaseService()
   await assert.rejects(
     unavailableService.rollback(),
+    (error: unknown) => error instanceof AppError && error.statusCode === 503,
+  )
+})
+
+// A nacos fake whose reads are keyed by Data ID, for the live read-only view.
+function nacosLibraryFake(values: Map<string, NacosResourceValue>) {
+  const reads: { dataId: string; group: string }[] = []
+  const nacos = {
+    available: true,
+    read: async (_target: NacosTarget, dataId: string, group: string) => {
+      reads.push({ dataId, group })
+      const value = values.get(dataId)
+      if (!value) throw new Error(`unexpected nacos read: ${dataId}`)
+      return value
+    },
+  }
+  return { nacos: nacos as unknown as NacosClient, reads }
+}
+
+const liveScript = '// live waf script'
+const liveScriptDataId = edgeFunctionScriptDataId('waf')
+
+function liveIndexValue(functions: unknown[], version = 7): NacosResourceValue {
+  const content = JSON.stringify({ version, functions })
+  return {
+    exists: true,
+    content,
+    sha256: '2'.repeat(32),
+    md5: '2'.repeat(16),
+  }
+}
+
+const liveMount = {
+  projects: { include: ['*'], exclude: [] },
+  priority: 100,
+}
+
+test('currentEdgeFunctions returns the live index and script bytes from rnacos', async () => {
+  const { nacos, reads } = nacosLibraryFake(
+    new Map([
+      [
+        EDGE_FUNCTIONS_DATA_ID,
+        liveIndexValue([{ name: 'waf', sha256: 'a'.repeat(64), mounts: [liveMount] }]),
+      ],
+      [
+        liveScriptDataId,
+        { exists: true, content: liveScript, sha256: 'a'.repeat(32), md5: 'a'.repeat(16) },
+      ],
+    ]),
+  )
+  const { service } = buildService({ nacos })
+
+  const view = await service.currentEdgeFunctions(actor)
+
+  assert.deepEqual(reads, [
+    { dataId: EDGE_FUNCTIONS_DATA_ID, group: EDGE_FUNCTIONS_GROUP },
+    { dataId: liveScriptDataId, group: EDGE_FUNCTIONS_GROUP },
+  ])
+  assert.equal(view.index.exists, true)
+  assert.equal(view.index.version, 7)
+  assert.equal(view.index.parseError, null)
+  assert.deepEqual(view.index.functions, [
+    { name: 'waf', sha256: 'a'.repeat(64), mounts: [liveMount] },
+  ])
+  assert.deepEqual(view.scripts, [
+    { name: 'waf', exists: true, sha256: 'a'.repeat(32), content: liveScript },
+  ])
+})
+
+test('currentEdgeFunctions reports an absent index without touching script Data IDs', async () => {
+  const { nacos, reads } = nacosLibraryFake(
+    new Map([[EDGE_FUNCTIONS_DATA_ID, { exists: false, content: null, sha256: null, md5: null }]]),
+  )
+  const { service } = buildService({ nacos })
+
+  const view = await service.currentEdgeFunctions(actor)
+
+  assert.deepEqual(reads, [{ dataId: EDGE_FUNCTIONS_DATA_ID, group: EDGE_FUNCTIONS_GROUP }])
+  assert.deepEqual(view, {
+    index: {
+      exists: false,
+      sha256: null,
+      md5: null,
+      version: null,
+      functions: [],
+      parseError: null,
+    },
+    scripts: [],
+  })
+})
+
+test('currentEdgeFunctions surfaces an unparseable index as a parse error', async () => {
+  const { nacos, reads } = nacosLibraryFake(
+    new Map([
+      [
+        EDGE_FUNCTIONS_DATA_ID,
+        { exists: true, content: 'not json', sha256: '3'.repeat(32), md5: '3'.repeat(16) },
+      ],
+    ]),
+  )
+  const { service } = buildService({ nacos })
+
+  const view = await service.currentEdgeFunctions(actor)
+
+  assert.deepEqual(reads, [{ dataId: EDGE_FUNCTIONS_DATA_ID, group: EDGE_FUNCTIONS_GROUP }])
+  assert.equal(view.index.exists, true)
+  assert.ok(view.index.parseError?.startsWith('index is not valid JSON:'))
+  assert.deepEqual(view.index.functions, [])
+  assert.deepEqual(view.scripts, [])
+})
+
+test('currentEdgeFunctions still lists foreign names but never reads unsafe script Data IDs', async () => {
+  const { nacos, reads } = nacosLibraryFake(
+    new Map([
+      [
+        EDGE_FUNCTIONS_DATA_ID,
+        liveIndexValue([
+          { name: 'waf', sha256: 'a'.repeat(64), mounts: [liveMount] },
+          { name: '../evil', sha256: 'b'.repeat(64), mounts: [] },
+          { no: 'name entry' },
+        ]),
+      ],
+      [
+        liveScriptDataId,
+        { exists: true, content: liveScript, sha256: 'a'.repeat(32), md5: 'a'.repeat(16) },
+      ],
+    ]),
+  )
+  const { service } = buildService({ nacos })
+
+  const view = await service.currentEdgeFunctions(actor)
+
+  // Every recognizable entry is listed; only slug-conforming names are fetched.
+  assert.deepEqual(
+    view.index.functions.map((entry) => entry.name),
+    ['waf', '../evil'],
+  )
+  assert.deepEqual(
+    reads.filter((read) => read.dataId !== EDGE_FUNCTIONS_DATA_ID),
+    [{ dataId: liveScriptDataId, group: EDGE_FUNCTIONS_GROUP }],
+  )
+  assert.deepEqual(
+    view.scripts.map((script) => script.name),
+    ['waf'],
+  )
+})
+
+test('currentEdgeFunctions fails closed when nacos is unavailable or a read fails', async () => {
+  const { service: offline } = buildService({ nacosAvailable: false })
+  await assert.rejects(
+    offline.currentEdgeFunctions(actor),
+    (error: unknown) => error instanceof AppError && error.statusCode === 503,
+  )
+
+  const broken = {
+    available: true,
+    read: async () => {
+      throw new Error('nacos transport down')
+    },
+  } as unknown as NacosClient
+  const { service } = buildService({ nacos: broken })
+  await assert.rejects(
+    service.currentEdgeFunctions(actor),
+    (error: unknown) =>
+      error instanceof AppError && error.code === 'NACOS_READ_FAILED' && error.statusCode === 503,
+  )
+
+  const unavailableService = new UnavailableWafReleaseService()
+  await assert.rejects(
+    unavailableService.currentEdgeFunctions(),
     (error: unknown) => error instanceof AppError && error.statusCode === 503,
   )
 })

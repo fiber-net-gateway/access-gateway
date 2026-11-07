@@ -354,3 +354,140 @@ export interface TlsCertificateReleaseView {
   createdAt: string
   publishedAt: string | null
 }
+
+export type WafMode = 'off' | 'log' | 'block'
+
+export type WafSeverity = 'critical' | 'high' | 'medium' | 'low'
+
+export interface WafRuleScope {
+  methods?: readonly string[]
+  paths?: readonly string[]
+  sourceCidrs?: readonly string[]
+}
+
+export interface WafRuleExclusion {
+  project: string
+  reason: string
+}
+
+export interface WafRule {
+  id: string
+  name: string
+  severity: WafSeverity
+  priority: number
+  action: 'log' | 'block'
+  phase: 'request_head'
+  match: string
+  scope?: WafRuleScope
+  exclusions?: readonly WafRuleExclusion[]
+}
+
+export interface WafPolicy {
+  schemaVersion: 1
+  defaultMode: WafMode
+  rules: readonly WafRule[]
+  projectModes: Readonly<Record<string, WafMode>>
+}
+
+export interface WafPolicyDraftView {
+  id: string
+  policy: WafPolicy
+  policySha256: string
+  lockVersion: string
+  createdAt: string
+  updatedAt: string
+}
+
+export interface WafPolicyIssue {
+  field: string
+  code: string
+  message: string
+}
+
+export interface WafScriptError {
+  code: string
+  field?: string
+  offset?: number
+  message: string
+}
+
+export interface WafMountedCompilation {
+  kind: 'mounted'
+  script: string
+  scriptSha256: string
+  functionName: string
+  mountPriority: number
+  mounts: readonly { include: readonly string[]; exclude: readonly string[] }[]
+  ruleOrder: readonly string[]
+  directives: readonly { name: string; cidrs: readonly string[] }[]
+}
+
+export interface WafUnmountCompilation {
+  kind: 'unmount'
+  reason: 'no-rules' | 'no-mounted-projects'
+}
+
+export type WafCompilation = WafMountedCompilation | WafUnmountCompilation
+
+export interface WafCompilePreviewView {
+  valid: boolean
+  issues: readonly WafPolicyIssue[]
+  compilation: WafCompilation
+  scriptValid: boolean | null
+  scriptErrors: readonly WafScriptError[]
+  validator: { contractVersion: number; revision: string } | null
+}
+
+export interface WafReleaseResourceView {
+  id: string
+  kind: 'edge_function_script' | 'edge_function_index'
+  dataId: string
+  group: string
+  status: string
+  verifiedSha256: string | null
+  verifiedAt: string | null
+}
+
+export interface WafReleaseView {
+  id: string
+  sequence: string
+  status: ReleaseStatus
+  functionName: string
+  mode: 'mounted' | 'unmount'
+  scriptSha256: string | null
+  ruleCount: number
+  indexVersion: string
+  description: string
+  resources: readonly WafReleaseResourceView[]
+  publication: { jobId: string | null; state: string | null }
+  activationStatus: ActivationStatus
+  activation: ActivationSummary
+  createdAt: string
+  publishedAt: string | null
+}
+
+export interface WafEdgeFunctionIndexEntryView {
+  name: string
+  sha256: string | null
+  mounts: readonly {
+    projects: { include: readonly string[]; exclude: readonly string[] }
+    priority: number | null
+  }[]
+}
+
+export interface WafEdgeFunctionsView {
+  index: {
+    exists: boolean
+    sha256: string | null
+    md5: string | null
+    version: number | null
+    functions: readonly WafEdgeFunctionIndexEntryView[]
+    parseError: string | null
+  }
+  scripts: readonly {
+    name: string
+    exists: boolean
+    sha256: string | null
+    content: string | null
+  }[]
+}

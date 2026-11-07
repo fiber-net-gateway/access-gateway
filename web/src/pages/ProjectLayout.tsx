@@ -53,6 +53,7 @@ const projectNavigation = [
   { path: 'routes', label: 'Routes', detail: '编辑与校验' },
   { path: 'host-policy', label: 'Host Policy', detail: '域名与 HTTPS' },
   { path: 'network-policy', label: 'Network Policy', detail: 'CIDR 与访问来源' },
+  { path: 'waf-policy', label: 'WAF', detail: '模式与豁免' },
   { path: 'versions', label: 'Versions', detail: '不可变配置' },
   { path: 'releases', label: 'Releases', detail: 'rnacos 发布' },
   { path: 'settings', label: 'Settings', detail: '生命周期与归档' },

@@ -25,6 +25,8 @@ import {
   type CreateWafReleaseInput,
   type QueueWafPublicationResult,
   type RollbackWafReleaseInput,
+  type WafEdgeFunctionIndexEntryView,
+  type WafEdgeFunctionsView,
   type WafReleaseView,
 } from './release-model.js'
 import {
@@ -54,6 +56,8 @@ export interface WafReleaseService {
     idempotencyKey: string,
     requestId: string,
   ): Promise<QueueWafPublicationResult>
+  /** Live read-only snapshot of the edge-function index + scripts in rnacos. */
+  currentEdgeFunctions(actor: Actor): Promise<WafEdgeFunctionsView>
 }
 
 // The index version is allocated inside the repository transaction, so the
@@ -61,6 +65,84 @@ export interface WafReleaseService {
 // array, placeholder version); only the embedded integer differs, and its
 // range is enforced at allocation time.
 const representativeIndexVersion = 1
+
+// The published index carries at most maxFunctions entries; the live view only
+// ever fetches a handful of scripts and never trusts the stored index to be
+// console-authored.
+const liveScriptReadLimit = 16
+const scriptDataIdSafeNamePattern = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/u
+
+function isScriptDataIdSafeName(name: string): boolean {
+  return scriptDataIdSafeNamePattern.test(name)
+}
+
+function parseLiveIndex(content: string): {
+  version: number | null
+  functions: WafEdgeFunctionIndexEntryView[]
+  parseError: string | null
+} {
+  let decoded: unknown
+  try {
+    decoded = JSON.parse(content) as unknown
+  } catch (error) {
+    return {
+      version: null,
+      functions: [],
+      parseError: `index is not valid JSON: ${error instanceof Error ? error.message : 'unknown error'}`,
+    }
+  }
+  if (typeof decoded !== 'object' || decoded === null || Array.isArray(decoded)) {
+    return { version: null, functions: [], parseError: 'index is not a JSON object' }
+  }
+  const record = decoded as Record<string, unknown>
+  if (!Array.isArray(record.functions)) {
+    return {
+      version: typeof record.version === 'number' ? record.version : null,
+      functions: [],
+      parseError: 'index has no functions array',
+    }
+  }
+  const functions = record.functions.flatMap((entry): WafEdgeFunctionIndexEntryView[] => {
+    if (typeof entry !== 'object' || entry === null) return []
+    const functionRecord = entry as Record<string, unknown>
+    if (typeof functionRecord.name !== 'string') return []
+    const mounts = Array.isArray(functionRecord.mounts)
+      ? functionRecord.mounts.flatMap((mount): WafEdgeFunctionIndexEntryView['mounts'] => {
+          if (typeof mount !== 'object' || mount === null) return []
+          const mountRecord = mount as Record<string, unknown>
+          const projects =
+            typeof mountRecord.projects === 'object' && mountRecord.projects !== null
+              ? (mountRecord.projects as Record<string, unknown>)
+              : {}
+          const stringList = (value: unknown): string[] =>
+            Array.isArray(value)
+              ? value.filter((item): item is string => typeof item === 'string')
+              : []
+          return [
+            {
+              projects: {
+                include: stringList(projects.include),
+                exclude: stringList(projects.exclude),
+              },
+              priority: typeof mountRecord.priority === 'number' ? mountRecord.priority : null,
+            },
+          ]
+        })
+      : []
+    return [
+      {
+        name: functionRecord.name,
+        sha256: typeof functionRecord.sha256 === 'string' ? functionRecord.sha256 : null,
+        mounts,
+      },
+    ]
+  })
+  return {
+    version: typeof record.version === 'number' ? record.version : null,
+    functions,
+    parseError: null,
+  }
+}
 
 function planFromPolicy(policy: WafPolicy): {
   plan: Omit<PreparedWafReleasePlan, 'functions'>
@@ -258,6 +340,88 @@ export class DefaultWafReleaseService implements WafReleaseService {
     return this.#releases.queuePublication(actor, releaseId, idempotencyKey, requestId)
   }
 
+  // Live snapshot for the read-only 边缘函数页 (§4.4): exactly the bytes the
+  // data plane sees in rnacos right now, distinct from release history. The
+  // index is parsed defensively — an unparseable or foreign index is reported
+  // as a parse error instead of failing the whole view.
+  async currentEdgeFunctions(actor: Actor): Promise<WafEdgeFunctionsView> {
+    const workspace = await this.#requireWorkspace(actor)
+    if (!this.#nacos.available) {
+      throw unavailable('PUBLICATION_UNCONFIGURED', 'Nacos publication is not configured')
+    }
+    const target: NacosTarget = {
+      endpoint: workspace.nacos.endpoint,
+      namespace: workspace.nacos.namespace,
+      tenant: workspace.nacos.tenant,
+      credentialConfigured: workspace.nacos.credentialConfigured,
+    }
+    const emptyIndex: WafEdgeFunctionsView['index'] = {
+      exists: false,
+      sha256: null,
+      md5: null,
+      version: null,
+      functions: [],
+      parseError: null,
+    }
+    let indexValue: NacosResourceValue
+    try {
+      indexValue = await this.#nacos.read(target, EDGE_FUNCTIONS_DATA_ID, EDGE_FUNCTIONS_GROUP)
+    } catch {
+      throw unavailable(
+        'NACOS_READ_FAILED',
+        'The edge-function index could not be read from rnacos',
+      )
+    }
+    if (!indexValue.exists || indexValue.content === null) {
+      return { index: emptyIndex, scripts: [] }
+    }
+
+    const parsed = parseLiveIndex(indexValue.content)
+    const names = [
+      ...new Set(
+        parsed.functions.map((entry) => entry.name).filter((name) => isScriptDataIdSafeName(name)),
+      ),
+    ].slice(0, liveScriptReadLimit)
+    const scripts: {
+      name: string
+      exists: boolean
+      sha256: string | null
+      content: string | null
+    }[] = []
+    for (const name of names) {
+      let script: NacosResourceValue
+      try {
+        script = await this.#nacos.read(
+          target,
+          edgeFunctionScriptDataId(name),
+          EDGE_FUNCTIONS_GROUP,
+        )
+      } catch {
+        throw unavailable(
+          'NACOS_READ_FAILED',
+          `The script for edge function "${name}" could not be read from rnacos`,
+        )
+      }
+      scripts.push({
+        name,
+        exists: script.exists,
+        sha256: script.exists ? script.sha256 : null,
+        content: script.exists ? script.content : null,
+      })
+    }
+    return {
+      index: {
+        exists: true,
+        sha256: indexValue.sha256,
+        md5: indexValue.md5,
+        version: parsed.version,
+        functions: parsed.functions,
+        parseError: parsed.parseError,
+      },
+      scripts,
+    }
+  }
+
   // Fail-closed: both wire payloads must compile through the native validator
   // before a Release can be prepared (§4.1 全环境校验). Rollback reuses this
   // with its own error code so operators can tell a stale historical payload
@@ -369,6 +533,9 @@ export class UnavailableWafReleaseService implements WafReleaseService {
     throw unavailable('DATABASE_UNCONFIGURED', 'MySQL is not configured')
   }
   async queuePublication(): Promise<never> {
+    throw unavailable('DATABASE_UNCONFIGURED', 'MySQL is not configured')
+  }
+  async currentEdgeFunctions(): Promise<never> {
     throw unavailable('DATABASE_UNCONFIGURED', 'MySQL is not configured')
   }
 }
