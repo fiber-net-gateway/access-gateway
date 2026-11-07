@@ -20,6 +20,10 @@ import type {
   TlsSniResolutionView,
   TlsCertificateReleaseView,
   WafCompilePreviewView,
+  WafEdgeFunctionDraftFunction,
+  WafEdgeFunctionMountDraft,
+  WafEdgeFunctionsDraft,
+  WafEdgeFunctionsDraftView,
   WafEdgeFunctionsView,
   WafHitsView,
   WafHitsWindow,
@@ -28,6 +32,7 @@ import type {
   WafPolicy,
   WafPolicyDraftView,
   WafPolicyIssue,
+  WafEdgeFunctionCompilePreviewView,
   WafReleaseResourceView,
   WafReleaseView,
   WafRule,
@@ -919,6 +924,82 @@ function isWafPolicyDraft(value: unknown): value is WafPolicyDraftView {
   )
 }
 
+function isWafEdgeFunctionMountDraft(value: unknown): value is WafEdgeFunctionMountDraft {
+  return (
+    isRecord(value) &&
+    isRecord(value.projects) &&
+    isStringList(value.projects.include) &&
+    (value.projects.exclude === undefined || isStringList(value.projects.exclude)) &&
+    (value.priority === undefined || typeof value.priority === 'number') &&
+    (value.ratio === undefined || typeof value.ratio === 'number')
+  )
+}
+
+function isWafEdgeFunctionDraftFunction(value: unknown): value is WafEdgeFunctionDraftFunction {
+  return (
+    isRecord(value) &&
+    typeof value.name === 'string' &&
+    (value.description === undefined || typeof value.description === 'string') &&
+    typeof value.enabled === 'boolean' &&
+    typeof value.script === 'string' &&
+    Array.isArray(value.mounts) &&
+    value.mounts.every(isWafEdgeFunctionMountDraft)
+  )
+}
+
+function isWafEdgeFunctionsDraft(value: unknown): value is WafEdgeFunctionsDraft {
+  return (
+    isRecord(value) &&
+    value.schemaVersion === 1 &&
+    Array.isArray(value.functions) &&
+    value.functions.every(isWafEdgeFunctionDraftFunction)
+  )
+}
+
+function isWafEdgeFunctionsDraftView(value: unknown): value is WafEdgeFunctionsDraftView {
+  return (
+    isRecord(value) &&
+    typeof value.id === 'string' &&
+    isWafEdgeFunctionsDraft(value.draft) &&
+    typeof value.draftSha256 === 'string' &&
+    typeof value.lockVersion === 'string' &&
+    typeof value.createdAt === 'string' &&
+    typeof value.updatedAt === 'string'
+  )
+}
+
+function isWafEdgeFunctionCompilePreview(
+  value: unknown,
+): value is WafEdgeFunctionCompilePreviewView {
+  return (
+    isRecord(value) &&
+    typeof value.valid === 'boolean' &&
+    Array.isArray(value.issues) &&
+    value.issues.every(isWafPolicyIssue) &&
+    Array.isArray(value.functions) &&
+    value.functions.every(
+      (fn) =>
+        isRecord(fn) &&
+        typeof fn.name === 'string' &&
+        typeof fn.scriptSha256 === 'string' &&
+        typeof fn.scriptValid === 'boolean' &&
+        Array.isArray(fn.errors) &&
+        fn.errors.every(
+          (error) =>
+            isRecord(error) &&
+            typeof error.code === 'string' &&
+            (error.field === undefined || typeof error.field === 'string') &&
+            (error.offset === undefined || typeof error.offset === 'number') &&
+            typeof error.message === 'string',
+        ),
+    ) &&
+    (value.validator === null ||
+      (isRecord(value.validator) &&
+        typeof value.validator.contractVersion === 'number' &&
+        typeof value.validator.revision === 'string'))
+  )
+}
+
 function isWafPolicyIssue(value: unknown): value is WafPolicyIssue {
   return (
     isRecord(value) &&
@@ -1033,7 +1114,8 @@ function isWafEdgeFunctions(value: unknown): value is WafEdgeFunctionsView {
             isRecord(mount.projects) &&
             isStringList(mount.projects.include) &&
             isStringList(mount.projects.exclude) &&
-            (mount.priority === null || typeof mount.priority === 'number'),
+            (mount.priority === null || typeof mount.priority === 'number') &&
+            (mount.ratio === null || typeof mount.ratio === 'number'),
         ),
     )
   ) {
@@ -1171,4 +1253,52 @@ export async function queueWafReleasePublication(releaseId: string): Promise<Waf
 
 export async function fetchWafEdgeFunctions(signal?: AbortSignal): Promise<WafEdgeFunctionsView> {
   return requestJson('/api/waf/edge-functions', { signal }, isWafEdgeFunctions)
+}
+
+export async function fetchWafEdgeFunctionsDraft(
+  signal?: AbortSignal,
+): Promise<WafEdgeFunctionsDraftView> {
+  return requestJson('/api/waf/edge-functions/draft', { signal }, isWafEdgeFunctionsDraftView)
+}
+
+export async function createWafEdgeFunctionsDraft(): Promise<WafEdgeFunctionsDraftView> {
+  return requestJson(
+    '/api/waf/edge-functions/draft',
+    { method: 'POST' },
+    isWafEdgeFunctionsDraftView,
+  )
+}
+
+export async function saveWafEdgeFunctionsDraft(
+  draft: WafEdgeFunctionsDraft,
+  lockVersion: string,
+): Promise<WafEdgeFunctionsDraftView> {
+  return requestJson(
+    '/api/waf/edge-functions/draft',
+    {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        'If-Match': `"${lockVersion}"`,
+      },
+      body: JSON.stringify({ draft }),
+    },
+    isWafEdgeFunctionsDraftView,
+  )
+}
+
+export async function compileWafEdgeFunctionsPreview(
+  draft: WafEdgeFunctionsDraft,
+  signal?: AbortSignal,
+): Promise<WafEdgeFunctionCompilePreviewView> {
+  return requestJson(
+    '/api/waf/edge-functions/compile-preview',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(draft),
+      signal,
+    },
+    isWafEdgeFunctionCompilePreview,
+  )
 }

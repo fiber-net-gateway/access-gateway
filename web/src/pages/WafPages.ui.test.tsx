@@ -135,7 +135,18 @@ const edgeFunctions = {
       {
         name: 'waf',
         sha256: '1'.repeat(64),
-        mounts: [{ projects: { include: ['*'], exclude: ['legacy.example.com'] }, priority: 100 }],
+        mounts: [
+          {
+            projects: { include: ['*'], exclude: ['legacy.example.com'] },
+            priority: 100,
+            ratio: null,
+          },
+        ],
+      },
+      {
+        name: 'old-fn',
+        sha256: '9'.repeat(64),
+        mounts: [{ projects: { include: ['*'], exclude: [] }, priority: 500, ratio: null }],
       },
     ],
     parseError: null,
@@ -148,6 +159,40 @@ const edgeFunctions = {
       content: 'function waf() {\n  return 0\n}\n',
     },
   ],
+}
+
+const edgeFunctionsDraft = {
+  id: '00000000-0000-4000-8000-00000000000e',
+  draft: {
+    schemaVersion: 1,
+    functions: [
+      {
+        name: 'bot-trap',
+        description: '抓扫描器',
+        enabled: true,
+        script:
+          'if (($header.user_agent contains "zgrab")) { ctx.report("bot.hit", "zgrab"); }\nreturn true;',
+        mounts: [
+          {
+            projects: { include: ['loan-*'], exclude: ['loan-admin-legacy'] },
+            priority: 200,
+            ratio: 5000,
+          },
+        ],
+      },
+    ],
+  },
+  draftSha256: '4'.repeat(64),
+  lockVersion: '2',
+  createdAt: '2026-11-07T00:00:00.000Z',
+  updatedAt: '2026-11-07T00:00:00.000Z',
+}
+
+const edgeCompilePreview = {
+  valid: true,
+  issues: [],
+  functions: [{ name: 'bot-trap', scriptSha256: 'b'.repeat(64), scriptValid: true, errors: [] }],
+  validator: { contractVersion: 1, revision: 'test' },
 }
 
 const rulePack = {
@@ -255,6 +300,16 @@ function installApiMock() {
         },
         201,
       )
+    }
+    if (url === '/api/waf/edge-functions/draft' && (!init?.method || init.method === 'GET')) {
+      return jsonResponse(edgeFunctionsDraft)
+    }
+    if (url === '/api/waf/edge-functions/draft' && init?.method === 'PUT') {
+      const body = JSON.parse(String(init.body)) as { draft: typeof edgeFunctionsDraft.draft }
+      return jsonResponse({ ...edgeFunctionsDraft, draft: body.draft, lockVersion: '3' })
+    }
+    if (url === '/api/waf/edge-functions/compile-preview' && init?.method === 'POST') {
+      return jsonResponse(edgeCompilePreview)
     }
     if (url === '/api/waf/edge-functions') {
       return jsonResponse(edgeFunctions)
@@ -371,6 +426,12 @@ describe('WAF console pages', () => {
     expect(screen.getByText(/挂载函数 waf · 1 条规则/u)).toBeTruthy()
     expect(screen.getByText('函数脚本')).toBeTruthy()
     expect(screen.getByText('函数索引')).toBeTruthy()
+    // The preview compares the planned index (WAF + handwritten drafts)
+    // per-function against the live index in rnacos.
+    expect(await screen.findByText(/索引将发布 2 个函数（WAF 生成 \+ 手写合并）/u)).toBeTruthy()
+    expect(screen.getByText('变更（脚本）')).toBeTruthy()
+    expect(screen.getByText('新增')).toBeTruthy()
+    expect(screen.getByText('残留')).toBeTruthy()
     // The preview diffs the compiled draft script against the live script.
     expect(await screen.findByText(/与 rnacos 当前脚本的差异（\+1 \/ -1 行）/u)).toBeTruthy()
 
@@ -394,18 +455,55 @@ describe('WAF console pages', () => {
     })
   })
 
-  test('shows the live edge-function index and script bytes read-only', async () => {
-    installApiMock()
+  test('authors handwritten edge functions with per-script compile preview and If-Match save', async () => {
+    const fetchMock = installApiMock()
     const router = createMemoryRouter(appRoutes, { initialEntries: ['/waf/edge-functions'] })
+    const user = userEvent.setup()
     render(<RouterProvider router={router} />)
 
-    expect(await screen.findByRole('heading', { name: '边缘函数（只读）' })).toBeTruthy()
+    expect(await screen.findByRole('heading', { name: '边缘函数' })).toBeTruthy()
+    // The draft workspace lists the saved function and opens its editor.
+    expect(await screen.findByText(/1 个启用函数待发布/u)).toBeTruthy()
+    const scriptEditor = (await screen.findByRole('textbox', {
+      name: '函数 bot-trap 脚本',
+    })) as HTMLTextAreaElement
+    expect(scriptEditor.value).toContain('ctx.report')
+    expect(screen.getByText(/抓扫描器/u)).toBeTruthy()
+    expect(screen.getByText(/脚本可编译/u)).toBeTruthy()
+
+    // Editing the script marks the draft dirty; the debounced compile preview
+    // posts the working draft.
+    await user.clear(scriptEditor)
+    await user.type(scriptEditor, 'return false;')
+    await waitFor(() => {
+      const calls = fetchMock.mock.calls.filter(
+        ([url, init]) =>
+          url === '/api/waf/edge-functions/compile-preview' && init?.method === 'POST',
+      )
+      const postedEditedDraft = calls.some((call) => {
+        const body = JSON.parse(String(call?.[1]?.body)) as { functions: { script: string }[] }
+        return body.functions[0]?.script === 'return false;'
+      })
+      expect(postedEditedDraft).toBe(true)
+    })
+
+    await user.click(screen.getByRole('button', { name: '保存函数草稿' }))
+    await waitFor(() => {
+      const saveCall = fetchMock.mock.calls.find(
+        ([url, init]) => url === '/api/waf/edge-functions/draft' && init?.method === 'PUT',
+      )
+      expect(saveCall).toBeTruthy()
+      expect(new Headers(saveCall?.[1]?.headers).get('If-Match')).toBe('"2"')
+      const body = JSON.parse(String(saveCall?.[1]?.body)) as {
+        draft: typeof edgeFunctionsDraft.draft
+      }
+      expect(body.draft.functions[0]?.script).toBe('return false;')
+      expect(body.draft.functions[0]?.mounts[0]?.ratio).toBe(5000)
+    })
+
+    // The live rnacos snapshot stays visible below the authoring surface.
     expect(screen.getByText('索引版本：5')).toBeTruthy()
-    expect(screen.getByText('函数数量：1')).toBeTruthy()
-    expect(screen.getByText('waf')).toBeTruthy()
     expect(screen.getByText(/exclude=legacy\.example\.com/u)).toBeTruthy()
-    expect(screen.getByText('查看脚本内容')).toBeTruthy()
-    expect(screen.getByText(/return 0/u)).toBeTruthy()
   })
 
   test('shows WAF hit statistics grouped per rule with joined policy metadata', async () => {
