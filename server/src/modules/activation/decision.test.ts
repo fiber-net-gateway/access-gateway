@@ -75,6 +75,7 @@ const resources: ActivationReleaseResource[] = [
     group: 'ACCESS-SERVER',
     operation: 'upsert',
     verifiedNacosMd5: '22222222222222222222222222222222',
+    verifiedSha256: null,
     allocatedProjectVersion: 9,
     projectName: 'example.com',
   },
@@ -84,6 +85,7 @@ const resources: ActivationReleaseResource[] = [
     group: 'ACCESS-SERVER',
     operation: 'upsert',
     verifiedNacosMd5: '11111111111111111111111111111111',
+    verifiedSha256: null,
     allocatedProjectVersion: null,
     projectName: null,
   },
@@ -158,6 +160,7 @@ test('activation verifies resource identity and proves Project removal by full-s
           group: 'ACCESS-SERVER',
           operation: 'remove',
           verifiedNacosMd5: null,
+          verifiedSha256: null,
           allocatedProjectVersion: null,
           projectName: 'example.com',
         },
@@ -179,6 +182,153 @@ test('watcher failure degrades an unmatched target without denying an exact acti
   failed.projects[0]!.activeMd5 = '33333333333333333333333333333333'
   assert.equal(
     decideInstanceActivation({ pollErrorCode: null, evidence: failed, resources }),
+    'degraded',
+  )
+})
+
+const edgeIndexMd5 = '44444444444444444444444444444444'
+const edgeIndexSha256 = 'c'.repeat(64)
+const scriptSha256 = 'd'.repeat(64)
+
+function edgeEvidence() {
+  return {
+    watcherState: 'running' as const,
+    index: {
+      dataId: 'ploto.unified-access.edge-functions',
+      group: 'ACCESS-SERVER',
+      candidateStatus: 'accepted' as const,
+      observedMd5: edgeIndexMd5,
+      activeMd5: edgeIndexMd5,
+      observedAtUnixMillis: 1,
+      activeAtUnixMillis: 1,
+      failure: null,
+    },
+    generation: '4',
+    functionCount: 1,
+    totalScriptBytes: 2048,
+    activeIndexSha256: edgeIndexSha256,
+  }
+}
+
+function edgeResources(script: boolean): ActivationReleaseResource[] {
+  const list: ActivationReleaseResource[] = []
+  if (script) {
+    list.push({
+      kind: 'edge_function_script',
+      dataId: 'ploto.unified-access.edge-function.waf',
+      group: 'ACCESS-SERVER',
+      operation: 'upsert',
+      verifiedNacosMd5: '55555555555555555555555555555555',
+      verifiedSha256: scriptSha256,
+      allocatedProjectVersion: 5,
+      projectName: null,
+    })
+  }
+  list.push({
+    kind: 'edge_function_index',
+    dataId: 'ploto.unified-access.edge-functions',
+    group: 'ACCESS-SERVER',
+    operation: 'upsert',
+    verifiedNacosMd5: edgeIndexMd5,
+    verifiedSha256: edgeIndexSha256,
+    allocatedProjectVersion: 5,
+    projectName: null,
+  })
+  return list
+}
+
+test('an edge-function release is active when the live index matches both digests', () => {
+  const snapshot = evidence()
+  snapshot.edgeFunctions = edgeEvidence()
+  assert.equal(
+    decideInstanceActivation({
+      pollErrorCode: null,
+      evidence: snapshot,
+      resources: edgeResources(true),
+    }),
+    'active',
+  )
+  // An unmount release proves itself through the empty index alone.
+  assert.equal(
+    decideInstanceActivation({
+      pollErrorCode: null,
+      evidence: snapshot,
+      resources: edgeResources(false),
+    }),
+    'active',
+  )
+})
+
+test('an edge-function release is pending while the old index snapshot is still live', () => {
+  const snapshot = evidence()
+  snapshot.edgeFunctions = edgeEvidence()
+  snapshot.edgeFunctions.activeIndexSha256 = 'e'.repeat(64)
+  snapshot.edgeFunctions.index.activeMd5 = '66666666666666666666666666666666'
+  assert.equal(
+    decideInstanceActivation({
+      pollErrorCode: null,
+      evidence: snapshot,
+      resources: edgeResources(true),
+    }),
+    'pending',
+  )
+})
+
+test('an edge-function release degrades on watcher failure or rejected published bytes', () => {
+  const failedWatcher = evidence()
+  failedWatcher.edgeFunctions = edgeEvidence()
+  failedWatcher.edgeFunctions.activeIndexSha256 = 'e'.repeat(64)
+  failedWatcher.edgeFunctions.watcherState = 'failed'
+  assert.equal(
+    decideInstanceActivation({
+      pollErrorCode: null,
+      evidence: failedWatcher,
+      resources: edgeResources(true),
+    }),
+    'degraded',
+  )
+
+  const rejected = evidence()
+  rejected.edgeFunctions = edgeEvidence()
+  rejected.edgeFunctions.activeIndexSha256 = 'e'.repeat(64)
+  rejected.edgeFunctions.index.candidateStatus = 'rejected'
+  rejected.edgeFunctions.index.failure = {
+    stage: 'assemble',
+    code: 'script_compile_failed',
+    field: '',
+    offset: 0,
+    observedAtUnixMillis: 2,
+  }
+  assert.equal(
+    decideInstanceActivation({
+      pollErrorCode: null,
+      evidence: rejected,
+      resources: edgeResources(true),
+    }),
+    'degraded',
+  )
+})
+
+test('an edge-function release stays unknown without edge evidence or on identity mismatch', () => {
+  // Builds without edge-function support omit the block entirely; never infer.
+  assert.equal(
+    decideInstanceActivation({
+      pollErrorCode: null,
+      evidence: evidence(),
+      resources: edgeResources(true),
+    }),
+    'unknown',
+  )
+
+  const mismatched = evidence()
+  mismatched.edgeFunctions = edgeEvidence()
+  mismatched.edgeFunctions.index.dataId = 'ploto.unified-access.edge-functions.other'
+  assert.equal(
+    decideInstanceActivation({
+      pollErrorCode: null,
+      evidence: mismatched,
+      resources: edgeResources(true),
+    }),
     'degraded',
   )
 })

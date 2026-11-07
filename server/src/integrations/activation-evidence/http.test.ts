@@ -243,3 +243,109 @@ test('activation evidence client rejects duplicate Projects in a complete traver
       error.code === 'ACTIVATION_INVALID_RESPONSE',
   )
 })
+
+function edgeFunctionsBlock() {
+  return {
+    watcherState: 'running',
+    index: {
+      dataId: 'ploto.unified-access.edge-functions',
+      group: 'ACCESS-SERVER',
+      candidateStatus: 'accepted',
+      observedMd5: '44444444444444444444444444444444',
+      activeMd5: '44444444444444444444444444444444',
+      observedAtUnixMillis: 1,
+      activeAtUnixMillis: 1,
+      failure: null,
+    },
+    generation: '4',
+    functionCount: 1,
+    totalScriptBytes: 2048,
+    activeIndexSha256: 'c'.repeat(64),
+  }
+}
+
+test('activation evidence client parses the optional edgeFunctions block when present', async (context) => {
+  const server = createServer((_request, response) => {
+    const payload = page('edge.example.com', null) as ReturnType<typeof page> & {
+      edgeFunctions?: unknown
+    }
+    payload.edgeFunctions = edgeFunctionsBlock()
+    response.writeHead(200, { 'Content-Type': 'application/json' })
+    response.end(JSON.stringify(payload))
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  context.after(() => new Promise<void>((resolve) => server.close(() => resolve())))
+  const address = server.address() as AddressInfo
+  const client = new HttpActivationEvidenceClient({
+    timeoutMillis: 2_000,
+    maxResponseBytes: 64 * 1024,
+    maxPages: 4,
+    maxProjects: 8,
+  })
+
+  const result = await client.collect({
+    environmentCode: 'demo',
+    instanceKey: 'access-0',
+    endpoint: `http://127.0.0.1:${address.port}/v1/activation-evidence`,
+    token: '0123456789abcdef0123456789abcdef',
+  })
+
+  assert.deepEqual(result.edgeFunctions, edgeFunctionsBlock())
+})
+
+test('activation evidence client tolerates builds that omit the edgeFunctions block', async (context) => {
+  const server = createServer((_request, response) => {
+    response.writeHead(200, { 'Content-Type': 'application/json' })
+    response.end(JSON.stringify(page('legacy.example.com', null)))
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  context.after(() => new Promise<void>((resolve) => server.close(() => resolve())))
+  const address = server.address() as AddressInfo
+  const client = new HttpActivationEvidenceClient({
+    timeoutMillis: 2_000,
+    maxResponseBytes: 64 * 1024,
+    maxPages: 4,
+    maxProjects: 8,
+  })
+
+  const result = await client.collect({
+    environmentCode: 'demo',
+    instanceKey: 'access-0',
+    endpoint: `http://127.0.0.1:${address.port}/v1/activation-evidence`,
+    token: '0123456789abcdef0123456789abcdef',
+  })
+
+  assert.equal(result.edgeFunctions, undefined)
+})
+
+test('activation evidence client rejects a malformed edgeFunctions block', async (context) => {
+  const server = createServer((_request, response) => {
+    const payload = page('edge.example.com', null) as ReturnType<typeof page> & {
+      edgeFunctions?: unknown
+    }
+    payload.edgeFunctions = { ...edgeFunctionsBlock(), activeIndexSha256: 'not-a-sha256' }
+    response.writeHead(200, { 'Content-Type': 'application/json' })
+    response.end(JSON.stringify(payload))
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  context.after(() => new Promise<void>((resolve) => server.close(() => resolve())))
+  const address = server.address() as AddressInfo
+  const client = new HttpActivationEvidenceClient({
+    timeoutMillis: 2_000,
+    maxResponseBytes: 64 * 1024,
+    maxPages: 4,
+    maxProjects: 8,
+  })
+
+  await assert.rejects(
+    client.collect({
+      environmentCode: 'demo',
+      instanceKey: 'access-0',
+      endpoint: `http://127.0.0.1:${address.port}/v1/activation-evidence`,
+      token: '0123456789abcdef0123456789abcdef',
+    }),
+    (error: unknown) =>
+      error instanceof ActivationEvidenceClientError &&
+      error.code === 'ACTIVATION_INVALID_RESPONSE',
+  )
+})

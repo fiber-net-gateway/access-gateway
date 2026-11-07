@@ -89,7 +89,9 @@ export class ActivationReadRepository {
                         AND activation.status = 'pending' THEN 1 ELSE 0 END) AS pending_count,
               SUM(CASE WHEN activation.expires_at > CURRENT_TIMESTAMP(6)
                         AND activation.status = 'degraded' THEN 1 ELSE 0 END) AS degraded_count,
-              SUM(CASE WHEN activation.expires_at IS NULL
+              SUM(CASE WHEN (activation.expires_at > CURRENT_TIMESTAMP(6)
+                             AND activation.status = 'unknown')
+                         OR activation.expires_at IS NULL
                          OR activation.expires_at <= CURRENT_TIMESTAMP(6)
                         THEN 1 ELSE 0 END) AS unknown_count,
               MAX(CASE WHEN activation.expires_at > CURRENT_TIMESTAMP(6)
@@ -159,21 +161,25 @@ export class ActivationReadRepository {
               CASE release_record.kind
                 WHEN 'tls_certificates' THEN observation.tls_candidate_status
                 WHEN 'project_decommission' THEN observation.project_list_candidate_status
+                WHEN 'edge_functions' THEN observation.edge_candidate_status
                 ELSE project_observation.candidate_status
               END AS candidate_status,
               CASE release_record.kind
                 WHEN 'tls_certificates' THEN observation.tls_error_code
                 WHEN 'project_decommission' THEN observation.project_list_error_code
+                WHEN 'edge_functions' THEN observation.edge_error_code
                 ELSE project_observation.error_code
               END AS candidate_error_code,
               CASE release_record.kind
                 WHEN 'tls_certificates' THEN observation.tls_active_md5
                 WHEN 'project_decommission' THEN observation.project_list_md5
+                WHEN 'edge_functions' THEN observation.edge_active_md5
                 ELSE project_observation.route_md5
               END AS active_md5,
               CASE release_record.kind
                 WHEN 'tls_certificates' THEN observation.tls_version
                 WHEN 'project_decommission' THEN NULL
+                WHEN 'edge_functions' THEN NULL
                 ELSE project_observation.project_version
               END AS active_version,
               observation.observed_at, observation.expires_at
