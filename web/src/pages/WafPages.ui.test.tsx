@@ -166,6 +166,16 @@ const rulePack = {
   ],
 }
 
+const wafHits = {
+  window: '24h',
+  queriedAt: '2026-11-07T02:00:00.000Z',
+  rows: [
+    { ruleId: 'probe-0001', event: 'waf.log', count: 4 },
+    { ruleId: 'probe-0001', event: 'waf.block', count: 2 },
+    { ruleId: 'retired-rule', event: 'waf.block', count: 9 },
+  ],
+}
+
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
@@ -208,6 +218,13 @@ function installApiMock() {
     }
     if (url === '/api/waf/rule-pack') {
       return jsonResponse(rulePack)
+    }
+    if (url === '/api/waf/hits?window=24h') {
+      return jsonResponse(wafHits)
+    }
+    if (url.startsWith('/api/waf/hits')) {
+      const requested = new URL(url, 'http://localhost').searchParams.get('window') ?? '1h'
+      return jsonResponse({ ...wafHits, window: requested })
     }
     if (url === '/api/waf/policy' && init?.method === 'PUT') {
       const body = JSON.parse(String(init.body)) as { policy: typeof policy }
@@ -389,6 +406,25 @@ describe('WAF console pages', () => {
     expect(screen.getByText(/exclude=legacy\.example\.com/u)).toBeTruthy()
     expect(screen.getByText('查看脚本内容')).toBeTruthy()
     expect(screen.getByText(/return 0/u)).toBeTruthy()
+  })
+
+  test('shows WAF hit statistics grouped per rule with joined policy metadata', async () => {
+    installApiMock()
+    const router = createMemoryRouter(appRoutes, { initialEntries: ['/waf/hits'] })
+    const user = userEvent.setup()
+    render(<RouterProvider router={router} />)
+
+    expect(await screen.findByRole('heading', { name: '命中统计' })).toBeTruthy()
+    // Rows are grouped by rule and joined with the draft policy (probe-0001 → 路径穿越探测);
+    // unknown ids stay visible as historical rules.
+    expect(await screen.findByText('路径穿越探测')).toBeTruthy()
+    expect(screen.getByText(/共 2 条规则 · 拦截 11 次 · 记录 4 次/u)).toBeTruthy()
+    expect(screen.getByText(/retired-rule · 历史规则或外部函数事件/u)).toBeTruthy()
+    expect(screen.getByText(/已不在当前策略/u)).toBeTruthy()
+
+    // Switching the window refetches with the new query parameter.
+    await user.click(screen.getByRole('radio', { name: /近 7 天/u }))
+    expect(await screen.findByText(/规则命中（近 7 天/u)).toBeTruthy()
   })
 
   test('manages per-project mode override and exemptions from the project page', async () => {

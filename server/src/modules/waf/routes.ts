@@ -3,6 +3,7 @@ import type { FastifyInstance } from 'fastify'
 import { badRequest } from '../../shared/errors.js'
 import { requireActor } from '../auth/http.js'
 import type { AuthService } from '../auth/model.js'
+import { isWafHitsWindow, type WafHitsService } from './hits-service.js'
 import type { WafReleaseService } from './release-service.js'
 import { wafRulePackView } from './rule-pack.js'
 import type { WafCompilePreviewView, WafService } from './service.js'
@@ -114,6 +115,30 @@ const wafRulePackResponseSchema = {
   properties: {
     version: { type: 'string', minLength: 1, maxLength: 64 },
     rules: { type: 'array', items: wafRuleSchema },
+  },
+} as const
+
+const wafHitsResponseSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['window', 'queriedAt', 'rows'],
+  properties: {
+    window: { type: 'string', enum: ['1h', '24h', '7d'] },
+    queriedAt: { type: 'string', format: 'date-time' },
+    rows: {
+      type: 'array',
+      maxItems: 512,
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['ruleId', 'event', 'count'],
+        properties: {
+          ruleId: { type: 'string', minLength: 1, maxLength: 64 },
+          event: { type: 'string', minLength: 1, maxLength: 32 },
+          count: { type: 'number', minimum: 0 },
+        },
+      },
+    },
   },
 } as const
 
@@ -238,6 +263,7 @@ export function registerWafRoutes(
   auth: AuthService,
   waf: WafService,
   wafReleases: WafReleaseService,
+  wafHits: WafHitsService,
 ): void {
   app.get(
     '/api/waf/policy',
@@ -319,6 +345,31 @@ export function registerWafRoutes(
       // Static curated data shipped with the console build; viewer-readable.
       await requireActor(auth)
       return wafRulePackView()
+    },
+  )
+
+  app.get<{ Querystring: { window?: string } }>(
+    '/api/waf/hits',
+    {
+      schema: {
+        querystring: {
+          type: 'object',
+          additionalProperties: false,
+          properties: { window: { type: 'string', enum: ['1h', '24h', '7d'] } },
+        },
+        response: { 200: wafHitsResponseSchema },
+      },
+    },
+    async (request, reply) => {
+      // The querystring schema already constrains the value; the guard keeps
+      // the service input honest if the schema ever loosens.
+      const window = request.query.window ?? '24h'
+      if (!isWafHitsWindow(window)) {
+        throw badRequest('INVALID_WINDOW', 'window must be one of 1h, 24h, 7d')
+      }
+      const result = await wafHits.hits(await requireActor(auth), window)
+      reply.header('cache-control', 'no-store')
+      return result
     },
   )
 

@@ -23,6 +23,7 @@ import { UnavailableTlsCertificateReleaseService } from './modules/tls/release-s
 import { registerConfigurationVersionRoutes } from './modules/versions/routes.js'
 import { UnavailableConfigurationVersionService } from './modules/versions/service.js'
 import { registerWafRoutes } from './modules/waf/routes.js'
+import { UnavailableWafHitsService } from './modules/waf/hits-service.js'
 import { UnavailableWafReleaseService } from './modules/waf/release-service.js'
 import { UnavailableWafService } from './modules/waf/service.js'
 import type { ApplicationServices } from './services.js'
@@ -102,7 +103,7 @@ export function buildApp(options: BuildAppOptions = {}) {
   registerDraftRoutes(app, services.auth, services.drafts)
   registerConfigurationVersionRoutes(app, services.auth, services.versions)
   registerReleaseRoutes(app, services.auth, services.releases)
-  registerWafRoutes(app, services.auth, services.waf, services.wafReleases)
+  registerWafRoutes(app, services.auth, services.waf, services.wafReleases, services.wafHits)
 
   app.setNotFoundHandler(async (request, reply) => {
     const pathname = request.url.split('?', 1)[0] ?? request.url
@@ -185,5 +186,6 @@ function createUnavailableServices(): ApplicationServices {
     tlsReleases: new UnavailableTlsCertificateReleaseService(),
     waf: new UnavailableWafService(),
     wafReleases: new UnavailableWafReleaseService(),
+    wafHits: new UnavailableWafHitsService(),
   }
 }
