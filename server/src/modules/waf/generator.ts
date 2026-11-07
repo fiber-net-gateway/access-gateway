@@ -35,6 +35,19 @@ export interface WafMountSelector {
   readonly exclude: readonly string[]
 }
 
+// Where one rule landed in the generated script. Validator errors carry script
+// byte offsets; authors only know their rules, so previews map offsets back
+// through these spans. Console-side metadata: it never reaches the wire.
+export interface WafRuleSpan {
+  /** Index of the rule in policy.rules (declaration order). */
+  readonly ruleIndex: number
+  /** Script byte range of the rule's block; `end` is exclusive. */
+  readonly start: number
+  readonly end: number
+  /** Script byte offset of the authored match text inside the block. */
+  readonly matchStart: number
+}
+
 export type WafCompilation =
   | { readonly kind: 'unmount'; readonly reason: 'no-rules' | 'no-mounted-projects' }
   | {
@@ -47,6 +60,7 @@ export type WafCompilation =
       /** Rule ids in generated execution order (priority asc, declaration ties). */
       readonly ruleOrder: readonly string[]
       readonly directives: readonly WafDirective[]
+      readonly ruleSpans: readonly WafRuleSpan[]
     }
 
 interface ModeSets {
@@ -109,8 +123,19 @@ function joinOr(terms: readonly string[]): string {
   return rest.length === 0 ? first : `(${[first, ...rest].join(' || ')})`
 }
 
+// The authored text exactly as it is embedded: single-line expressions are
+// trimmed, multi-line ones keep their layout on their own lines.
+function embeddedMatch(rule: WafRule): string {
+  return rule.match.includes('\n') ? rule.match : rule.match.trim()
+}
+
+function matchOpening(rule: WafRule): string {
+  return rule.match.includes('\n') ? '(\n' : '('
+}
+
 function matchExpression(rule: WafRule): string {
-  return rule.match.includes('\n') ? `(\n${rule.match}\n)` : `(${rule.match.trim()})`
+  const closing = rule.match.includes('\n') ? '\n)' : ')'
+  return `${matchOpening(rule)}${embeddedMatch(rule)}${closing}`
 }
 
 function ruleCondition(rule: WafRule, directiveByCidrKey: ReadonlyMap<string, string>): string {
@@ -160,6 +185,40 @@ function blockStatements(rule: WafRule, indent: string): string[] {
     `${indent}${reportStatement(rule, 'waf.block')}`,
     `${indent}resp.sendJson(403, {code: ${dialectStringLiteral('WAF_BLOCKED')}, ruleId: ${dialectStringLiteral(rule.id)}});`,
   ]
+}
+
+interface RuleBlock {
+  readonly rule: WafRule
+  readonly ruleIndex: number
+  /** Index of the block's comment line; its `if` line always follows. */
+  readonly firstLine: number
+  /** Index just past the block's last line. */
+  readonly endLine: number
+}
+
+function ruleSpans(lines: readonly string[], blocks: readonly RuleBlock[]): WafRuleSpan[] {
+  const lineStarts: number[] = []
+  let offset = 0
+  for (const line of lines) {
+    lineStarts.push(offset)
+    offset += Buffer.byteLength(line, 'utf8') + 1
+  }
+  return blocks.map(({ rule, ruleIndex, firstLine, endLine }) => {
+    // ruleCondition always ends in matchExpression, so the `if` line ends in
+    // that expression followed by the block opener.
+    const ifLine = firstLine + 1
+    const fromLineEnd = Buffer.byteLength(`${matchExpression(rule)}) {`, 'utf8')
+    return {
+      ruleIndex,
+      start: lineStarts[firstLine] ?? 0,
+      end: lineStarts[endLine] ?? offset,
+      matchStart:
+        (lineStarts[ifLine] ?? 0) +
+        Buffer.byteLength(lines[ifLine] ?? '', 'utf8') -
+        fromLineEnd +
+        Buffer.byteLength(matchOpening(rule), 'utf8'),
+    }
+  })
 }
 
 export function compileWafPolicy(policy: WafPolicy): WafCompilation {
@@ -232,8 +291,10 @@ export function compileWafPolicy(policy: WafPolicy): WafCompilation {
         : left.index - right.index,
     )
 
-  for (const { rule } of orderedRules) {
+  const ruleBlocks: RuleBlock[] = []
+  for (const { rule, index } of orderedRules) {
     lines.push('')
+    const firstLine = lines.length
     lines.push(`// ${rule.id} (priority ${String(rule.priority)}, ${rule.action}): ${rule.name}`)
     const condition = ruleCondition(rule, directiveByCidrKey)
     if (rule.action === 'block' && blockPossible && logPossible && blockGate) {
@@ -253,6 +314,7 @@ export function compileWafPolicy(policy: WafPolicy): WafCompilation {
       lines.push(`    ${reportStatement(rule, 'waf.log')}`)
       lines.push('}')
     }
+    ruleBlocks.push({ rule, ruleIndex: index, firstLine, endLine: lines.length })
   }
 
   lines.push('')
@@ -271,5 +333,39 @@ export function compileWafPolicy(policy: WafPolicy): WafCompilation {
     mounts: [selector],
     ruleOrder: orderedRules.map(({ rule }) => rule.id),
     directives,
+    ruleSpans: ruleSpans(lines, ruleBlocks),
+  }
+}
+
+export interface WafScriptLocation {
+  readonly ruleIndex: number
+  /** 1-based position in the authored match text; absent outside of it. */
+  readonly match?: { readonly line: number; readonly column: number }
+}
+
+// Maps a validator byte offset back to the rule that produced it. Parse errors
+// can point just past the authored text (an unbalanced expression fails on the
+// generated `{`), so offsets beyond the match clamp to its end.
+export function locateScriptOffset(
+  policy: WafPolicy,
+  compilation: Extract<WafCompilation, { kind: 'mounted' }>,
+  offset: number,
+): WafScriptLocation | null {
+  const span = compilation.ruleSpans.find(({ start, end }) => offset >= start && offset < end)
+  const rule = span ? policy.rules[span.ruleIndex] : undefined
+  if (!span || !rule) {
+    return null
+  }
+  if (offset < span.matchStart) {
+    return { ruleIndex: span.ruleIndex }
+  }
+  const embedded = embeddedMatch(rule)
+  const consumed = Buffer.from(embedded, 'utf8')
+    .subarray(0, offset - span.matchStart)
+    .toString('utf8')
+  const before = `${rule.match.slice(0, rule.match.indexOf(embedded))}${consumed}`.split('\n')
+  return {
+    ruleIndex: span.ruleIndex,
+    match: { line: before.length, column: (before.at(-1)?.length ?? 0) + 1 },
   }
 }

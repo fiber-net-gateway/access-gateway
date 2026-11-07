@@ -12,7 +12,7 @@ import { badRequest, forbidden, notFound, unavailable } from '../../shared/error
 import type { Actor } from '../auth/model.js'
 import { EnvironmentRepository } from '../environments/repository.js'
 import type { WafCompilation } from './generator.js'
-import { compileWafPolicy } from './generator.js'
+import { compileWafPolicy, locateScriptOffset } from './generator.js'
 import type { WafPolicy } from './model.js'
 import { WafPolicyDraftRepository, type WafPolicyDraftView } from './repository.js'
 import { validateWafPolicy, type WafValidationIssue } from './validate.js'
@@ -24,14 +24,26 @@ export interface SaveWafPolicyInput {
   policy: unknown
 }
 
+type MountedCompilation = Extract<WafCompilation, { kind: 'mounted' }>
+
+// Rule spans only serve offset attribution here; the view stays the public shape.
+export type WafCompilationView =
+  Exclude<WafCompilation, MountedCompilation> | Omit<MountedCompilation, 'ruleSpans'>
+
+export interface WafScriptError extends NativeValidationError {
+  /** 1-based position inside the rule's match text, when the error is in it. */
+  line?: number
+  column?: number
+}
+
 export interface WafCompilePreviewView {
   /** False when the policy has field-level issues; compilation is then null. */
   valid: boolean
   issues: readonly WafValidationIssue[]
-  compilation: WafCompilation | null
+  compilation: WafCompilationView | null
   /** Null when there is no script to compile (unmount candidate). */
   scriptValid: boolean | null
-  scriptErrors: readonly NativeValidationError[]
+  scriptErrors: readonly WafScriptError[]
   validator: { contractVersion: number; revision: string } | null
 }
 
@@ -49,6 +61,24 @@ export interface WafService {
     requestId: string,
     signal?: AbortSignal,
   ): Promise<WafCompilePreviewView>
+}
+
+// The validator reports script byte offsets and a transport field name; the
+// author needs the rule, so errors inside a rule block are rewritten to the
+// same rules[i].* paths field issues use.
+function attributeScriptError(
+  policy: WafPolicy,
+  compilation: MountedCompilation,
+  error: NativeValidationError,
+): WafScriptError {
+  const location =
+    error.offset === undefined ? null : locateScriptOffset(policy, compilation, error.offset)
+  if (location === null) {
+    return error
+  }
+  return location.match
+    ? { ...error, field: `rules[${location.ruleIndex}].match`, ...location.match }
+    : { ...error, field: `rules[${location.ruleIndex}]` }
 }
 
 function parseWafPolicy(value: unknown): WafPolicy {
@@ -170,12 +200,15 @@ export class DefaultWafService implements WafService {
       },
       signal,
     )
+    const { ruleSpans: _ruleSpans, ...compilationView } = compilation
     return {
       valid: true,
       issues: [],
-      compilation,
+      compilation: compilationView,
       scriptValid: native.valid,
-      scriptErrors: native.errors,
+      scriptErrors: native.errors.map((error) =>
+        attributeScriptError(policy as WafPolicy, compilation, error),
+      ),
       validator: { contractVersion: native.contractVersion, revision: native.validatorRevision },
     }
   }

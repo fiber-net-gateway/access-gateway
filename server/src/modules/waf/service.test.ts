@@ -11,6 +11,7 @@ import type { Actor } from '../auth/model.js'
 import { EnvironmentRepository } from '../environments/repository.js'
 import type { WafPolicyDraftView } from './repository.js'
 import { WafPolicyDraftRepository } from './repository.js'
+import { compileWafPolicy } from './generator.js'
 import { DefaultWafService, UnavailableWafService } from './service.js'
 import type { WafPolicy } from './model.js'
 
@@ -267,6 +268,39 @@ test('compilePreview surfaces native script compile errors', async () => {
     { code: 'script_compile_failed', offset: 42, message: 'unexpected escape' },
   ])
   assert.equal(result.compilation?.kind, 'mounted')
+})
+
+test('compilePreview attributes script errors inside a rule block to that rule', async () => {
+  const input = policy()
+  const compilation = compileWafPolicy(input)
+  assert.equal(compilation.kind, 'mounted')
+  if (compilation.kind !== 'mounted') {
+    return
+  }
+  const offset = compilation.ruleSpans[0]!.matchStart + 'strings.'.length
+  const { validator } = validatorFake({
+    valid: false,
+    errors: [
+      { code: 'script_compile_failed', field: 'payloadBase64', offset, message: 'not defined' },
+    ],
+  })
+  const service = new DefaultWafService(
+    {} as unknown as WafPolicyDraftRepository,
+    environmentsFake(),
+    validator,
+  )
+
+  const result = await service.compilePreview(actor, input, 'request-1')
+  assert.deepEqual(result.scriptErrors, [
+    {
+      code: 'script_compile_failed',
+      field: 'rules[0].match',
+      offset,
+      line: 1,
+      column: 'strings.'.length + 1,
+      message: 'not defined',
+    },
+  ])
 })
 
 test('compilePreview treats unmount candidates as valid with no script to compile', async () => {

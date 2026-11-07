@@ -1,9 +1,10 @@
-import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { createMemoryRouter } from 'react-router'
 import { RouterProvider } from 'react-router/dom'
 
+import type { WafPolicy } from '../api/types'
 import { appRoutes } from '../router'
 
 vi.mock('../components/YamlCodeEditor', () => ({
@@ -381,6 +382,44 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
+async function openPolicyPage(awaitPreview = true) {
+  const router = createMemoryRouter(appRoutes, { initialEntries: ['/waf'] })
+  const user = userEvent.setup()
+  render(<RouterProvider router={router} />)
+  expect(await screen.findByRole('heading', { name: 'WAF 策略' })).toBeTruthy()
+  if (awaitPreview) expect(await screen.findByText(/挂载函数 waf · 脚本 \d+ 行/u)).toBeTruthy()
+  return user
+}
+
+type MockedFetch = ReturnType<typeof installApiMock>
+
+function savedPolicyBody(fetchMock: MockedFetch) {
+  const call = fetchMock.mock.calls.find(
+    ([url, init]) => url === '/api/waf/policy' && init?.method === 'PUT',
+  )
+  if (!call) return undefined
+  return (
+    JSON.parse(String(call[1]?.body)) as {
+      policy: {
+        rules: {
+          name: string
+          scope?: unknown
+          exclusions?: unknown
+        }[]
+      }
+    }
+  ).policy
+}
+
+function previewBodies(fetchMock: MockedFetch) {
+  return fetchMock.mock.calls
+    .filter(([url]) => url === '/api/waf/policy/compile-preview')
+    .map(
+      ([, init]) =>
+        JSON.parse(String(init?.body)) as { defaultMode: string; rules: { name: string }[] },
+    )
+}
+
 describe('WAF console pages', () => {
   test('edits the policy draft and saves it with optimistic concurrency', async () => {
     const fetchMock = installApiMock()
@@ -390,10 +429,10 @@ describe('WAF console pages', () => {
 
     expect(await screen.findByRole('heading', { name: 'WAF 策略' })).toBeTruthy()
     expect(screen.getByText('路径穿越探测')).toBeTruthy()
-    const matchEditor = (await screen.findByRole('textbox', {
-      name: '规则 1 match 表达式',
-    })) as HTMLTextAreaElement
-    expect(matchEditor.value).toContain('strings.contains')
+    expect(screen.getByText(/probe-0001 · strings\.contains/u)).toBeTruthy()
+
+    // Configured rules stay compact: no editor is mounted until one is opened.
+    expect(screen.queryByRole('textbox', { name: 'match 表达式' })).toBeNull()
 
     // The debounced compile preview renders the mounted compilation summary.
     expect(await screen.findByText(/挂载函数 waf · 脚本 \d+ 行/u)).toBeTruthy()
@@ -423,6 +462,276 @@ describe('WAF console pages', () => {
         { project: 'api.example.com', reason: '误报待修' },
       ])
     })
+  })
+
+  test('edits a rule in a dialog, keeping typed lists and marking the row as changed', async () => {
+    const fetchMock = installApiMock()
+    const user = await openPolicyPage()
+
+    await user.click(screen.getByRole('button', { name: '编辑规则 路径穿越探测' }))
+    const dialog = await screen.findByRole('dialog', { name: '编辑规则' })
+
+    // The rule's exclusion is listed; adding one lives on the project page.
+    expect(within(dialog).getByText('api.example.com')).toBeTruthy()
+    expect(within(dialog).getByText(/新增豁免请到对应 Project/u)).toBeTruthy()
+
+    await user.clear(within(dialog).getByRole('textbox', { name: '规则名称' }))
+    await user.type(within(dialog).getByRole('textbox', { name: '规则名称' }), '路径穿越')
+    await user.click(within(dialog).getByText(/适用范围/u))
+    const methods = within(dialog).getByRole('textbox', { name: /限定 Method/u })
+    const cidrs = within(dialog).getByRole('textbox', { name: /限定来源 CIDR/u })
+    await user.type(methods, 'get, POST')
+    await user.type(cidrs, '10.0.0.0/8， 192.168.0.0/16')
+    expect((methods as HTMLInputElement).value).toBe('get, POST')
+
+    await user.click(within(dialog).getByRole('button', { name: '应用到草稿' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+
+    // Applying only changes the working copy; the row says so until saved.
+    expect(screen.getByText('路径穿越')).toBeTruthy()
+    expect(screen.getByText('已修改')).toBeTruthy()
+    expect(screen.getByText(/未保存：新增 0 · 修改 1 · 移除 0/u)).toBeTruthy()
+    expect(savedPolicyBody(fetchMock)).toBeUndefined()
+
+    await user.click(screen.getByRole('button', { name: '保存策略草稿' }))
+    await waitFor(() => {
+      const rule = savedPolicyBody(fetchMock)?.rules[0]
+      expect(rule?.name).toBe('路径穿越')
+      expect(rule?.scope).toEqual({
+        methods: ['GET', 'POST'],
+        sourceCidrs: ['10.0.0.0/8', '192.168.0.0/16'],
+      })
+      expect(rule?.exclusions).toEqual([{ project: 'api.example.com', reason: '误报待修' }])
+    })
+    await waitFor(() => expect(screen.queryByText('已修改')).toBeNull())
+  })
+
+  test('adds a rule only once it is complete and checks it in isolation', async () => {
+    const fetchMock = installApiMock()
+    const user = await openPolicyPage()
+
+    await user.click(screen.getByRole('button', { name: '+ 添加规则' }))
+    const dialog = await screen.findByRole('dialog', { name: '添加规则' })
+    expect(within(dialog).queryByRole('button', { name: '删除规则' })).toBeNull()
+
+    // Nothing reaches the draft while required fields are missing.
+    await user.click(within(dialog).getByRole('button', { name: '应用到草稿' }))
+    expect(await within(dialog).findByText('请填写规则名称')).toBeTruthy()
+    expect(within(dialog).getByText('请填写 match 表达式')).toBeTruthy()
+    expect(screen.getByText('规则（1/256）')).toBeTruthy()
+
+    await user.type(within(dialog).getByRole('textbox', { name: '规则名称' }), '封禁扫描器')
+    await user.clear(within(dialog).getByRole('textbox', { name: '优先级' }))
+    await user.type(within(dialog).getByRole('textbox', { name: '优先级' }), '5')
+    await user.type(
+      within(dialog).getByRole('textbox', { name: 'match 表达式' }),
+      '$req.path == "/scan"',
+    )
+    await user.click(within(dialog).getByRole('button', { name: '应用到草稿' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+
+    expect(screen.getByText('规则（2/256）')).toBeTruthy()
+    expect(screen.getByText('新增')).toBeTruthy()
+
+    // Priority 5 runs first, so it is listed first.
+    const rows = screen.getAllByRole('listitem').map((row) => row.textContent ?? '')
+    expect(rows.findIndex((text) => text.includes('封禁扫描器'))).toBeLessThan(
+      rows.findIndex((text) => text.includes('路径穿越探测')),
+    )
+
+    // The check compiled the rule alone, in a mode that always yields a script.
+    const checked = previewBodies(fetchMock).find((body) => body.rules[0]?.name === '封禁扫描器')
+    expect(checked?.rules.length).toBe(1)
+    expect(checked?.defaultMode).toBe('log')
+  })
+
+  test('blocks applying a rule the validator rejects and points at the rule field', async () => {
+    const fetchMock = installApiMock()
+    const respondWithPreview = fetchMock.getMockImplementation()!
+    fetchMock.mockImplementation(async (url, init) => {
+      const body =
+        url === '/api/waf/policy/compile-preview'
+          ? (JSON.parse(String(init?.body)) as WafPolicy)
+          : null
+      if (body?.rules[0]?.match.includes('nope')) {
+        return jsonResponse({
+          ...compilePreview,
+          scriptValid: false,
+          scriptErrors: [
+            {
+              code: 'script_compile_failed',
+              field: 'rules[0].match',
+              offset: 321,
+              line: 1,
+              column: 9,
+              message: 'function not defined',
+            },
+          ],
+        })
+      }
+      if (body?.rules[0]?.scope?.sourceCidrs?.includes('10.0.0.0/33')) {
+        return jsonResponse({
+          ...compilePreview,
+          valid: false,
+          compilation: null,
+          scriptValid: null,
+          issues: [
+            {
+              field: 'rules[0].scope.sourceCidrs',
+              code: 'invalid_field',
+              message: "invalid CIDR literal '10.0.0.0/33'",
+            },
+          ],
+        })
+      }
+      return respondWithPreview(url, init)
+    })
+    const user = await openPolicyPage()
+
+    await user.click(screen.getByRole('button', { name: '编辑规则 路径穿越探测' }))
+    const dialog = await screen.findByRole('dialog', { name: '编辑规则' })
+    const match = within(dialog).getByRole('textbox', { name: 'match 表达式' })
+    await user.clear(match)
+    await user.type(match, 'strings.nope($req.path)')
+    await user.click(within(dialog).getByRole('button', { name: '应用到草稿' }))
+
+    expect(await within(dialog).findByText(/第 1 行第 9 列：function not defined/u)).toBeTruthy()
+    expect(screen.getByRole('dialog', { name: '编辑规则' })).toBeTruthy()
+
+    // A field issue inside the collapsed scope section opens it.
+    await user.clear(match)
+    await user.type(match, '$req.path == "/x"')
+    await user.click(within(dialog).getByText(/适用范围/u))
+    await user.type(within(dialog).getByRole('textbox', { name: /限定来源 CIDR/u }), '10.0.0.0/33')
+    await user.click(within(dialog).getByText(/适用范围/u))
+    expect(await within(dialog).findByText(/invalid CIDR literal/u)).toBeTruthy()
+    await waitFor(() => {
+      expect(
+        within(dialog)
+          .getByText(/适用范围/u)
+          .closest('details')?.open,
+      ).toBe(true)
+    })
+    expect(
+      within(dialog)
+        .getByRole('textbox', { name: /限定来源 CIDR/u })
+        .getAttribute('aria-invalid'),
+    ).toBe('true')
+  })
+
+  test('still applies a rule while the validator is unreachable', async () => {
+    const fetchMock = installApiMock()
+    const respondWithPreview = fetchMock.getMockImplementation()!
+    fetchMock.mockImplementation(async (url, init) =>
+      url === '/api/waf/policy/compile-preview' &&
+      (JSON.parse(String(init?.body)) as typeof policy).rules[0]?.name === '断网时编辑'
+        ? jsonResponse({ error: { message: 'Native Validator unavailable' } }, 503)
+        : respondWithPreview(url, init),
+    )
+    const user = await openPolicyPage()
+
+    await user.click(screen.getByRole('button', { name: '编辑规则 路径穿越探测' }))
+    const dialog = await screen.findByRole('dialog', { name: '编辑规则' })
+    await user.clear(within(dialog).getByRole('textbox', { name: '规则名称' }))
+    await user.type(within(dialog).getByRole('textbox', { name: '规则名称' }), '断网时编辑')
+    await user.click(within(dialog).getByRole('button', { name: '应用到草稿' }))
+
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    expect(screen.getByText('断网时编辑')).toBeTruthy()
+  })
+
+  test('asks before dropping unapplied edits and removes rules from the dialog', async () => {
+    installApiMock()
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    const user = await openPolicyPage()
+
+    await user.click(screen.getByRole('button', { name: '编辑规则 路径穿越探测' }))
+    let dialog = await screen.findByRole('dialog', { name: '编辑规则' })
+
+    // Untouched: Escape closes straight away and focus returns to the row.
+    await user.keyboard('{Escape}')
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    expect(confirm).not.toHaveBeenCalled()
+    expect(document.activeElement).toBe(
+      screen.getByRole('button', { name: '编辑规则 路径穿越探测' }),
+    )
+
+    await user.click(screen.getByRole('button', { name: '编辑规则 路径穿越探测' }))
+    dialog = await screen.findByRole('dialog', { name: '编辑规则' })
+    await user.type(within(dialog).getByRole('textbox', { name: '规则名称' }), '改')
+    await user.keyboard('{Escape}')
+    expect(confirm).toHaveBeenCalledOnce()
+    expect(screen.getByRole('dialog', { name: '编辑规则' })).toBeTruthy()
+
+    confirm.mockReturnValue(true)
+    await user.click(within(dialog).getByRole('button', { name: '取消' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    expect(screen.getByText('路径穿越探测')).toBeTruthy()
+
+    await user.click(screen.getByRole('button', { name: '编辑规则 路径穿越探测' }))
+    dialog = await screen.findByRole('dialog', { name: '编辑规则' })
+    await user.click(within(dialog).getByRole('button', { name: '删除规则' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    expect(screen.queryByText('路径穿越探测')).toBeNull()
+    expect(screen.getByText('规则（0/256）')).toBeTruthy()
+  })
+
+  test('removes an exclusion from the rule dialog', async () => {
+    installApiMock()
+    const user = await openPolicyPage()
+    expect(screen.getByText('豁免 1')).toBeTruthy()
+
+    await user.click(screen.getByRole('button', { name: '编辑规则 路径穿越探测' }))
+    const dialog = await screen.findByRole('dialog', { name: '编辑规则' })
+    await user.click(within(dialog).getByRole('button', { name: '移除豁免' }))
+    expect(within(dialog).queryByText('api.example.com')).toBeNull()
+    expect(within(dialog).getByText('Project 豁免（0）')).toBeTruthy()
+
+    await user.click(within(dialog).getByRole('button', { name: '应用到草稿' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    expect(screen.getByText('豁免 0')).toBeTruthy()
+    expect(screen.getByText('已修改')).toBeTruthy()
+  })
+
+  test('saving from the editor shortcut applies the rule', async () => {
+    installApiMock()
+    const user = await openPolicyPage()
+
+    await user.click(screen.getByRole('button', { name: '编辑规则 路径穿越探测' }))
+    const dialog = await screen.findByRole('dialog', { name: '编辑规则' })
+    const match = within(dialog).getByRole('textbox', { name: 'match 表达式' })
+    await user.type(match, ' && true')
+    await user.keyboard('{Control>}s{/Control}')
+
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    expect(screen.getByText('已修改')).toBeTruthy()
+  })
+
+  test('shows field issues from the whole-policy preview on the rule row', async () => {
+    const fetchMock = installApiMock()
+    const respondWithPreview = fetchMock.getMockImplementation()!
+    fetchMock.mockImplementation(async (url, init) =>
+      url === '/api/waf/policy/compile-preview'
+        ? jsonResponse({
+            ...compilePreview,
+            valid: false,
+            compilation: null,
+            scriptValid: null,
+            issues: [
+              {
+                field: 'rules[0].scope.paths',
+                code: 'invalid_field',
+                message: "invalid path pattern 'admin'",
+              },
+            ],
+          })
+        : respondWithPreview(url, init),
+    )
+    await openPolicyPage(false)
+
+    expect(await screen.findByText('1 个问题', { selector: '.waf-rule-row *' })).toBeTruthy()
+    expect(screen.getByText('修复下列问题后才能生成脚本。')).toBeTruthy()
+    expect(screen.getByText('路径穿越探测 · scope.paths')).toBeTruthy()
   })
 
   test('publishes and rolls back WAF releases with preview diff context', async () => {

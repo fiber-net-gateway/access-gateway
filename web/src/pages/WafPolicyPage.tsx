@@ -1,23 +1,24 @@
-import { lazy, Suspense, useEffect, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router'
 
 import { compileWafPolicyPreview, fetchWafRulePack } from '../api/client'
-import type {
-  WafCompilePreviewView,
-  WafMode,
-  WafRule,
-  WafRuleExclusion,
-  WafSeverity,
-} from '../api/types'
-import type { YamlCodeEditorDiagnostic } from '../components/YamlCodeEditor'
-import { createUuid } from '../shared/uuid'
+import type { WafCompilePreviewView, WafMode, WafRule } from '../api/types'
 import { useUnsavedChangesGuard } from '../routes/useUnsavedChangesGuard'
 import { useWafPolicyDraft } from './useWafPolicyDraft'
+import { WafRuleDialog } from './WafRuleDialog'
+import {
+  actionLabels,
+  newWafRule,
+  problemsByRuleId,
+  ruleChange,
+  rulesInExecutionOrder,
+  scopeSummary,
+  severityLabels,
+  type WafRuleChange,
+  type WafRuleProblem,
+} from './wafRuleForm'
 
-const YamlCodeEditor = lazy(async () => {
-  const module = await import('../components/YamlCodeEditor')
-  return { default: module.YamlCodeEditor }
-})
+const MAX_RULES = 256
 
 const modeLabels: Record<WafMode, string> = {
   off: '关闭',
@@ -25,71 +26,46 @@ const modeLabels: Record<WafMode, string> = {
   block: '拦截',
 }
 
-const severityLabels: Record<WafSeverity, string> = {
-  critical: '严重',
-  high: '高',
-  medium: '中',
-  low: '低',
-}
-
 const unmountReasonLabels: Record<string, string> = {
   'no-rules': '策略中没有规则',
   'no-mounted-projects': '没有任何 Project 挂载该函数',
 }
 
-function csvToList(value: string): string[] {
-  return value
-    .split(',')
-    .map((item) => item.trim())
-    .filter((item) => item.length > 0)
-}
+type RuleDialogTarget = { mode: 'add'; rule: WafRule } | { mode: 'edit'; ruleId: string }
 
-function newRuleId(): string {
-  return `rule-${createUuid().replace(/-/g, '').slice(0, 8)}`
-}
-
-function emptyRule(): WafRule {
-  return {
-    id: newRuleId(),
-    name: '',
-    severity: 'high',
-    priority: 100,
-    action: 'block',
-    phase: 'request_head',
-    match: 'strings.contains($req.path, "/")',
-  }
-}
-
-// Map compile-preview issue field paths (rules[2].match) onto editor
-// diagnostics for the rule match editors.
-function matchDiagnostics(
-  preview: WafCompilePreviewView | null,
-): Record<number, readonly YamlCodeEditorDiagnostic[]> {
-  const diagnostics: Record<number, readonly YamlCodeEditorDiagnostic[]> = {}
-  if (!preview) return diagnostics
-  for (const issue of preview.issues) {
-    const match = /^rules\[(\d+)\]\.match$/.exec(issue.field)
-    if (!match?.[1]) continue
-    const index = Number(match[1])
-    const existing = diagnostics[index] ?? []
-    diagnostics[index] = [
-      ...existing,
-      { line: 1, column: 1, path: issue.field, code: issue.code, message: issue.message },
-    ]
-  }
-  return diagnostics
+// Issue paths are positional; rules are shown by name and in execution order.
+function fieldLocation(field: string | undefined, rules: readonly WafRule[]): string {
+  const located = /^rules\[(\d+)\](?:\.(.+))?$/u.exec(field ?? '')
+  if (located?.[1] === undefined) return field === 'payloadBase64' ? 'script' : (field ?? 'script')
+  const rule = rules[Number(located[1])]
+  return [rule?.name || rule?.id || field, located[2]].filter(Boolean).join(' · ')
 }
 
 export function WafPolicyPage() {
-  const { draft, policy, dirty, loading, saving, errorMessage, updatePolicy, discard, save } =
-    useWafPolicyDraft()
+  const {
+    draft,
+    policy,
+    savedPolicy,
+    dirty,
+    loading,
+    saving,
+    errorMessage,
+    updatePolicy,
+    discard,
+    save,
+  } = useWafPolicyDraft()
   const [preview, setPreview] = useState<WafCompilePreviewView | null>(null)
+  const [ruleProblems, setRuleProblems] = useState<ReadonlyMap<string, readonly WafRuleProblem[]>>(
+    new Map(),
+  )
+  const [dialogTarget, setDialogTarget] = useState<RuleDialogTarget | null>(null)
+  const [dialogDirty, setDialogDirty] = useState(false)
   const [previewError, setPreviewError] = useState<string | null>(null)
   const [previewLoading, setPreviewLoading] = useState(false)
   const [importingPack, setImportingPack] = useState(false)
   const [packMessage, setPackMessage] = useState<string | null>(null)
 
-  useUnsavedChangesGuard(dirty, '当前 WAF 策略草稿尚未保存，确定离开吗？')
+  useUnsavedChangesGuard(dirty || dialogDirty, '当前 WAF 策略草稿尚未保存，确定离开吗？')
 
   // Debounced live compile check: every edit revalidates the policy and
   // recompiles the script through the native validator (server side).
@@ -101,6 +77,7 @@ export function WafPolicyPage() {
       void compileWafPolicyPreview(policy, controller.signal)
         .then((result) => {
           setPreview(result)
+          setRuleProblems(problemsByRuleId(result, policy.rules))
           setPreviewError(null)
         })
         .catch((error: unknown) => {
@@ -118,20 +95,28 @@ export function WafPolicyPage() {
     }
   }, [policy])
 
-  const setRule = (index: number, next: WafRule): void =>
+  const closeDialog = useCallback((): void => {
+    setDialogTarget(null)
+    setDialogDirty(false)
+  }, [])
+
+  const applyRule = (next: WafRule): void => {
     updatePolicy((current) => ({
       ...current,
-      rules: current.rules.map((rule, ruleIndex) => (ruleIndex === index ? next : rule)),
+      rules: current.rules.some((rule) => rule.id === next.id)
+        ? current.rules.map((rule) => (rule.id === next.id ? next : rule))
+        : [...current.rules, next],
     }))
+    closeDialog()
+  }
 
-  const addRule = (): void =>
-    updatePolicy((current) => ({ ...current, rules: [...current.rules, emptyRule()] }))
-
-  const removeRule = (index: number): void =>
+  const removeRule = (ruleId: string): void => {
     updatePolicy((current) => ({
       ...current,
-      rules: current.rules.filter((_, ruleIndex) => ruleIndex !== index),
+      rules: current.rules.filter((rule) => rule.id !== ruleId),
     }))
+    closeDialog()
+  }
 
   // Import the curated starter pack into the working copy: rules whose id
   // already exists are skipped so re-importing never duplicates or overwrites
@@ -142,7 +127,7 @@ export function WafPolicyPage() {
     void fetchWafRulePack()
       .then((pack) => {
         const existing = new Set(policy.rules.map((rule) => rule.id))
-        const room = 256 - policy.rules.length
+        const room = MAX_RULES - policy.rules.length
         const additions: WafRule[] = []
         let skipped = 0
         let overflowed = 0
@@ -172,7 +157,26 @@ export function WafPolicyPage() {
       .finally(() => setImportingPack(false))
   }
 
-  const diagnosticsByRule = matchDiagnostics(preview)
+  const savedRules = useMemo(
+    () => new Map(savedPolicy?.rules.map((rule) => [rule.id, rule])),
+    [savedPolicy],
+  )
+  const orderedRules = useMemo(() => rulesInExecutionOrder(policy?.rules ?? []), [policy])
+  const changes = useMemo(() => {
+    const rules = policy?.rules ?? []
+    const currentIds = new Set(rules.map((rule) => rule.id))
+    const changed = rules.map((rule) => ruleChange(rule, savedRules.get(rule.id)))
+    return {
+      added: changed.filter((change) => change === 'added').length,
+      modified: changed.filter((change) => change === 'modified').length,
+      removed: [...savedRules.keys()].filter((id) => !currentIds.has(id)).length,
+    }
+  }, [policy, savedRules])
+
+  const dialogRule =
+    dialogTarget?.mode === 'add'
+      ? dialogTarget.rule
+      : policy?.rules.find((rule) => rule.id === dialogTarget?.ruleId)
 
   if (loading) {
     return <div className="route-empty-state page-loading-state">正在加载 WAF 策略…</div>
@@ -256,7 +260,9 @@ export function WafPolicyPage() {
 
           <section aria-labelledby="waf-rules-title">
             <header className="route-toolbar">
-              <h3 id="waf-rules-title">规则（{policy.rules.length}/256）</h3>
+              <h3 id="waf-rules-title">
+                规则（{policy.rules.length}/{MAX_RULES}）
+              </h3>
               <div className="header-actions">
                 <button
                   className="button-secondary"
@@ -266,7 +272,12 @@ export function WafPolicyPage() {
                 >
                   {importingPack ? '导入中…' : '导入起手规则包'}
                 </button>
-                <button className="button-secondary" onClick={addRule} type="button">
+                <button
+                  className="button-secondary"
+                  disabled={policy.rules.length >= MAX_RULES}
+                  onClick={() => setDialogTarget({ mode: 'add', rule: newWafRule() })}
+                  type="button"
+                >
                   + 添加规则
                 </button>
               </div>
@@ -284,18 +295,25 @@ export function WafPolicyPage() {
                 <p>添加规则后，发布时会生成 WAF 边缘函数脚本。</p>
               </div>
             ) : (
-              <ol className="route-list">
-                {policy.rules.map((rule, index) => (
-                  <RuleCard
-                    diagnostics={diagnosticsByRule[index] ?? []}
-                    key={rule.id}
-                    rule={rule}
-                    title={`规则 ${index + 1}`}
-                    onRemove={() => removeRule(index)}
-                    onRuleChange={(next) => setRule(index, next)}
-                  />
-                ))}
-              </ol>
+              <>
+                <p className="settings-note waf-rule-list-note">
+                  按执行顺序排列，优先级数字小的先执行
+                  {changes.added + changes.modified + changes.removed > 0
+                    ? `。未保存：新增 ${changes.added} · 修改 ${changes.modified} · 移除 ${changes.removed}`
+                    : ''}
+                </p>
+                <ol className="waf-rule-list">
+                  {orderedRules.map((rule) => (
+                    <RuleRow
+                      change={ruleChange(rule, savedRules.get(rule.id))}
+                      key={rule.id}
+                      problems={ruleProblems.get(rule.id) ?? []}
+                      rule={rule}
+                      onEdit={() => setDialogTarget({ mode: 'edit', ruleId: rule.id })}
+                    />
+                  ))}
+                </ol>
+              </>
             )}
           </section>
 
@@ -315,17 +333,25 @@ export function WafPolicyPage() {
               <div className="waf-compile-summary">
                 <p>
                   <span
-                    className={`status-chip status-chip-${preview.valid ? 'ready' : 'pending'}`}
+                    className={`status-chip status-chip-${
+                      preview.issues.length + preview.scriptErrors.length === 0
+                        ? 'ready'
+                        : 'pending'
+                    }`}
                   >
-                    {preview.valid ? '可编译' : `${preview.issues.length} 个问题`}
+                    {preview.issues.length + preview.scriptErrors.length === 0
+                      ? '可编译'
+                      : `${preview.issues.length + preview.scriptErrors.length} 个问题`}
                   </span>{' '}
-                  {preview.compilation.kind === 'mounted'
-                    ? `挂载函数 ${preview.compilation.functionName} · 脚本 ${
-                        preview.compilation.script.split('\n').length
-                      } 行 · sha256 ${preview.compilation.scriptSha256.slice(0, 16)}…`
-                    : `不生成脚本（${unmountReasonLabels[preview.compilation.reason] ?? preview.compilation.reason}），将发布空函数索引卸载。`}
+                  {preview.compilation === null
+                    ? '修复下列问题后才能生成脚本。'
+                    : preview.compilation.kind === 'mounted'
+                      ? `挂载函数 ${preview.compilation.functionName} · 脚本 ${
+                          preview.compilation.script.split('\n').length
+                        } 行 · sha256 ${preview.compilation.scriptSha256.slice(0, 16)}…`
+                      : `不生成脚本（${unmountReasonLabels[preview.compilation.reason] ?? preview.compilation.reason}），将发布空函数索引卸载。`}
                 </p>
-                {preview.compilation.kind === 'mounted' &&
+                {preview.compilation?.kind === 'mounted' &&
                 preview.compilation.directives.length > 0 ? (
                   <p>
                     CIDR 指令：
@@ -335,10 +361,10 @@ export function WafPolicyPage() {
                   </p>
                 ) : null}
                 {preview.issues.length > 0 ? (
-                  <ul className="route-issues">
+                  <ul className="route-issues waf-preview-issues">
                     {preview.issues.map((issue) => (
                       <li key={`${issue.field}-${issue.code}`}>
-                        <span>{issue.field}</span>
+                        <span>{fieldLocation(issue.field, policy.rules)}</span>
                         <span>{issue.code}</span>
                         <span>{issue.message}</span>
                       </li>
@@ -346,20 +372,24 @@ export function WafPolicyPage() {
                   </ul>
                 ) : null}
                 {preview.scriptErrors.length > 0 ? (
-                  <ul className="route-issues">
+                  <ul className="route-issues waf-preview-issues">
                     {preview.scriptErrors.map((error, errorIndex) => (
                       <li key={`${error.code}-${errorIndex}`}>
-                        <span>script</span>
+                        <span>{fieldLocation(error.field, policy.rules)}</span>
                         <span>{error.code}</span>
                         <span>
-                          {error.offset !== undefined ? `offset ${error.offset}：` : ''}
+                          {error.line !== undefined
+                            ? `第 ${error.line} 行第 ${error.column ?? 1} 列：`
+                            : error.offset !== undefined
+                              ? `offset ${error.offset}：`
+                              : ''}
                           {error.message}
                         </span>
                       </li>
                     ))}
                   </ul>
                 ) : null}
-                {preview.compilation.kind === 'mounted' ? (
+                {preview.compilation?.kind === 'mounted' ? (
                   <details className="wire-preview">
                     <summary>查看生成脚本</summary>
                     <pre>{preview.compilation.script}</pre>
@@ -368,228 +398,78 @@ export function WafPolicyPage() {
               </div>
             )}
           </section>
+
+          {dialogTarget !== null && dialogRule !== undefined ? (
+            <WafRuleDialog
+              key={dialogRule.id}
+              mode={dialogTarget.mode}
+              rule={dialogRule}
+              onApply={applyRule}
+              onClose={closeDialog}
+              onDirtyChange={setDialogDirty}
+              onRemove={() => removeRule(dialogRule.id)}
+            />
+          ) : null}
         </>
       )}
     </section>
   )
 }
 
-interface RuleCardProps {
-  rule: WafRule
-  title: string
-  diagnostics: readonly YamlCodeEditorDiagnostic[]
-  onRuleChange(next: WafRule): void
-  onRemove(): void
+const changeChips: Record<NonNullable<WafRuleChange>, { label: string; tone: string }> = {
+  added: { label: '新增', tone: 'ready' },
+  modified: { label: '已修改', tone: 'unknown' },
 }
 
-function RuleCard({ rule, title, diagnostics, onRuleChange, onRemove }: RuleCardProps) {
-  const [exclusionProject, setExclusionProject] = useState('')
-  const [exclusionReason, setExclusionReason] = useState('')
+interface RuleRowProps {
+  rule: WafRule
+  change: WafRuleChange
+  problems: readonly WafRuleProblem[]
+  onEdit(): void
+}
 
-  const scope = rule.scope ?? {}
-  const exclusions = rule.exclusions ?? []
-
-  const addExclusion = (event: FormEvent): void => {
-    event.preventDefault()
-    const project = exclusionProject.trim()
-    const reason = exclusionReason.trim()
-    if (!project || !reason) return
-    const exclusion: WafRuleExclusion = { project, reason }
-    onRuleChange({
-      ...rule,
-      exclusions: [...exclusions.filter((existing) => existing.project !== project), exclusion],
-    })
-    setExclusionProject('')
-    setExclusionReason('')
-  }
-
+function RuleRow({ rule, change, problems, onEdit }: RuleRowProps) {
+  const exclusionCount = rule.exclusions?.length ?? 0
   return (
-    <li className="route-card">
-      <header className="route-card-header">
-        <div>
-          <strong>{rule.name || '未命名规则'}</strong>
-          <small>
-            {rule.id} · {severityLabels[rule.severity]} · 优先级 {rule.priority} ·{' '}
-            {rule.action === 'block' ? '拦截' : '记录'}
-          </small>
+    <li className="waf-rule-row">
+      <span className={`status-chip waf-severity-${rule.severity}`}>
+        {severityLabels[rule.severity]}
+      </span>
+      <div className="waf-rule-row-main">
+        <div className="waf-rule-row-title">
+          <strong title={rule.name}>{rule.name}</strong>
+          {change !== null ? (
+            <span className={`status-chip status-chip-${changeChips[change].tone}`}>
+              {changeChips[change].label}
+            </span>
+          ) : null}
+          {problems.length > 0 ? (
+            <span
+              className="status-chip status-chip-degraded"
+              title={problems.map((problem) => problem.message).join('\n')}
+            >
+              {problems.length} 个问题
+            </span>
+          ) : null}
         </div>
-        <div className="route-card-actions">
-          <button
-            className="button-danger"
-            onClick={onRemove}
-            title={`移除规则 ${rule.name || rule.id}`}
-            type="button"
-          >
-            移除规则
-          </button>
-        </div>
-      </header>
-
-      <div className="waf-rule-grid">
-        <label>
-          规则名称
-          <input
-            aria-label={`${title} 规则名称`}
-            maxLength={255}
-            value={rule.name}
-            onChange={(event) => onRuleChange({ ...rule, name: event.target.value })}
-          />
-        </label>
-        <label>
-          严重级别
-          <select
-            aria-label={`${title} 严重级别`}
-            value={rule.severity}
-            onChange={(event) =>
-              onRuleChange({ ...rule, severity: event.target.value as WafSeverity })
-            }
-          >
-            {(['critical', 'high', 'medium', 'low'] as const).map((severity) => (
-              <option key={severity} value={severity}>
-                {severityLabels[severity]}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          优先级
-          <input
-            aria-label={`${title} 优先级`}
-            inputMode="numeric"
-            max={1000000}
-            min={0}
-            type="number"
-            value={rule.priority}
-            onChange={(event) => onRuleChange({ ...rule, priority: Number(event.target.value) })}
-          />
-        </label>
-        <label>
-          动作
-          <select
-            aria-label={`${title} 动作`}
-            value={rule.action}
-            onChange={(event) =>
-              onRuleChange({
-                ...rule,
-                action: event.target.value === 'log' ? 'log' : 'block',
-              })
-            }
-          >
-            <option value="block">拦截</option>
-            <option value="log">记录</option>
-          </select>
-        </label>
+        <code className="waf-rule-row-detail" title={rule.match}>
+          {rule.id} · {rule.match}
+        </code>
       </div>
-
-      <div className="waf-match-editor">
-        <Suspense fallback={<p role="status">正在加载表达式编辑器…</p>}>
-          <YamlCodeEditor
-            ariaLabel={`${title} match 表达式`}
-            diagnostics={diagnostics}
-            language="javascript"
-            onChange={(value) => onRuleChange({ ...rule, match: value })}
-            onSave={() => undefined}
-            value={rule.match}
-          />
-        </Suspense>
+      <div className="waf-rule-row-facts">
+        <span>{actionLabels[rule.action]}</span>
+        <span>优先级 {rule.priority}</span>
+        <span title={scopeSummary(rule)}>{scopeSummary(rule)}</span>
+        <span>豁免 {exclusionCount}</span>
       </div>
-
-      <div className="waf-rule-grid">
-        <label>
-          限定 Method（逗号分隔）
-          <input
-            aria-label={`${title} 限定 method`}
-            placeholder="GET, POST"
-            value={(scope.methods ?? []).join(', ')}
-            onChange={(event) =>
-              onRuleChange({
-                ...rule,
-                scope: { ...scope, methods: csvToList(event.target.value) },
-              })
-            }
-          />
-        </label>
-        <label>
-          限定 Path（逗号分隔）
-          <input
-            aria-label={`${title} 限定 path`}
-            placeholder="/api/, /admin"
-            value={(scope.paths ?? []).join(', ')}
-            onChange={(event) =>
-              onRuleChange({
-                ...rule,
-                scope: { ...scope, paths: csvToList(event.target.value) },
-              })
-            }
-          />
-        </label>
-        <label>
-          限定来源 CIDR（逗号分隔）
-          <input
-            aria-label={`${title} 限定来源 CIDR`}
-            placeholder="10.0.0.0/8"
-            value={(scope.sourceCidrs ?? []).join(', ')}
-            onChange={(event) =>
-              onRuleChange({
-                ...rule,
-                scope: { ...scope, sourceCidrs: csvToList(event.target.value) },
-              })
-            }
-          />
-        </label>
-      </div>
-
-      <div className="waf-exclusions">
-        <strong>Project 豁免（按主域名，含原因可审计）</strong>
-        {exclusions.length === 0 ? (
-          <p className="settings-note">该规则当前对所有 Project 生效。</p>
-        ) : (
-          <ul>
-            {exclusions.map((exclusion) => (
-              <li key={exclusion.project}>
-                <span>
-                  <strong>{exclusion.project}</strong>
-                  <small>{exclusion.reason}</small>
-                </span>
-                <button
-                  className="button-link"
-                  onClick={() =>
-                    onRuleChange({
-                      ...rule,
-                      exclusions: exclusions.filter(
-                        (existing) => existing.project !== exclusion.project,
-                      ),
-                    })
-                  }
-                  title={`移除豁免 ${exclusion.project}`}
-                  type="button"
-                >
-                  移除豁免
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
-        <form className="waf-exclusion-form" onSubmit={addExclusion}>
-          <input
-            aria-label={`${title} 豁免项目`}
-            maxLength={255}
-            placeholder="Project 主域名"
-            value={exclusionProject}
-            onChange={(event) => setExclusionProject(event.target.value)}
-          />
-          <input
-            aria-label={`${title} 豁免原因`}
-            maxLength={255}
-            placeholder="豁免原因（必填，审计可见）"
-            value={exclusionReason}
-            onChange={(event) => setExclusionReason(event.target.value)}
-          />
-          <button className="button-secondary" type="submit">
-            添加豁免
-          </button>
-        </form>
-      </div>
+      <button
+        aria-label={`编辑规则 ${rule.name}`}
+        className="button-secondary"
+        onClick={onEdit}
+        type="button"
+      >
+        编辑
+      </button>
     </li>
   )
 }
