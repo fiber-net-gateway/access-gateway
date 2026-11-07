@@ -110,6 +110,45 @@ TEST(EdgeFunctionConfigCodec, ParsesFullIndex) {
     EXPECT_EQ(config.functions[1].mounts[0].ratio, fiber::access_server::kEdgeFunctionFullRatio);
 }
 
+TEST(EdgeFunctionConfigCodec, PhaseDefaultsToRequestHead) {
+    auto parsed = parse_edge_function_index_config(index_json("1", function_json("audit")));
+    ASSERT_TRUE(parsed.has_value());
+    ASSERT_TRUE(parsed->has_value());
+    ASSERT_EQ((*parsed)->functions.size(), 1U);
+    EXPECT_EQ((*parsed)->functions[0].phase, fiber::access_server::EdgeFunctionPhase::RequestHead);
+}
+
+TEST(EdgeFunctionConfigCodec, PhaseRequestBodyAccepted) {
+    auto parsed = parse_edge_function_index_config(
+            R"({"version": 3, "functions": [)"
+            R"({"name": "body-scan", "sha256": ")" +
+            std::string(kValidSha256) +
+            R"(", "phase": "request_body", "mounts": [{"projects": {"include": ["loan-*"]}}]}]})");
+    ASSERT_TRUE(parsed.has_value());
+    ASSERT_TRUE(parsed->has_value());
+    ASSERT_EQ((*parsed)->functions.size(), 1U);
+    EXPECT_EQ((*parsed)->functions[0].phase, fiber::access_server::EdgeFunctionPhase::RequestBody);
+}
+
+TEST(EdgeFunctionConfigCodec, UnknownPhaseRejected) {
+    const AccessConfigError error =
+            parse_error(R"({"version": 3, "functions": [)"
+                        R"({"name": "body-scan", "sha256": ")" +
+                        std::string(kValidSha256) +
+                        R"(", "phase": "response", "mounts": [{"projects": {"include": ["loan-*"]}}]}]})");
+    EXPECT_EQ(error.code, AccessConfigErrorCode::InvalidField);
+    EXPECT_EQ(error.field, "functions[0].phase");
+}
+
+TEST(EdgeFunctionConfigCodec, PhaseMustBeText) {
+    const AccessConfigError error = parse_error(
+            R"({"version": 3, "functions": [)"
+            R"({"name": "body-scan", "sha256": ")" +
+            std::string(kValidSha256) + R"(", "phase": 2, "mounts": [{"projects": {"include": ["loan-*"]}}]}]})");
+    EXPECT_EQ(error.code, AccessConfigErrorCode::InvalidField);
+    EXPECT_EQ(error.field, "functions[0].phase");
+}
+
 TEST(EdgeFunctionConfigCodec, EmptyFunctionsListIsAccepted) {
     auto parsed = parse_edge_function_index_config(R"({"version": 2})");
     ASSERT_TRUE(parsed.has_value());

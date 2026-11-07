@@ -313,7 +313,7 @@ bool EdgeFunctionsWatcher::try_assemble() {
         const auto found = scripts_.find(function.name);
         bool compiled = false;
         std::shared_ptr<EdgeFunctionProgram> program =
-                compile_cached(function.sha256_hex, *found->second->verified_content, compiled);
+                compile_cached(function.sha256_hex, *found->second->verified_content, compiled, function.phase);
         if (!program) {
             ++failed_updates_;
             report_failure("compile", "script_compile_failed", function.name);
@@ -354,28 +354,34 @@ void EdgeFunctionsWatcher::mark_active(std::size_t function_count, std::size_t s
 }
 
 std::shared_ptr<EdgeFunctionProgram> EdgeFunctionsWatcher::compile_cached(const std::string &sha256_hex_value,
-                                                                          std::string_view source, bool &compiled) {
-    if (const auto found = compile_cache_.find(sha256_hex_value); found != compile_cache_.end()) {
+                                                                          std::string_view source, bool &compiled,
+                                                                          EdgeFunctionPhase phase) {
+    // $req.body resolves only for request_body scripts, so the same bytes are
+    // two different programs; phase joins the cache key.
+    std::string cache_key = sha256_hex_value;
+    cache_key += phase == EdgeFunctionPhase::RequestBody ? ":body" : ":head";
+    if (const auto found = compile_cache_.find(cache_key); found != compile_cache_.end()) {
         compiled = false;
         return found->second;
     }
     EdgeFunctionLibrary library(kAccessConfigLimits);
-    auto program = library.compile(source);
+    auto program = library.compile(source, phase);
     if (!program) {
         compiled = true;
         return nullptr;
     }
     auto shared = std::make_shared<EdgeFunctionProgram>(std::move(*program));
     compiled = true;
-    compile_cache_[sha256_hex_value] = shared;
+    compile_cache_[std::move(cache_key)] = shared;
     // Bound the cache: keep referenced hashes, drop the rest, then the oldest.
     const std::size_t cap = std::max<std::size_t>(kAccessConfigLimits.edge_functions.max_functions * 2U, 8U);
     if (compile_cache_.size() > cap) {
         for (auto it = compile_cache_.begin(); it != compile_cache_.end() && compile_cache_.size() > cap;) {
             const bool referenced =
-                    desired_index_ &&
-                    std::any_of(desired_index_->functions.begin(), desired_index_->functions.end(),
-                                [&it](const EdgeFunctionIndexEntry &entry) { return entry.sha256_hex == it->first; });
+                    desired_index_ && std::any_of(desired_index_->functions.begin(), desired_index_->functions.end(),
+                                                  [&it](const EdgeFunctionIndexEntry &entry) {
+                                                      return it->first.rfind(entry.sha256_hex, 0) == 0;
+                                                  });
             if (!referenced) {
                 it = compile_cache_.erase(it);
             } else {

@@ -82,34 +82,42 @@ EdgeFunctionMountTable::build(const EdgeFunctionsState &state, std::span<const s
         table->name_storage_.push_back(function.name);
     }
 
-    // Per project: the mounted functions in declaration order, then a stable
-    // sort by priority so equal priorities keep declaration order.
+    // Per project: the mounted functions split into head and body chains
+    // (declaration order), then a stable sort by priority per chain so equal
+    // priorities keep declaration order.
     struct ProjectGroup {
         std::string_view project;
-        std::vector<EdgeFunctionMounted> mounted;
+        std::vector<EdgeFunctionMounted> head;
+        std::vector<EdgeFunctionMounted> body;
     };
     std::vector<ProjectGroup> groups;
     groups.reserve(project_names.size());
     for (const std::string_view project: project_names) {
-        ProjectGroup group{.project = project, .mounted = {}};
+        ProjectGroup group{.project = project, .head = {}, .body = {}};
         for (std::size_t function_index = 0; function_index < state.index.functions.size(); ++function_index) {
             const EdgeFunctionIndexEntry &function = state.index.functions[function_index];
             const EdgeFunctionMountConfig *mount = matching_mount(function, project);
             if (mount == nullptr) {
                 continue;
             }
-            group.mounted.push_back(EdgeFunctionMounted{
+            EdgeFunctionMounted mounted{
                     .name = table->name_storage_[function_index],
                     .program = table->owned_programs_[function_index].get(),
                     .priority = mount->priority,
                     .ratio = mount->ratio,
-            });
+            };
+            if (function.phase == EdgeFunctionPhase::RequestBody) {
+                group.body.push_back(mounted);
+            } else {
+                group.head.push_back(mounted);
+            }
         }
-        if (!group.mounted.empty()) {
-            std::stable_sort(group.mounted.begin(), group.mounted.end(),
-                             [](const EdgeFunctionMounted &left, const EdgeFunctionMounted &right) noexcept {
-                                 return left.priority < right.priority;
-                             });
+        const auto by_priority = [](const EdgeFunctionMounted &left, const EdgeFunctionMounted &right) noexcept {
+            return left.priority < right.priority;
+        };
+        if (!group.head.empty() || !group.body.empty()) {
+            std::stable_sort(group.head.begin(), group.head.end(), by_priority);
+            std::stable_sort(group.body.begin(), group.body.end(), by_priority);
             groups.push_back(std::move(group));
         }
     }
@@ -120,15 +128,22 @@ EdgeFunctionMountTable::build(const EdgeFunctionsState &state, std::span<const s
 
     std::size_t entry_count = 0;
     for (const ProjectGroup &group: groups) {
-        entry_count += group.mounted.size();
+        entry_count += group.head.size() + group.body.size();
     }
     table->entries_.reserve(entry_count);
     table->group_offsets_.reserve(groups.size() + 1U);
+    table->body_offsets_.reserve(groups.size());
     table->project_names_.reserve(groups.size());
     table->group_offsets_.push_back(0);
     for (ProjectGroup &group: groups) {
         table->project_names_.push_back(group.project);
-        for (EdgeFunctionMounted &mounted: group.mounted) {
+        for (EdgeFunctionMounted &mounted: group.head) {
+            table->entries_.push_back(mounted);
+        }
+        // The body chain occupies the tail of the group span; body_offsets_
+        // marks its start (equal to the span end when the chain is empty).
+        table->body_offsets_.push_back(static_cast<std::uint32_t>(table->entries_.size()));
+        for (EdgeFunctionMounted &mounted: group.body) {
             table->entries_.push_back(mounted);
         }
         table->group_offsets_.push_back(static_cast<std::uint32_t>(table->entries_.size()));
@@ -143,6 +158,17 @@ std::span<const EdgeFunctionMounted> EdgeFunctionMountTable::mounted_for(std::st
     }
     const std::size_t group = static_cast<std::size_t>(found - project_names_.begin());
     const std::uint32_t begin = group_offsets_[group];
+    const std::uint32_t end = body_offsets_[group];
+    return {entries_.data() + begin, end - begin};
+}
+
+std::span<const EdgeFunctionMounted> EdgeFunctionMountTable::mounted_body_for(std::string_view project) const noexcept {
+    const auto found = std::lower_bound(project_names_.begin(), project_names_.end(), project);
+    if (found == project_names_.end() || *found != project) {
+        return {};
+    }
+    const std::size_t group = static_cast<std::size_t>(found - project_names_.begin());
+    const std::uint32_t begin = body_offsets_[group];
     const std::uint32_t end = group_offsets_[group + 1U];
     return {entries_.data() + begin, end - begin};
 }

@@ -715,13 +715,38 @@ bool response_limit_exceeded(const std::optional<std::uint64_t> &limit, std::siz
 // sink's own framing checks.
 class ProxyRequestBodyReader {
 public:
+    // prefetched (nullable) carries body bytes the handler already read from
+    // the exchange to feed body-phase edge functions. It is drained first —
+    // with the same budget and completeness classification as an exchange
+    // read, so a spliced body behaves identically to a streamed one — and
+    // once exhausted the reader falls through to the exchange for the unread
+    // tail (an overflowed prefetch never buffers the whole body).
     ProxyRequestBodyReader(http::HttpExchange &exchange, const http::HttpBodySpec &body_spec,
-                           std::size_t max_request_body_size) noexcept :
+                           std::size_t max_request_body_size, mem::IoBufChain *prefetched = nullptr) noexcept :
         exchange_(exchange), forward_state_(body_spec), content_length_(body_spec.is_content_length()),
-        max_request_body_size_(max_request_body_size) {}
+        max_request_body_size_(max_request_body_size), prefetched_(prefetched) {}
 
     async::Task<common::IoResult<mem::IoBufChain>> read_body(std::size_t max_bytes,
                                                              std::chrono::milliseconds timeout) noexcept {
+        if (prefetched_ != nullptr && (prefetched_->readable_bytes() > 0 || prefetched_->complete())) {
+            const std::size_t take = std::min(max_bytes, prefetched_->readable_bytes());
+            mem::IoBufChain prefix;
+            if (take != 0 && !prefetched_->take_prefix(take, prefix)) {
+                co_return std::unexpected(common::IoErr::NoMem);
+            }
+            const bool drained = prefetched_->readable_bytes() == 0;
+            const bool complete = drained && prefetched_->complete();
+            if (complete) {
+                // The chain is fully handed over; its terminal marker moves
+                // onto the returned prefix so the pipe sees the body end.
+                prefix.mark_complete();
+            }
+            auto accepted = accept_prefetched(std::move(prefix), complete);
+            if (!accepted) {
+                co_return std::unexpected(accepted.error());
+            }
+            co_return std::move(*accepted);
+        }
         auto body = co_await exchange_.read_body(max_bytes, timeout);
         if (!body) {
             co_return std::unexpected(body.error());
@@ -750,6 +775,31 @@ public:
         co_return std::move(*body);
     }
 
+    // Applies the same read-boundary classification to a prefetched prefix so
+    // the splice cannot bypass the Content-Length budget or the route limit.
+    // Plain function by design: it never suspends, and a no-await Task is the
+    // degenerate-coroutine trap (frame locals die at first suspension of the
+    // awaiting caller's continuation assumptions).
+    common::IoResult<mem::IoBufChain> accept_prefetched(mem::IoBufChain prefix, bool complete) noexcept {
+        const std::size_t body_bytes = prefix.readable_bytes();
+        if (!forward_state_.accepts(body_bytes)) {
+            length_mismatch_ = true;
+            return std::unexpected(common::IoErr::Invalid);
+        }
+        if (max_request_body_size_ != 0 &&
+            body_bytes > max_request_body_size_ - std::min(received_body_, max_request_body_size_)) {
+            limit_exceeded_ = true;
+            return std::unexpected(common::IoErr::MessageTooLarge);
+        }
+        received_body_ += body_bytes;
+        forward_state_.record_write(body_bytes);
+        if (complete && content_length_ && !forward_state_.complete()) {
+            length_short_ = true;
+            return std::unexpected(common::IoErr::Invalid);
+        }
+        return prefix;
+    }
+
     // Neutral by design. The pipe aborts both endpoints on failure, but this
     // source is the downstream exchange whose response channel must survive so
     // the executor can still deliver the mapped error response; the upstream
@@ -770,6 +820,7 @@ private:
     bool limit_exceeded_ = false;
     bool length_mismatch_ = false;
     bool length_short_ = false;
+    mem::IoBufChain *prefetched_ = nullptr;
 };
 
 // ClientHttp1Exchange satisfies the pipe writer contract through write()
@@ -1030,7 +1081,8 @@ async::Task<Result<void>> UpstreamAttempt::run() noexcept {
 
     const http::HttpBodySpec &request_body = request_plan_.body_spec();
     if (!request_plan_.request_end_stream()) {
-        ProxyRequestBodyReader body_reader(exchange_, request_body, input_.max_request_body_size);
+        ProxyRequestBodyReader body_reader(exchange_, request_body, input_.max_request_body_size,
+                                           input_.prefetched_body);
         ProxyRequestBodyWriter body_writer(upstream);
         RequestBodyStatsScope request_body_stats(provider_, body_reader, telemetry_, body_writer, endpoint_);
         // The route flush knob is bidirectional, mirroring the response-body

@@ -74,13 +74,18 @@ struct EdgeFunctionLimits {
     std::size_t max_cidr_bytes = 64;
     // Truncation applied to request fields exposed to edge functions.
     std::size_t max_input_field_bytes = 8U << 10U;
+    // Request-body phase budget (design §3.2): bodies at or above this size
+    // never enter the body-function path (streamed untouched); buffered
+    // prefixes beyond it are spliced through without executing functions.
+    std::size_t max_body_phase_bytes = 1U << 20U;
 };
 
 struct AccessConfigLimits {
     // Version 3 added EdgeFunctionLimits; version 4 collapses the
     // edge-function identity to a single slug name (maxFunctionIdBytes
-    // removed, maxFunctionNameBytes is now the slug cap).
-    std::size_t schema_version = 4;
+    // removed, maxFunctionNameBytes is now the slug cap); version 5 adds the
+    // request-body phase budget (maxBodyPhaseBytes).
+    std::size_t schema_version = 5;
     ProjectListLimits project_list;
     ProjectRouteLimits project_route;
     GrayRuleLimits gray_rules;

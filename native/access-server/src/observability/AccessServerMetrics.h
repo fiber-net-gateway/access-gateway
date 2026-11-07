@@ -248,6 +248,15 @@ public:
         // the function stayed mounted but this request's peer bucket fell
         // outside the mount's ratio (or the ratio is 0 = disabled).
         void edge_function_sampled_out(std::string_view function, std::string_view project) noexcept;
+        // Body-phase chains that were mounted for the project but not executed,
+        // by the fixed skip vocabulary (route not opted in / route not a proxy
+        // route / content type outside the whitelist / declared Content-Length
+        // above the buffer cap / streaming prefetch above the cap). The skip
+        // is a per-request decision, so the only labels are project and reason.
+        void edge_function_body_skipped(std::string_view project, std::string_view reason) noexcept;
+        // Bytes actually buffered for a body-phase chain run (bounded by
+        // max_body_phase_bytes; overflow bytes are never buffered).
+        void edge_function_body_buffered(std::uint64_t bytes) noexcept;
 
     private:
         friend class AccessServerMetrics;
@@ -305,6 +314,8 @@ public:
         std::optional<prometheus::DynamicCounter> function_events_dynamic_;
         std::optional<prometheus::DynamicCounter> function_report_overflow_dynamic_;
         std::optional<prometheus::DynamicCounter> function_sampled_out_dynamic_;
+        std::optional<prometheus::DynamicCounter> function_body_skip_dynamic_;
+        prometheus::CounterRef function_body_buffered_bytes_;
         prometheus::HistogramRef request_duration_;
         prometheus::HistogramRef request_body_size_;
         prometheus::HistogramRef response_body_size_;

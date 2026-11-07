@@ -72,17 +72,17 @@ private:
 
 } // namespace
 
-fiber::async::Task<EdgeFunctionOutcome> EdgeFunctionExecutor::run(std::span<const EdgeFunctionMounted> mounted,
-                                                                  http_script::ScriptExchangeCtx &script_context,
-                                                                  AccessRequestTelemetry &telemetry,
-                                                                  std::string_view project, std::string_view host,
-                                                                  bool fail_close) noexcept {
+fiber::async::Task<EdgeFunctionOutcome>
+EdgeFunctionExecutor::run(std::span<const EdgeFunctionMounted> mounted, http_script::ScriptExchangeCtx &script_context,
+                          AccessRequestTelemetry &telemetry, std::string_view project, std::string_view host,
+                          bool fail_close, std::string_view request_body) noexcept {
     if (mounted.empty()) {
         co_return EdgeFunctionOutcome::Continue;
     }
     RequestEdgeContext edge(telemetry);
     edge.project = project;
     edge.host = host;
+    edge.request_body = request_body;
     // Production installs the HTTP upstream services for the request's route
     // scripts; edge functions must see (and leave) the original pointer.
     http_script::HttpScriptServices *const previous_services = script_context.services();

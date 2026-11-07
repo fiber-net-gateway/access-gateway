@@ -639,6 +639,19 @@ EdgeFunctionLibrary::resolve_directive_def(std::string_view type, std::string_vi
 
 const script::Library::HostCallable *EdgeFunctionLibrary::resolve_constant(std::string_view namespace_name,
                                                                            std::string_view key) {
+    // $req.body is the only body-phase surface (design §3.3): a native-string
+    // view over the handler-prefetched bytes. It resolves only while a
+    // request_body-phase script compiles — head-phase scripts that reference
+    // it fail to compile.
+    if (namespace_name == "$req" && key == "body" && body_phase_compile_) {
+        static const script::Library::HostCallable kBodyConstant{
+                .kind = script::Library::HostCallable::Kind::SyncConstant,
+                .userdata = nullptr,
+                .constant = &EdgeFunctionLibrary::body_constant_fn,
+                .debug_name = "$req.body",
+        };
+        return &kBodyConstant;
+    }
     if (namespace_name != "$ctx") {
         return nullptr;
     }
@@ -687,7 +700,17 @@ script::AbiResult EdgeFunctionLibrary::ctx_constant_fn(void *userdata,
     }
 }
 
-std::expected<EdgeFunctionProgram, script::parse::ParseError> EdgeFunctionLibrary::compile(std::string_view source) {
+script::AbiResult EdgeFunctionLibrary::body_constant_fn(void * /*userdata*/,
+                                                        const script::Library::HostCallFrame &frame) noexcept {
+    auto *edge = edge_context_of(frame);
+    if (edge == nullptr) {
+        return invalid_state();
+    }
+    return native_string(edge->request_body);
+}
+
+std::expected<EdgeFunctionProgram, script::parse::ParseError> EdgeFunctionLibrary::compile(std::string_view source,
+                                                                                           EdgeFunctionPhase phase) {
     if (source.size() > limits_.max_script_payload_bytes) {
         return std::unexpected(script::parse::ParseError{
                 .message = "edge-function script exceeds the configured byte limit",
@@ -695,6 +718,7 @@ std::expected<EdgeFunctionProgram, script::parse::ParseError> EdgeFunctionLibrar
         });
     }
     pending_directives_.clear();
+    body_phase_compile_ = phase == EdgeFunctionPhase::RequestBody;
     http_script::ConstPackage::Builder constants;
     // Empty path-variable set: $path.* is a compile error for edge functions,
     // and the http directive stays disabled (contract: no upstream access).
@@ -702,10 +726,12 @@ std::expected<EdgeFunctionProgram, script::parse::ParseError> EdgeFunctionLibrar
                                                                   /*http_directives_enabled=*/false);
     auto compiled = script::compile_script(library_, source, /*allow_assign=*/false);
     if (!compiled) {
+        body_phase_compile_ = false;
         return std::unexpected(std::move(compiled.error()));
     }
     auto package = constants.build();
     if (!package) {
+        body_phase_compile_ = false;
         return std::unexpected(script::parse::ParseError{
                 .message = "failed to finalize edge-function constant package",
                 .position = 0,
@@ -717,6 +743,7 @@ std::expected<EdgeFunctionProgram, script::parse::ParseError> EdgeFunctionLibrar
             .constants = std::move(package),
     };
     pending_directives_.clear();
+    body_phase_compile_ = false;
     return program;
 }
 

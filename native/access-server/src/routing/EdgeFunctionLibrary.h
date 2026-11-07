@@ -1,6 +1,7 @@
 #ifndef FIBER_ACCESS_SERVER_EDGE_FUNCTION_LIBRARY_H
 #define FIBER_ACCESS_SERVER_EDGE_FUNCTION_LIBRARY_H
 
+#include "../config/AccessConfig.h"
 #include "../config/AccessConfigLimits.h"
 #include "Cidr.h"
 
@@ -93,6 +94,10 @@ public:
     std::string_view project;
     std::string_view host;
     std::string_view function;
+    // Buffered request body for request_body-phase functions (design §3.2):
+    // empty unless the handler prefetched the body within the size limit. The
+    // view borrows the handler's buffer and stays valid for the execution.
+    std::string_view request_body;
 };
 
 // Restricted edge-function library (docs/edge-functions-and-waf-design.md
@@ -125,8 +130,12 @@ public:
     EdgeFunctionLibrary &operator=(const EdgeFunctionLibrary &) = delete;
 
     // allow_assign=false; unresolved names are compile errors. Exceeding the
-    // script payload limit fails before parsing.
-    [[nodiscard]] std::expected<EdgeFunctionProgram, script::parse::ParseError> compile(std::string_view source);
+    // script payload limit fails before parsing. Head-phase compilation (the
+    // default) does not resolve $req.body — referencing it is a compile error.
+    // RequestBody-phase compilation resolves $req.body, whose runtime value is
+    // the handler-prefetched body.
+    [[nodiscard]] std::expected<EdgeFunctionProgram, script::parse::ParseError>
+    compile(std::string_view source, EdgeFunctionPhase phase = EdgeFunctionPhase::RequestHead);
 
     [[nodiscard]] const EdgeFunctionLimits &limits() const noexcept { return limits_; }
 
@@ -140,6 +149,7 @@ private:
     [[nodiscard]] static const script::Library::HostCallable *
     resolve_constant_op(void *ctx, std::string_view namespace_name, std::string_view key);
     static script::AbiResult ctx_constant_fn(void *userdata, const script::Library::HostCallFrame &frame) noexcept;
+    static script::AbiResult body_constant_fn(void *userdata, const script::Library::HostCallFrame &frame) noexcept;
 
     [[nodiscard]] script::Library::DirectiveDef *resolve_directive_def(std::string_view type, std::string_view name,
                                                                        const std::vector<script::JsValue> &literals);
@@ -156,6 +166,10 @@ private:
     // Directives created by the in-flight compile() call; moved into the
     // returned EdgeFunctionProgram on success.
     std::vector<std::unique_ptr<EdgeCidrDirectiveDef>> pending_directives_;
+    // Set for the duration of a RequestBody-phase compile so resolve_constant
+    // accepts $req.body; head-phase compiles leave it unset and the reference
+    // becomes a compile error (fail-closed).
+    bool body_phase_compile_ = false;
 };
 
 } // namespace fiber::access_server

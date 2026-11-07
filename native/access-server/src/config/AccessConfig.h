@@ -130,6 +130,10 @@ struct RouteConfig {
     std::optional<std::int64_t> timeout_millis;
     std::optional<std::int64_t> max_client_body_size;
     std::optional<std::int64_t> max_proxy_body_size;
+    // Opt-in for request-body edge functions (design §3.2): only PROXY routes
+    // with this flag buffer their request body (within limits) for
+    // request_body-phase functions. Absent/false keeps the zero-cost stream.
+    std::optional<bool> edge_function_body;
     std::optional<std::int64_t> websocket_timeout_millis;
     std::optional<bool> flush;
     NullableStringSet allows;
@@ -186,6 +190,16 @@ struct EdgeFunctionProjectsSelector {
 // over crc32(peer IP) % kEdgeFunctionFullRatio; 0 is mounted-but-disabled.
 inline constexpr std::int32_t kEdgeFunctionFullRatio = 10000;
 
+// Execution phase of one function (design §3.2). Head functions run before
+// route matching on every matching request; body functions run after the
+// route matched, only for opted-in PROXY routes whose body passed the
+// content-type and size gates, with the buffered body replayed upstream.
+enum class EdgeFunctionPhase : std::uint8_t {
+    RequestHead,
+    RequestBody,
+    Count,
+};
+
 struct EdgeFunctionMountConfig {
     EdgeFunctionProjectsSelector projects;
     std::int32_t priority = 0;
@@ -203,6 +217,9 @@ struct EdgeFunctionIndexEntry {
     // Lowercase-hex sha256 of the script payload. The watcher verifies script
     // content against it and uses it for content-addressed compile reuse.
     std::string sha256_hex;
+    // request_head (default) or request_body; a head-phase script that
+    // references $req.body fails to compile (fail-closed).
+    EdgeFunctionPhase phase = EdgeFunctionPhase::RequestHead;
     std::vector<EdgeFunctionMountConfig> mounts;
 
     bool operator==(const EdgeFunctionIndexEntry &) const = default;
