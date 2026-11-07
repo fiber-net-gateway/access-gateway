@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 2,
+  "groups": [
+    {
+      "id": "xss",
+      "name": "XSS",
+      "mode": "log",
+      "priority": 100,
+      "projects": {
+        "include": ["trade-web", "loan-admin"]
+      }
+    }
+  ],
+  "projectModes": {
+    "trade-web": "block"
+  },
+  "rules": [
+    {
+      "id": "xss-0001",
+      "name": "XSS probe",
+      "group": "xss",
+      "severity": "high",
+      "priority": 50,
+      "action": "block",
+      "phase": "request_head",
+      "match": "strings.match($query.q, \"(?i)<script\")",
+      "scope": {
+        "paths": ["/search"]
+      }
+    }
+  ]
+}

@@ -16,6 +16,7 @@
 #include <fiber/http/HttpExchange.h>
 #include <fiber/prometheus/Counter.h>
 #include <fiber/prometheus/DynamicCounter.h>
+#include <fiber/prometheus/DynamicHistogram.h>
 #include <fiber/prometheus/Gauge.h>
 #include <fiber/prometheus/Histogram.h>
 #include <fiber/prometheus/MetricsRegistry.h>
@@ -232,6 +233,31 @@ public:
         void provider_body_transferred(std::string_view app, std::string_view ip_port, AccessBodyDirection direction,
                                        std::uint64_t bytes) noexcept;
 
+        // Edge-function execution families. Label values are bounded by the
+        // published edge-function model (function names, mount projects) plus a
+        // small fixed reason vocabulary; events carry the script-chosen
+        // event/label pair, which the config limits already bound.
+        void edge_function_evaluated(std::string_view function, std::string_view project) noexcept;
+        void edge_function_duration(std::string_view function, std::chrono::nanoseconds elapsed) noexcept;
+        void edge_function_error(std::string_view function, std::string_view reason) noexcept;
+        void edge_function_event(std::string_view function, std::string_view event, std::string_view label) noexcept;
+        // ctx.report calls dropped because the per-function per-request report
+        // budget was exhausted (design §3.5 overflow counter).
+        void edge_function_report_overflow(std::string_view function) noexcept;
+        // Mounts skipped by sticky ratio sampling (design §3.1 挂载采样):
+        // the function stayed mounted but this request's peer bucket fell
+        // outside the mount's ratio (or the ratio is 0 = disabled).
+        void edge_function_sampled_out(std::string_view function, std::string_view project) noexcept;
+        // Body-phase chains that were mounted for the project but not executed,
+        // by the fixed skip vocabulary (route not opted in / route not a proxy
+        // route / content type outside the whitelist / declared Content-Length
+        // above the buffer cap / streaming prefetch above the cap). The skip
+        // is a per-request decision, so the only labels are project and reason.
+        void edge_function_body_skipped(std::string_view project, std::string_view reason) noexcept;
+        // Bytes actually buffered for a body-phase chain run (bounded by
+        // max_body_phase_bytes; overflow bytes are never buffered).
+        void edge_function_body_buffered(std::uint64_t bytes) noexcept;
+
     private:
         friend class AccessServerMetrics;
 
@@ -282,6 +308,14 @@ public:
         std::optional<prometheus::DynamicCounter> circuit_rejections_dynamic_;
         std::optional<prometheus::DynamicCounter> route_body_bytes_dynamic_;
         std::optional<prometheus::DynamicCounter> provider_body_bytes_dynamic_;
+        std::optional<prometheus::DynamicCounter> function_evaluations_dynamic_;
+        std::optional<prometheus::DynamicHistogram> function_duration_dynamic_;
+        std::optional<prometheus::DynamicCounter> function_errors_dynamic_;
+        std::optional<prometheus::DynamicCounter> function_events_dynamic_;
+        std::optional<prometheus::DynamicCounter> function_report_overflow_dynamic_;
+        std::optional<prometheus::DynamicCounter> function_sampled_out_dynamic_;
+        std::optional<prometheus::DynamicCounter> function_body_skip_dynamic_;
+        prometheus::CounterRef function_body_buffered_bytes_;
         prometheus::HistogramRef request_duration_;
         prometheus::HistogramRef request_body_size_;
         prometheus::HistogramRef response_body_size_;

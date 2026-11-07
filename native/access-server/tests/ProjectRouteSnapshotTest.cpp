@@ -142,10 +142,7 @@ public:
     }
 
     void add_path_var(std::string_view name, std::string_view value) noexcept {
-        path_variables_[path_variable_count_++] = PathVariable{
-                .name = name,
-                .value = value,
-        };
+        path_variables_[path_variable_count_++] = PathVariable{name, value};
     }
 
     void pop_path_var() noexcept { --path_variable_count_; }
@@ -799,8 +796,8 @@ TEST(ProjectRouteSnapshotTest, UsesJavaCrc32cRouteKeyAndConditionalOrder) {
     ASSERT_TRUE(snapshot.match_route_path("/same/42", context));
     EXPECT_EQ(context.route(), &snapshot.routes()[1]);
     ASSERT_EQ(context.path_variables().size(), 1U);
-    EXPECT_EQ(context.path_variables()[0].name, "id");
-    EXPECT_EQ(context.path_variables()[0].value, "42");
+    EXPECT_EQ(context.path_variables()[0].first, "id");
+    EXPECT_EQ(context.path_variables()[0].second, "42");
 
     TestRouteMatchContext no_script_context(snapshot.routes(), variables);
     ASSERT_TRUE(snapshot.match_route_path("/same/43", no_script_context));
@@ -905,8 +902,11 @@ TEST(ProjectRouteSnapshotTest, CompilesJavaScriptRouteAgainstPathConstants) {
     ASSERT_EQ(snapshot.routes().size(), 1U);
     ASSERT_TRUE(snapshot.routes()[0].script_program);
     EXPECT_TRUE(snapshot.routes()[0].script_program->valid());
-    ASSERT_EQ(snapshot.routes()[0].path_constant_indices.size(), 1U);
-    EXPECT_NE(snapshot.routes()[0].path_constant_indices[0], fiber::http_script::kInvalidConstIndex);
+    // $path.id compiled against the pattern's variable name list (the
+    // RouteScriptExtension name check is what makes the compile succeed);
+    // resolution is dynamic per request now, so there is no index table.
+    ASSERT_EQ(snapshot.routes()[0].path_variable_names.size(), 1U);
+    EXPECT_EQ(snapshot.routes()[0].path_variable_names[0], "id");
 }
 
 TEST(ProjectRouteSnapshotTest, RejectsDuplicatePathVariableAndMiddleWildcard) {
@@ -928,8 +928,8 @@ TEST(ProjectRouteSnapshotTest, ReportsMaximumPathVariableCount) {
     TestRouteMatchContext context(snapshot.routes(), variables);
     ASSERT_TRUE(snapshot.match_route_path("/x/y", context));
     ASSERT_EQ(context.path_variables().size(), 2U);
-    EXPECT_EQ(context.path_variables()[0].value, "x");
-    EXPECT_EQ(context.path_variables()[1].value, "y");
+    EXPECT_EQ(context.path_variables()[0].second, "x");
+    EXPECT_EQ(context.path_variables()[1].second, "y");
 }
 
 TEST(ProjectRouteSnapshotTest, RejectsJavaBuildTimeInvalidCombinations) {

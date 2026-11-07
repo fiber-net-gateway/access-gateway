@@ -372,6 +372,7 @@ enum class FailurePoint : std::uint8_t {
     NamingService,
     GrayWatcher,
     TlsWatcher,
+    EdgeWatcher,
     AccessWatcher,
     InitialReadiness,
     SynchronousTlsClosedReplay,
@@ -412,6 +413,7 @@ TestModeProbeResult run_supervisor_probe(bool test_mode) {
     options.config_watcher.project_route_group = "routes-group";
     options.gray_watcher.data_id = "gray";
     options.gray_watcher.group = "gray-group";
+    options.edge_functions_watcher.index_data_id = "edge";
     options.tls_certificate_watcher.data_id = "tls";
     options.tls_certificate_watcher.group = "tls-group";
     // tls_enabled=false keeps start() from waiting for the first certificate
@@ -481,6 +483,7 @@ TEST(AccessControlPlaneSupervisorTest, BackgroundRegistrationRetriesAndPendingAt
     options.config_watcher.project_route_group = "routes-group";
     options.gray_watcher.data_id = "gray";
     options.gray_watcher.group = "gray-group";
+    options.edge_functions_watcher.index_data_id = "edge";
     options.tls_certificate_watcher.data_id = "tls";
     options.tls_certificate_watcher.group = "tls-group";
     options.registration_retry_initial_delay = std::chrono::milliseconds(0);
@@ -578,6 +581,7 @@ TEST_P(AccessControlPlaneSupervisorFailureTest, RollsBackOnlyAttemptedResourcesI
             events, test.point == FailurePoint::ConfigService,
             test.point == FailurePoint::GrayWatcher     ? "gray"
             : test.point == FailurePoint::TlsWatcher    ? "tls"
+            : test.point == FailurePoint::EdgeWatcher   ? "edge"
             : test.point == FailurePoint::AccessWatcher ? "projects"
                                                         : "",
             test.point == FailurePoint::InitialReadiness ? ProjectListReplay::Closed : ProjectListReplay::Valid,
@@ -600,6 +604,7 @@ TEST_P(AccessControlPlaneSupervisorFailureTest, RollsBackOnlyAttemptedResourcesI
         options.config_watcher.project_route_group = "routes-group";
         options.gray_watcher.data_id = "gray";
         options.gray_watcher.group = "gray-group";
+        options.edge_functions_watcher.index_data_id = "edge";
         options.tls_certificate_watcher.data_id = "tls";
         options.tls_certificate_watcher.group = "tls-group";
         options.tls_enabled = test.point == FailurePoint::TlsWatcher || test.point == FailurePoint::AccessWatcher ||
@@ -662,6 +667,8 @@ std::string failure_case_name(const testing::TestParamInfo<FailureCase> &info) {
             return "GrayWatcher";
         case FailurePoint::TlsWatcher:
             return "TlsWatcher";
+        case FailurePoint::EdgeWatcher:
+            return "EdgeWatcher";
         case FailurePoint::AccessWatcher:
             return "AccessWatcher";
         case FailurePoint::InitialReadiness:
@@ -677,9 +684,9 @@ INSTANTIATE_TEST_SUITE_P(
         testing::Values(
                 FailureCase{
                         .expected_events = {"cat.start", "nacos.start", "config.start", "naming.start", "gray.start",
-                                            "tls.start", "projects.start", "routes.demo.start", "projects.stop",
-                                            "routes.demo.stop", "tls.stop", "gray.stop", "naming.stop", "config.stop",
-                                            "nacos.stop", "cat.stop"},
+                                            "tls.start", "edge.start", "projects.start", "routes.demo.start",
+                                            "projects.stop", "routes.demo.stop", "tls.stop", "edge.stop", "gray.stop",
+                                            "naming.stop", "config.stop", "nacos.stop", "cat.stop"},
                 },
                 FailureCase{
                         .point = FailurePoint::CatClient,
@@ -717,18 +724,26 @@ INSTANTIATE_TEST_SUITE_P(
                                             "cat.stop"},
                 },
                 FailureCase{
+                        .point = FailurePoint::EdgeWatcher,
+                        .error = AccessServerRuntimeErrorCode::StartEdgeFunctionsWatcher,
+                        .expected_events = {"cat.start", "nacos.start", "config.start", "naming.start", "gray.start",
+                                            "tls.start", "edge.start", "tls.stop", "gray.stop", "naming.stop",
+                                            "config.stop", "nacos.stop", "cat.stop"},
+                },
+                FailureCase{
                         .point = FailurePoint::AccessWatcher,
                         .error = AccessServerRuntimeErrorCode::StartAccessWatcher,
                         .expected_events = {"cat.start", "nacos.start", "config.start", "naming.start", "gray.start",
-                                            "tls.start", "projects.start", "tls.stop", "gray.stop", "naming.stop",
-                                            "config.stop", "nacos.stop", "cat.stop"},
+                                            "tls.start", "edge.start", "projects.start", "tls.stop", "edge.stop",
+                                            "gray.stop", "naming.stop", "config.stop", "nacos.stop", "cat.stop"},
                 },
                 FailureCase{
                         .point = FailurePoint::InitialReadiness,
                         .error = AccessServerRuntimeErrorCode::InitialConfigUnavailable,
                         .expected_events = {"cat.start", "nacos.start", "config.start", "naming.start", "gray.start",
-                                            "tls.start", "projects.start", "projects.stop", "tls.stop", "gray.stop",
-                                            "naming.stop", "config.stop", "nacos.stop", "cat.stop"},
+                                            "tls.start", "edge.start", "projects.start", "projects.stop", "tls.stop",
+                                            "edge.stop", "gray.stop", "naming.stop", "config.stop", "nacos.stop",
+                                            "cat.stop"},
                 },
                 FailureCase{
                         .point = FailurePoint::SynchronousTlsClosedReplay,

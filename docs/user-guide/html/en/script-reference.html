@@ -394,6 +394,7 @@ strings.trimRight              strings.split                   strings.contains
 strings.contains_any           strings.index                   strings.indexAny
 strings.lastIndex              strings.lastIndexAny            strings.repeat
 strings.substring              strings.toString
+strings.findAll                strings.match
 binary.base64Encode            binary.base64Decode             binary.hex
 binary.fromHex                 binary.getUtf8Bytes
 hash.crc32                     hash.md5                         hash.sha1
@@ -693,6 +694,9 @@ return { values: values, sameObject: same === values };
 
     function repeat(text: string, count: number): string | null;
     function substring(text: string, start?: number, end?: number): string | null;
+
+    function match(text: string, pattern: string): boolean | null;
+    function findAll(text: string, pattern: string): string[] | null;
 
     function toString(): string;
     function toString(value: ScriptValue): string;
@@ -1123,7 +1127,66 @@ return { values: values, sameObject: same === values };
     json: JSON.stringify({ ok: true }) // &quot;{\&quot;ok\&quot;:true}&quot;
 };
 </code></pre>
-<p><code>strings.match</code> and <code>strings.findAll</code> are not registered.</p>
+<h3 id="strings-match-text-pattern">
+  <code>strings.match(text, pattern)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#strings-match-text-pattern"
+    aria-label="Link to `strings.match(text, pattern)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>
+    Parameters: two required strings. <code>pattern</code> is a regular expression using RE2 syntax:
+    no backreferences, no lookahead/lookbehind, and <code>\p{...}</code> Unicode classes are not
+    supported.
+  </li>
+  <li>
+    Matching: unanchored search — returns <code>true</code> when any position of
+    <code>text</code> matches, not a whole-text match test. Patterns are UTF-8:
+    <code>.</code> matches one code point and never a newline; matching is case-sensitive;
+    <code>^</code> and <code>$</code> anchor the start and end of the text (no multi-line mode).
+  </li>
+  <li>
+    Performance: matching runs in linear time in the input length; a pathological pattern cannot
+    cause exponential backtracking.
+  </li>
+  <li>
+    Returns: boolean. A non-string argument, or a <code>pattern</code> that does not compile
+    (including patterns longer than 64 KiB), returns <code>null</code> rather than raising.
+  </li>
+  <li>Exceptions: none.</li>
+</ul>
+<pre><code class="language-javascript">return {
+    hit: strings.match(&quot;order-42 shipped&quot;, &quot;order-\\d+&quot;), // true
+    miss: strings.match(&quot;order-42 shipped&quot;, &quot;^refund&quot;), // false
+    badPattern: strings.match(&quot;text&quot;, &quot;a(&quot;) // null
+};
+</code></pre>
+<h3 id="strings-findall-text-pattern">
+  <code>strings.findAll(text, pattern)</code
+  ><a
+    class="documentation-heading-anchor"
+    href="#strings-findall-text-pattern"
+    aria-label="Link to `strings.findAll(text, pattern)`"
+    >#</a
+  >
+</h3>
+<ul>
+  <li>Parameters and pattern semantics: identical to <code>strings.match(text, pattern)</code>.</li>
+  <li>
+    Returns: array of all non-overlapping matched substrings, left to right (whole matches only;
+    capture groups are not returned). An empty match is reported at most once per position, an empty
+    match immediately after a previous match is skipped, and scanning resumes one code point later.
+    Text with no match returns <code>[]</code>. A non-string argument or a <code>pattern</code> that
+    does not compile returns <code>null</code>.
+  </li>
+  <li>Exceptions: none.</li>
+</ul>
+<pre><code class="language-javascript">return strings.findAll(&quot;id=7, id=11; id=23&quot;, &quot;id=\\d+&quot;);
+// [&quot;id=7&quot;, &quot;id=11&quot;, &quot;id=23&quot;]
+</code></pre>
 <h2 id="8-binary-functions">
   8. Binary functions<a
     class="documentation-heading-anchor"

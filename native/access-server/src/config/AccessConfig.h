@@ -16,6 +16,10 @@ inline constexpr std::string_view kProjectRouteGroup = "ACCESS-SERVER";
 inline constexpr std::string_view kGrayConfigDataId = "ploto.unified-access.gray-match";
 inline constexpr std::string_view kTempClusterConfigDataId = "ploto.test.temp-cluster-apps";
 inline constexpr std::string_view kDefaultNacosGroup = "DEFAULT_GROUP";
+// Edge functions: one versioned index plus one plain-text script per function
+// (docs/edge-functions-and-waf-design.md). Same group as project routes.
+inline constexpr std::string_view kEdgeFunctionsIndexDataId = "ploto.unified-access.edge-functions";
+inline constexpr std::string_view kEdgeFunctionDataIdPrefix = "ploto.unified-access.edge-function.";
 
 enum class RouteType : std::uint8_t {
     Proxy,
@@ -126,6 +130,10 @@ struct RouteConfig {
     std::optional<std::int64_t> timeout_millis;
     std::optional<std::int64_t> max_client_body_size;
     std::optional<std::int64_t> max_proxy_body_size;
+    // Opt-in for request-body edge functions (design §3.2): only PROXY routes
+    // with this flag buffer their request body (within limits) for
+    // request_body-phase functions. Absent/false keeps the zero-cost stream.
+    std::optional<bool> edge_function_body;
     std::optional<std::int64_t> websocket_timeout_millis;
     std::optional<bool> flush;
     NullableStringSet allows;
@@ -165,6 +173,74 @@ struct TempClusterConfigEntry {
 };
 
 using TempClusterConfig = std::vector<TempClusterConfigEntry>;
+
+// Edge-function index (ploto.unified-access.edge-functions): which functions
+// exist, where their script payloads live, and how they are mounted. The wire
+// carries no policy semantics — WAF and any future consumers are control-plane
+// compile targets (docs/edge-functions-and-waf-design.md).
+struct EdgeFunctionProjectsSelector {
+    std::vector<std::string> include;
+    std::vector<std::string> exclude;
+
+    bool operator==(const EdgeFunctionProjectsSelector &) const = default;
+};
+
+// Sampling denominator: mount-level ratio is basis points out of this value.
+// 10000 (kEdgeFunctionFullRatio) means must-run; below it is a sticky sample
+// over crc32(peer IP) % kEdgeFunctionFullRatio; 0 is mounted-but-disabled.
+inline constexpr std::int32_t kEdgeFunctionFullRatio = 10000;
+
+// Execution phase of one function (design §3.2). Head functions run before
+// route matching on every matching request; body functions run after the
+// route matched, only for opted-in PROXY routes whose body passed the
+// content-type and size gates, with the buffered body replayed upstream.
+enum class EdgeFunctionPhase : std::uint8_t {
+    RequestHead,
+    RequestBody,
+    Count,
+};
+
+struct EdgeFunctionMountConfig {
+    EdgeFunctionProjectsSelector projects;
+    std::int32_t priority = 0;
+    // [0, kEdgeFunctionFullRatio]; the codec rejects anything outside.
+    std::int32_t ratio = kEdgeFunctionFullRatio;
+
+    bool operator==(const EdgeFunctionMountConfig &) const = default;
+};
+
+struct EdgeFunctionIndexEntry {
+    // Single slug identity ([a-z0-9-], alphanumeric edges): the script Data ID
+    // is derived from it and it feeds metric labels, event logs, and evidence.
+    // Display names are console-DB-only; renaming is delete-and-create.
+    std::string name;
+    // Lowercase-hex sha256 of the script payload. The watcher verifies script
+    // content against it and uses it for content-addressed compile reuse.
+    std::string sha256_hex;
+    // request_head (default) or request_body; a head-phase script that
+    // references $req.body fails to compile (fail-closed).
+    EdgeFunctionPhase phase = EdgeFunctionPhase::RequestHead;
+    std::vector<EdgeFunctionMountConfig> mounts;
+
+    bool operator==(const EdgeFunctionIndexEntry &) const = default;
+};
+
+struct EdgeFunctionIndexConfig {
+    std::int32_t version = 0;
+    // Declaration order is the same-priority execution tie-break.
+    std::vector<EdgeFunctionIndexEntry> functions;
+
+    bool operator==(const EdgeFunctionIndexConfig &) const = default;
+};
+
+// Script Data ID of a function: derived from the slug name (docs
+// edge-functions-and-waf-design.md §3.1). The wire index never carries it —
+// the watcher and validator call this instead.
+[[nodiscard]] inline std::string edge_function_script_data_id(std::string_view function_name) {
+    std::string data_id(kEdgeFunctionDataIdPrefix);
+    data_id.append(function_name);
+    return data_id;
+}
 
 } // namespace fiber::access_server
 

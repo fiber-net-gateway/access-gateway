@@ -60,6 +60,7 @@ AccessActivationEvidenceStore::AccessActivationEvidenceStore(event::EventLoop &o
     initial->identity = identity_;
     initial->route = route_;
     initial->gray = gray_;
+    initial->edge_functions = edge_functions_;
     initial->tls = tls_;
     initial->route_snapshot_fingerprint_sha256 = route_fingerprint();
     std::shared_ptr<const AccessActivationEvidenceSnapshot> snapshot = std::move(initial);
@@ -84,6 +85,13 @@ AccessGrayActivationEvidenceObserver AccessActivationEvidenceStore::gray_observe
     };
 }
 
+AccessEdgeFunctionsActivationEvidenceObserver AccessActivationEvidenceStore::edge_functions_observer() noexcept {
+    return AccessEdgeFunctionsActivationEvidenceObserver{
+            .context = this,
+            .on_update = &observe_edge_functions,
+    };
+}
+
 AccessTlsActivationEvidenceObserver AccessActivationEvidenceStore::tls_observer() noexcept {
     return AccessTlsActivationEvidenceObserver{
             .context = this,
@@ -98,6 +106,11 @@ void AccessActivationEvidenceStore::observe_route(void *context,
 
 void AccessActivationEvidenceStore::observe_gray(void *context, const AccessGrayActivationEvidence &evidence) noexcept {
     static_cast<AccessActivationEvidenceStore *>(context)->update_gray(evidence);
+}
+
+void AccessActivationEvidenceStore::observe_edge_functions(
+        void *context, const AccessEdgeFunctionsActivationEvidence &evidence) noexcept {
+    static_cast<AccessActivationEvidenceStore *>(context)->update_edge_functions(evidence);
 }
 
 void AccessActivationEvidenceStore::observe_tls(void *context, const AccessTlsActivationEvidence &evidence) noexcept {
@@ -116,6 +129,13 @@ void AccessActivationEvidenceStore::update_gray(const AccessGrayActivationEviden
     publish();
 }
 
+void AccessActivationEvidenceStore::update_edge_functions(
+        const AccessEdgeFunctionsActivationEvidence &evidence) noexcept {
+    FIBER_ASSERT(owner_->in_loop());
+    edge_functions_ = evidence;
+    publish();
+}
+
 void AccessActivationEvidenceStore::update_tls(const AccessTlsActivationEvidence &evidence) noexcept {
     FIBER_ASSERT(owner_->in_loop());
     tls_ = evidence;
@@ -130,6 +150,7 @@ void AccessActivationEvidenceStore::publish() noexcept {
     snapshot->identity = identity_;
     snapshot->route = route_;
     snapshot->gray = gray_;
+    snapshot->edge_functions = edge_functions_;
     snapshot->tls = tls_;
     snapshot->route_snapshot_fingerprint_sha256 = route_fingerprint();
     std::shared_ptr<const AccessActivationEvidenceSnapshot> pinned = std::move(snapshot);

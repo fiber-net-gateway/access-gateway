@@ -264,6 +264,12 @@ DecodeResult<RouteConfig> route_config(const AccessJsonValue &value, std::string
                 return std::unexpected(std::move(decoded.error()));
             }
             result.websocket_timeout_millis = *decoded;
+        } else if (entry.key == "edge_function_body") {
+            auto decoded = nullable_java_bool(entry.value, path);
+            if (!decoded) {
+                return std::unexpected(std::move(decoded.error()));
+            }
+            result.edge_function_body = *decoded;
         } else if (entry.key == "flush") {
             auto decoded = nullable_java_bool(entry.value, path);
             if (!decoded) {

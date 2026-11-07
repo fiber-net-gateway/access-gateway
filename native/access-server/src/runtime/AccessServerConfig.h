@@ -81,6 +81,11 @@ public:
         return default_max_response_body_size_;
     }
     [[nodiscard]] bool test_mode() const noexcept { return test_mode_; }
+    // Strict edge-function posture (design §6): true = a mounted function that
+    // errors before writing a response rejects the request (503) instead of
+    // failing open into routing. Default false — a broken filter must not
+    // take the gateway down.
+    [[nodiscard]] bool edge_function_fail_close() const noexcept { return edge_function_fail_close_; }
     [[nodiscard]] const ClientMetadataResolverOptions &client_metadata_options() const noexcept {
         return client_metadata_options_;
     }
@@ -126,7 +131,7 @@ private:
                        AccessHttpListenerOptions plain_http_server_options, net::SocketAddress metrics_listen_address,
                        AccessActivationEndpointOptions activation_endpoint_options,
                        std::chrono::milliseconds initial_config_timeout, std::size_t default_max_request_body_size,
-                       std::size_t default_max_response_body_size, bool test_mode,
+                       std::size_t default_max_response_body_size, bool test_mode, bool edge_function_fail_close,
                        ClientMetadataResolverOptions client_metadata_options, std::string network_entry,
                        std::string access_log_directory, UpstreamTlsClientPolicy upstream_tls_client_policy,
                        std::chrono::milliseconds upstream_connect_timeout,
@@ -151,6 +156,7 @@ private:
     std::size_t default_max_request_body_size_ = 400U << 20U;
     std::size_t default_max_response_body_size_ = 600U << 20U;
     bool test_mode_ = false;
+    bool edge_function_fail_close_ = false;
     ClientMetadataResolverOptions client_metadata_options_;
     std::string network_entry_;
     std::string access_log_directory_;

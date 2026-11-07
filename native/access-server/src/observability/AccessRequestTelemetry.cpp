@@ -39,7 +39,12 @@ AccessRequestTelemetry::AccessRequestTelemetry(http::HttpExchange &exchange, Acc
     execution_(exchange), response_writer_(http::make_http_response_writer(exchange)),
     client_metadata_((client_metadata_resolver ? *client_metadata_resolver : default_client_metadata_resolver())
                              .resolve(exchange, connection_secure)),
-    trace_(exchange.pool()), observability_(exchange, metrics, cat_client, client_metadata_, trace_) {}
+    trace_(exchange.pool()), trace_services_(trace_),
+    observability_(exchange, metrics, cat_client, client_metadata_, trace_) {
+    // Trace constants ($context / $header.traceparent) resolve through the
+    // services pointer, so it is installed before any script can run.
+    execution_.script_context().set_services(&trace_services_);
+}
 
 AccessRequestTelemetry::~AccessRequestTelemetry() noexcept {
     if (gzip_writer_) {

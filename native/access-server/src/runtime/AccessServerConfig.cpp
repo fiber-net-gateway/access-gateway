@@ -38,6 +38,7 @@ constexpr std::string_view kInitialConfigTimeout = "ACCESS_SERVER_INITIAL_CONFIG
 constexpr std::string_view kMaxRequestBody = "ACCESS_SERVER_MAX_REQUEST_BODY_SIZE";
 constexpr std::string_view kMaxResponseBody = "ACCESS_SERVER_MAX_RESPONSE_BODY_SIZE";
 constexpr std::string_view kTestMode = "ACCESS_SERVER_TEST_MODE";
+constexpr std::string_view kEdgeFunctionFailClose = "ACCESS_SERVER_EDGE_FUNCTION_FAIL_CLOSE";
 constexpr std::string_view kClientMetadataMode = "ACCESS_SERVER_CLIENT_METADATA_MODE";
 constexpr std::string_view kTrustedProxyCidrs = "ACCESS_SERVER_TRUSTED_PROXY_CIDRS";
 constexpr std::string_view kNetworkEntry = "ACCESS_SERVER_NETWORK_ENTRY";
@@ -376,7 +377,7 @@ AccessServerConfig::AccessServerConfig(
         AccessHttpListenerOptions plain_http_server_options, net::SocketAddress metrics_listen_address,
         AccessActivationEndpointOptions activation_endpoint_options, std::chrono::milliseconds initial_config_timeout,
         std::size_t default_max_request_body_size, std::size_t default_max_response_body_size, bool test_mode,
-        ClientMetadataResolverOptions client_metadata_options, std::string network_entry,
+        bool edge_function_fail_close, ClientMetadataResolverOptions client_metadata_options, std::string network_entry,
         std::string access_log_directory, UpstreamTlsClientPolicy upstream_tls_client_policy,
         std::chrono::milliseconds upstream_connect_timeout, ProxyHappyEyeballsPolicy happy_eyeballs_policy,
         AccessDnsMode dns_mode, std::string dns_resolver_config_path, dns::DnsNameserverList dns_override_nameservers,
@@ -394,8 +395,8 @@ AccessServerConfig::AccessServerConfig(
     activation_endpoint_options_(std::move(activation_endpoint_options)),
     initial_config_timeout_(initial_config_timeout), default_max_request_body_size_(default_max_request_body_size),
     default_max_response_body_size_(default_max_response_body_size), test_mode_(test_mode),
-    client_metadata_options_(std::move(client_metadata_options)), network_entry_(std::move(network_entry)),
-    access_log_directory_(std::move(access_log_directory)),
+    edge_function_fail_close_(edge_function_fail_close), client_metadata_options_(std::move(client_metadata_options)),
+    network_entry_(std::move(network_entry)), access_log_directory_(std::move(access_log_directory)),
     upstream_tls_client_policy_(std::move(upstream_tls_client_policy)),
     upstream_connect_timeout_(upstream_connect_timeout), happy_eyeballs_policy_(happy_eyeballs_policy),
     dns_mode_(dns_mode), dns_resolver_config_path_(std::move(dns_resolver_config_path)),
@@ -444,6 +445,7 @@ AccessServerConfig::load_from_string(std::string_view input) {
     std::size_t max_request_body = 400U << 20U;
     std::size_t max_response_body = 600U << 20U;
     bool test_mode = false;
+    bool edge_function_fail_close = false;
     ClientMetadataResolverOptions client_metadata_options;
     std::string network_entry;
     std::string access_log_directory{kDefaultAccessLogDirectory};
@@ -561,6 +563,11 @@ AccessServerConfig::load_from_string(std::string_view input) {
             }
         } else if (entry.key == kTestMode) {
             if (!parse_boolean(value, test_mode)) {
+                return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, entry.line, entry.key,
+                                             "expected true or false"));
+            }
+        } else if (entry.key == kEdgeFunctionFailClose) {
+            if (!parse_boolean(value, edge_function_fail_close)) {
                 return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, entry.line, entry.key,
                                              "expected true or false"));
             }
@@ -908,11 +915,11 @@ AccessServerConfig::load_from_string(std::string_view input) {
     return AccessServerConfig(
             tls_address, std::move(http_options), plain_listen_enabled, plain_address, std::move(plain_http_options),
             metrics_address, std::move(activation_endpoint_options), std::chrono::milliseconds(timeout_millis),
-            max_request_body, max_response_body, test_mode, std::move(client_metadata_options),
-            std::move(network_entry), std::move(access_log_directory), std::move(upstream_tls_client_policy),
-            std::chrono::milliseconds(upstream_connect_timeout_millis), happy_eyeballs_policy, dns_mode,
-            std::move(dns_resolver_config_path), std::move(dns_override_nameservers), std::move(cat_config),
-            std::move(*nacos_config), std::move(watcher_options), std::move(gray_options),
+            max_request_body, max_response_body, test_mode, edge_function_fail_close,
+            std::move(client_metadata_options), std::move(network_entry), std::move(access_log_directory),
+            std::move(upstream_tls_client_policy), std::chrono::milliseconds(upstream_connect_timeout_millis),
+            happy_eyeballs_policy, dns_mode, std::move(dns_resolver_config_path), std::move(dns_override_nameservers),
+            std::move(cat_config), std::move(*nacos_config), std::move(watcher_options), std::move(gray_options),
             std::move(temp_cluster_options), std::move(tls_certificate_options), std::move(service_discovery_options),
             std::move(instance_registration_options), selected_registration_listener);
 }

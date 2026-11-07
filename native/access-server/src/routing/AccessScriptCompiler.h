@@ -2,6 +2,7 @@
 #define FIBER_ACCESS_SERVER_ACCESS_SCRIPT_COMPILER_H
 
 #include "ProjectConfigCompiler.h"
+#include "TraceContextConstExtension.h"
 
 #include <span>
 #include <string>
@@ -32,6 +33,7 @@ private:
     script::std_lib::StdLibrary expression_library_;
     script::std_lib::StdLibrary route_library_;
     http_script::ExchangeConstExtension exchange_const_extension_;
+    TraceContextConstExtension trace_const_extension_;
     http_script::RouteScriptExtension route_extension_;
 };
 

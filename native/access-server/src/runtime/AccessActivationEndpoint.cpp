@@ -251,6 +251,15 @@ std::string encode_page(const AccessActivationEvidenceSnapshot &snapshot, const 
          write_resource(generator, snapshot.gray.resource) && key(generator, "generation") &&
          decimal(generator, snapshot.gray.generation) && key(generator, "ruleCount") &&
          generated(generator.integer(static_cast<std::int64_t>(snapshot.gray.rule_count))) &&
+         generated(generator.map_close()) && key(generator, "edgeFunctions") && generated(generator.map_open()) &&
+         key(generator, "watcherState") && text(generator, snapshot.edge_functions.watcher_state) &&
+         key(generator, "index") && write_resource(generator, snapshot.edge_functions.index) &&
+         key(generator, "generation") && decimal(generator, snapshot.edge_functions.generation) &&
+         key(generator, "functionCount") &&
+         generated(generator.integer(static_cast<std::int64_t>(snapshot.edge_functions.function_count))) &&
+         key(generator, "totalScriptBytes") &&
+         generated(generator.integer(static_cast<std::int64_t>(snapshot.edge_functions.total_script_bytes))) &&
+         key(generator, "activeIndexSha256") && text(generator, snapshot.edge_functions.active_index_sha256) &&
          generated(generator.map_close()) && key(generator, "tls") && generated(generator.map_open()) &&
          key(generator, "enabled") && generated(generator.bool_value(snapshot.tls.enabled)) &&
          key(generator, "watcherState") && text(generator, snapshot.tls.watcher_state) && key(generator, "resource") &&

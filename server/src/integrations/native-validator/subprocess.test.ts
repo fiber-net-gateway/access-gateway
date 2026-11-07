@@ -26,7 +26,7 @@ process.stdin.on('end', () => {
   process.stdout.write(JSON.stringify({
     contractVersion: request.contractVersion,
     valid: payload === 'wire-payload',
-    normalized: { projectVersion: 3 },
+    normalized: { projectVersion: 3, phase: request.phase ?? null },
     errors: [],
   }))
 })
@@ -51,7 +51,18 @@ process.stdin.on('end', () => {
   assert.equal(result.valid, true)
   assert.equal(result.contractVersion, 1)
   assert.equal(result.validatorRevision, 'fixture-revision')
-  assert.deepEqual(result.normalized, { projectVersion: 3 })
+  assert.deepEqual(result.normalized, { projectVersion: 3, phase: null })
+
+  // The phase rides the same stdin JSON: request_body compiles are explicit,
+  // omitted stays absent (native empty = request_head).
+  const phased = await validator.validate({
+    requestId: '12d7e31d-a3c9-4a46-863a-0edc04f135e8',
+    kind: 'edge_function_script',
+    project: '',
+    payload: Buffer.from('wire-payload'),
+    phase: 'request_body',
+  })
+  assert.deepEqual(phased.normalized, { projectVersion: 3, phase: 'request_body' })
 
   await assert.rejects(
     validator.validate({

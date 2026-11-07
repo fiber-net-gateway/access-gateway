@@ -27,6 +27,7 @@ enum class AccessServerRuntimeErrorCode : std::uint8_t {
     StartGrayWatcher,
     StartTempClusterWatcher,
     StartTlsCertificateWatcher,
+    StartEdgeFunctionsWatcher,
     StartAccessWatcher,
     InitialConfigUnavailable,
     InitialConfigTimeout,

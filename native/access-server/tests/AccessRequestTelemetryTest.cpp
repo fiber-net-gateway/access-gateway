@@ -28,6 +28,8 @@
 #include "observability/RequestObservability.h"
 #include "observability/ScriptExecutionContext.h"
 #include "observability/TracePropagation.h"
+#include "routing/AccessScriptCompiler.h"
+#include "routing/RequestTraceServices.h"
 
 namespace {
 
@@ -90,8 +92,7 @@ private:
 };
 
 struct ComponentResult {
-    bool constants_prepared = false;
-    bool trace_bound = false;
+    bool trace_constants_compiled = false;
     bool context_updated = false;
     bool context_removed = false;
     bool upstream_injected = false;
@@ -101,6 +102,7 @@ struct ComponentResult {
     std::string initial_tenant;
     std::string bound_trace_parent;
     std::string updated_tenant;
+    std::string removed_tenant;
     std::string trace_parent;
     std::string upstream_trace_state;
     std::string upstream_trace_id;
@@ -108,28 +110,15 @@ struct ComponentResult {
     std::string copied_value;
 };
 
-std::string read_string_constant(const fiber::http_script::ScriptExchangeCtx &context,
-                                 const fiber::http_script::ConstPackage &constants,
-                                 fiber::http_script::ConstIndex index) {
-    const fiber::script::AbiResult value = context.constant(constants.identity(), index);
-    if (!value || !fiber::script::js_value_is_string(value.value())) {
-        return {};
-    }
-    const fiber::script::NativeStr string = fiber::script::js_value_native_string(value.value());
-    return std::string(string.data, string.len);
-}
-
-fiber::async::DetachedTask run_component_request(fiber::event::EventLoop *loop,
-                                                 std::shared_ptr<const fiber::http_script::ConstPackage> constants,
-                                                 fiber::cat::CatClient *cat_client, ComponentResult *result,
-                                                 std::promise<void> *done) {
+fiber::async::DetachedTask run_component_request(fiber::event::EventLoop *loop, fiber::cat::CatClient *cat_client,
+                                                 ComponentResult *result, std::promise<void> *done) {
     auto transport = std::make_unique<TelemetryTransport>(
             *loop, "GET /telemetry HTTP/1.1\r\n"
                    "Host: api.example.com\r\n"
                    "traceparent: 00-11111111111111111111111111111111-2222222222222222-01\r\n"
                    "tracestate: vendor=opaque,bnrc=aL8nZlUy-1nka5V\r\n"
                    "Connection: close\r\n\r\n");
-    fiber::http::HttpHandler handler = [constants = std::move(constants), cat_client,
+    fiber::http::HttpHandler handler = [cat_client,
                                         result](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
         fiber::access_server::ScriptExecutionContext execution(exchange);
         fiber::access_server::ClientMetadataResolver resolver;
@@ -137,27 +126,46 @@ fiber::async::DetachedTask run_component_request(fiber::event::EventLoop *loop,
         fiber::access_server::TracePropagation trace(exchange.pool());
         fiber::access_server::RequestObservability observability(exchange, nullptr, cat_client, metadata, trace);
 
-        const auto prepared = execution.script_context().prepare_constants(*constants);
-        result->constants_prepared = prepared.has_value();
-        if (prepared) {
-            result->trace_bound = trace.bind_trace_context(execution, *constants).has_value();
-        }
+        // Read the trace constants through the production pipeline: compiled by
+        // AccessScriptCompiler (TraceContextConstExtension) and resolved via the
+        // per-request services pointer, exactly like AccessRequestTelemetry does.
+        fiber::access_server::AccessScriptCompiler compiler;
+        fiber::http_script::ConstPackage::Builder builder;
+        const fiber::access_server::ScriptCompilerAdapter adapter = compiler.adapter();
+        const auto tenant_program = adapter.compile_expression(adapter.context, builder, "$context.tenant", {});
+        const auto trace_parent_program =
+                adapter.compile_expression(adapter.context, builder, "$header.traceparent", {});
+        result->trace_constants_compiled = tenant_program.has_value() && trace_parent_program.has_value();
+        // Lifetime anchor: the compiled programs reference package storage.
+        const std::shared_ptr<const fiber::http_script::ConstPackage> package = builder.build();
+        fiber::access_server::RequestTraceServices services(trace);
+        execution.script_context().set_services(&services);
 
-        const auto tenant_index = constants->find(fiber::http_script::ConstType::Context, "tenant");
-        const auto trace_parent_index = constants->find(fiber::http_script::ConstType::Header, "traceparent");
-        result->initial_tenant = read_string_constant(execution.script_context(), *constants, tenant_index);
-        result->bound_trace_parent = read_string_constant(execution.script_context(), *constants, trace_parent_index);
+        const auto read_constant = [&](const decltype(tenant_program) &program) -> std::string {
+            if (!program || !package) {
+                return {};
+            }
+            const fiber::script::ScriptResult evaluated =
+                    program->exec_sync(fiber::script::JsValue::make_null(), &execution.script_context(),
+                                       execution.script_context().heap());
+            if (!evaluated.is_value() || !fiber::script::js_value_is_string(evaluated.value())) {
+                return {};
+            }
+            const fiber::script::NativeStr string = fiber::script::js_value_native_string(evaluated.value());
+            return std::string(string.data, string.len);
+        };
+
+        result->initial_tenant = read_constant(tenant_program);
+        result->bound_trace_parent = read_constant(trace_parent_program);
 
         result->context_updated =
-                trace.put_trace_context(execution, observability.root_transaction(), "tenant", "green").has_value();
-        result->updated_tenant = read_string_constant(execution.script_context(), *constants, tenant_index);
-        trace.remove_trace_context(execution, observability.root_transaction(), "tenant");
-        const fiber::script::AbiResult removed =
-                execution.script_context().constant(constants->identity(), tenant_index);
-        result->context_removed = !trace.trace_context("tenant") && removed &&
-                                  fiber::script::js_value_type(removed.value()) == fiber::script::JsNodeType::Null;
+                trace.put_trace_context(observability.root_transaction(), "tenant", "green").has_value();
+        result->updated_tenant = read_constant(tenant_program);
+        trace.remove_trace_context(observability.root_transaction(), "tenant");
+        result->removed_tenant = read_constant(tenant_program);
+        result->context_removed = !trace.trace_context("tenant") && result->removed_tenant.empty();
 
-        (void) trace.put_trace_context(execution, observability.root_transaction(), "region", "east");
+        (void) trace.put_trace_context(observability.root_transaction(), "region", "east");
         fiber::http::HttpHeaders upstream_headers(execution.pool());
         fiber::access_server::AccessProviderTransaction provider;
         result->upstream_injected =
@@ -187,11 +195,6 @@ fiber::async::DetachedTask run_component_request(fiber::event::EventLoop *loop,
 }
 
 ComponentResult run_component_request(bool wrong_cat_loop = false) {
-    fiber::http_script::ConstPackage::Builder builder;
-    (void) builder.add_constant(fiber::http_script::ConstType::Context, "tenant");
-    (void) builder.add_constant(fiber::http_script::ConstType::Header, "traceparent");
-    auto constants = builder.build();
-
     fiber::event::EventLoopGroup group(wrong_cat_loop ? 2 : 1);
     std::unique_ptr<fiber::cat::CatClient> cat_client;
     if (wrong_cat_loop) {
@@ -225,7 +228,7 @@ ComponentResult run_component_request(bool wrong_cat_loop = false) {
     auto completed = done.get_future();
     const std::size_t request_worker = wrong_cat_loop ? 1 : 0;
     fiber::async::spawn(group.at(request_worker), [&]() {
-        return run_component_request(&group.at(request_worker), std::move(constants), cat_client.get(), &result, &done);
+        return run_component_request(&group.at(request_worker), cat_client.get(), &result, &done);
     });
     EXPECT_EQ(completed.wait_for(2s), std::future_status::ready);
     group.stop();
@@ -233,14 +236,17 @@ ComponentResult run_component_request(bool wrong_cat_loop = false) {
     return result;
 }
 
-TEST(AccessRequestTelemetryTest, KeepsFacadeComposedOfNonPolymorphicRequestComponents) {
+TEST(AccessRequestTelemetryTest, KeepsFacadeComposedOfRequestComponents) {
     EXPECT_GE(sizeof(fiber::access_server::AccessRequestTelemetry),
               sizeof(fiber::access_server::ScriptExecutionContext) + sizeof(fiber::http::HttpResponseWriter) +
                       sizeof(std::optional<fiber::http::GzipResponseWriter>) +
                       sizeof(fiber::access_server::ClientMetadata) + sizeof(fiber::access_server::TracePropagation) +
+                      sizeof(fiber::access_server::RequestTraceServices) +
                       sizeof(fiber::access_server::RequestObservability));
     EXPECT_FALSE(std::is_polymorphic_v<fiber::access_server::ScriptExecutionContext>);
-    EXPECT_FALSE(std::is_polymorphic_v<fiber::access_server::TracePropagation>);
+    // TracePropagation implements the TraceConstSource interface for the
+    // $context / $header.traceparent script constants.
+    EXPECT_TRUE(std::is_polymorphic_v<fiber::access_server::TracePropagation>);
     EXPECT_FALSE(std::is_polymorphic_v<fiber::access_server::RequestObservability>);
     EXPECT_FALSE(std::is_polymorphic_v<fiber::http::GzipResponseWriter>);
 }
@@ -248,8 +254,7 @@ TEST(AccessRequestTelemetryTest, KeepsFacadeComposedOfNonPolymorphicRequestCompo
 TEST(AccessRequestTelemetryTest, ComponentsPreserveW3cAndScriptStateWhenCatIsDisabled) {
     const ComponentResult result = run_component_request();
 
-    EXPECT_TRUE(result.constants_prepared);
-    EXPECT_TRUE(result.trace_bound);
+    EXPECT_TRUE(result.trace_constants_compiled);
     EXPECT_EQ(result.initial_tenant, "blue");
     EXPECT_EQ(result.bound_trace_parent, "00-11111111111111111111111111111111-2222222222222222-01");
     EXPECT_TRUE(result.context_updated);
@@ -271,7 +276,7 @@ TEST(AccessRequestTelemetryTest, CatCreationFailureDoesNotAffectW3cOrScriptState
 
     EXPECT_TRUE(result.cat_disabled);
     EXPECT_TRUE(result.provider_disabled);
-    EXPECT_TRUE(result.trace_bound);
+    EXPECT_TRUE(result.trace_constants_compiled);
     EXPECT_EQ(result.initial_tenant, "blue");
     EXPECT_TRUE(result.upstream_injected);
     EXPECT_TRUE(result.upstream_trace_state.starts_with("vendor=opaque,bnrc="));

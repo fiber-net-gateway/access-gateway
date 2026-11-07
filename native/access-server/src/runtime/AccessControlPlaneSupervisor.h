@@ -9,6 +9,7 @@
 #include "AccessInstanceRegistration.h"
 #include "AccessRuntimeCoordinator.h"
 #include "AccessServiceDiscovery.h"
+#include "EdgeFunctionsWatcher.h"
 #include "GrayConfigWatcher.h"
 #include "GrayMatchStore.h"
 #include "NacosStatusMonitor.h"
@@ -69,6 +70,7 @@ struct AccessControlPlaneOptions {
     AccessActivationEndpointOptions activation_endpoint;
     AccessConfigWatcherOptions config_watcher;
     GrayConfigWatcherOptions gray_watcher;
+    EdgeFunctionsWatcherOptions edge_functions_watcher;
     TempClusterConfigWatcherOptions temp_cluster_watcher;
     TlsCertificateWatcherOptions tls_certificate_watcher;
     AccessServiceDiscoveryOptions service_discovery;
@@ -183,6 +185,7 @@ private:
     RouteConfigStore route_store_;
     AccessConfigWatcher config_watcher_;
     GrayConfigWatcher gray_watcher_;
+    EdgeFunctionsWatcher edge_functions_watcher_;
     TempClusterConfigWatcher temp_cluster_watcher_;
     TlsCertificateStore tls_certificate_store_;
     TlsCertificateWatcher tls_certificate_watcher_;
@@ -211,6 +214,7 @@ private:
     bool config_service_start_attempted_ = false;
     bool naming_service_start_attempted_ = false;
     bool gray_watcher_started_ = false;
+    bool edge_functions_watcher_started_ = false;
     bool temp_cluster_watcher_started_ = false;
     bool tls_certificate_watcher_started_ = false;
     bool config_watcher_started_ = false;

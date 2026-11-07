@@ -3,6 +3,7 @@
 #include "config/AccessConfigCodec.h"
 #include "routing/AccessScriptCompiler.h"
 #include "routing/Cidr.h"
+#include "routing/EdgeFunctionLibrary.h"
 #include "routing/GrayMatchCompiler.h"
 #include "routing/ProjectConfigCompiler.h"
 
@@ -35,6 +36,7 @@ enum RequestField : std::uint8_t {
     Kind = 1U << 2U,
     Project = 1U << 3U,
     Payload = 1U << 4U,
+    Phase = 1U << 5U,
 };
 
 struct ValidatorRequest {
@@ -43,6 +45,9 @@ struct ValidatorRequest {
     std::string_view kind;
     std::string_view project;
     std::string_view payload_base64;
+    // Optional, kind=edge_function_script only: compile the script in the
+    // request_body phase so $req.body resolves (empty = request_head).
+    std::string_view phase;
     std::uint8_t present = 0;
 };
 
@@ -61,6 +66,9 @@ struct ValidationSummary {
     std::optional<std::size_t> estimated_snapshot_bytes;
     std::optional<std::size_t> static_response_bytes;
     std::optional<std::size_t> compiled_program_count;
+    std::optional<std::size_t> function_count;
+    std::optional<std::size_t> script_bytes;
+    std::optional<std::size_t> cidr_directive_count;
 };
 
 struct ValidationResult {
@@ -124,6 +132,12 @@ ObjectFieldStatus parse_request_field(std::string_view field, JsonParser &parser
         }
         return json::to_object_field_status(json::parse_text(parser, pool, out.payload_base64));
     }
+    if (field == "phase") {
+        if (!set_present(out, RequestField::Phase, parser)) {
+            return ObjectFieldStatus::Error;
+        }
+        return json::to_object_field_status(json::parse_text(parser, pool, out.phase));
+    }
     (void) parser.fail("unknown validator request field");
     return ObjectFieldStatus::Error;
 }
@@ -176,7 +190,8 @@ std::optional<ValidationError> decode_request(std::string_view input, ValidatorR
                 .message = "requestId must be 1-128 bytes",
         };
     }
-    if (request.kind != "project_route" && request.kind != "gray_rules") {
+    if (request.kind != "project_route" && request.kind != "gray_rules" && request.kind != "edge_function_index" &&
+        request.kind != "edge_function_script") {
         return ValidationError{
                 .code = "invalid_request",
                 .field = "kind",
@@ -335,6 +350,77 @@ ValidationResult validate_gray(std::string_view payload) {
     };
 }
 
+ValidationResult validate_edge_function_index(std::string_view payload) {
+    auto parsed = parse_edge_function_index_config(payload);
+    if (!parsed) {
+        return ValidationResult{.errors = {to_validation_error(std::move(parsed.error()))}};
+    }
+    if (!parsed->has_value()) {
+        // The watcher treats empty content as keep-current; a validation
+        // request is always about a publishable candidate, and only JSON
+        // null (or an empty functions array) publishes.
+        return ValidationResult{
+                .errors = {{
+                        .code = "invalid_request",
+                        .field = "payloadBase64",
+                        .message = "empty payload is keep-current, not a publishable edge-function index",
+                }},
+        };
+    }
+    if (auto limited = validate_edge_function_index_limits(**parsed); !limited) {
+        return ValidationResult{.errors = {to_validation_error(std::move(limited.error()))}};
+    }
+    return ValidationResult{
+            .valid = true,
+            .summary = {.function_count = (**parsed).functions.size()},
+    };
+}
+
+ValidationResult validate_edge_function_script(std::string_view payload, std::string_view phase) {
+    if (payload.size() > kAccessConfigLimits.edge_functions.max_script_payload_bytes) {
+        return ValidationResult{
+                .errors = {{
+                        .code = "limit_exceeded",
+                        .field = "payloadBase64",
+                        .message = "edge-function script exceeds maxScriptPayloadBytes",
+                }},
+        };
+    }
+    const EdgeFunctionPhase compile_phase = phase.empty() || phase == "request_head" ? EdgeFunctionPhase::RequestHead
+                                            : phase == "request_body"                ? EdgeFunctionPhase::RequestBody
+                                                                                     : EdgeFunctionPhase::Count;
+    if (compile_phase == EdgeFunctionPhase::Count) {
+        return ValidationResult{
+                .errors = {{
+                        .code = "invalid_request",
+                        .field = "phase",
+                        .message = "phase must be request_head or request_body",
+                }},
+        };
+    }
+    EdgeFunctionLibrary library;
+    auto program = library.compile(payload, compile_phase);
+    if (!program) {
+        return ValidationResult{
+                .errors = {{
+                        .code = "script_compile_failed",
+                        .field = "payloadBase64",
+                        .offset = program.error().position,
+                        .message = std::move(program.error().message),
+                }},
+        };
+    }
+    return ValidationResult{
+            .valid = true,
+            .summary =
+                    {
+                            .compiled_program_count = 1,
+                            .script_bytes = payload.size(),
+                            .cidr_directive_count = program->cidr_directives.size(),
+                    },
+    };
+}
+
 bool generated(Generator::Result result) noexcept { return result == Generator::Result::OK; }
 
 bool write_key(Generator &generator, std::string_view key) {
@@ -356,6 +442,7 @@ std::string encode_config_limits() {
     const ProjectListLimits &project_list = kAccessConfigLimits.project_list;
     const ProjectRouteLimits &project_route = kAccessConfigLimits.project_route;
     const GrayRuleLimits &gray_rules = kAccessConfigLimits.gray_rules;
+    const EdgeFunctionLimits &edge_functions = kAccessConfigLimits.edge_functions;
 
     bool ok = generated(generator.map_open()) &&
               write_size(generator, "schemaVersion", kAccessConfigLimits.schema_version) &&
@@ -398,8 +485,23 @@ std::string encode_config_limits() {
               write_size(generator, "maxEntryBytes", gray_rules.max_entry_bytes) &&
               write_size(generator, "maxCidrsPerRule", gray_rules.max_cidrs_per_rule) &&
               write_size(generator, "maxCidrBytes", gray_rules.max_cidr_bytes) && generated(generator.map_close()) &&
-              generated(generator.map_close());
-    return ok ? output : std::string(R"({"schemaVersion":2,"error":"encoding_failed"})");
+              write_key(generator, "edgeFunctions") && generated(generator.map_open()) &&
+              write_size(generator, "maxPayloadBytes", edge_functions.max_payload_bytes) &&
+              write_size(generator, "maxFunctions", edge_functions.max_functions) &&
+              write_size(generator, "maxFunctionNameBytes", edge_functions.max_function_name_bytes) &&
+              write_size(generator, "maxMountsPerFunction", edge_functions.max_mounts_per_function) &&
+              write_size(generator, "maxGlobsPerSelector", edge_functions.max_globs_per_selector) &&
+              write_size(generator, "maxGlobBytes", edge_functions.max_glob_bytes) &&
+              write_size(generator, "maxScriptPayloadBytes", edge_functions.max_script_payload_bytes) &&
+              write_size(generator, "maxTotalScriptBytes", edge_functions.max_total_script_bytes) &&
+              write_size(generator, "maxReportsPerExecution", edge_functions.max_reports_per_execution) &&
+              write_size(generator, "maxCidrDirectivesPerScript", edge_functions.max_cidr_directives_per_script) &&
+              write_size(generator, "maxCidrsPerDirective", edge_functions.max_cidrs_per_directive) &&
+              write_size(generator, "maxCidrBytes", edge_functions.max_cidr_bytes) &&
+              write_size(generator, "maxInputFieldBytes", edge_functions.max_input_field_bytes) &&
+              write_size(generator, "maxBodyPhaseBytes", edge_functions.max_body_phase_bytes) &&
+              generated(generator.map_close()) && generated(generator.map_close());
+    return ok ? output : std::string(R"({"schemaVersion":5,"error":"encoding_failed"})");
 }
 
 std::string encode_response(const ValidationResult &result) {
@@ -437,6 +539,15 @@ std::string encode_response(const ValidationResult &result) {
         }
         if (ok && result.summary.compiled_program_count) {
             ok = write_size(generator, "compiledProgramCount", *result.summary.compiled_program_count);
+        }
+        if (ok && result.summary.function_count) {
+            ok = write_size(generator, "functionCount", *result.summary.function_count);
+        }
+        if (ok && result.summary.script_bytes) {
+            ok = write_size(generator, "scriptBytes", *result.summary.script_bytes);
+        }
+        if (ok && result.summary.cidr_directive_count) {
+            ok = write_size(generator, "cidrDirectiveCount", *result.summary.cidr_directive_count);
         }
         ok = ok && generated(generator.map_close());
     }
@@ -477,8 +588,16 @@ std::string process_native_validator_request(std::string_view input) {
                 }},
         });
     }
-    return encode_response(request.kind == "project_route" ? validate_project(request.project, payload)
-                                                           : validate_gray(payload));
+    if (request.kind == "project_route") {
+        return encode_response(validate_project(request.project, payload));
+    }
+    if (request.kind == "gray_rules") {
+        return encode_response(validate_gray(payload));
+    }
+    if (request.kind == "edge_function_index") {
+        return encode_response(validate_edge_function_index(payload));
+    }
+    return encode_response(validate_edge_function_script(payload, request.phase));
 }
 
 std::string native_validator_input_too_large_response() {

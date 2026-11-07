@@ -228,6 +228,7 @@ TEST(AccessServerConfigTest, LoadsExplicitRuntimeAndCompatibilityKeys) {
         ACCESS_SERVER_MAX_REQUEST_BODY_SIZE=12345
         ACCESS_SERVER_MAX_RESPONSE_BODY_SIZE=629145600
         ACCESS_SERVER_TEST_MODE=true
+        ACCESS_SERVER_EDGE_FUNCTION_FAIL_CLOSE=true
         ACCESS_SERVER_CLIENT_METADATA_MODE=trusted_proxy
         ACCESS_SERVER_TRUSTED_PROXY_CIDRS=10.0.0.0/8,2001:db8::/32
         ACCESS_SERVER_ACCESS_LOG_DIR=/var/log/access
@@ -260,6 +261,7 @@ TEST(AccessServerConfigTest, LoadsExplicitRuntimeAndCompatibilityKeys) {
     EXPECT_EQ(config->default_max_request_body_size(), 12345U);
     EXPECT_EQ(config->default_max_response_body_size(), 629145600U);
     EXPECT_TRUE(config->test_mode());
+    EXPECT_TRUE(config->edge_function_fail_close());
     EXPECT_EQ(config->client_metadata_options().mode, ClientMetadataMode::TrustedProxy);
     EXPECT_EQ(config->client_metadata_options().trusted_proxy_cidrs.size(), 2u);
     EXPECT_FALSE(config->client_metadata_options().connection_secure);
@@ -540,6 +542,18 @@ TEST(AccessServerConfigTest, RejectsNonBooleanTestMode) {
     ASSERT_FALSE(config);
     EXPECT_EQ(config.error().code, AccessServerConfigErrorCode::InvalidValue);
     EXPECT_EQ(config.error().key, "ACCESS_SERVER_TEST_MODE");
+}
+
+TEST(AccessServerConfigTest, FailCloseDefaultsToFalseAndRejectsGarbage) {
+    auto baseline = AccessServerConfig::load_from_string("NACOS_SERVER_ADDRESSES=127.0.0.1\n");
+    ASSERT_TRUE(baseline) << baseline.error().detail;
+    EXPECT_FALSE(baseline->edge_function_fail_close());
+
+    auto config = AccessServerConfig::load_from_string("NACOS_SERVER_ADDRESSES=127.0.0.1\n"
+                                                       "ACCESS_SERVER_EDGE_FUNCTION_FAIL_CLOSE=yes\n");
+    ASSERT_FALSE(config);
+    EXPECT_EQ(config.error().code, AccessServerConfigErrorCode::InvalidValue);
+    EXPECT_EQ(config.error().key, "ACCESS_SERVER_EDGE_FUNCTION_FAIL_CLOSE");
 }
 
 TEST(AccessServerConfigTest, RejectsAccessLogDirectoryWithEmbeddedNul) {

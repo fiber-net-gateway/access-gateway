@@ -18,6 +18,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include <fiber/async/Task.h>
@@ -76,10 +77,10 @@ struct CompiledRoute {
     std::optional<script::Script> condition_program;
     std::shared_ptr<script::Script> script_program;
     std::vector<std::string> path_variable_names;
-    // Aligned with path_variable_names. Entries not referenced by any script use
-    // kInvalidConstIndex and are skipped when a candidate route binds captures.
-    std::vector<http_script::ConstIndex> path_constant_indices;
     std::optional<std::int64_t> max_client_body_size;
+    // Design §3.2: PROXY routes with this flag buffer their request body
+    // (within limits) for request_body-phase edge functions.
+    bool edge_function_body = false;
     // Present for every route type that enables response gzip. Static RESPONSE
     // bodies additionally retain their precompressed representation below;
     // PROXY, SCRIPT, and TEMPLATE responses use this level at request time.
@@ -95,10 +96,9 @@ struct CompiledHost {
     HostStrategyConfig strategy;
 };
 
-struct PathVariable {
-    std::string_view name;
-    std::string_view value;
-};
+// Route path captures: (pattern variable name, captured request text) pairs —
+// the element type ScriptExchangeCtx::set_path_vars consumes.
+using PathVariable = std::pair<std::string_view, std::string_view>;
 
 class ProjectConfigCompiler;
 

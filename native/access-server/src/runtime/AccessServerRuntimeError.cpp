@@ -55,6 +55,8 @@ std::string_view access_server_runtime_stage_name(AccessServerRuntimeErrorCode c
             return "subscribe temp-cluster configuration";
         case AccessServerRuntimeErrorCode::StartTlsCertificateWatcher:
             return "subscribe TLS certificate configuration";
+        case AccessServerRuntimeErrorCode::StartEdgeFunctionsWatcher:
+            return "subscribe edge-function configuration";
         case AccessServerRuntimeErrorCode::StartAccessWatcher:
             return "subscribe access configuration";
         case AccessServerRuntimeErrorCode::InitialConfigUnavailable:

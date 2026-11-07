@@ -45,6 +45,8 @@ interface YamlCodeEditorProps {
   ariaLabel: string
   diagnostics: readonly YamlCodeEditorDiagnostic[]
   language?: 'yaml' | 'javascript'
+  /** Set false inside dialogs so Tab moves focus instead of indenting. */
+  tabIndents?: boolean
   value: string
   onChange(value: string): void
   onSave(): void
@@ -187,6 +189,7 @@ export function YamlCodeEditor({
   ariaLabel,
   diagnostics,
   language = 'yaml',
+  tabIndents = true,
   value,
   onChange,
   onSave,
@@ -244,7 +247,7 @@ export function YamlCodeEditor({
                 return true
               },
             },
-            indentWithTab,
+            ...(tabIndents ? [indentWithTab] : []),
             ...closeBracketsKeymap,
             ...completionKeymap,
             ...defaultKeymap,

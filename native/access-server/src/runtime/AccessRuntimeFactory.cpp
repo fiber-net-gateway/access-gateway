@@ -135,6 +135,7 @@ AccessRuntimeFactory::create(event::EventLoop &accept_loop, event::EventLoop &na
                             },
                     .default_max_request_body_size = config.default_max_request_body_size(),
                     .test_mode = config.test_mode(),
+                    .edge_function_fail_close = config.edge_function_fail_close(),
             }));
     if (!data_plane) {
         return std::unexpected(AccessServerRuntimeError{

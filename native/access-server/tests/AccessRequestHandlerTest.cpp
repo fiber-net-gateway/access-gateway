@@ -903,6 +903,33 @@ TEST(AccessRequestHandlerTest, AcceptsUnderscoreRequestHeaderNames) {
     EXPECT_EQ(response_body(response), "value=forwarded");
 }
 
+TEST(AccessRequestHandlerTest, PathVarConditionSeesEachCandidatesOwnCapture) {
+    // Two patterns both match "/api/foo" with the same variable name capturing
+    // different text (/api/:id -> id=foo; /:id/foo -> id=api). The earlier
+    // candidate's condition reads $path.id and fails; the later candidate must
+    // observe its own capture, not a memoized value from the earlier one.
+    // Guards the upstream fix (set_path_vars resets the constant memo on
+    // rebind); Fiber pins it with RouteVarTest.PathVarRebindInvalidatesMemoizedConstant.
+    AccessScriptRuntime scripts;
+    RouteConfig first = response_route("/api/:id", "first");
+    first.condition = "$path.id == 'never'";
+    RouteConfig second = response_route("/:id/foo", "second-match");
+    second.condition = "$path.id == 'api'";
+
+    RouteConfigStore store(scripts.compiler_adapter());
+    publish(store, project({}, {std::move(first), std::move(second)}));
+
+    AccessRequestHandlerOptions options;
+    const std::string response = run_request(store,
+                                             "GET /api/foo HTTP/1.1\r\n"
+                                             "Host: api.example.com\r\n"
+                                             "Connection: close\r\n\r\n",
+                                             scripts.request_adapter());
+
+    EXPECT_NE(response.find(" 200 "), std::string::npos) << response;
+    EXPECT_EQ(response_body(response), "second-match");
+}
+
 TEST(AccessRequestHandlerTest, MatchesRecordedConditionAndTemplateSyntaxSnapshot) {
     AccessScriptRuntime scripts;
     RouteConfig conditional =
@@ -946,6 +973,32 @@ TEST(AccessRequestHandlerTest, MatchesRecordedConditionAndTemplateSyntaxSnapshot
               "header_default=header-blue;context=context-blue;cookie=cookie-blue;query=/next;"
               "request_path=/corpus/segment/rest;request_query=redirect=%2Fnext;request_method=GET;"
               "origin=https://origin.example.test;forwarded_for=192.0.2.20;remote_addr=192.0.2.10");
+}
+
+TEST(AccessRequestHandlerTest, RoutesCanUseLinearRegexScriptFunctions) {
+    // strings.match / strings.findAll arrive with the pinned Fiber's regex
+    // engine; this guards them through the real script runtime and handler
+    // (the Fiber-owned suite does not compile on every deployment host).
+    AccessScriptRuntime scripts;
+    RouteConfig regex_route = response_route("/corpus/*tail", "regex-ok", 203);
+    regex_route.condition = "strings.match($path.tail, 'gm') && strings.match($path.tail, '^segment/') && "
+                            "strings.match($path.tail, '/rest$') && strings.match($path.tail, 'GM') == false && "
+                            "strings.match($path.tail, 'z+') == false && "
+                            "length(strings.findAll($path.tail, 'e')) == 3 && "
+                            "length(strings.findAll($path.tail, 'zzz')) == 0";
+    RouteConfig fallback = response_route("/corpus/*tail", "fallback");
+
+    RouteConfigStore store(scripts.compiler_adapter());
+    publish(store, project({}, {std::move(regex_route), std::move(fallback)}));
+
+    const std::string response = run_request(store,
+                                             "GET /corpus/segment/rest HTTP/1.1\r\n"
+                                             "Host: api.example.com\r\n"
+                                             "Connection: close\r\n\r\n",
+                                             scripts.request_adapter());
+
+    EXPECT_TRUE(response.starts_with("HTTP/1.1 203 "));
+    EXPECT_EQ(response_body(response), "regex-ok");
 }
 
 TEST(AccessRequestHandlerTest, BindsBnrcContextAndGeneratedTraceParentBeforeRouteScripts) {

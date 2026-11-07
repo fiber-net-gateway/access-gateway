@@ -105,6 +105,29 @@ test('reports missing and unknown route fields before server validation', () => 
   assert.ok(result.issues.some((issue) => issue.code === 'UNKNOWN_ROUTE_FIELD'))
 })
 
+test('edge_function_body is accepted on PROXY routes and rejected elsewhere', () => {
+  const proxy = analyzeRouteSource({
+    id: crypto.randomUUID(),
+    format: 'yaml',
+    source: 'path: /api/*\ntype: PROXY\nservice: users/stable\nedge_function_body: true',
+  })
+  assert.deepEqual(proxy.issues, [])
+
+  const notProxy = analyzeRouteSource({
+    id: crypto.randomUUID(),
+    format: 'yaml',
+    source: 'path: /health\ntype: RESPONSE\nstatus: 200\nedge_function_body: true',
+  })
+  assert.ok(notProxy.issues.some((issue) => issue.code === 'ROUTE_EDGE_FUNCTION_BODY_NOT_PROXY'))
+
+  const notBoolean = analyzeRouteSource({
+    id: crypto.randomUUID(),
+    format: 'yaml',
+    source: 'path: /api/*\ntype: PROXY\nservice: users/stable\nedge_function_body: maybe',
+  })
+  assert.ok(notBoolean.issues.some((issue) => issue.code === 'INVALID_ROUTE_EDGE_FUNCTION_BODY'))
+})
+
 test('rejects a scalar response_headers block even though it is valid YAML syntax', () => {
   const result = analyzeRouteSource({
     id: crypto.randomUUID(),

@@ -777,6 +777,7 @@ std::expected<CompiledRoute, AccessConfigError> compile_route(std::string_view p
                                            "script is only valid for SCRIPT routes"));
     } else if (route.type == RouteType::Response) {
         route.max_client_body_size = source.max_client_body_size;
+        route.edge_function_body = source.edge_function_body.value_or(false);
         if (source.status < 100 || source.status >= 1000) {
             return std::unexpected(
                     route_error(AccessConfigErrorCode::OutOfRange, route_index, "status", "invalid status code"));
@@ -873,6 +874,7 @@ std::expected<CompiledRoute, AccessConfigError> compile_route(std::string_view p
         route.response.emplace(std::move(response));
     } else {
         route.max_client_body_size = source.max_client_body_size;
+        route.edge_function_body = source.edge_function_body.value_or(false);
         if (source.timeout_millis && *source.timeout_millis < 5) {
             return std::unexpected(
                     route_error(AccessConfigErrorCode::OutOfRange, route_index, "timeout", "timeout is too small"));
@@ -1157,12 +1159,6 @@ ProjectSnapshotResult ProjectConfigCompiler::compile(std::string_view project, c
     snapshot.const_package_ = constants.build();
     if (!snapshot.const_package_) {
         return std::unexpected(project_error("routes", "failed to finalize route constant package"));
-    }
-    for (CompiledRoute &route: snapshot.routes_) {
-        route.path_constant_indices.reserve(route.path_variable_names.size());
-        for (const std::string &name: route.path_variable_names) {
-            route.path_constant_indices.push_back(snapshot.const_package_->find(http_script::ConstType::Path, name));
-        }
     }
 
     std::vector<HostPattern> patterns;

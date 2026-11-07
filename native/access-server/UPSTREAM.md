@@ -10,7 +10,7 @@ HTTP, JSON/script, Nacos, CAT, and Prometheus modules are consumed from the pinn
 historical application import revision.
 
 The current reusable Fiber dependency is pinned at
-`56534432cd695653206b759ac33b7603783f2226` (upstream `master`, fetched 2026-10-24). The pinned
+`625f0b469db78b2527498dbd1e79e343234f2b97` (upstream `master`, fetched 2026-11-06). The pinned
 revision carries no repository-owned compatibility patches: the TLS dynamic-credential lifetime
 defect ([upstream issue #41](https://github.com/fiber-net-gateway/fiber-gateway-cpp/issues/41)),
 briefly patched against `f832d5458d3bfca1cefa45a4c7a6cb1cd0662f23`, is fixed upstream in `90ed153`
@@ -18,6 +18,70 @@ briefly patched against `f832d5458d3bfca1cefa45a4c7a6cb1cd0662f23`, is fixed ups
 The repository-owned regression
 `ProxyExecutorTest.StreamsChunkedUpstreamWhoseFramingArrivesSeparatelyFromPayload` still guards
 the HTTP/1 chunked split-framing fix from the application side.
+The reviewed update range from the previous pin is
+`4a5f12b8b374045975e21410e3987447a550043e..625f0b469db78b2527498dbd1e79e343234f2b97` (seven
+non-merge commits, fast-forward). Its behavioral core is the script constant model rework
+(`03ea19bf`): request constants (`$header`/`$query`/`$cookie`/`$path`) are no longer prepared and
+bound per package — `ConstPackage` compiles (type, normalized name, precomputed hash) into each
+constant's callable, `ScriptExchangeCtx` resolves values against request state at first access
+and memoizes them in a pool-backed open-addressing table, and one ctx can serve scripts compiled
+against different packages (including a mid-request configuration-generation swap).
+`prepare_constants`/`bind_*` disappear in favor of `set_path_vars` + `resolve_constant`, and
+`$path.<name>` compiles only when the name is declared to the compile scope's path-variable span.
+The repository's edge-function library (this change set) composes that model directly:
+`RouteScriptExtension` with an empty path-variable span and HTTP directives disabled yields the
+untruncated `$header`/`$query`/`$cookie` reads of the v1 execution contract. `625f0b46` fixes the
+defect that rebind exposed: `set_path_vars()` now resets the whole constant memo (unlinking
+single entries would break the linear-probe chains), so when several candidate patterns capture
+the same variable name, each candidate's condition observes its own capture instead of a value
+memoized from an earlier candidate — `AccessRequestHandlerTest.PathVarConditionSeesEachCandidatesOwnCapture`
+is unsealed to guard it (previously `GTEST_SKIP`ed against the old pin). `e06e4ab0` reworks
+`encode_set_cookie` around an injected allocator returning a `string_view` (the removed
+`std::string&` overload could throw `bad_alloc` inside the `noexcept` host function); access-server
+adapted in one place: `EdgeFunctionLibrary`'s `ctx.addCookie` encodes into a 4096-byte stack
+buffer per RFC 6265 6.1, refuses oversize cookies (the script observes `false`), mirroring
+upstream's `add_cookie_fn`. The remaining commits are additive or internal: `a0b39c18` adds a
+zero-allocation `to_string_view` to `IpAddress`/`SocketAddress`, `e24161a1`/`2f65e513` scope
+clang-tidy runs, and `7ee40abe` records the dynamic-constant design doc.
+The reviewed update range from the previous pin is
+`f28838ff6f6a2e9ee0ca685fb84e346c087952d9..4a5f12b8b374045975e21410e3987447a550043e` (a single
+test-only commit, fast-forward): `TlsStreamFdTest`'s `heap_in_use()` now gates `mallinfo2` on
+`__GLIBC_PREREQ(2, 33)` and falls back to `mallinfo` on older glibc — the 32-bit counters only
+wrap past 2 GiB in use, far beyond the deltas the trickled-handshake test inspects, and the
+probe still vetoes allocators invisible to glibc (jemalloc, ASan) by skipping. `fiber_tests`
+therefore compiles again on glibc < 2.33 hosts, where the
+`TrickledHandshakeRecordStaysInOneWireBuffer` probe now also runs instead of being unreachable.
+No library source or public header changes; access-server needed no adaptation.
+The reviewed update range from the previous pin is
+`56534432cd695653206b759ac33b7603783f2226..f28838ff6f6a2e9ee0ca685fb84e346c087952d9` (five
+non-merge commits, fast-forward). Its behavioral core is the linear-time regex engine `d5047f4a`
+(PR #50): an in-tree port of RE2's architecture with no external dependency — parser/simplifier,
+Pike VM, BitState, OnePass, lazy DFA with a non-failing degraded path, `RegexSet`, a multi-literal
+`LiteralSet`, a streaming `Scanner`, UTF-8 and byte modes, RE2 syntax minus lookaround,
+backreferences, and `\p{...}`; patterns are capped at 64 KiB and resource exhaustion surfaces as
+an error rather than a silent non-match (WAF-oriented; OWASP CRS is the acceptance corpus). The
+script stdlib registers the two functions that previously had a reserved placeholder:
+`strings.match(text, pattern)` and `strings.findAll(text, pattern)`, backed by a per-thread
+128-entry LRU compile cache and per-thread scratch, so route scripts gain them automatically
+through `StdLibrary` with no per-call compile cost in the hot path.
+The second core is the `HttpBodySpec` rework (PR #48, `a42b6705`/`8c1826c3`/`af5a35b7`):
+`Chunked` is folded into `Stream` — unknown-length content that HTTP/1 frames with chunked
+transfer coding (close-delimited only when answering an HTTP/1.0 request) and HTTP/2/3 delimit by
+end of stream — and the new `Raw` kind carries tunnel bytes that are not HTTP content (after an
+HTTP/1 101 or a 2xx answering CONNECT). Inbound h2/h3 CONNECT requests now surface
+`request_body_spec() == Raw()`, and a 101/2xx-CONNECT response must use `Raw`: `Stream()` on a
+1xx status is rejected (`must_not_have_body`), and `Raw()` on anything but a tunnel-opening
+status is rejected on h1 and h2/h3 alike.
+Access-server adapted to the new API in three sites: `select_proxy_request_body_spec` returns
+`Stream()` where it returned `Chunked()` (identical HTTP/1-upstream chunked wire framing, the
+same rename upstream applied to `proxy_core::detect_request_body`); the WebSocket handshake
+response (101 upgrade / extended-CONNECT 2xx) sends `Raw()` instead of `Stream()` so the tunnel
+bytes stay out of HTTP content framing; and the test fixtures/port assertions follow
+(`ProxyExecutorTest`'s fake upstream 101 uses `Raw()`, its chunked-response fixture uses
+`Stream()`, `script_body_supported` coverage gains the `Raw` rejection). Everything else in the
+range is internal to the pinned modules (h1 exchange-IO tunnel validation, h2/h3 CONNECT raw
+plumbing, gzip writer raw exclusion, script `http.request` CONNECT handling) or additive test
+coverage (`c09d9b16`).
 The reviewed update range from the previous pin is
 `47e71f6cb34b01d20ff866dc3c274be16a368fe1..56534432cd695653206b759ac33b7603783f2226` (eight
 non-merge commits, fast-forward). Its behavioral core is two memory bounds on slow peers, a TLS

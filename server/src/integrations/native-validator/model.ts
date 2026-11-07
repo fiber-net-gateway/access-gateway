@@ -1,7 +1,15 @@
-export type NativeValidationKind = 'project_route' | 'gray_rules'
+export type NativeValidationKind =
+  'project_route' | 'gray_rules' | 'edge_function_index' | 'edge_function_script'
+
+/**
+ * Compile phase of an edge-function script (edge_function_script kind only):
+ * a request_body script may reference $req.body; a request_head script that
+ * does fails to compile. Omitted = request_head, matching the wire default.
+ */
+export type NativeValidatorScriptPhase = 'request_head' | 'request_body'
 
 export interface AccessConfigLimits {
-  schemaVersion: 2
+  schemaVersion: 5
   projectList: {
     maxPayloadBytes: number
     maxProjects: number
@@ -42,6 +50,22 @@ export interface AccessConfigLimits {
     maxCidrsPerRule: number
     maxCidrBytes: number
   }
+  edgeFunctions: {
+    maxPayloadBytes: number
+    maxFunctions: number
+    maxFunctionNameBytes: number
+    maxMountsPerFunction: number
+    maxGlobsPerSelector: number
+    maxGlobBytes: number
+    maxScriptPayloadBytes: number
+    maxTotalScriptBytes: number
+    maxReportsPerExecution: number
+    maxCidrDirectivesPerScript: number
+    maxCidrsPerDirective: number
+    maxCidrBytes: number
+    maxInputFieldBytes: number
+    maxBodyPhaseBytes: number
+  }
 }
 
 export interface NativeValidationError {
@@ -56,6 +80,8 @@ export interface NativeValidationRequest {
   kind: NativeValidationKind
   project: string
   payload: Uint8Array
+  /** edge_function_script only; omitted = request_head. */
+  phase?: NativeValidatorScriptPhase
 }
 
 export interface NativeValidationResult {

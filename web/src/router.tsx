@@ -10,7 +10,13 @@ import { ProjectReleasesPage } from './pages/ProjectReleasesPage'
 import { ProjectRoutesPage } from './pages/ProjectRoutesPage'
 import { ProjectSettingsPage } from './pages/ProjectSettingsPage'
 import { ProjectVersionsPage } from './pages/ProjectVersionsPage'
+import { ProjectWafPolicyPage } from './pages/ProjectWafPolicyPage'
 import { ProjectsIndexPage } from './pages/ProjectsIndexPage'
+import { WafEdgeFunctionsPage } from './pages/WafEdgeFunctionsPage'
+import { WafHitsPage } from './pages/WafHitsPage'
+import { WafLayout } from './pages/WafLayout'
+import { WafPolicyPage } from './pages/WafPolicyPage'
+import { WafReleasesPage } from './pages/WafReleasesPage'
 
 export const appRoutes = [
   {
@@ -33,6 +39,16 @@ export const appRoutes = [
         ],
       },
       {
+        path: 'waf',
+        element: <WafLayout />,
+        children: [
+          { index: true, element: <WafPolicyPage /> },
+          { path: 'releases', element: <WafReleasesPage /> },
+          { path: 'hits', element: <WafHitsPage /> },
+          { path: 'edge-functions', element: <WafEdgeFunctionsPage /> },
+        ],
+      },
+      {
         path: 'projects',
         children: [
           { index: true, element: <ProjectsIndexPage /> },
@@ -45,6 +61,7 @@ export const appRoutes = [
               { path: 'versions', element: <ProjectVersionsPage /> },
               { path: 'host-policy', element: <ProjectHostPolicyPage /> },
               { path: 'network-policy', element: <ProjectNetworkPolicyPage /> },
+              { path: 'waf-policy', element: <ProjectWafPolicyPage /> },
               { path: 'releases', element: <ProjectReleasesPage /> },
               { path: 'settings', element: <ProjectSettingsPage /> },
             ],

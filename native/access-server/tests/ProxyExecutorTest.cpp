@@ -38,6 +38,8 @@
 #include <fiber/net/TcpStream.h>
 #include <openssl/sha.h>
 #include "HttpTransportStub.h"
+#include "config/AccessConfig.h"
+#include "config/AccessConfigLimits.h"
 #include "execution/AccessRequestHandler.h"
 #include "execution/ProxyExecutor.h"
 #include "fiber/cat/CatClient.h"
@@ -45,6 +47,8 @@
 #include "observability/AccessLogChannel.h"
 #include "observability/AccessRequestTelemetry.h"
 #include "routing/AccessScriptCompiler.h"
+#include "routing/EdgeFunctionLibrary.h"
+#include "routing/EdgeFunctionsSnapshot.h"
 #include "runtime/RouteConfigStore.h"
 
 #include <unistd.h>
@@ -556,7 +560,7 @@ fiber::async::Task<void> serve_upstream(fiber::http::HttpExchange &exchange, Ups
                 .kind = fiber::http::OutgoingHeaderKind::Final,
                 .status_code = 101,
                 .headers = &headers,
-                .body = fiber::http::HttpBodySpec::Stream(),
+                .body = fiber::http::HttpBodySpec::Raw(),
                 .end_stream = false,
         });
         if (sent) {
@@ -603,7 +607,7 @@ fiber::async::Task<void> serve_upstream(fiber::http::HttpExchange &exchange, Ups
         }
     }
     const fiber::http::HttpBodySpec body_spec =
-            state->response.chunked ? fiber::http::HttpBodySpec::Chunked()
+            state->response.chunked ? fiber::http::HttpBodySpec::Stream()
                                     : fiber::http::HttpBodySpec::ContentLength(
                                               state->response.advertised_content_length.value_or(response_body_size));
     auto sent = co_await exchange.send_header({
@@ -735,9 +739,10 @@ fiber::async::DetachedTask run_paced_downstream(fiber::event::EventLoop *loop,
                                                 const fiber::access_server::RouteConfigStore *store,
                                                 fiber::access_server::AccessProxyAdapter proxy_adapter,
                                                 std::vector<PacedInput> paced_input, std::string *output,
-                                                std::promise<void> *done) {
+                                                std::promise<void> *done,
+                                                fiber::access_server::AccessRequestHandlerOptions options = {}) {
     auto transport = std::make_unique<RecordingTransport>(*loop, std::move(paced_input), *output);
-    fiber::access_server::AccessRequestHandler handler(store->snapshot_provider(), {}, {}, proxy_adapter);
+    fiber::access_server::AccessRequestHandler handler(store->snapshot_provider(), {}, options, proxy_adapter);
     fiber::access_server::ClientMetadataResolver client_metadata_resolver(
             fiber::access_server::ClientMetadataResolverOptions{
                     .mode = fiber::access_server::ClientMetadataMode::LegacyHeaders,
@@ -2408,6 +2413,156 @@ TEST(ProxyExecutorTest, FlushControlsCrossReadRequestBodyAggregation) {
             EXPECT_EQ(raw.find("5\r\nhello\r\n"), std::string::npos) << raw;
             EXPECT_NE(raw.find("b\r\nhelloworld!\r\n0\r\n\r\n"), std::string::npos) << raw;
         }
+    }
+
+    std::promise<void> shutdown_promise;
+    auto shutdown_future = shutdown_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
+        co_await pool.shutdown_async();
+        shutdown_promise.set_value();
+    });
+    ASSERT_EQ(shutdown_future.wait_for(2s), std::future_status::ready);
+    group.stop();
+    group.join();
+}
+
+TEST(ProxyExecutorTest, SplicesHandlerPrefetchedBodyIntoTheUpstreamRequest) {
+    // End-to-end for the body-phase splice (design §7), in two rounds against
+    // real upstreams:
+    //  A) fail-close: the mounted request_body-phase function raises, proving
+    //     the handler entered the buffering branch and EXECUTED the function
+    //     (only the body chain is mounted).
+    //  B) fail-open pass-through: the same gates pass, so the prefetch also
+    //     happened, and the real request-body pipe must forward the
+    //     prefetched bytes upstream with correct framing — the only path
+    //     those bytes can take is the splice.
+    fiber::event::EventLoopGroup group(1);
+    fiber::http::StealableHttp1ConnectionPoolSet pool(group);
+    ASSERT_TRUE(pool.init());
+    group.start();
+
+    const auto mount_body_function = [](fiber::access_server::RouteConfigStore &store, std::string_view source) {
+        fiber::access_server::EdgeFunctionLibrary library;
+        fiber::access_server::EdgeFunctionsState state;
+        auto compiled = library.compile(source, fiber::access_server::EdgeFunctionPhase::RequestBody);
+        EXPECT_TRUE(compiled.has_value()) << (compiled ? "" : compiled.error().message);
+        if (!compiled) {
+            return;
+        }
+        state.total_script_bytes += source.size();
+        state.programs.push_back(std::make_shared<fiber::access_server::EdgeFunctionProgram>(std::move(*compiled)));
+        fiber::access_server::EdgeFunctionIndexEntry entry;
+        entry.name = "probe";
+        entry.phase = fiber::access_server::EdgeFunctionPhase::RequestBody;
+        entry.mounts = {fiber::access_server::EdgeFunctionMountConfig{
+                .projects = fiber::access_server::EdgeFunctionProjectsSelector{.include = {"*"}},
+                .priority = 0,
+        }};
+        state.index.functions.push_back(std::move(entry));
+        store.set_edge_functions(std::make_shared<fiber::access_server::EdgeFunctionsState>(std::move(state)));
+    };
+    const auto publish_route = [&](fiber::access_server::RouteConfigStore &store, std::uint16_t port) {
+        auto config = project_config(port);
+        auto &route = **config.routes->begin();
+        route.edge_function_body = true;
+        auto published = store.apply("orders", std::move(config));
+        ASSERT_TRUE(published) << published.error().message;
+    };
+    const auto paced_chunked_post = [] {
+        return std::vector<PacedInput>{
+                PacedInput{.delay = 0ms,
+                           .data = "POST /proxy HTTP/1.1\r\n"
+                                   "Host: api.example.com\r\n"
+                                   "Content-Type: application/json\r\n"
+                                   "Transfer-Encoding: chunked\r\n"
+                                   "Connection: close\r\n"
+                                   "\r\n"},
+                PacedInput{.delay = 50ms, .data = "5\r\nhello\r\n"},
+                PacedInput{.delay = 100ms, .data = "6\r\nworld!\r\n0\r\n\r\n"},
+        };
+    };
+
+    fiber::access_server::ProxyExecutor executor(pool);
+    fiber::access_server::AccessRequestHandlerOptions fail_close_options;
+    fail_close_options.edge_function_fail_close = true;
+
+    // Round A: the function executes and raises; fail-close must reject.
+    {
+        fiber::net::TcpListener listener(group.at(0));
+        ASSERT_TRUE(listener.bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), {}));
+        auto port = bound_port(listener.fd());
+        ASSERT_TRUE(port);
+
+        std::promise<void> head_received_promise;
+        std::promise<void> first_body_byte_promise;
+        std::promise<std::string> raw_request_promise;
+        std::promise<void> upstream_done_promise;
+        auto upstream_done = upstream_done_promise.get_future();
+        fiber::async::spawn(group.at(0), [&]() {
+            return serve_request_timing_upstream(&listener, &head_received_promise, &first_body_byte_promise,
+                                                 &raw_request_promise, &upstream_done_promise);
+        });
+
+        fiber::access_server::RouteConfigStore store;
+        publish_route(store, *port);
+        // ctx.report with a non-string argument raises inside the VM.
+        mount_body_function(store, "ctx.report(1, \"boom\"); return true;");
+
+        std::string output;
+        std::promise<void> request_promise;
+        auto request_done = request_promise.get_future();
+        fiber::async::spawn(group.at(0), [&]() {
+            return run_paced_downstream(&group.at(0), &store, executor.adapter(), paced_chunked_post(), &output,
+                                        &request_promise, fail_close_options);
+        });
+        ASSERT_EQ(request_done.wait_for(5s), std::future_status::ready);
+        EXPECT_NE(output.find(" 503 "), std::string::npos) << output;
+        // Fail-close rejects before the proxy connects, so no upstream ever
+        // arrives: close the listener (on its loop) to release the parked
+        // accept.
+        fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
+            listener.close();
+            co_return;
+        });
+        ASSERT_EQ(upstream_done.wait_for(5s), std::future_status::ready);
+    }
+
+    // Round B: pass-through; the spliced bytes must arrive upstream whole.
+    {
+        fiber::net::TcpListener listener(group.at(0));
+        ASSERT_TRUE(listener.bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), {}));
+        auto port = bound_port(listener.fd());
+        ASSERT_TRUE(port);
+
+        std::promise<void> head_received_promise;
+        std::promise<void> first_body_byte_promise;
+        std::promise<std::string> raw_request_promise;
+        std::promise<void> upstream_done_promise;
+        auto upstream_done = upstream_done_promise.get_future();
+        auto raw_request = raw_request_promise.get_future();
+        fiber::async::spawn(group.at(0), [&]() {
+            return serve_request_timing_upstream(&listener, &head_received_promise, &first_body_byte_promise,
+                                                 &raw_request_promise, &upstream_done_promise);
+        });
+
+        fiber::access_server::RouteConfigStore store;
+        publish_route(store, *port);
+        mount_body_function(store, "return true;");
+
+        std::string output;
+        std::promise<void> request_promise;
+        auto request_done = request_promise.get_future();
+        fiber::async::spawn(group.at(0), [&]() {
+            return run_paced_downstream(&group.at(0), &store, executor.adapter(), paced_chunked_post(), &output,
+                                        &request_promise);
+        });
+        ASSERT_EQ(request_done.wait_for(5s), std::future_status::ready);
+        EXPECT_NE(output.find("HTTP/1.1 200 OK\r\n"), std::string::npos) << output;
+
+        ASSERT_EQ(upstream_done.wait_for(5s), std::future_status::ready);
+        const std::string raw = raw_request.get();
+        // Default aggregation coalesces the spliced bytes into one chunk.
+        EXPECT_NE(raw.find("b\r\nhelloworld!\r\n0\r\n\r\n"), std::string::npos) << raw;
     }
 
     std::promise<void> shutdown_promise;

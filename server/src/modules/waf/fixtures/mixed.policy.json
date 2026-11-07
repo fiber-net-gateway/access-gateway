@@ -1,0 +1,74 @@
+{
+  "schemaVersion": 2,
+  "groups": [
+    {
+      "id": "core",
+      "name": "核心规则",
+      "mode": "block",
+      "priority": 100,
+      "projects": {
+        "include": ["*"],
+        "exempt": [
+          {
+            "project": "loan-web",
+            "reason": "内部报表导出含 SQL 片段, 2026-11-05 张三"
+          }
+        ]
+      }
+    },
+    {
+      "id": "scanner",
+      "name": "扫描探测",
+      "mode": "log",
+      "priority": 50,
+      "projects": {
+        "include": ["trade-*", "loan-*"]
+      }
+    }
+  ],
+  "projectModes": {
+    "loan-admin": "log",
+    "loan-admin-legacy": "off",
+    "trade-web": "block"
+  },
+  "rules": [
+    {
+      "id": "sqli-0023",
+      "name": "union select 注入探测",
+      "group": "core",
+      "severity": "high",
+      "priority": 100,
+      "action": "block",
+      "phase": "request_head",
+      "match": "strings.match($req.uri, \"(?i)union[+%20\\\\s]+select\") || strings.match($query.q, \"(?i)union\\\\s+select\")",
+      "scope": {
+        "methods": ["GET", "POST"],
+        "paths": ["/api/*", "/loan/apply"],
+        "sourceCidrs": ["172.28.0.0/16", "10.164.44.2/32"]
+      }
+    },
+    {
+      "id": "scanner-ua",
+      "name": "scanner user agents",
+      "group": "scanner",
+      "severity": "medium",
+      "priority": 10,
+      "action": "log",
+      "phase": "request_head",
+      "match": "strings.match($header.user_agent, \"(?i)(sqlmap|nikto|nmap)\")"
+    },
+    {
+      "id": "path-traversal",
+      "name": "path traversal probe",
+      "group": "core",
+      "severity": "critical",
+      "priority": 100,
+      "action": "block",
+      "phase": "request_head",
+      "match": "strings.contains($req.path, \"../\")",
+      "scope": {
+        "sourceCidrs": ["10.164.44.2/32", "172.28.0.0/16"]
+      }
+    }
+  ]
+}

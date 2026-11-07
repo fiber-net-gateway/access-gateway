@@ -51,6 +51,7 @@ Key invariants (keep these distinct in storage, APIs, metrics, and UI):
 Run from the repository root. First-time setup: `git submodule update --init --recursive`, `npm install`, `cp server/.env.example server/.env`.
 
 Console:
+
 - `npm run dev` — Vite (:5173) + Fastify (:3000) watch mode; `npm run dev:web` / `npm run dev:server` for one side. Vite proxies `/api` to Fastify.
 - `npm run db:migrate` — apply MySQL migrations (needed for persistent API use; requires MySQL 8.4 with `MYSQL_ENABLED=true` and `DOCUMENT_ENCRYPTION_KEY_BASE64` in `server/.env`).
 - `npm run typecheck` — strict TypeScript in all workspaces.
@@ -59,6 +60,7 @@ Console:
 - `npm run build` — build both console workspaces.
 
 Native (Linux; CMake 4.1+, Ninja, Clang 17+ or GCC 13+, C++23):
+
 - `npm run configure:native` — configure the Release build in `native/build` with tests (`-DFIBER_BUILD_TESTS=ON`).
 - `npm run build:native` / `npm run build:native-validator` / `npm run test:native` — build app/validator, then build and run the focused access-server tests.
 - `npm run format:native` — clang-format repository-owned C/C++ only (pinned Fiber style; never touches `third_party/`). `format:native:all` formats everything repository-owned.
@@ -75,6 +77,7 @@ Demo: `npm run demo:init && npm run demo:up` runs the full Docker Compose stack 
 ## Validation expectations
 
 Match validation to the changed scope (full matrix in AGENTS.md):
+
 - `web/`/`server/` or shared TS config → `npm run typecheck`, `npm test`, `npm run format:check`, `npm run build`.
 - `native/access-server/` → native configure/build, focused CTest label, clang-format diff review.
 - Fiber gitlink, native CMake, codec, routing, proxy state, EventLoop ownership, or shutdown → full applicable Fiber/native suite plus focused access-server tests.
@@ -85,13 +88,13 @@ Document any test that cannot be run and why; do not claim production compatibil
 
 ## rnacos contract
 
-| Purpose | Data ID | Group |
-|---|---|---|
-| Project list | `ploto.unified-access.projects` | `ACCESS-SERVER` |
-| Project route | `ploto.unified-access.route.<project>` | `ACCESS-SERVER` |
-| TLS certificate snapshot | `ploto.unified-access.tls-certificates` | `ACCESS-SERVER` |
-| Gray rules | `ploto.unified-access.gray-match` | `DEFAULT_GROUP` |
-| Test-env cluster whitelist | `ploto.test.temp-cluster-apps` | `DEFAULT_GROUP` |
+| Purpose                    | Data ID                                 | Group           |
+| -------------------------- | --------------------------------------- | --------------- |
+| Project list               | `ploto.unified-access.projects`         | `ACCESS-SERVER` |
+| Project route              | `ploto.unified-access.route.<project>`  | `ACCESS-SERVER` |
+| TLS certificate snapshot   | `ploto.unified-access.tls-certificates` | `ACCESS-SERVER` |
+| Gray rules                 | `ploto.unified-access.gray-match`       | `DEFAULT_GROUP` |
+| Test-env cluster whitelist | `ploto.test.temp-cluster-apps`          | `DEFAULT_GROUP` |
 
 The project list is a semicolon-separated string, not JSON. Route and gray-rule payloads must retain the native compatibility codec's Java wire behavior. `ploto.test.temp-cluster-apps` (JSON map of service → cluster set) is consumed by the data plane only when `ACCESS_SERVER_TEST_MODE=true` — it gates the request-specified-cluster fallback to the configured cluster; it is not published by the console and carries no activation evidence. Any change to the wire model, defaults, validation, routing behavior, publication semantics, or activation evidence is cross-component work: update the native codec/runtime and tests first (or in the same change), then server schemas/services, frontend types and editors, fixtures, and user docs.
 

@@ -15,6 +15,10 @@
 #include <string>
 #include <string_view>
 
+namespace fiber::mem {
+class IoBufChain;
+}
+
 namespace fiber::http {
 class HttpExchange;
 }
@@ -54,6 +58,11 @@ struct AccessRequestHandlerOptions {
     // and the compat access log read the final value back from there.
     ProxyClusterMatcher gray_matcher{};
     bool test_mode = false;
+    // Strict edge-function posture (design §6): when true, a function that
+    // errors before writing any response rejects the request (503) instead of
+    // failing open into routing. Default stays fail-open — a broken WAF must
+    // not take the gateway down.
+    bool edge_function_fail_close = false;
 };
 
 struct ProxyExecutionInput {
@@ -62,6 +71,13 @@ struct ProxyExecutionInput {
     std::string_view origin_host;
     TemplateEvaluator template_evaluator;
     std::size_t max_request_body_size = 0;
+    // Body bytes already read from the exchange by the handler to feed
+    // body-phase edge functions (null when nothing was prefetched). The
+    // proxy's request-body reader drains this chain before reading the
+    // exchange, so a partially-prefetched (overflowing) body still reaches
+    // the upstream whole. Owned by the caller and kept alive across the
+    // execution.
+    mem::IoBufChain *prefetched_body = nullptr;
 };
 
 struct AccessProxyAdapter {

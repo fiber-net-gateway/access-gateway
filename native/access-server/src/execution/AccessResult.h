@@ -67,6 +67,18 @@ struct Exception {
         };
     }
 
+    // Strict mode (ACCESS_SERVER_EDGE_FUNCTION_FAIL_CLOSE=true): a mounted edge
+    // function errored before writing any response, and the operator chose to
+    // reject rather than fail open. 503 because the filter layer is down for
+    // this request, not the client's fault and not the upstream's.
+    [[nodiscard]] static constexpr Exception edge_function_fail_close() noexcept {
+        return {
+                .name = "EDGE_FUNCTION_FAIL_CLOSE",
+                .message = "edge function failed while fail-close is enabled",
+                .status = 503,
+        };
+    }
+
     [[nodiscard]] static constexpr Exception unknown(std::string_view message = {}) noexcept {
         return {
                 .name = "ACCESS_UNKNOWN_ERROR",
