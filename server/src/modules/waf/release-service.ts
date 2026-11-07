@@ -24,6 +24,7 @@ import {
   edgeFunctionScriptDataId,
   type CreateWafReleaseInput,
   type QueueWafPublicationResult,
+  type RollbackWafReleaseInput,
   type WafReleaseView,
 } from './release-model.js'
 import {
@@ -39,6 +40,12 @@ export const WAF_GENERATOR_REVISION = 'waf-generator-v1'
 
 export interface WafReleaseService {
   create(actor: Actor, input: CreateWafReleaseInput, requestId: string): Promise<WafReleaseView>
+  rollback(
+    actor: Actor,
+    releaseId: string,
+    input: RollbackWafReleaseInput,
+    requestId: string,
+  ): Promise<WafReleaseView>
   list(actor: Actor): Promise<{ items: readonly WafReleaseView[] }>
   get(actor: Actor, releaseId: string): Promise<WafReleaseView>
   queuePublication(
@@ -149,8 +156,118 @@ export class DefaultWafReleaseService implements WafReleaseService {
     }
 
     const { plan, functions } = planFromPolicy(draft.policy)
-    // Fail-closed: both wire payloads must compile through the native
-    // validator before a Release can be prepared (§4.1 全环境校验).
+    await this.#validatePlan(plan, functions, requestId, 'WAF_COMPILATION_NOT_PUBLISHABLE')
+    const bases = await this.#readBases(workspace, plan.functionName, plan.mode)
+
+    return this.#releases.create(
+      actor,
+      workspace.internalId,
+      { ...plan, functions },
+      bases,
+      {
+        idempotencyKey: input.idempotencyKey,
+        requestSha256: sha256(canonicalJson({ kind: 'waf_edge_functions' })),
+        generatorRevision: WAF_GENERATOR_REVISION,
+        validatorContractVersion: this.#validator.contractVersion,
+        validatorRevision: this.#validator.revision,
+      },
+      requestId,
+    )
+  }
+
+  // Rollback republishes a historical release's immutable payload documents as
+  // a NEW release: the plan is rebuilt from the stored payloads (digests
+  // verified by the repository), re-validated through today's native validator
+  // fail-closed, and persisted with a freshly allocated index version. Release
+  // history is never rewritten; the current WAF draft is not touched.
+  async rollback(
+    actor: Actor,
+    releaseId: string,
+    input: RollbackWafReleaseInput,
+    requestId: string,
+  ): Promise<WafReleaseView> {
+    const workspace = await this.#requireWorkspace(actor)
+    await this.#requirePublisher(actor, workspace.id)
+    if (!this.#validator.available || !this.#validator.revision || !this.#validator.limits) {
+      throw unavailable(
+        'NATIVE_VALIDATOR_UNCONFIGURED',
+        'Native Validator is required before rolling back a WAF release',
+      )
+    }
+    if (!this.#nacos.available) {
+      throw unavailable('PUBLICATION_UNCONFIGURED', 'Nacos publication is not configured')
+    }
+
+    const source = await this.#releases.loadRollbackSource(workspace.internalId, releaseId)
+    if (!source) throw notFound('WAF release')
+    await this.#validatePlan(
+      source.plan,
+      source.plan.functions,
+      requestId,
+      'WAF_ROLLBACK_NOT_PUBLISHABLE',
+    )
+    const bases = await this.#readBases(workspace, source.plan.functionName, source.plan.mode)
+
+    return this.#releases.create(
+      actor,
+      workspace.internalId,
+      source.plan,
+      bases,
+      {
+        idempotencyKey: input.idempotencyKey,
+        requestSha256: sha256(
+          canonicalJson({ kind: 'waf_edge_functions_rollback', sourceReleaseId: releaseId }),
+        ),
+        // The content was produced by the historical generator revision; keep
+        // that provenance instead of stamping today's revision on old bytes.
+        generatorRevision: source.generatorRevision || WAF_GENERATOR_REVISION,
+        validatorContractVersion: this.#validator.contractVersion,
+        validatorRevision: this.#validator.revision,
+        description: `rollback of WAF edge functions #${source.sequence}`,
+        rollbackOfSequence: source.sequence,
+      },
+      requestId,
+    )
+  }
+
+  async list(actor: Actor): Promise<{ items: readonly WafReleaseView[] }> {
+    const workspace = await this.#requireWorkspace(actor)
+    return { items: await this.#releases.list(workspace.internalId) }
+  }
+
+  async get(actor: Actor, releaseId: string): Promise<WafReleaseView> {
+    const workspace = await this.#requireWorkspace(actor)
+    const release = await this.#releases.find(releaseId, workspace.internalId)
+    if (!release) throw notFound('WAF release')
+    return release
+  }
+
+  async queuePublication(
+    actor: Actor,
+    releaseId: string,
+    idempotencyKey: string,
+    requestId: string,
+  ): Promise<QueueWafPublicationResult> {
+    const workspace = await this.#requireWorkspace(actor)
+    await this.#requirePublisher(actor, workspace.id)
+    if (!this.#nacos.available) {
+      throw unavailable('PUBLICATION_UNCONFIGURED', 'Nacos publication is not configured')
+    }
+    const release = await this.#releases.find(releaseId, workspace.internalId)
+    if (!release) throw notFound('WAF release')
+    return this.#releases.queuePublication(actor, releaseId, idempotencyKey, requestId)
+  }
+
+  // Fail-closed: both wire payloads must compile through the native validator
+  // before a Release can be prepared (§4.1 全环境校验). Rollback reuses this
+  // with its own error code so operators can tell a stale historical payload
+  // from a bad draft compilation.
+  async #validatePlan(
+    plan: Omit<PreparedWafReleasePlan, 'functions'>,
+    functions: readonly WafWireIndexFunctionEntry[],
+    requestId: string,
+    errorCode: string,
+  ): Promise<void> {
     const validations = []
     if (plan.mode === 'mounted' && plan.script !== null) {
       validations.push(
@@ -186,25 +303,32 @@ export class DefaultWafReleaseService implements WafReleaseService {
     )
     if (errors.length > 0) {
       throw unprocessable(
-        'WAF_COMPILATION_NOT_PUBLISHABLE',
-        'The compiled WAF artifacts failed native validation',
+        errorCode,
+        errorCode === 'WAF_ROLLBACK_NOT_PUBLISHABLE'
+          ? 'The historical WAF artifacts failed native validation'
+          : 'The compiled WAF artifacts failed native validation',
         errors,
       )
     }
+  }
 
+  async #readBases(
+    workspace: EnvironmentView & { internalId: string },
+    functionName: string,
+    mode: PreparedWafReleasePlan['mode'],
+  ): Promise<{ index: NacosResourceValue; script: NacosResourceValue | null }> {
     const target: NacosTarget = {
       endpoint: workspace.nacos.endpoint,
       namespace: workspace.nacos.namespace,
       tenant: workspace.nacos.tenant,
       credentialConfigured: workspace.nacos.credentialConfigured,
     }
-    const scriptDataId = edgeFunctionScriptDataId(plan.functionName)
-    let bases: { index: NacosResourceValue; script: NacosResourceValue | null }
+    const scriptDataId = edgeFunctionScriptDataId(functionName)
     try {
-      bases = {
+      return {
         index: await this.#nacos.read(target, EDGE_FUNCTIONS_DATA_ID, EDGE_FUNCTIONS_GROUP),
         script:
-          plan.mode === 'mounted'
+          mode === 'mounted'
             ? await this.#nacos.read(target, scriptDataId, EDGE_FUNCTIONS_GROUP)
             : null,
       }
@@ -214,49 +338,6 @@ export class DefaultWafReleaseService implements WafReleaseService {
         'The edge-function resources could not be read before creating the WAF release',
       )
     }
-
-    return this.#releases.create(
-      actor,
-      workspace.internalId,
-      { ...plan, functions },
-      bases,
-      {
-        idempotencyKey: input.idempotencyKey,
-        requestSha256: sha256(canonicalJson({ kind: 'waf_edge_functions' })),
-        generatorRevision: WAF_GENERATOR_REVISION,
-        validatorContractVersion: this.#validator.contractVersion,
-        validatorRevision: this.#validator.revision,
-      },
-      requestId,
-    )
-  }
-
-  async list(actor: Actor): Promise<{ items: readonly WafReleaseView[] }> {
-    const workspace = await this.#requireWorkspace(actor)
-    return { items: await this.#releases.list(workspace.internalId) }
-  }
-
-  async get(actor: Actor, releaseId: string): Promise<WafReleaseView> {
-    const workspace = await this.#requireWorkspace(actor)
-    const release = await this.#releases.find(releaseId, workspace.internalId)
-    if (!release) throw notFound('WAF release')
-    return release
-  }
-
-  async queuePublication(
-    actor: Actor,
-    releaseId: string,
-    idempotencyKey: string,
-    requestId: string,
-  ): Promise<QueueWafPublicationResult> {
-    const workspace = await this.#requireWorkspace(actor)
-    await this.#requirePublisher(actor, workspace.id)
-    if (!this.#nacos.available) {
-      throw unavailable('PUBLICATION_UNCONFIGURED', 'Nacos publication is not configured')
-    }
-    const release = await this.#releases.find(releaseId, workspace.internalId)
-    if (!release) throw notFound('WAF release')
-    return this.#releases.queuePublication(actor, releaseId, idempotencyKey, requestId)
   }
 
   async #requireWorkspace(actor: Actor): Promise<EnvironmentView & { internalId: string }> {
@@ -276,6 +357,9 @@ export class DefaultWafReleaseService implements WafReleaseService {
 
 export class UnavailableWafReleaseService implements WafReleaseService {
   async create(): Promise<never> {
+    throw unavailable('DATABASE_UNCONFIGURED', 'MySQL is not configured')
+  }
+  async rollback(): Promise<never> {
     throw unavailable('DATABASE_UNCONFIGURED', 'MySQL is not configured')
   }
   async list(): Promise<never> {

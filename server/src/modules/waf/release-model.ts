@@ -36,6 +36,8 @@ export interface WafReleaseView {
   ruleCount: number
   /** The wire index version embedded in the published index. */
   indexVersion: string
+  /** Empty for direct releases; records the source release for rollbacks. */
+  description: string
   resources: readonly WafReleaseResourceView[]
   publication: {
     jobId: string | null
@@ -48,6 +50,10 @@ export interface WafReleaseView {
 }
 
 export interface CreateWafReleaseInput {
+  idempotencyKey: string
+}
+
+export interface RollbackWafReleaseInput {
   idempotencyKey: string
 }
 
