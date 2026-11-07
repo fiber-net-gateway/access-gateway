@@ -168,6 +168,39 @@ test('rejects duplicate, unknown, and structurally incomplete route fields', () 
   assert.ok(incomplete.issues.some((issue) => issue.code === 'INVALID_ROUTE_TYPE'))
 })
 
+test('edge_function_body passes through on PROXY routes and is rejected elsewhere', () => {
+  const compiled = compileProjectRoutes(
+    'api.example.com',
+    model(
+      'path: /api/*\ntype: PROXY\nservice: users/stable\nedge_function_body: true',
+      'path: /off\ntype: PROXY\nservice: users/stable\nedge_function_body: false',
+    ),
+  )
+  assert.deepEqual(compiled.issues, [])
+  const payload = JSON.parse(compiled.compiled!.payloadText) as { routes: unknown[] }
+  assert.deepEqual(payload.routes, [
+    {
+      path: '/api/*',
+      type: 'PROXY',
+      service: 'users/stable',
+      edge_function_body: true,
+    },
+    { path: '/off', type: 'PROXY', service: 'users/stable', edge_function_body: false },
+  ])
+
+  const notProxy = compileProjectRoutes(
+    'api.example.com',
+    model('path: /health\ntype: RESPONSE\nstatus: 200\nedge_function_body: true'),
+  )
+  assert.ok(notProxy.issues.some((issue) => issue.code === 'ROUTE_EDGE_FUNCTION_BODY_NOT_PROXY'))
+
+  const notBoolean = compileProjectRoutes(
+    'api.example.com',
+    model('path: /api/*\ntype: PROXY\nservice: users/stable\nedge_function_body: maybe'),
+  )
+  assert.ok(notBoolean.issues.some((issue) => issue.code === 'INVALID_ROUTE_EDGE_FUNCTION_BODY'))
+})
+
 test('rejects scalar header blocks that YAML accepts but the native route codec cannot consume', () => {
   const result = compileProjectRoutes(
     'api.example.com',
