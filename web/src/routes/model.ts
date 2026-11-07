@@ -27,6 +27,7 @@ const routeFields = new Set([
   'flush',
   'allows',
   'upstream_tls',
+  'edge_function_body',
 ])
 
 const responseTemplate = `path: /healthz
@@ -263,10 +264,37 @@ function validateRouteFieldShapes(
     'max_proxy_body_size',
     'websocket_timeout',
     'flush',
+    'edge_function_body',
   ]) {
     if (field in value && !isScalarValue(value[field])) addTypeIssue(field, 'scalar 或 null')
   }
   if ('body' in value && !isScalarMap(value.body)) addTypeIssue('body', 'mapping 或 null')
+  // request_body 边缘函数会把缓冲的 body 重放进代理：opt-in 只在 PROXY 路由上有意义。
+  if ('edge_function_body' in value && value.edge_function_body !== null) {
+    if (value.type !== 'PROXY') {
+      issues.push(
+        sourceIssue(
+          route.id,
+          lineCounter,
+          'ROUTE_EDGE_FUNCTION_BODY_NOT_PROXY',
+          'edge_function_body 只在 PROXY 路由上有效',
+          'edge_function_body',
+          fieldOffset(document, 'edge_function_body'),
+        ),
+      )
+    } else if (value.edge_function_body !== true && value.edge_function_body !== false) {
+      issues.push(
+        sourceIssue(
+          route.id,
+          lineCounter,
+          'INVALID_ROUTE_EDGE_FUNCTION_BODY',
+          'edge_function_body 必须是 true 或 false',
+          'edge_function_body',
+          fieldOffset(document, 'edge_function_body'),
+        ),
+      )
+    }
+  }
   validateUpstreamTls(route, lineCounter, document, value, issues)
 }
 
