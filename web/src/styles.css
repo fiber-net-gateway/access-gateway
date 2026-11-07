@@ -2697,6 +2697,34 @@ button:disabled {
   margin: 0 0 8px;
 }
 
+.waf-group-list {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.waf-group {
+  display: grid;
+  gap: 8px;
+}
+
+.waf-group-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.waf-group-header .button-secondary {
+  min-height: 32px;
+  padding: 0 12px;
+  font-size: 0.7rem;
+}
+
+.waf-group-empty {
+  margin: 0;
+}
+
 .waf-rule-list {
   display: grid;
   overflow: hidden;
@@ -2771,7 +2799,7 @@ button:disabled {
 
 .waf-rule-row-facts {
   display: grid;
-  grid-template-columns: 32px 76px minmax(0, 1fr) 44px;
+  grid-template-columns: 32px 76px minmax(0, 1fr);
   gap: 10px;
   color: #526059;
   font-size: 0.68rem;
@@ -2847,7 +2875,13 @@ button:disabled {
 
 .waf-rule-fields {
   display: grid;
-  grid-template-columns: minmax(0, 2fr) repeat(3, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 2fr) repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.waf-group-fields {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 2fr) repeat(2, minmax(0, 1fr));
   gap: 12px;
 }
 
@@ -2898,11 +2932,6 @@ button:disabled {
   font-weight: 700;
 }
 
-.waf-rule-section .waf-exclusions {
-  padding: 2px 14px 14px;
-  border-top: 0;
-}
-
 .waf-rule-section .settings-note {
   margin: 0;
 }
@@ -2921,14 +2950,19 @@ button:disabled {
   grid-template-columns: 120px 150px minmax(0, 1fr);
 }
 
-.waf-exclusions {
+.waf-exemptions {
+  display: grid;
+  gap: 8px;
+}
+
+.waf-function-mounts {
   display: grid;
   gap: 8px;
   padding: 14px 16px;
   border-top: 1px solid #e6eae4;
 }
 
-.waf-exclusions ul {
+.waf-exemptions ul {
   display: grid;
   gap: 6px;
   margin: 0;
@@ -2936,7 +2970,7 @@ button:disabled {
   list-style: none;
 }
 
-.waf-exclusions li {
+.waf-exemptions li {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -2947,25 +2981,60 @@ button:disabled {
   background: #f7f9f5;
 }
 
-.waf-exclusions li > span {
+.waf-exemptions li > span {
   display: grid;
   min-width: 0;
   gap: 2px;
 }
 
-.waf-exclusions small {
-  color: #536159;
+.waf-exemptions strong {
+  font-size: 0.76rem;
 }
 
-.waf-exclusion-form {
+.waf-exemptions small {
+  color: #536159;
+  font-size: 0.68rem;
+}
+
+.waf-exemptions .button-link,
+.waf-project-groups .button-link {
+  flex: none;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: #315f4a;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-decoration: underline;
+}
+
+.waf-project-groups strong {
+  color: #17221e;
+  font-size: 0.78rem;
+}
+
+.waf-project-groups small {
+  color: #6e7b74;
+  font-family: inherit;
+  font-size: 0.68rem;
+}
+
+.policy-option[role='radiogroup'] {
+  flex-wrap: wrap;
+  gap: 8px 20px;
+}
+
+.waf-exemption-form {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
   align-items: end;
   gap: 10px;
 }
 
-.waf-exclusion-form input,
-.waf-exclusion-form select {
+.waf-exemption-form input,
+.waf-exemption-form select {
   min-height: 38px;
   padding: 0 11px;
   border: 1px solid #ccd4cb;
@@ -2977,8 +3046,8 @@ button:disabled {
   outline: none;
 }
 
-.waf-exclusion-form input:focus,
-.waf-exclusion-form select:focus {
+.waf-exemption-form input:focus,
+.waf-exemption-form select:focus {
   border-color: #789578;
   box-shadow: 0 0 0 3px rgb(120 149 120 / 13%);
 }
@@ -3189,7 +3258,7 @@ button:disabled {
     display: block;
   }
 
-  .waf-exclusion-form {
+  .waf-exemption-form {
     grid-template-columns: 1fr;
   }
 
@@ -3199,6 +3268,14 @@ button:disabled {
 
   .waf-rule-fields label:first-child {
     grid-column: 1 / -1;
+  }
+
+  .waf-group-fields {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .waf-group-header {
+    display: grid;
   }
 
   .waf-rule-scope {

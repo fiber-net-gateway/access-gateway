@@ -1,5 +1,5 @@
 // WAF hit statistics (design §3.7 / P3 ⑤): the data plane counts every rule
-// match as `access_server_function_events_total{function="waf", event,
+// match as `access_server_function_events_total{function="waf-<group>", event,
 // label=<ruleId>}`; this service asks Prometheus for the per-rule increases
 // over a window. The data plane stays the source of truth — the console only
 // aggregates what Prometheus already scraped.
@@ -32,11 +32,13 @@ export interface WafHitsService {
   hits(actor: Actor, window: WafHitsWindow): Promise<WafHitsView>
 }
 
-// The WAF function name is fixed by the generator (WAF_FUNCTION_NAME); the
-// rule id travels in the `label` label. `window` is enum-typed upstream, so
-// the query string below is always well-formed PromQL.
+// Generated functions all match this selector, and a window reaching back past
+// rule groups still sees the old single `waf` function. Rule ids are unique
+// across groups, so summing over `function` keeps a moved rule on one row. The
+// rule id travels in the `label` label. `window` is enum-typed upstream, so the
+// query string below is always well-formed PromQL.
 function hitsQuery(window: WafHitsWindow): string {
-  return `sum by (event, label) (increase(access_server_function_events_total{function="waf"}[${window}]))`
+  return `sum by (event, label) (increase(access_server_function_events_total{function=~"waf(-.+)?"}[${window}]))`
 }
 
 // Wire rule ids are ≤64 bytes (validator schema) and events ≤32; anything

@@ -5,9 +5,9 @@
 // wire function index minus `version`/`sha256`, which the release pipeline
 // derives. It subsumes the interim mount-first authoring file
 // (temp/edge-functions.json): one function may carry several mounts, and
-// mount glob semantics match the native codec exactly. The WAF-generated
-// function is not part of this draft; releases merge it in, so its slug is
-// reserved here.
+// mount glob semantics match the native codec exactly. WAF-generated functions
+// are not part of this draft; releases merge them in, so their slugs are
+// reserved here (isWafFunctionName).
 //
 // Hard constraints (§7 "先扛住硬约束") are enforced in stages: these
 // field-level caps mirror the native edge-function limits
@@ -17,8 +17,6 @@
 // restricted dialect (no function definitions, no while, bounded for-of) is
 // what handwritten scripts compile through, so authoring opens no new
 // execution capability.
-
-import { WAF_FUNCTION_NAME } from './model.js'
 
 export const EDGE_FUNCTIONS_DRAFT_SCHEMA_VERSION = 1
 
@@ -47,9 +45,6 @@ export const EDGE_FUNCTION_RATIO_MAX = 10_000
  */
 export const EDGE_FUNCTION_PHASES = ['request_head', 'request_body'] as const
 export type EdgeFunctionPhase = (typeof EDGE_FUNCTION_PHASES)[number]
-
-/** The only reserved slug: releases always merge the generated WAF function. */
-export const RESERVED_FUNCTION_NAMES: readonly string[] = [WAF_FUNCTION_NAME]
 
 export interface EdgeFunctionMountDraft {
   readonly projects: {

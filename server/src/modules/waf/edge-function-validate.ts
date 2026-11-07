@@ -13,37 +13,29 @@ import {
   EDGE_FUNCTION_RATIO_MIN,
   MAX_DESCRIPTION_BYTES,
   MAX_DRAFT_FUNCTIONS,
-  MAX_GLOB_BYTES,
   MAX_GLOBS_PER_SELECTOR,
   MAX_MOUNTS_PER_FUNCTION,
   MAX_SCRIPT_BYTES_PER_FUNCTION,
   MAX_TOTAL_DRAFT_SCRIPT_BYTES,
-  RESERVED_FUNCTION_NAMES,
   type EdgeFunctionDraftFunction,
   type EdgeFunctionsDraft,
 } from './edge-function-model.js'
-import { hasLoneSurrogate, isPrintableSingleLine, type WafValidationIssue } from './validate.js'
+import { isWafFunctionName } from './model.js'
+import {
+  hasLoneSurrogate,
+  isPrintableSingleLine,
+  isProjectGlob,
+  type WafValidationIssue,
+} from './validate.js'
 
 export type EdgeFunctionValidationIssue = WafValidationIssue
+
+export const RESERVED_FUNCTION_NAME_CODE = 'reserved_function_name'
 
 const functionNamePattern = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/u
 
 function byteLength(value: string): number {
   return Buffer.byteLength(value, 'utf8')
-}
-
-// Mount selector entries are wire globs: printable, no ';'(the projects-list
-// wire splits on it), bounded length. '*' wildcard syntax is the codec's to
-// judge; anything printable without ';' is accepted here.
-function isGlobCandidate(value: string): boolean {
-  if (value.length === 0 || byteLength(value) > MAX_GLOB_BYTES) return false
-  for (let index = 0; index < value.length; index += 1) {
-    const codeUnit = value.charCodeAt(index)
-    if (codeUnit < 0x20 || codeUnit === 0x7f || codeUnit === 0x3b) {
-      return false
-    }
-  }
-  return !hasLoneSurrogate(value)
 }
 
 export function validateEdgeFunctionsDraft(draft: unknown): EdgeFunctionValidationIssue[] {
@@ -97,11 +89,11 @@ export function validateEdgeFunctionsDraft(draft: unknown): EdgeFunctionValidati
         })
       }
       seenNames.add(function_.name)
-      if (RESERVED_FUNCTION_NAMES.includes(function_.name)) {
+      if (isWafFunctionName(function_.name)) {
         issues.push({
           field: `${path}.name`,
-          code: 'reserved_function_name',
-          message: `function name "${function_.name}" is reserved for the generated WAF function`,
+          code: RESERVED_FUNCTION_NAME_CODE,
+          message: `function name "${function_.name}" is reserved for generated WAF functions`,
         })
       }
     }
@@ -245,7 +237,7 @@ function validateMount(mount: unknown, path: string, issues: EdgeFunctionValidat
       })
     }
     list.forEach((glob, globIndex) => {
-      if (typeof glob !== 'string' || !isGlobCandidate(glob)) {
+      if (typeof glob !== 'string' || !isProjectGlob(glob)) {
         issues.push({
           field: `${path}.projects.${listName}[${globIndex}]`,
           code: 'invalid_glob',

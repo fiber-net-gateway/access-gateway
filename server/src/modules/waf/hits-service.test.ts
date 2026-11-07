@@ -53,7 +53,7 @@ test('hits service asks Prometheus for the waf event increases over the window',
   assert.equal(client.queries.length, 1)
   assert.equal(
     client.queries[0],
-    'sum by (event, label) (increase(access_server_function_events_total{function="waf"}[24h]))',
+    'sum by (event, label) (increase(access_server_function_events_total{function=~"waf(-.+)?"}[24h]))',
   )
   assert.equal(view.window, '24h')
   assert.ok(!Number.isNaN(Date.parse(view.queriedAt)))

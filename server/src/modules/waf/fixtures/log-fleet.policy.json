@@ -1,6 +1,16 @@
 {
-  "schemaVersion": 1,
-  "defaultMode": "log",
+  "schemaVersion": 2,
+  "groups": [
+    {
+      "id": "malformed",
+      "name": "畸形请求",
+      "mode": "log",
+      "priority": 100,
+      "projects": {
+        "include": ["*"]
+      }
+    }
+  ],
   "projectModes": {
     "loan-admin-legacy": "off"
   },
@@ -8,6 +18,7 @@
     {
       "id": "malformed-uri",
       "name": "畸形 URI 探测",
+      "group": "malformed",
       "severity": "low",
       "priority": 0,
       "action": "log",

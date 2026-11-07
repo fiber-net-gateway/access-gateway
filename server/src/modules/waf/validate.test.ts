@@ -1,13 +1,24 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import type { WafPolicy } from './model.js'
+import type { WafGroup, WafPolicy } from './model.js'
 import { isValidCidrLiteral, isValidProjectName, validateWafPolicy } from './validate.js'
+
+function group(overrides: Partial<WafGroup> = {}): WafGroup {
+  return {
+    id: 'core',
+    name: 'core rules',
+    mode: 'log',
+    priority: 100,
+    projects: { include: ['*'] },
+    ...overrides,
+  }
+}
 
 function basePolicy(overrides: Partial<WafPolicy> = {}): WafPolicy {
   return {
-    schemaVersion: 1,
-    defaultMode: 'log',
+    schemaVersion: 2,
+    groups: [group()],
     rules: [],
     projectModes: {},
     ...overrides,
@@ -18,6 +29,7 @@ function rule(overrides: Partial<WafPolicy['rules'][number]>): WafPolicy['rules'
   return {
     id: 'sqli-0001',
     name: 'probe',
+    group: 'core',
     severity: 'high',
     priority: 100,
     action: 'block',
@@ -33,12 +45,19 @@ function issueFields(policy: WafPolicy): string[] {
 
 test('valid fixture policies produce no issues', () => {
   const fixture: WafPolicy = basePolicy({
-    defaultMode: 'block',
+    groups: [
+      group({
+        mode: 'block',
+        projects: {
+          include: ['loan-*', 'trade-web'],
+          exempt: [{ project: 'loan-web', reason: 'report export contains SQL fragments' }],
+        },
+      }),
+    ],
     projectModes: { 'loan-admin': 'log', 'loan-admin-legacy': 'off' },
     rules: [
       rule({
         scope: { methods: ['GET', 'POST'], paths: ['/api/*'], sourceCidrs: ['172.28.0.0/16'] },
-        exclusions: [{ project: 'loan-web', reason: 'report export contains SQL fragments' }],
       }),
     ],
   })
@@ -46,10 +65,9 @@ test('valid fixture policies produce no issues', () => {
 })
 
 test('schema envelope fields are validated', () => {
-  assert.deepEqual(issueFields(basePolicy({ schemaVersion: 2 as WafPolicy['schemaVersion'] })), [
+  assert.deepEqual(issueFields(basePolicy({ schemaVersion: 1 as WafPolicy['schemaVersion'] })), [
     'schemaVersion',
   ])
-  assert.ok(issueFields(basePolicy({ defaultMode: 'warn' as never })).includes('defaultMode'))
 })
 
 test('rule identity and metadata fields are validated', () => {
@@ -128,42 +146,120 @@ test('scope methods, paths, and CIDRs are validated', () => {
   assert.ok(issues.filter((field) => field === 'rules[0].scope.sourceCidrs').length >= 5)
 })
 
-test('exclusions require a printable project and a non-blank reason', () => {
+test('group identity and metadata fields are validated', () => {
+  for (const bad of ['SQLI', 'sqli_1', '-sqli', 'sqli-', 'a'.repeat(61), '']) {
+    assert.ok(
+      issueFields(basePolicy({ groups: [group({ id: bad })] })).includes('groups[0].id'),
+      `id: ${bad}`,
+    )
+  }
+  // 60 bytes plus the waf- prefix is exactly the 64-byte function name cap.
+  assert.deepEqual(issueFields(basePolicy({ groups: [group({ id: 'a'.repeat(60) })] })), [])
+  assert.ok(issueFields(basePolicy({ groups: [group({ name: '  ' })] })).includes('groups[0].name'))
+  assert.ok(
+    issueFields(basePolicy({ groups: [group({ mode: 'warn' as never })] })).includes(
+      'groups[0].mode',
+    ),
+  )
+  for (const bad of [-1, 1.5, 1_000_001]) {
+    assert.ok(
+      issueFields(basePolicy({ groups: [group({ priority: bad })] })).includes(
+        'groups[0].priority',
+      ),
+      `priority: ${String(bad)}`,
+    )
+  }
+})
+
+test('a group needs a project selector made of valid, distinct globs', () => {
+  const include = (values: string[]) =>
+    issueFields(basePolicy({ groups: [group({ projects: { include: values } })] }))
+  assert.deepEqual(include([]), ['groups[0].projects.include'])
+  assert.deepEqual(include(['loan;web']), ['groups[0].projects.include'])
+  assert.deepEqual(include(['loan-*', 'loan-*']), ['groups[0].projects.include'])
+  assert.deepEqual(include(Array.from({ length: 257 }, (_, index) => `p${index}`)), [
+    'groups[0].projects.include',
+  ])
+})
+
+test('exemptions require a printable project and a non-blank reason', () => {
   const issues = issueFields(
     basePolicy({
-      rules: [
-        rule({
-          exclusions: [
-            { project: 'loan;web', reason: '' },
-            { project: 'loan*web', reason: 'ok'.repeat(200) },
-          ],
+      groups: [
+        group({
+          projects: {
+            include: ['*'],
+            exempt: [
+              { project: 'loan;web', reason: '' },
+              { project: 'loan-*', reason: 'ok'.repeat(200) },
+              { project: 'trade-web', reason: 'line\nbreak' },
+            ],
+          },
         }),
       ],
     }),
   )
-  assert.ok(issues.includes('rules[0].exclusions[0].project'))
-  assert.ok(issues.includes('rules[0].exclusions[0].reason'))
-  assert.ok(issues.includes('rules[0].exclusions[1].project'))
-  assert.ok(issues.includes('rules[0].exclusions[1].reason'))
+  assert.deepEqual(issues, [
+    'groups[0].projects.exempt[0].project',
+    'groups[0].projects.exempt[0].reason',
+    'groups[0].projects.exempt[1].reason',
+    'groups[0].projects.exempt[2].reason',
+  ])
 })
 
-test('duplicate rule ids and duplicate exclusions conflict', () => {
+test('duplicate ids and duplicate exemptions conflict', () => {
   assert.deepEqual(issueFields(basePolicy({ rules: [rule({}), rule({ id: 'sqli-0001' })] })), [
     'rules[1].id',
   ])
+  assert.deepEqual(issueFields(basePolicy({ groups: [group(), group()] })), ['groups[1].id'])
   const issues = issueFields(
     basePolicy({
-      rules: [
-        rule({
-          exclusions: [
-            { project: 'loan-web', reason: 'a' },
-            { project: 'loan-web', reason: 'b' },
-          ],
+      groups: [
+        group({
+          projects: {
+            include: ['*'],
+            exempt: [
+              { project: 'loan-web', reason: 'a' },
+              { project: 'loan-web', reason: 'b' },
+            ],
+          },
         }),
       ],
     }),
   )
-  assert.deepEqual(issues, ['rules[0].exclusions[1].project'])
+  assert.deepEqual(issues, ['groups[0].projects.exempt[1].project'])
+})
+
+test('a rule must belong to an existing group', () => {
+  const issues = validateWafPolicy(basePolicy({ rules: [rule({ group: 'missing' })] }))
+  assert.deepEqual(
+    issues.map(({ field, code }) => [field, code]),
+    [['rules[0].group', 'unknown_group']],
+  )
+})
+
+test('the wire exclude cap counts exemptions together with off-mode members', () => {
+  const exempt = Array.from({ length: 200 }, (_, index) => ({
+    project: `exempt-${index}`,
+    reason: 'audit',
+  }))
+  const projectModes = Object.fromEntries(
+    Array.from({ length: 57 }, (_, index) => [`off-${index}`, 'off' as const]),
+  )
+  const issues = validateWafPolicy(
+    basePolicy({ groups: [group({ projects: { include: ['*'], exempt } })], projectModes }),
+  )
+  assert.deepEqual(
+    issues.map(({ field, code }) => [field, code]),
+    [['groups[0].projects.exempt', 'limit_exceeded']],
+  )
+  // Off-mode projects outside the group never reach its exclude list.
+  assert.deepEqual(
+    issueFields(
+      basePolicy({ groups: [group({ projects: { include: ['loan-*'], exempt } })], projectModes }),
+    ),
+    [],
+  )
 })
 
 test('projectModes keys and values are validated', () => {
@@ -174,7 +270,10 @@ test('projectModes keys and values are validated', () => {
   assert.ok(issues.includes("projectModes['loan-web']"))
 })
 
-test('rule count and projectModes count are bounded', () => {
+test('group, rule and projectModes counts are bounded', () => {
+  const manyGroups = Array.from({ length: 33 }, (_, index) => group({ id: `g${index}` }))
+  assert.deepEqual(issueFields(basePolicy({ groups: manyGroups })), ['groups'])
+
   const manyRules = Array.from({ length: 257 }, () => rule({}))
   assert.deepEqual(issueFields(basePolicy({ rules: manyRules })), ['rules'])
 

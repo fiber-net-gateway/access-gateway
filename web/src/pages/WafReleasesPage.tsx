@@ -255,15 +255,12 @@ export function WafReleasesPage() {
                   <div>
                     <strong>
                       {release.mode === 'mounted'
-                        ? `挂载函数 ${release.functionName} · ${release.ruleCount} 条规则`
-                        : '卸载边缘函数（空索引）'}
+                        ? `挂载 ${release.wafFunctions.length} 个 WAF 函数 · ${release.ruleCount} 条规则`
+                        : '不挂载 WAF 函数'}
                     </strong>
                     <small>
                       索引版本 {release.indexVersion} ·{' '}
-                      {release.scriptSha256
-                        ? `脚本 ${release.scriptSha256.slice(0, 12)}…`
-                        : '无脚本'}{' '}
-                      · {new Date(release.createdAt).toLocaleString('zh-CN')}
+                      {new Date(release.createdAt).toLocaleString('zh-CN')}
                     </small>
                   </div>
                 </div>
@@ -408,18 +405,18 @@ function WafPublicationPreview({ onCreateFromDraft, working }: WafPublicationPre
         ])
 
         const planned: PlannedEdgeFunction[] = []
-        const wafCompilation =
-          policyResult.compilation?.kind === 'mounted' ? policyResult.compilation : null
-        if (wafCompilation) {
+        const wafFunctions =
+          policyResult.compilation?.kind === 'mounted' ? policyResult.compilation.functions : []
+        for (const fn of wafFunctions) {
           planned.push({
-            name: wafCompilation.functionName,
-            sha256: wafCompilation.scriptSha256,
-            script: wafCompilation.script,
+            name: fn.functionName,
+            sha256: fn.scriptSha256,
+            script: fn.script,
             source: 'waf',
             mountsKey: mountsSignature(
-              wafCompilation.mounts.map((mount) => ({
+              fn.mounts.map((mount) => ({
                 projects: { include: mount.include, exclude: mount.exclude },
-                priority: wafCompilation.mountPriority,
+                priority: fn.mountPriority,
               })),
             ),
           })

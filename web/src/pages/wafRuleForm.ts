@@ -1,8 +1,9 @@
 import type {
   WafCompilePreviewView,
+  WafGroup,
+  WafMode,
   WafPolicy,
   WafRule,
-  WafRuleExclusion,
   WafSeverity,
 } from '../api/types'
 import { createUuid } from '../shared/uuid'
@@ -19,11 +20,18 @@ export const actionLabels: Record<WafRule['action'], string> = {
   log: '记录',
 }
 
+export const modeLabels: Record<WafMode, string> = {
+  off: '关闭',
+  log: '仅记录',
+  block: '拦截',
+}
+
 // Form state keeps what the operator typed: list and number fields are parsed
 // only when building a rule, so a half-typed "GET," or an empty priority stays
 // in the input instead of being normalized away on every keystroke.
 export interface WafRuleForm {
   name: string
+  group: string
   severity: WafSeverity
   priority: string
   action: WafRule['action']
@@ -31,7 +39,6 @@ export interface WafRuleForm {
   methods: string
   paths: string
   sourceCidrs: string
-  exclusions: readonly WafRuleExclusion[]
 }
 
 // One problem on one rule; `field` is relative to the rule ("scope.methods"),
@@ -44,10 +51,11 @@ export interface WafRuleProblem {
   column?: number
 }
 
-export function newWafRule(): WafRule {
+export function newWafRule(group: string): WafRule {
   return {
     id: `rule-${createUuid().replace(/-/g, '').slice(0, 8)}`,
     name: '',
+    group,
     severity: 'high',
     priority: 100,
     action: 'block',
@@ -59,6 +67,7 @@ export function newWafRule(): WafRule {
 export function ruleToForm(rule: WafRule): WafRuleForm {
   return {
     name: rule.name,
+    group: rule.group,
     severity: rule.severity,
     priority: String(rule.priority),
     action: rule.action,
@@ -66,7 +75,6 @@ export function ruleToForm(rule: WafRule): WafRuleForm {
     methods: (rule.scope?.methods ?? []).join(', '),
     paths: (rule.scope?.paths ?? []).join(', '),
     sourceCidrs: (rule.scope?.sourceCidrs ?? []).join(', '),
-    exclusions: rule.exclusions ?? [],
   }
 }
 
@@ -86,13 +94,13 @@ export function formToRule(form: WafRuleForm, base: WafRule): WafRule {
   return {
     id: base.id,
     name: form.name.trim(),
+    group: form.group,
     severity: form.severity,
     priority: Number(form.priority),
     action: form.action,
     phase: base.phase,
     match: form.match,
     ...(Object.keys(scope).length > 0 ? { scope } : {}),
-    ...(form.exclusions.length > 0 ? { exclusions: form.exclusions } : {}),
   }
 }
 
@@ -117,10 +125,17 @@ export function formProblems(form: WafRuleForm): readonly WafRuleProblem[] {
 }
 
 // A policy holding only this rule: every issue it yields belongs to the rule,
-// other rules cannot mask it, and log mode always compiles a script even when
-// the real default mode is off.
+// other rules cannot mask it, and a log group always compiles a script even when
+// the real group is off.
 export function isolatedRulePolicy(rule: WafRule): WafPolicy {
-  return { schemaVersion: 1, defaultMode: 'log', rules: [rule], projectModes: {} }
+  return {
+    schemaVersion: 2,
+    groups: [
+      { id: rule.group, name: rule.group, mode: 'log', priority: 0, projects: { include: ['*'] } },
+    ],
+    rules: [rule],
+    projectModes: {},
+  }
 }
 
 const ruleFieldPattern = /^rules\[(\d+)\](?:\.(.+))?$/u
@@ -185,11 +200,125 @@ export function ruleChange(rule: WafRule, saved: WafRule | undefined): WafRuleCh
   return JSON.stringify(rule) === JSON.stringify(saved) ? null : 'modified'
 }
 
-// The order the generated script evaluates rules in: priority ascending, ties
-// keep declaration order. Mirrors compileWafPolicy in server/src/modules/waf.
+// The order a group's script evaluates rules in: priority ascending, ties keep
+// declaration order. Mirrors compileWafPolicy in server/src/modules/waf.
 export function rulesInExecutionOrder(rules: readonly WafRule[]): readonly WafRule[] {
   return rules
     .map((rule, index) => ({ rule, index }))
     .sort((left, right) => left.rule.priority - right.rule.priority || left.index - right.index)
     .map(({ rule }) => rule)
+}
+
+// The order groups run in: mount priority ascending, ties by id.
+export function groupsInExecutionOrder(groups: readonly WafGroup[]): readonly WafGroup[] {
+  return [...groups].sort(
+    (left, right) => left.priority - right.priority || (left.id < right.id ? -1 : 1),
+  )
+}
+
+export function groupChange(group: WafGroup, saved: WafGroup | undefined): WafRuleChange {
+  if (saved === undefined) return 'added'
+  return JSON.stringify(group) === JSON.stringify(saved) ? null : 'modified'
+}
+
+// Mirrors star_glob in the data plane: '*' matches any run, the rest is literal.
+export function projectGlobMatches(pattern: string, project: string): boolean {
+  const literals = pattern.split('*').map((part) => part.replace(/[.+?^${}()|[\]\\]/gu, '\\$&'))
+  return new RegExp(`^${literals.join('.*')}$`, 'su').test(project)
+}
+
+export type WafGroupMembership =
+  | { state: 'active' }
+  | { state: 'outside' }
+  /** `exact` when this project's own entry exempts it; a glob entry may cover others too. */
+  | { state: 'exempt'; project: string; reason: string; exact: boolean }
+
+export function groupMembership(group: WafGroup, project: string): WafGroupMembership {
+  if (!group.projects.include.some((glob) => projectGlobMatches(glob, project))) {
+    return { state: 'outside' }
+  }
+  const exempt = group.projects.exempt ?? []
+  const exemption =
+    exempt.find((entry) => entry.project === project) ??
+    exempt.find((entry) => projectGlobMatches(entry.project, project))
+  return exemption
+    ? { state: 'exempt', ...exemption, exact: exemption.project === project }
+    : { state: 'active' }
+}
+
+export function includeSummary(group: WafGroup): string {
+  const { include } = group.projects
+  return include.includes('*') ? '全部 Project' : `${include.length} 条 Project 匹配`
+}
+
+// Form state keeps what the operator typed; see WafRuleForm.
+export interface WafGroupForm {
+  id: string
+  name: string
+  mode: WafMode
+  priority: string
+  include: string
+  exempt: readonly { project: string; reason: string }[]
+}
+
+// Off until an operator turns it on: creating a group changes nothing on the wire.
+export function newWafGroupForm(): WafGroupForm {
+  return { id: '', name: '', mode: 'off', priority: '100', include: '*', exempt: [] }
+}
+
+export function groupToForm(group: WafGroup): WafGroupForm {
+  return {
+    id: group.id,
+    name: group.name,
+    mode: group.mode,
+    priority: String(group.priority),
+    include: group.projects.include.join(', '),
+    exempt: group.projects.exempt ?? [],
+  }
+}
+
+export function formToGroup(form: WafGroupForm): WafGroup {
+  return {
+    id: form.id.trim(),
+    name: form.name.trim(),
+    mode: form.mode,
+    priority: Number(form.priority),
+    projects: {
+      include: parseList(form.include),
+      ...(form.exempt.length > 0 ? { exempt: form.exempt } : {}),
+    },
+  }
+}
+
+const groupIdPattern = /^[a-z0-9](?:[a-z0-9-]{0,58}[a-z0-9])?$/u
+
+export function groupFormProblems(
+  form: WafGroupForm,
+  existingIds: readonly string[],
+): readonly WafRuleProblem[] {
+  const problems: WafRuleProblem[] = []
+  const id = form.id.trim()
+  if (!groupIdPattern.test(id)) {
+    problems.push({
+      field: 'id',
+      code: 'invalid_field',
+      message: '组 ID 须为小写字母、数字或连字符，1-60 字符，且首尾为字母或数字',
+    })
+  } else if (existingIds.includes(id)) {
+    problems.push({ field: 'id', code: 'conflict', message: `组 ID ${id} 已存在` })
+  }
+  if (form.name.trim().length === 0) {
+    problems.push({ field: 'name', code: 'required', message: '请填写组名称' })
+  }
+  if (!/^\d{1,7}$/u.test(form.priority.trim()) || Number(form.priority) > 1_000_000) {
+    problems.push({
+      field: 'priority',
+      code: 'out_of_range',
+      message: '优先级须为 0–1000000 的整数',
+    })
+  }
+  if (parseList(form.include).length === 0) {
+    problems.push({ field: 'include', code: 'required', message: '请至少填写一条生效 Project' })
+  }
+  return problems
 }

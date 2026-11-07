@@ -32,14 +32,20 @@ export interface WafReleaseResourceView {
   verifiedAt: string | null
 }
 
+/** One generated WAF function of a release. */
+export interface WafReleaseFunctionView {
+  name: string
+  scriptSha256: string
+}
+
 export interface WafReleaseView {
   id: string
   sequence: string
   status: ReleaseStatus
-  functionName: string
-  /** 'unmount' releases publish an empty function index. */
+  /** Empty when no group publishes: an 'unmount' release. */
+  wafFunctions: readonly WafReleaseFunctionView[]
+  /** 'unmount' releases mount no WAF function; handwritten ones may remain. */
   mode: 'mounted' | 'unmount'
-  scriptSha256: string | null
   ruleCount: number
   /** The wire index version embedded in the published index. */
   indexVersion: string

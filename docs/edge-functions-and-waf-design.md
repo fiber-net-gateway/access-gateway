@@ -50,14 +50,14 @@ WAF/边缘函数是全新能力，**没有 Java wire 兼容包袱**：错误码�
   "version": 3,
   "functions": [
     {
-      "name": "waf",
+      "name": "waf-sqli",
       "sha256": "…64 位小写 hex…",
       "mounts": [
         { "projects": { "include": ["*"], "exclude": ["loan-admin-legacy"] }, "priority": 100 }
       ]
     },
     {
-      "name": "waf-candidate",
+      "name": "bot-trap",
       "sha256": "…64 位小写 hex…",
       "mounts": [{ "projects": { "include": ["*"] }, "ratio": 1000 }]
     }
@@ -103,7 +103,7 @@ glob 规则：非空可打印文本、不含 `;`（项目列表 wire 以分号�
 
 limits 同步修订：`maxFunctionIdBytes` 删除（身份只剩一个），`maxFunctionNameBytes` 128 → 64（从展示名上限变为 slug 上限），`--describe-config-limits` schemaVersion 3 → 4；`ratio` 为固定值域 [0,10000]（同 `priority` 的 [0,1000000]），不设 limits 字段。P1 已提交的 codec/validator/server 镜像（master `23c2388`）仍是修订前形态（`id` + 可空 `name` + `dataId`、无 `ratio`），本修订的实现变更为下一步（未部署、P2 未消费，零迁移）。body phase（P3 ①）追加 `edgeFunctions.maxBodyPhaseBytes`（缺省 1 MiB），schemaVersion 4 → 5。
 
-- 项目级 WAF mode（off/log/block）**不设 wire 字段**：由生成器折叠——mode 为 `off` 的项目直接进 `exclude`（零执行成本），`log`/`block` 项目共享同一脚本，脚本头部按 `$ctx.project` 查表。
+- 项目级 WAF mode（off/log/block）**不设 wire 字段**：由生成器折叠——mode 为 `off` 的项目进其所在各组的 `exclude`（零执行成本），`log`/`block` 项目共享组脚本，block 规则命中后按 `$ctx.project` 判定。
 - 脚本 Data ID 的身份 = 索引中的 `sha256`；脚本文本不变则 hash 不变，watcher 编译产物按内容寻址复用（改挂载只 bump 索引版本，不重写脚本）。
 
 **组装语义（failure-old-snapshot 的推广）**：快照切换**全或无**。watcher 收到索引后逐一校验引用脚本：本地缓存命中（同 hash 已编译）则复用，否则订阅/拉取 → 校验 sha256 → 受限编译；全部就绪才组装联合快照并原子替换，任一脚本缺失、hash 不匹配或编译失败 → 保留旧快照 + 失败计数 + 日志。索引同版本忽略；索引中消失的函数 Data ID 成为孤儿，直接不参与组装（删除清理由发布侧负责，数据面不做删除依赖）。
@@ -211,11 +211,22 @@ if (!office.contains($conn.remote_addr) && strings.match($req.uri, "(?i)union\\s
 ### 4.1 规则模型（控制台内部模型，不进 wire）
 
 ```yaml
-rules:
-  - id: sqli-0023 # 稳定 ID，进日志/metrics 标签/豁免引用
+groups:
+  - id: sqli # slug，≤60 字节，不可改名；发布为边缘函数 waf-sqli
+    name: 'SQL 注入'
+    mode: block # off/log/block；off = 不发布该函数
+    priority: 100 # 即挂载 priority：组间顺序，也决定与手写函数的先后
+    projects:
+      include: ['*'] # glob，即 wire 挂载 include
+      exempt: # glob + 必填原因，即 wire 挂载 exclude
+        - project: loan-web
+          reason: '内部报表导出含 SQL 片段, 2026-11-05 张三'
+rules: # 平铺；每条规则只属于一个组，id 全策略唯一
+  - id: sqli-0023 # 稳定 ID，进日志/metrics 标签
     name: 'union select 注入探测'
+    group: sqli
     severity: high # critical/high/medium/low，仅元信息
-    priority: 100 # 生成 if 链顺序
+    priority: 100 # 组内 if 链顺序
     action: block # log | block
     phase: request_head # v1 仅此枚举
     match: | # 表达式，与路由 condition 同语言同编译管线
@@ -225,20 +236,26 @@ rules:
       methods: [GET, POST]
       paths: ['/api/*']
       source_cidrs: ['172.28.0.0/16'] # 生成器收集去重 → 脚本顶部 cidr directive 声明
-    exclusions:
-      - project: loan-web
-        reason: '内部报表导出含 SQL 片段, 2026-11-05 张三'
-projectWaf:
-  loan-admin: { mode: log } # off/log/block；off 的项目在生成时进挂载 exclude
+projectModes:
+  loan-admin: log # 覆盖该项目所在全部组的模式；off = 从这些组的挂载排除
 ```
+
+**规则组（2026-11-07 修订，策略 schemaVersion 2）**：Project 作用域只在组上，规则不再带 Project。每个 mode 非 off 且含规则的组编译为一个边缘函数 `waf-<组 id>`，组的 `include/exempt` 直接成为 wire 挂载选择器，因此 native、rnacos 契约与 validator 均无改动。有效模式 = `projectModes[P] ?? group.mode`。
+
+- 组数上限 32（函数总数 64 与手写函数共用）；exempt 与命中该组的 off 项目合计不得超过 selector 上限 256，保存时校验。
+- `waf` 与 `waf-*` 为生成函数保留名；存量手写草稿可读取以便改名，但保存和创建 Release 都拒绝。
+- 组内 block 后脚本 `return`；函数链在响应发出后短路，所以前面的组拦截后后面的组不执行，其 log 命中会少计。运行期异常只影响所在的组。
+- 代价：不再有单规则豁免。规则误报时豁免整组、拆出单独的组，或用 `scope.paths` 收窄；起手规则包因此按误报族分为 6 个组，导入时全部为 off。
+- 每多一组，请求多一次 `exec_async`、两次时钟读取和两次指标更新，实测约 0.3µs CPU（§5）；`function_evaluations_total` 上限 4096 个序列，组数 × 项目数超限会逐出并清零计数。
+- schema 1 草稿读取时升级：规则进入 `default` 组，`defaultMode` 成为组模式（default off 时组的 include 改为已启用项目）；`exclusions` 折叠为 match 内的 `$ctx.project != …` 守卫，其审计原因丢失。回滚使用历史 wire payload，可回到单函数 `waf`，此时 `waf-*` 脚本成为孤儿（§8）。
 
 脚本做不了的事由信封/生成器补：CIDR 判断经 `scope.source_cidrs` 语法糖编译为脚本顶部的 cidr directive 声明（多条规则共享的网段去重合并），规则体引用 `<name>.contains($conn.remote_addr)`；手写场景（P3）可直接写 directive，两者兼容。性能敏感的全量扫描由 `scope.methods/paths` 折叠为 `strings.hasPrefix`/`contains` 前置链（公共前缀合并，不逐规则跑正则）。需要完整脚本表达力的场景走既有 Script 路由类型，不往 WAF 规则里塞。
 
-校验阶段对齐现有分层：字段语法（类型/长度/枚举/ID 唯一性）→ 交叉校验（豁免引用的规则 ID 存在、scope 字段与 CIDR 合法）→ 全环境校验（**生成产物必须通过 native validator 编译**，fail-closed，Release 准备之前）。
+校验阶段对齐现有分层：字段语法（类型/长度/枚举/ID 唯一性）→ 交叉校验（规则引用的组存在、scope 字段与 CIDR 合法、挂载 exclude 不超限）→ 全环境校验（**生成产物必须通过 native validator 编译**，fail-closed，Release 准备之前）。
 
 ### 4.2 代码生成器（`server/`，关键路径组件）
 
-- 输入：规则集 + 项目 mode 表；输出：单函数脚本文本（含顶部 cidr directive 声明）+ 索引条目（exclude 含全部 mode=off 项目）。
+- 输入：规则组 + 规则集 + 项目 mode 表；输出：每组一份函数脚本文本（含顶部 cidr directive 声明）+ 索引条目（exclude 含组豁免与命中该组的 mode=off 项目）。
 - 生成策略：priority 升序 if 链；mode 查表在脚本头部；`block` 命中 = `ctx.report("waf.block", "<ruleId>")` + `resp.sendJson(403, …)` 默认 JSON 体 `{code:"WAF_BLOCKED", ruleId}`（实现修订：v1 方言不暴露 requestId/traceId 常量，二者不入体——traceId 经响应头 `hi-trace-id` 关联，ruleId 足以定位规则）；`log` 命中 = 仅 `ctx.report("waf.log", "<ruleId>")`。转义器实现要点（P2 落地）：非可打印 ASCII 与全部元字符统一走 `\xHH` 按字节转义，回避方言的八进制/`\a`/`\u{}` 转义死角，可证明字节级往返。
 - **转义器**是安全关键点：规则里的正则/字面量要安全转义进方言字符串。方言转义与 JS 有差异（无 `\u{...}`、支持 1-3 位八进制、`\a` 写出普通 `a` 等），转义器单独单测并覆盖恶意输入（转义错误 = 规则语义偏移 = 安全漏洞）。CIDR 列表同样经转义器进 directive 字面量。
 - **黄金 fixtures**：规则集 → 生成脚本快照对比（对齐 `tests/fixtures/java` 的做法），并用 native validator 断言全部 fixture 编译通过。
@@ -254,7 +271,7 @@ projectWaf:
 ### 4.4 web
 
 - WAF 页：规则表格 + 结构化编辑 + `match` 表达式 CodeMirror 编辑器 + 即时编译校验（server → validator）。
-- 项目策略页：per-project mode 与豁免管理（豁免带原因，可审计）。
+- 项目策略页：per-project mode 覆盖与规则组豁免（豁免带原因，可审计）。
 - 发布预览：编译两个已存草稿（WAF 策略 + 手写函数）得到 planned 索引，与 rnacos live 索引**逐函数对比**（新增 / 不变 / 变更（脚本|挂载，含脚本 diff）/ 残留），全部脚本可编译才允许创建 Release。
 - 边缘函数页：手写函数工作区（函数列表 + 脚本 CodeMirror 编辑 + 挂载编辑 + 执行阶段选择（P3 ①）+ 去抖逐函数原生编译预览（按 phase）+ If-Match 乐观并发保存），rnacos 实时快照折叠只读保留（§7 P3 ②，已实施；实时快照含 phase 展示）。
 
@@ -262,7 +279,8 @@ projectWaf:
 
 - 挂载项目每请求：1 次 `exec_async`（GcHeap 已存在，无新增分配；纯同步函数不挂起，成本同 `exec_sync`）+ 生成代码的前置字符串链；CIDR 判断为纯 C++ 区间匹配，无 VM 参与。
 - ratio 采样：每请求至多一次 crc32(对端 IP 字节) + 整数比较（无分配）；命中的函数列表全部必跑（ratio 缺省/10000）时不抽签，零成本。
-- 目标：典型 50 规则集函数求值 p99 < 100µs；进 `benchmark:native` 基线，PR 中报告。
+- 目标：典型 50 规则集函数求值 p99 < 100µs；`benchmark:native` 尚无边缘函数基准，这个目标还没有量化基线。
+- 规则组实测（2026-11-07，compose 栈，单项目，WSL2，静态响应路由，起手规则包 9 条全部 log 且不命中，5 轮中位数）：access-server 每请求 CPU（cgroup `usage_usec`）无 WAF 32.4µs、1 个组 37.1µs、6 个组 38.6µs，即 WAF 约 +5µs，每多一组约 +0.3µs；三者的吞吐与延迟差异都在噪声内，该测试受压测客户端限制（约 2.9 万 RPS）。
 - 未挂载项目零成本；mode=off 项目经挂载排除零成本；ratio=0 函数只余一次阈值比较。
 - 热路径承诺：数据面侧短路判定（`response_header_sent()`）与索引查表无分配。
 
@@ -290,6 +308,7 @@ projectWaf:
 
 - ~~**上游备忘失效缺陷**：`ScriptExchangeCtx::set_path_vars()` 不清除已备忘的 `$path` 常量~~ **已解决**（上游 `625f0b46`，随本设计实施一同 pin）：`set_path_vars()` 现重置整个常量备忘（单条摘除会断线性探测链），各候选条件读到自己的捕获；`AccessRequestHandlerTest.PathVarConditionSeesEachCandidatesOwnCapture` 已解封守护。
 - **body 阶段 v2 候选**（P3 ① 后仍开放）：content-type 白名单为代码固定 v1（console/数据面均不可配置——可配置清单是配置面攻击面，先固定观察）；`multipart/form-data`、`application/octet-stream` 等是否纳入待真实规则需求；脚本在代理路径上改写响应头（`resp.setHeader` 未 send 即丢弃，见 §3.3 方言脚枪）需要显式契约；`$req.body` 目前整体原样视图（无解析后的 JSON 常量，规则用 `strings.match` 匹配原始字节）。
+- `access_server_function_duration_seconds` 按整数微秒截断（`duration_cast<microseconds>`），1µs 以内的执行记为 0。规则组把脚本拆小后更容易低估，判断函数开销要看 CPU，不要看这个直方图；修复需改 native 记录精度。
 - CAT 事务标记形态（函数短路是否独立 transaction type 或仅 trace 标记）。
 - 函数能否读 trace context（`$context` 已含 trace cluster；开放给 `$ctx` 的范围待实现时定）。
 - 响应阶段函数（`phase: response`）与请求改写（`phase: request_rewrite`）的契约扩展——远期，先留枚举位不实现。

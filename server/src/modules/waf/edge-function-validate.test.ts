@@ -66,12 +66,26 @@ test('function names must be slugs, unique, and not reserved', () => {
         script: 'return true;',
         mounts: [{ projects: { include: ['*'] } }],
       },
+      {
+        name: 'waf-sqli',
+        enabled: true,
+        script: 'return true;',
+        mounts: [{ projects: { include: ['*'] } }],
+      },
+      {
+        name: 'wafer',
+        enabled: true,
+        script: 'return true;',
+        mounts: [{ projects: { include: ['*'] } }],
+      },
     ],
   })
   const fields = issues.map((issue) => `${issue.field}:${issue.code}`)
   assert.ok(fields.includes('functions[0].name:invalid_function_name'))
   assert.ok(fields.includes('functions[2].name:duplicate_function_name'))
   assert.ok(fields.includes('functions[3].name:reserved_function_name'))
+  assert.ok(fields.includes('functions[4].name:reserved_function_name'))
+  assert.ok(!fields.some((field) => field.startsWith('functions[5]')))
 })
 
 test('disabled functions may omit mounts; enabled functions need one', () => {

@@ -1,5 +1,5 @@
 // WAF release service: compiles the current WAF policy draft into the
-// edge-function wire artifacts (script + function index), fail-closes on the
+// edge-function wire artifacts (one script per group + function index), fail-closes on the
 // native validator for both payloads, and persists an immutable release whose
 // resources the publication worker writes scripts-first-index-last
 // (§4.3). Activation stays 'unknown' until the edge-function evidence wiring
@@ -17,9 +17,13 @@ import type { Actor } from '../auth/model.js'
 import { EnvironmentRepository } from '../environments/repository.js'
 import type { EnvironmentView } from '../environments/model.js'
 import { compileWafPolicy } from './generator.js'
-import { emptyEdgeFunctionsDraft, type EdgeFunctionsDraft } from './edge-function-model.js'
+import {
+  emptyEdgeFunctionsDraft,
+  MAX_DRAFT_FUNCTIONS,
+  type EdgeFunctionsDraft,
+} from './edge-function-model.js'
 import { EdgeFunctionDraftRepository } from './edge-function-repository.js'
-import { WAF_FUNCTION_NAME, WAF_MOUNT_PRIORITY, type WafPolicy } from './model.js'
+import { isWafFunctionName, type WafPolicy } from './model.js'
 import {
   EDGE_FUNCTIONS_DATA_ID,
   EDGE_FUNCTIONS_GROUP,
@@ -41,7 +45,7 @@ import { WafPolicyDraftRepository } from './repository.js'
 import { validateWafPolicy } from './validate.js'
 
 /** Identity of the generator output; bump when generation semantics change. */
-export const WAF_GENERATOR_REVISION = 'waf-generator-v1'
+export const WAF_GENERATOR_REVISION = 'waf-generator-v2'
 
 export interface WafReleaseService {
   create(actor: Actor, input: CreateWafReleaseInput, requestId: string): Promise<WafReleaseView>
@@ -69,10 +73,9 @@ export interface WafReleaseService {
 // range is enforced at allocation time.
 const representativeIndexVersion = 1
 
-// The published index carries at most maxFunctions entries; the live view only
-// ever fetches a handful of scripts and never trusts the stored index to be
-// console-authored.
-const liveScriptReadLimit = 16
+// Covers every function a published index can carry, so the publication preview
+// can diff them all, while never trusting the stored index to be console-authored.
+const liveScriptReadLimit = MAX_DRAFT_FUNCTIONS
 
 function parseLiveIndex(content: string): {
   version: number | null
@@ -152,27 +155,18 @@ function planFromPolicy(
   functionsDraft: EdgeFunctionsDraft,
 ): PreparedWafReleasePlan {
   const compilation = compileWafPolicy(policy)
-  const wafMounted = compilation.kind !== 'unmount'
-  const [selector] = compilation.kind === 'mounted' ? compilation.mounts : []
-  const wafEntry: WafWireIndexFunctionEntry | null = wafMounted
-    ? {
-        name: compilation.functionName,
-        sha256: compilation.scriptSha256,
-        mounts: [
-          {
-            projects: {
-              include: [...(selector?.include ?? [])],
-              exclude: [...(selector?.exclude ?? [])],
-            },
-            priority: compilation.mountPriority ?? WAF_MOUNT_PRIORITY,
-          },
-        ],
-      }
-    : null
+  const generated = compilation.kind === 'mounted' ? compilation.functions : []
 
   const handwritten = functionsDraft.functions.filter((fn) => fn.enabled)
   const entries: WafWireIndexFunctionEntry[] = [
-    ...(wafEntry ? [wafEntry] : []),
+    ...generated.map((fn) => ({
+      name: fn.functionName,
+      sha256: fn.scriptSha256,
+      mounts: fn.mounts.map((selector) => ({
+        projects: { include: [...selector.include], exclude: [...selector.exclude] },
+        priority: fn.mountPriority,
+      })),
+    })),
     ...handwritten.map((fn) => ({
       name: fn.name,
       sha256: sha256(fn.script).toString('hex'),
@@ -198,9 +192,7 @@ function planFromPolicy(
   entries.sort((a, b) => minPriority(a) - minPriority(b) || (a.name < b.name ? -1 : 1))
 
   const scripts: PreparedWafReleasePlan['scripts'] = [
-    ...(wafMounted && compilation.kind === 'mounted'
-      ? [{ name: compilation.functionName, script: compilation.script }]
-      : []),
+    ...generated.map((fn) => ({ name: fn.functionName, script: fn.script })),
     ...handwritten.map((fn) => ({
       name: fn.name,
       script: fn.script,
@@ -209,11 +201,9 @@ function planFromPolicy(
   ]
 
   return {
-    mode: wafMounted ? 'mounted' : 'unmount',
-    functionName: wafEntry?.name ?? WAF_FUNCTION_NAME,
-    script: wafMounted && compilation.kind === 'mounted' ? compilation.script : null,
-    scriptSha256: wafEntry?.sha256 ?? null,
-    ruleCount: policy.rules.length,
+    mode: generated.length > 0 ? 'mounted' : 'unmount',
+    wafFunctions: generated.map((fn) => ({ name: fn.functionName, scriptSha256: fn.scriptSha256 })),
+    ruleCount: generated.reduce((total, fn) => total + fn.ruleOrder.length, 0),
     functions: entries,
     scripts,
   }
@@ -274,6 +264,13 @@ export class DefaultWafReleaseService implements WafReleaseService {
       workspace.internalId,
     )
     const functionsDraft = functionsDraftView?.draft ?? emptyEdgeFunctionsDraft()
+    const reserved = functionsDraft.functions.find((fn) => fn.enabled && isWafFunctionName(fn.name))
+    if (reserved) {
+      throw unprocessable(
+        'EDGE_FUNCTION_NAME_RESERVED',
+        `Rename the handwritten function "${reserved.name}": waf and waf-* are reserved for generated WAF functions`,
+      )
+    }
     const plan = planFromPolicy(draft.policy, functionsDraft)
     this.#checkCardinalityLimits(plan)
 

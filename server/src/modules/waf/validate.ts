@@ -5,7 +5,16 @@
 // semantics is the native validator compile (edge_function_script kind),
 // which publication runs fail-closed before any Release.
 
-import type { WafPolicy, WafProjectMode, WafRule, WafRuleExclusion, WafSeverity } from './model.js'
+import { MAX_GLOB_BYTES, MAX_GLOBS_PER_SELECTOR } from './edge-function-model.js'
+import { groupModeSets, groupMountSelector } from './group-scope.js'
+import type {
+  WafGroup,
+  WafGroupExemption,
+  WafMode,
+  WafPolicy,
+  WafRule,
+  WafSeverity,
+} from './model.js'
 
 export interface WafValidationIssue {
   field: string
@@ -14,17 +23,21 @@ export interface WafValidationIssue {
 }
 
 const SEVERITIES: readonly WafSeverity[] = ['critical', 'high', 'medium', 'low']
-const MODES: readonly WafProjectMode[] = ['off', 'log', 'block']
+const MODES: readonly WafMode[] = ['off', 'log', 'block']
 const MAX_RULES = 256
+// Every enabled group is one edge function, and a release may mount 64 in all,
+// handwritten ones included. Half of that stays free for them.
+const MAX_GROUPS = 32
 const MAX_NAME_BYTES = 255
 const MAX_MATCH_BYTES = 8_192
-const MAX_EXCLUSIONS_PER_RULE = 64
 const MAX_METHODS = 16
 const MAX_PATHS = 64
 const MAX_CIDRS_PER_RULE = 64
 const MAX_PROJECT_MODES = 1_024
 
 const ruleIdPattern = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/u
+// Leaves room for the `waf-` prefix inside the 64-byte function-name cap.
+const groupIdPattern = /^[a-z0-9](?:[a-z0-9-]{0,58}[a-z0-9])?$/u
 const methodPattern = /^[A-Z][A-Z0-9]{0,15}$/u
 // Exact paths may not contain '*' at all; prefix patterns carry exactly one
 // trailing '*'. Printable ASCII, no control characters.
@@ -63,9 +76,23 @@ export function isPrintableSingleLine(value: string): boolean {
   return !hasLoneSurrogate(value)
 }
 
-// Project names reach the wire mount selector as exact (non-glob) entries;
-// the native codec requires printable non-';' bytes (the projects-list wire
-// splits on ';').
+// Mount selector entries are wire globs: printable, no ';' (the projects-list
+// wire splits on it), bounded length. '*' wildcard syntax is the codec's to
+// judge; anything printable without ';' is accepted here.
+export function isProjectGlob(value: string): boolean {
+  if (value.length === 0 || byteLength(value) > MAX_GLOB_BYTES) return false
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index)
+    if (codeUnit < 0x20 || codeUnit === 0x7f || codeUnit === 0x3b) {
+      return false
+    }
+  }
+  return !hasLoneSurrogate(value)
+}
+
+// projectModes keys are exact names: the native codec requires printable
+// non-';' bytes (the projects-list wire splits on ';'), and a '*' here would
+// silently stop meaning a single project.
 export function isValidProjectName(value: string): boolean {
   if (value.length === 0 || byteLength(value) > 255) {
     return false
@@ -113,48 +140,6 @@ export function isValidCidrLiteral(value: string): boolean {
     return false
   }
   return prefixLength <= 128
-}
-
-function validateExclusions(rule: WafRule, ruleIndex: number, issues: WafValidationIssue[]): void {
-  const exclusions = rule.exclusions ?? []
-  if (exclusions.length > MAX_EXCLUSIONS_PER_RULE) {
-    issues.push({
-      field: `rules[${ruleIndex}].exclusions`,
-      code: 'limit_exceeded',
-      message: `at most ${MAX_EXCLUSIONS_PER_RULE} exclusions per rule`,
-    })
-    return
-  }
-  const seen = new Set<string>()
-  exclusions.forEach((exclusion: WafRuleExclusion, exclusionIndex: number) => {
-    const field = `rules[${ruleIndex}].exclusions[${exclusionIndex}]`
-    if (!isValidProjectName(exclusion.project)) {
-      issues.push({
-        field: `${field}.project`,
-        code: 'invalid_field',
-        message: 'exclusion project must be a printable project name without "*" or ";"',
-      })
-    }
-    if (seen.has(exclusion.project)) {
-      issues.push({
-        field: `${field}.project`,
-        code: 'conflict',
-        message: `duplicate exclusion for project '${exclusion.project}'`,
-      })
-    }
-    seen.add(exclusion.project)
-    if (
-      exclusion.reason.trim().length === 0 ||
-      byteLength(exclusion.reason) > MAX_NAME_BYTES ||
-      !isPrintableSingleLine(exclusion.reason)
-    ) {
-      issues.push({
-        field: `${field}.reason`,
-        code: 'invalid_field',
-        message: 'exclusion reason must be 1-255 bytes of single-line printable text',
-      })
-    }
-  })
 }
 
 function validateRule(rule: WafRule, ruleIndex: number, issues: WafValidationIssue[]): void {
@@ -305,26 +290,144 @@ function validateRule(rule: WafRule, ruleIndex: number, issues: WafValidationIss
       seen.add(cidr)
     })
   }
+}
 
-  validateExclusions(rule, ruleIndex, issues)
+function validateExemptions(
+  exemptions: readonly WafGroupExemption[],
+  field: string,
+  issues: WafValidationIssue[],
+): void {
+  const seen = new Set<string>()
+  exemptions.forEach((exemption, exemptionIndex) => {
+    const entry = `${field}[${exemptionIndex}]`
+    if (typeof exemption?.project !== 'string' || !isProjectGlob(exemption.project)) {
+      issues.push({
+        field: `${entry}.project`,
+        code: 'invalid_field',
+        message: 'exempt project must be a printable project name or glob without ";"',
+      })
+    } else if (seen.has(exemption.project)) {
+      issues.push({
+        field: `${entry}.project`,
+        code: 'conflict',
+        message: `duplicate exemption for project '${exemption.project}'`,
+      })
+    }
+    seen.add(exemption?.project)
+    if (
+      typeof exemption?.reason !== 'string' ||
+      exemption.reason.trim().length === 0 ||
+      byteLength(exemption.reason) > MAX_NAME_BYTES ||
+      !isPrintableSingleLine(exemption.reason)
+    ) {
+      issues.push({
+        field: `${entry}.reason`,
+        code: 'invalid_field',
+        message: 'exemption reason must be 1-255 bytes of single-line printable text',
+      })
+    }
+  })
+}
+
+function validateGroup(group: WafGroup, groupIndex: number, issues: WafValidationIssue[]): void {
+  const field = (name: string): string => `groups[${groupIndex}].${name}`
+
+  if (typeof group.id !== 'string' || !groupIdPattern.test(group.id)) {
+    issues.push({
+      field: field('id'),
+      code: 'invalid_field',
+      message: 'group id must be 1-60 bytes of [a-z0-9-] with alphanumeric edges',
+    })
+  }
+  if (
+    typeof group.name !== 'string' ||
+    group.name.trim().length === 0 ||
+    byteLength(group.name) > MAX_NAME_BYTES ||
+    !isPrintableSingleLine(group.name)
+  ) {
+    issues.push({
+      field: field('name'),
+      code: 'invalid_field',
+      message: 'group name must be 1-255 bytes of single-line printable text',
+    })
+  }
+  if (!MODES.includes(group.mode)) {
+    issues.push({
+      field: field('mode'),
+      code: 'invalid_field',
+      message: 'mode must be off, log, or block',
+    })
+  }
+  if (!Number.isInteger(group.priority) || group.priority < 0 || group.priority > 1_000_000) {
+    issues.push({
+      field: field('priority'),
+      code: 'out_of_range',
+      message: 'priority must be an integer within [0, 1000000]',
+    })
+  }
+
+  const include = group.projects?.include
+  if (!Array.isArray(include) || include.length === 0) {
+    issues.push({
+      field: field('projects.include'),
+      code: 'invalid_field',
+      message: 'a group must apply to at least one project or glob',
+    })
+  } else if (include.length > MAX_GLOBS_PER_SELECTOR) {
+    issues.push({
+      field: field('projects.include'),
+      code: 'limit_exceeded',
+      message: `at most ${MAX_GLOBS_PER_SELECTOR} include entries per group`,
+    })
+  } else {
+    const seen = new Set<string>()
+    include.forEach((glob) => {
+      if (typeof glob !== 'string' || !isProjectGlob(glob)) {
+        issues.push({
+          field: field('projects.include'),
+          code: 'invalid_field',
+          message: `invalid project glob '${String(glob)}'`,
+        })
+      } else if (seen.has(glob)) {
+        issues.push({
+          field: field('projects.include'),
+          code: 'conflict',
+          message: `duplicate project glob '${glob}'`,
+        })
+      }
+      seen.add(glob)
+    })
+  }
+
+  const exempt = group.projects?.exempt ?? []
+  if (!Array.isArray(exempt) || exempt.length > MAX_GLOBS_PER_SELECTOR) {
+    issues.push({
+      field: field('projects.exempt'),
+      code: 'limit_exceeded',
+      message: `at most ${MAX_GLOBS_PER_SELECTOR} exemptions per group`,
+    })
+  } else {
+    validateExemptions(exempt, field('projects.exempt'), issues)
+  }
 }
 
 export function validateWafPolicy(policy: WafPolicy): readonly WafValidationIssue[] {
   const issues: WafValidationIssue[] = []
 
-  if (policy.schemaVersion !== 1) {
+  if (policy.schemaVersion !== 2) {
     issues.push({
       field: 'schemaVersion',
       code: 'invalid_field',
-      message: `unsupported WAF policy schemaVersion ${String(policy.schemaVersion)}, expected 1`,
+      message: `unsupported WAF policy schemaVersion ${String(policy.schemaVersion)}, expected 2`,
     })
   }
-  if (!MODES.includes(policy.defaultMode)) {
+  if (!Array.isArray(policy.groups) || policy.groups.length > MAX_GROUPS) {
     issues.push({
-      field: 'defaultMode',
-      code: 'invalid_field',
-      message: 'defaultMode must be off, log, or block',
+      field: 'groups',
+      code: 'limit_exceeded',
+      message: `at most ${MAX_GROUPS} groups`,
     })
+    return issues
   }
   if (!Array.isArray(policy.rules) || policy.rules.length > MAX_RULES) {
     issues.push({
@@ -348,6 +451,27 @@ export function validateWafPolicy(policy: WafPolicy): readonly WafValidationIssu
     return issues
   }
 
+  const groupIds = new Set<string>()
+  policy.groups.forEach((group, groupIndex) => {
+    if (group === null || typeof group !== 'object') {
+      issues.push({
+        field: `groups[${groupIndex}]`,
+        code: 'invalid_field',
+        message: 'group must be an object',
+      })
+      return
+    }
+    validateGroup(group, groupIndex, issues)
+    if (groupIds.has(group.id)) {
+      issues.push({
+        field: `groups[${groupIndex}].id`,
+        code: 'conflict',
+        message: `duplicate group id '${group.id}'`,
+      })
+    }
+    groupIds.add(group.id)
+  })
+
   policy.rules.forEach((rule, ruleIndex) => {
     if (rule === null || typeof rule !== 'object') {
       issues.push({
@@ -358,6 +482,13 @@ export function validateWafPolicy(policy: WafPolicy): readonly WafValidationIssu
       return
     }
     validateRule(rule, ruleIndex, issues)
+    if (!groupIds.has(rule.group)) {
+      issues.push({
+        field: `rules[${ruleIndex}].group`,
+        code: 'unknown_group',
+        message: `rule group '${String(rule.group)}' does not exist`,
+      })
+    }
   })
 
   const ruleIds = new Set<string>()
@@ -389,6 +520,21 @@ export function validateWafPolicy(policy: WafPolicy): readonly WafValidationIssu
         message: `invalid mode '${String(mode)}' for project '${project}'`,
       })
     }
+  }
+
+  // The mount exclude list merges exemptions with off-mode projects, so only
+  // the whole policy can tell whether it fits the wire selector cap.
+  if (issues.length === 0) {
+    policy.groups.forEach((group, groupIndex) => {
+      const { exclude } = groupMountSelector(group, groupModeSets(policy, group))
+      if (exclude.length > MAX_GLOBS_PER_SELECTOR) {
+        issues.push({
+          field: `groups[${groupIndex}].projects.exempt`,
+          code: 'limit_exceeded',
+          message: `exempt and off-mode projects total ${exclude.length}, above the ${MAX_GLOBS_PER_SELECTOR}-entry mount limit`,
+        })
+      }
+    })
   }
 
   return issues

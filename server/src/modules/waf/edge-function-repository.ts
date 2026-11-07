@@ -16,7 +16,10 @@ import { mysqlDateTimeToRfc3339 } from '../../shared/time.js'
 import { AuditRepository } from '../audit/repository.js'
 import type { Actor } from '../auth/model.js'
 import { emptyEdgeFunctionsDraft, type EdgeFunctionsDraft } from './edge-function-model.js'
-import { validateEdgeFunctionsDraft } from './edge-function-validate.js'
+import {
+  RESERVED_FUNCTION_NAME_CODE,
+  validateEdgeFunctionsDraft,
+} from './edge-function-validate.js'
 
 export interface EdgeFunctionDraftView {
   id: string
@@ -225,7 +228,12 @@ export class EdgeFunctionDraftRepository {
       throw new Error('Edge function draft document was not found')
     }
     const parsed: unknown = JSON.parse(plaintext.toString('utf8'))
-    if (validateEdgeFunctionsDraft(parsed).length > 0) {
+    // A name the WAF claimed after it was saved must stay loadable, or there is
+    // no way to rename it; saves and releases still refuse it.
+    const issues = validateEdgeFunctionsDraft(parsed).filter(
+      (issue) => issue.code !== RESERVED_FUNCTION_NAME_CODE,
+    )
+    if (issues.length > 0) {
       throw new Error('Stored edge-function draft is invalid')
     }
     return {
