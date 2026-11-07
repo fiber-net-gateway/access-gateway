@@ -45,6 +45,15 @@ export interface ActivationProjectEvidence {
   failure: ActivationEvidenceFailure | null
 }
 
+export interface ActivationEdgeFunctionsEvidence {
+  watcherState: ActivationWatcherState
+  index: ActivationResourceEvidence
+  generation: string
+  functionCount: number
+  totalScriptBytes: number
+  activeIndexSha256: string
+}
+
 export interface ActivationEvidence {
   contractVersion: 1
   evidenceRevision: string
@@ -80,6 +89,9 @@ export interface ActivationEvidence {
     version: string
     certificateCount: number
   }
+  // Absent on access-server builds without edge-function support; edge-function
+  // releases stay activation-unknown for such instances instead of inferred.
+  edgeFunctions?: ActivationEdgeFunctionsEvidence
   discovery: {
     clientState: ActivationNacosLifecycleState
     configServiceState: ActivationNacosLifecycleState

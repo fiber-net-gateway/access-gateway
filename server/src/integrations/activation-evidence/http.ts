@@ -2,6 +2,7 @@ import type { ActivationTargetConfig } from '../../config/env.js'
 import {
   ActivationEvidenceClientError,
   type ActivationCandidateStatus,
+  type ActivationEdgeFunctionsEvidence,
   type ActivationEvidence,
   type ActivationEvidenceClient,
   type ActivationEvidenceFailure,
@@ -141,6 +142,23 @@ function resource(value: unknown): ActivationResourceEvidence {
   }
 }
 
+// The edgeFunctions block is optional: instances running builds without
+// edge-function support omit it entirely, and a present-but-malformed block
+// still fails the whole response.
+function edgeFunctionsBlock(value: unknown): ActivationEdgeFunctionsEvidence {
+  if (!isRecord(value)) invalidResponse()
+  const activeIndexSha256 = boundedText(value.activeIndexSha256, 64)
+  if (!sha256Pattern.test(activeIndexSha256)) invalidResponse()
+  return {
+    watcherState: enumText(value.watcherState, watcherStates),
+    index: resource(value.index),
+    generation: decimal(value.generation),
+    functionCount: uint32(value.functionCount),
+    totalScriptBytes: uint32(value.totalScriptBytes),
+    activeIndexSha256,
+  }
+}
+
 function nullableVersion(value: unknown): number | null {
   if (value === null) return null
   if (
@@ -270,6 +288,9 @@ function parsePage(value: unknown): ParsedPage {
       version: decimal(tls.version),
       certificateCount,
     },
+    ...(value.edgeFunctions === undefined
+      ? {}
+      : { edgeFunctions: edgeFunctionsBlock(value.edgeFunctions) }),
     discovery: {
       clientState,
       configServiceState,

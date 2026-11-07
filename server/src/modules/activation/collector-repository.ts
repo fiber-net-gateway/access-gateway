@@ -18,6 +18,7 @@ interface ReleaseResourceRow extends RowDataPacket {
   group_name: string
   operation: ActivationReleaseResource['operation']
   verified_nacos_md5: Buffer | null
+  verified_sha256: Buffer | null
   allocated_project_version: number | null
   project_name: string | null
 }
@@ -55,6 +56,7 @@ function groupReleaseResources(
       group: row.group_name,
       operation: row.operation,
       verifiedNacosMd5: row.verified_nacos_md5?.toString('hex') ?? null,
+      verifiedSha256: row.verified_sha256?.toString('hex') ?? null,
       allocatedProjectVersion: row.allocated_project_version,
       projectName: row.project_name,
     })
@@ -168,6 +170,8 @@ export class ActivationCollectorRepository {
       const projectList = evidence.accessConfig.projectList
       const gray = evidence.gray.resource
       const tls = evidence.tls.resource
+      const edge = evidence.edgeFunctions ?? null
+      const edgeIndex = edge?.index ?? null
       const [result] = await transaction.execute<ResultSetHeader>(
         `INSERT INTO instance_observations
           (public_id, instance_id, contract_version, evidence_revision, poll_result,
@@ -183,9 +187,14 @@ export class ActivationCollectorRepository {
            discovery_client_state, discovery_config_state, discovery_naming_state,
            discovery_ready_services, discovery_selectable_endpoints,
            discovery_logical_clusters, discovery_selector_leases,
+           edge_watcher_state, edge_observed_md5, edge_active_md5, edge_candidate_status,
+           edge_error_code, edge_generation, edge_function_count, edge_total_script_bytes,
+           edge_active_index_sha256,
            error_code, observed_at, expires_at)
          VALUES (?, ?, 1, ?, 'success', ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL,
+                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                 ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                 NULL,
                  CURRENT_TIMESTAMP(6), DATE_ADD(CURRENT_TIMESTAMP(6), INTERVAL ? MICROSECOND))`,
         [
           publicIdToBuffer(createPublicId()),
@@ -226,6 +235,15 @@ export class ActivationCollectorRepository {
           evidence.discovery.selectableEndpoints,
           evidence.discovery.logicalClusters,
           evidence.discovery.selectorLeases,
+          edge?.watcherState ?? null,
+          digest(edgeIndex?.observedMd5 ?? null),
+          digest(edgeIndex?.activeMd5 ?? null),
+          edgeIndex?.candidateStatus ?? null,
+          edgeIndex?.failure?.code ?? null,
+          edge?.generation ?? null,
+          edge?.functionCount ?? null,
+          edge?.totalScriptBytes ?? null,
+          edge ? Buffer.from(edge.activeIndexSha256, 'hex') : null,
           evidenceTtlMicros,
         ],
       )
@@ -376,7 +394,7 @@ export class ActivationCollectorRepository {
   ): Promise<void> {
     const [rows] = await transaction.execute<ReleaseResourceRow[]>(
       `SELECT target.release_id, resource.kind, resource.data_id, resource.group_name,
-              resource.operation, resource.verified_nacos_md5,
+              resource.operation, resource.verified_nacos_md5, resource.verified_sha256,
               resource.allocated_project_version, project_record.name AS project_name
        FROM release_activation_targets target
        INNER JOIN releases release_record ON release_record.id = target.release_id
