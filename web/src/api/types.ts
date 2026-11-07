@@ -491,3 +491,8 @@ export interface WafEdgeFunctionsView {
     content: string | null
   }[]
 }
+
+export interface WafRulePackView {
+  version: string
+  rules: readonly WafRule[]
+}

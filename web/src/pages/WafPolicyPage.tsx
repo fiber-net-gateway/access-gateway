@@ -1,7 +1,7 @@
 import { lazy, Suspense, useEffect, useState, type FormEvent } from 'react'
 import { Link } from 'react-router'
 
-import { compileWafPolicyPreview } from '../api/client'
+import { compileWafPolicyPreview, fetchWafRulePack } from '../api/client'
 import type {
   WafCompilePreviewView,
   WafMode,
@@ -86,6 +86,8 @@ export function WafPolicyPage() {
   const [preview, setPreview] = useState<WafCompilePreviewView | null>(null)
   const [previewError, setPreviewError] = useState<string | null>(null)
   const [previewLoading, setPreviewLoading] = useState(false)
+  const [importingPack, setImportingPack] = useState(false)
+  const [packMessage, setPackMessage] = useState<string | null>(null)
 
   useUnsavedChangesGuard(dirty, '当前 WAF 策略草稿尚未保存，确定离开吗？')
 
@@ -130,6 +132,45 @@ export function WafPolicyPage() {
       ...current,
       rules: current.rules.filter((_, ruleIndex) => ruleIndex !== index),
     }))
+
+  // Import the curated starter pack into the working copy: rules whose id
+  // already exists are skipped so re-importing never duplicates or overwrites
+  // operator edits. The result stays a dirty draft — review, then save.
+  const importRulePack = (): void => {
+    if (policy === null) return
+    setImportingPack(true)
+    void fetchWafRulePack()
+      .then((pack) => {
+        const existing = new Set(policy.rules.map((rule) => rule.id))
+        const room = 256 - policy.rules.length
+        const additions: WafRule[] = []
+        let skipped = 0
+        let overflowed = 0
+        for (const rule of pack.rules) {
+          if (existing.has(rule.id)) {
+            skipped += 1
+          } else if (additions.length < room) {
+            additions.push(rule)
+          } else {
+            overflowed += 1
+          }
+        }
+        if (additions.length > 0) {
+          updatePolicy((current) => ({ ...current, rules: [...current.rules, ...additions] }))
+        }
+        setPackMessage(
+          `已导入 ${additions.length} 条（${pack.version}），跳过已存在 ${skipped} 条` +
+            (overflowed > 0 ? `，超出 256 条上限未导入 ${overflowed} 条` : '') +
+            '——导入后为未保存草稿，请检查后保存。',
+        )
+      })
+      .catch((error: unknown) => {
+        setPackMessage(
+          error instanceof Error ? `规则包拉取失败：${error.message}` : '规则包拉取失败',
+        )
+      })
+      .finally(() => setImportingPack(false))
+  }
 
   const diagnosticsByRule = matchDiagnostics(preview)
 
@@ -216,10 +257,26 @@ export function WafPolicyPage() {
           <section aria-labelledby="waf-rules-title">
             <header className="route-toolbar">
               <h3 id="waf-rules-title">规则（{policy.rules.length}/256）</h3>
-              <button className="button-secondary" onClick={addRule} type="button">
-                + 添加规则
-              </button>
+              <div className="header-actions">
+                <button
+                  className="button-secondary"
+                  disabled={importingPack}
+                  onClick={importRulePack}
+                  type="button"
+                >
+                  {importingPack ? '导入中…' : '导入起手规则包'}
+                </button>
+                <button className="button-secondary" onClick={addRule} type="button">
+                  + 添加规则
+                </button>
+              </div>
             </header>
+
+            {packMessage ? (
+              <p className="settings-note" role="status">
+                {packMessage}
+              </p>
+            ) : null}
 
             {policy.rules.length === 0 ? (
               <div className="route-empty-state">
