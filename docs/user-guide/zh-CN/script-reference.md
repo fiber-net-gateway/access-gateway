@@ -684,7 +684,6 @@ return strings.findAll("id=7, id=11; id=23", "id=\\d+");
 // ["id=7", "id=11", "id=23"]
 ```
 
-
 ## 8. Binary 函数
 
 ```typescript

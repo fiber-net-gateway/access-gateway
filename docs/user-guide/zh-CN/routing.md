@@ -191,29 +191,29 @@ matcher 的结构优先级。
 
 ## 6. YAML Route 字段参考
 
-| 字段                   | 适用类型              | 规则与默认值                                               |
-| ---------------------- | --------------------- | ---------------------------------------------------------- |
-| `path`                 | 全部                  | 必填、非空、ASCII Path pattern                             |
-| `method`               | 全部                  | 可选；缺失/`null` 匹配全部，配置后精确匹配                 |
-| `type`                 | 全部                  | YAML 中必须为 `RESPONSE` 或 `PROXY`                        |
-| `condition`            | YAML                  | 可选同步表达式                                             |
-| `service`              | PROXY                 | 命名服务；可写 `service/cluster`                           |
-| `cluster`              | PROXY                 | 显式 cluster，覆盖 `service` suffix                        |
-| `addresses`            | PROXY                 | 无 `service` 时使用的静态 HTTP(S) authority 列表           |
-| `proxy_headers`        | PROXY                 | 发往 upstream 的 header 模板 mapping                       |
-| `response_headers`     | RESPONSE/PROXY        | 发往 client 的 header 模板 mapping                         |
-| `context`              | PROXY                 | trace/CAT context 模板 mapping                             |
-| `rewrite`              | PROXY                 | upstream path 模板；原 query 会重新拼接                    |
-| `status`               | RESPONSE              | 必填；native 接受 100–999，实际应使用标准 HTTP status      |
-| `body`                 | RESPONSE              | 可选；缺失表示空 body                                      |
-| `gzip`                 | RESPONSE/PROXY/SCRIPT | 可选；`true` 使用级别 6，`1`–`9` 指定级别，`false` 关闭    |
+| 字段                   | 适用类型              | 规则与默认值                                                                                                           |
+| ---------------------- | --------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `path`                 | 全部                  | 必填、非空、ASCII Path pattern                                                                                         |
+| `method`               | 全部                  | 可选；缺失/`null` 匹配全部，配置后精确匹配                                                                             |
+| `type`                 | 全部                  | YAML 中必须为 `RESPONSE` 或 `PROXY`                                                                                    |
+| `condition`            | YAML                  | 可选同步表达式                                                                                                         |
+| `service`              | PROXY                 | 命名服务；可写 `service/cluster`                                                                                       |
+| `cluster`              | PROXY                 | 显式 cluster，覆盖 `service` suffix                                                                                    |
+| `addresses`            | PROXY                 | 无 `service` 时使用的静态 HTTP(S) authority 列表                                                                       |
+| `proxy_headers`        | PROXY                 | 发往 upstream 的 header 模板 mapping                                                                                   |
+| `response_headers`     | RESPONSE/PROXY        | 发往 client 的 header 模板 mapping                                                                                     |
+| `context`              | PROXY                 | trace/CAT context 模板 mapping                                                                                         |
+| `rewrite`              | PROXY                 | upstream path 模板；原 query 会重新拼接                                                                                |
+| `status`               | RESPONSE              | 必填；native 接受 100–999，实际应使用标准 HTTP status                                                                  |
+| `body`                 | RESPONSE              | 可选；缺失表示空 body                                                                                                  |
+| `gzip`                 | RESPONSE/PROXY/SCRIPT | 可选；`true` 使用级别 6，`1`–`9` 指定级别，`false` 关闭                                                                |
 | `timeout`              | PROXY                 | response header 超时，同时也是双向 body 读空闲超时的下限（实际取 `max(60s, timeout)`）；默认 60000 ms，配置值至少 5 ms |
-| `max_client_body_size` | RESPONSE/PROXY        | Route 请求体限制；缺失或数值 0 使用 server 默认值          |
-| `max_proxy_body_size`  | PROXY                 | 非零时覆盖 upstream response body 限制                     |
-| `websocket_timeout`    | PROXY                 | 大于 0 时允许 WebSocket tunnel，并作为隧道读写 timeout     |
-| `flush`                | PROXY                 | `true` 双向开启低延迟 body flush（请求与响应），并写 `X-Accel-Buffering: no` |
-| `allows`               | 全部                  | CIDR allow/deny sequence；`!` 前缀表示 deny                |
-| `upstream_tls`         | PROXY                 | native-only 不可变出站 TLS transport profile               |
+| `max_client_body_size` | RESPONSE/PROXY        | Route 请求体限制；缺失或数值 0 使用 server 默认值                                                                      |
+| `max_proxy_body_size`  | PROXY                 | 非零时覆盖 upstream response body 限制                                                                                 |
+| `websocket_timeout`    | PROXY                 | 大于 0 时允许 WebSocket tunnel，并作为隧道读写 timeout                                                                 |
+| `flush`                | PROXY                 | `true` 双向开启低延迟 body flush（请求与响应），并写 `X-Accel-Buffering: no`                                           |
+| `allows`               | 全部                  | CIDR allow/deny sequence；`!` 前缀表示 deny                                                                            |
+| `upstream_tls`         | PROXY                 | native-only 不可变出站 TLS transport profile                                                                           |
 
 时间值接受整数毫秒，或不区分单位大小写的字符串：`500`、`500ms`、`5s`。数据大小接受整数 byte，
 或二进制单位字符串，例如 `64k`、`4m`、`1g`。新配置应使用非负、含义明确的值；不要依赖 Java
