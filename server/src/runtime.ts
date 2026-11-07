@@ -52,6 +52,11 @@ import {
   UnavailableConfigurationVersionService,
 } from './modules/versions/service.js'
 import { WafPolicyDraftRepository } from './modules/waf/repository.js'
+import { WafReleaseRepository } from './modules/waf/release-repository.js'
+import {
+  DefaultWafReleaseService,
+  UnavailableWafReleaseService,
+} from './modules/waf/release-service.js'
 import { DefaultWafService, UnavailableWafService } from './modules/waf/service.js'
 import type { ApplicationRuntime, ApplicationServices } from './services.js'
 
@@ -134,6 +139,7 @@ function unavailableServices(
     tlsSni: new UnavailableTlsSniService(),
     tlsReleases: new UnavailableTlsCertificateReleaseService(),
     waf: new UnavailableWafService(),
+    wafReleases: new UnavailableWafReleaseService(),
   }
 }
 
@@ -174,6 +180,7 @@ export async function createApplicationRuntime(config: ServerConfig): Promise<Ap
     const drafts = new DraftRepository(pool, documents)
     const versions = new ConfigurationVersionRepository(pool, documents)
     const wafDrafts = new WafPolicyDraftRepository(pool, documents)
+    const wafReleasesRepo = new WafReleaseRepository(pool, documents, undefined, activationRead)
     const nacos = config.publication.enabled
       ? new HttpNacosClient({
           timeoutMillis: config.publication.requestTimeoutMillis,
@@ -218,6 +225,13 @@ export async function createApplicationRuntime(config: ServerConfig): Promise<Ap
       tlsSni: new DefaultTlsSniService(tlsSni, environments),
       tlsReleases: new DefaultTlsCertificateReleaseService(tlsReleases, environments, nacos),
       waf: new DefaultWafService(wafDrafts, environments, validator),
+      wafReleases: new DefaultWafReleaseService(
+        wafDrafts,
+        wafReleasesRepo,
+        environments,
+        validator,
+        nacos,
+      ),
     }
     return {
       services,

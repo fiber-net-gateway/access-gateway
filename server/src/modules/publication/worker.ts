@@ -36,7 +36,12 @@ interface PublicationResourceRow extends RowDataPacket {
   id: string
   public_id: Buffer
   project_id: string | null
-  kind: 'project_route' | 'project_list' | 'tls_certificates'
+  kind:
+    | 'project_route'
+    | 'project_list'
+    | 'tls_certificates'
+    | 'edge_function_script'
+    | 'edge_function_index'
   data_id: string
   group_name: string
   operation: 'upsert' | 'remove'
@@ -297,7 +302,11 @@ export class PublicationWorker {
           resource.data_id,
           resource.group_name,
           payload.toString('utf8'),
-          resource.kind === 'project_list' ? 'text' : 'json',
+          // The edge-function script Data ID carries pure script text, like
+          // the semicolon-joined project list; everything else is JSON.
+          resource.kind === 'project_list' || resource.kind === 'edge_function_script'
+            ? 'text'
+            : 'json',
         )
         wrote = true
       } else if (decision === 'remove') {
@@ -504,6 +513,16 @@ export class PublicationWorker {
            WHERE previous.id <> ? AND previous.status = 'published'
              AND previous.kind = 'tls_certificates'
              AND current.kind = 'tls_certificates'
+             AND previous.environment_id = current.environment_id`,
+          [claim.releaseInternalId, claim.releaseInternalId],
+        )
+        await transaction.execute(
+          `UPDATE releases previous
+           INNER JOIN releases current ON current.id = ?
+           SET previous.status = 'superseded', previous.lock_version = previous.lock_version + 1
+           WHERE previous.id <> ? AND previous.status = 'published'
+             AND previous.kind = 'edge_functions'
+             AND current.kind = 'edge_functions'
              AND previous.environment_id = current.environment_id`,
           [claim.releaseInternalId, claim.releaseInternalId],
         )
