@@ -472,7 +472,50 @@ export interface WafEdgeFunctionIndexEntryView {
   mounts: readonly {
     projects: { include: readonly string[]; exclude: readonly string[] }
     priority: number | null
+    ratio: number | null
   }[]
+}
+
+export interface WafEdgeFunctionMountDraft {
+  projects: { include: readonly string[]; exclude?: readonly string[] }
+  priority?: number
+  ratio?: number
+}
+
+export interface WafEdgeFunctionDraftFunction {
+  name: string
+  description?: string
+  enabled: boolean
+  script: string
+  mounts: readonly WafEdgeFunctionMountDraft[]
+}
+
+export interface WafEdgeFunctionsDraft {
+  schemaVersion: 1
+  functions: readonly WafEdgeFunctionDraftFunction[]
+}
+
+export interface WafEdgeFunctionsDraftView {
+  id: string
+  draft: WafEdgeFunctionsDraft
+  draftSha256: string
+  lockVersion: string
+  createdAt: string
+  updatedAt: string
+}
+
+export interface WafEdgeFunctionCompileResult {
+  name: string
+  scriptSha256: string
+  scriptValid: boolean
+  errors: readonly WafScriptError[]
+}
+
+export interface WafEdgeFunctionCompilePreviewView {
+  valid: boolean
+  issues: readonly WafPolicyIssue[]
+  functions: readonly WafEdgeFunctionCompileResult[]
+  validator: { contractVersion: number; revision: string } | null
 }
 
 export interface WafEdgeFunctionsView {

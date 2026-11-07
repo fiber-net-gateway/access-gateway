@@ -1,9 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 
 import {
+  ApiClientError,
+  compileWafEdgeFunctionsPreview,
   compileWafPolicyPreview,
+  createWafEdgeFunctionsDraft,
   createWafRelease,
   fetchWafEdgeFunctions,
+  fetchWafEdgeFunctionsDraft,
   fetchWafPolicyDraft,
   fetchWafReleases,
   queueWafReleasePublication,
@@ -333,33 +337,145 @@ interface WafPublicationPreviewProps {
   working: boolean
 }
 
-// 发布预览 (§4.4): compile the SAVED draft, then diff the generated script
-// against the live script currently in rnacos — "what would change on the
-// wire", independent of release history.
+interface PlannedEdgeFunction {
+  name: string
+  sha256: string
+  script: string
+  source: 'waf' | 'handwritten'
+  mountsKey: string
+}
+
+interface LiveEdgeFunction {
+  sha256: string | null
+  content: string | null
+  mountsKey: string
+}
+
+// Normalized mount signature: ratio defaults to the wire value 10000 both in
+// drafts (undefined) and in the live view (null), so a default-vs-default
+// comparison does not show as a change.
+function mountSignature(mount: {
+  projects: { include: readonly string[]; exclude: readonly string[] }
+  priority: number
+  ratio?: number | null
+}): string {
+  return `${mount.projects.include.join(',')}|${mount.projects.exclude.join(',')}|${
+    mount.priority
+  }|${mount.ratio ?? 10_000}`
+}
+
+function mountsSignature(
+  mounts: readonly {
+    projects: { include: readonly string[]; exclude: readonly string[] }
+    priority: number
+    ratio?: number | null
+  }[],
+): string {
+  return mounts.map(mountSignature).join(';')
+}
+
+// 发布预览 (§4.4): compile BOTH saved drafts (WAF policy + handwritten edge
+// functions) into the planned index, then compare it per-function against the
+// live index in rnacos — "what would change on the wire", independent of
+// release history.
 function WafPublicationPreview({ onCreateFromDraft, working }: WafPublicationPreviewProps) {
   const [previewError, setPreviewError] = useState<string | null>(null)
   const [preview, setPreview] = useState<{
-    script: string | null
     valid: boolean
     issueCount: number
+    planned: readonly PlannedEdgeFunction[]
+    live: ReadonlyMap<string, LiveEdgeFunction>
   } | null>(null)
-  const [live, setLive] = useState<string | null>(null)
 
   useEffect(() => {
     const controller = new AbortController()
     void (async () => {
       try {
-        const [draft, edgeFunctions] = await Promise.all([
+        const [policyDraft, functionsDraft, liveView] = await Promise.all([
           fetchWafPolicyDraft(controller.signal),
+          fetchWafEdgeFunctionsDraft(controller.signal).catch(async (error: unknown) => {
+            if (error instanceof ApiClientError && error.status === 404) {
+              return createWafEdgeFunctionsDraft()
+            }
+            throw error
+          }),
           fetchWafEdgeFunctions(controller.signal).catch(() => null),
         ])
-        setLive(edgeFunctions?.scripts.find((script) => script.name === 'waf')?.content ?? null)
-        // Compile the exact saved policy — the same bytes a Release would use.
-        const result = await compileWafPolicyPreview(draft.policy, controller.signal)
+        // Compile the exact saved drafts — the same bytes a Release would use.
+        const [policyResult, functionsResult] = await Promise.all([
+          compileWafPolicyPreview(policyDraft.policy, controller.signal),
+          compileWafEdgeFunctionsPreview(functionsDraft.draft, controller.signal),
+        ])
+
+        const planned: PlannedEdgeFunction[] = []
+        const wafCompilation =
+          policyResult.compilation.kind === 'mounted' ? policyResult.compilation : null
+        if (wafCompilation) {
+          planned.push({
+            name: wafCompilation.functionName,
+            sha256: wafCompilation.scriptSha256,
+            script: wafCompilation.script,
+            source: 'waf',
+            mountsKey: mountsSignature(
+              wafCompilation.mounts.map((mount) => ({
+                projects: { include: mount.include, exclude: mount.exclude },
+                priority: wafCompilation.mountPriority,
+              })),
+            ),
+          })
+        }
+        for (const fn of functionsDraft.draft.functions) {
+          if (!fn.enabled) continue
+          const sha = functionsResult.functions.find((entry) => entry.name === fn.name)
+          if (!sha) continue
+          planned.push({
+            name: fn.name,
+            sha256: sha.scriptSha256,
+            script: fn.script,
+            source: 'handwritten',
+            mountsKey: mountsSignature(
+              fn.mounts.map((mount) => ({
+                projects: {
+                  include: mount.projects.include,
+                  exclude: mount.projects.exclude ?? [],
+                },
+                priority: mount.priority ?? 0,
+                ratio: mount.ratio,
+              })),
+            ),
+          })
+        }
+
+        const live = new Map<string, LiveEdgeFunction>()
+        if (liveView) {
+          for (const entry of liveView.index.functions) {
+            live.set(entry.name, {
+              sha256: entry.sha256,
+              content:
+                liveView.scripts.find((script) => script.name === entry.name)?.content ?? null,
+              mountsKey: mountsSignature(
+                entry.mounts.map((mount) => ({
+                  projects: mount.projects,
+                  priority: mount.priority ?? 0,
+                  ratio: mount.ratio,
+                })),
+              ),
+            })
+          }
+        }
+
+        const scriptErrorCount = functionsResult.functions.reduce(
+          (total, fn) => total + fn.errors.length,
+          0,
+        )
         setPreview({
-          script: result.compilation.kind === 'mounted' ? result.compilation.script : null,
-          valid: result.valid,
-          issueCount: result.issues.length,
+          valid:
+            policyResult.valid &&
+            functionsResult.valid &&
+            functionsResult.functions.every((fn) => fn.scriptValid),
+          issueCount: policyResult.issues.length + functionsResult.issues.length + scriptErrorCount,
+          planned,
+          live,
         })
         setPreviewError(null)
       } catch (error) {
@@ -370,8 +486,6 @@ function WafPublicationPreview({ onCreateFromDraft, working }: WafPublicationPre
     })()
     return () => controller.abort()
   }, [])
-
-  const diff = preview?.script != null && live !== null ? diffScript(live, preview.script) : null
 
   return (
     <section className="settings-card" aria-labelledby="waf-publish-preview-title">
@@ -389,22 +503,80 @@ function WafPublicationPreview({ onCreateFromDraft, working }: WafPublicationPre
             <span className={`status-chip status-chip-${preview.valid ? 'ready' : 'pending'}`}>
               {preview.valid ? '草稿可编译' : `${preview.issueCount} 个问题`}
             </span>{' '}
-            {preview.script
-              ? `生成脚本 ${preview.script.split('\n').length} 行`
-              : '当前策略不生成脚本（发布空索引卸载）'}
+            {preview.planned.length > 0
+              ? `索引将发布 ${preview.planned.length} 个函数（WAF 生成 + 手写合并）`
+              : '当前草稿不产生任何函数（发布空索引卸载）'}
           </p>
-          {preview.script && live === null ? (
+          {preview.planned.length === 0 && preview.live.size > 0 ? (
             <p className="settings-note">
-              rnacos 中当前没有已挂载的 WAF 脚本，首次发布将全量写入。
+              空索引会从数据面卸载全部 {preview.live.size} 个现有函数。
             </p>
           ) : null}
-          {preview.script && diff ? (
-            diff.every((line) => line.kind === 'context') ? (
-              <p className="settings-note">生成脚本与 rnacos 当前脚本一致，发布不会改变内容。</p>
-            ) : (
-              <details className="wire-preview">
+          <div className="release-resources">
+            {preview.planned.map((fn) => {
+              const liveEntry = preview.live.get(fn.name)
+              const scriptChanged = liveEntry ? liveEntry.sha256 !== fn.sha256 : false
+              const mountsChanged = liveEntry ? liveEntry.mountsKey !== fn.mountsKey : false
+              const status =
+                liveEntry === undefined
+                  ? 'added'
+                  : scriptChanged
+                    ? 'script'
+                    : mountsChanged
+                      ? 'mounts'
+                      : 'same'
+              return (
+                <div key={fn.name}>
+                  <span>
+                    <strong>{fn.name}</strong>
+                    <small>
+                      {fn.source === 'waf' ? 'WAF 生成' : '手写'} ·{' '}
+                      {status === 'added'
+                        ? 'rnacos 中尚不存在，首次发布将全量写入'
+                        : status === 'script'
+                          ? '脚本字节发生变化'
+                          : status === 'mounts'
+                            ? '挂载配置发生变化'
+                            : '与 rnacos 当前内容一致'}
+                    </small>
+                  </span>
+                  <span
+                    className={`status-chip status-chip-${status === 'same' ? 'ready' : 'pending'}`}
+                  >
+                    {status === 'added'
+                      ? '新增'
+                      : status === 'script'
+                        ? '变更（脚本）'
+                        : status === 'mounts'
+                          ? '变更（挂载）'
+                          : '不变'}
+                  </span>
+                </div>
+              )
+            })}
+            {[...preview.live.entries()]
+              .filter(([name]) => !preview.planned.some((fn) => fn.name === name))
+              .map(([name]) => (
+                <div key={name}>
+                  <span>
+                    <strong>{name}</strong>
+                    <small>不在本次索引中，数据面将忽略；rnacos 字节暂不自动清理</small>
+                  </span>
+                  <span className="status-chip status-chip-unknown">残留</span>
+                </div>
+              ))}
+          </div>
+          {preview.planned.map((fn) => {
+            const liveEntry = preview.live.get(fn.name)
+            if (!liveEntry || liveEntry.content === null || liveEntry.sha256 === fn.sha256) {
+              return null
+            }
+            const diff = diffScript(liveEntry.content, fn.script)
+            if (diff.every((line) => line.kind === 'context')) return null
+            return (
+              <details className="wire-preview" key={`${fn.name}-diff`}>
                 <summary>
-                  与 rnacos 当前脚本的差异（+
+                  {fn.name} 与 rnacos 当前脚本的差异（+
                   {diff.filter((line) => line.kind === 'added').length} / -
                   {diff.filter((line) => line.kind === 'removed').length} 行）
                 </summary>
@@ -422,7 +594,7 @@ function WafPublicationPreview({ onCreateFromDraft, working }: WafPublicationPre
                 </pre>
               </details>
             )
-          ) : null}
+          })}
           <div className="form-actions">
             <button
               className="button-primary"
