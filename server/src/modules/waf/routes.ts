@@ -357,6 +357,7 @@ const wafReleaseResponseSchema = {
     'scriptSha256',
     'ruleCount',
     'indexVersion',
+    'description',
     'resources',
     'publication',
     'activationStatus',
@@ -389,6 +390,7 @@ const wafReleaseResponseSchema = {
     scriptSha256: { type: ['string', 'null'], pattern: '^[0-9a-f]{64}$' },
     ruleCount: { type: 'integer', minimum: 0 },
     indexVersion: { type: 'string', pattern: '^(0|[1-9][0-9]*)$' },
+    description: { type: 'string' },
     resources: { type: 'array', items: wafReleaseResourceSchema },
     publication: {
       type: 'object',
@@ -464,6 +466,26 @@ function registerWafReleaseRoutes(
     async (request, reply) => {
       const release = await wafReleases.create(
         await requireActor(auth),
+        { idempotencyKey: parseIdempotencyKey(request.headers['idempotency-key']) },
+        String(request.id),
+      )
+      return reply.code(201).send(release)
+    },
+  )
+
+  app.post<{ Params: { releaseId: string }; Headers: { 'idempotency-key'?: string } }>(
+    '/api/waf/releases/:releaseId/rollback',
+    {
+      schema: {
+        params: releaseParameters,
+        headers: idempotencyHeaders,
+        response: { 201: wafReleaseResponseSchema },
+      },
+    },
+    async (request, reply) => {
+      const release = await wafReleases.rollback(
+        await requireActor(auth),
+        request.params.releaseId,
         { idempotencyKey: parseIdempotencyKey(request.headers['idempotency-key']) },
         String(request.id),
       )

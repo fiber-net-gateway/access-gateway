@@ -12,7 +12,7 @@ import type {
   NativeValidator,
 } from '../../integrations/native-validator/model.js'
 import { AppError } from '../../shared/errors.js'
-import { canonicalJson } from '../../shared/json.js'
+import { canonicalJson, sha256 } from '../../shared/json.js'
 import type { Actor } from '../auth/model.js'
 import { EnvironmentRepository } from '../environments/repository.js'
 import type { WafPolicy } from './model.js'
@@ -22,7 +22,7 @@ import {
   edgeFunctionScriptDataId,
   type WafReleaseView,
 } from './release-model.js'
-import type { PreparedWafReleasePlan } from './release-repository.js'
+import type { PreparedWafReleasePlan, WafRollbackSource } from './release-repository.js'
 import { WafReleaseRepository } from './release-repository.js'
 import {
   DefaultWafReleaseService,
@@ -135,6 +135,7 @@ const releaseView: WafReleaseView = {
   scriptSha256: '1'.repeat(64),
   ruleCount: 1,
   indexVersion: '5',
+  description: '',
   resources: [],
   publication: { jobId: null, state: null },
   activationStatus: 'unknown',
@@ -389,5 +390,174 @@ test('representative index serialization is stable under canonicalJson', () => {
   assert.equal(
     canonicalJson({ version: 1, functions }),
     `{"functions":[{"mounts":[{"priority":100,"projects":{"exclude":[],"include":["*"]}}],"name":"waf","sha256":"${'a'.repeat(64)}"}],"version":1}`,
+  )
+})
+
+const historicalScript = '-- historical waf script bytes'
+
+function rollbackSourceMounted(): WafRollbackSource {
+  return {
+    publicId: '00000000-0000-4000-8000-00000000000e',
+    sequence: '4',
+    generatorRevision: 'waf-generator-v0-old',
+    plan: {
+      mode: 'mounted',
+      functionName: 'waf',
+      script: historicalScript,
+      scriptSha256: sha256(historicalScript).toString('hex'),
+      functions: [
+        {
+          name: 'waf',
+          sha256: sha256(historicalScript).toString('hex'),
+          mounts: [{ projects: { include: ['*'], exclude: [] }, priority: 100 }],
+        },
+      ],
+      ruleCount: 3,
+    },
+  }
+}
+
+interface CreatedCapture {
+  environmentInternalId: string
+  plan: PreparedWafReleasePlan
+  bases: { index: NacosResourceValue; script: NacosResourceValue | null }
+  input: Record<string, unknown>
+}
+
+function rollbackRepositoryFake(source: WafRollbackSource | null) {
+  const created: CreatedCapture[] = []
+  const repository = {
+    loadRollbackSource: async (_environmentInternalId: string, releaseId: string) =>
+      source && releaseId === source.publicId ? source : null,
+    create: async (
+      _actor: unknown,
+      environmentInternalId: string,
+      plan: PreparedWafReleasePlan,
+      bases: { index: NacosResourceValue; script: NacosResourceValue | null },
+      input: Record<string, unknown>,
+    ) => {
+      created.push({ environmentInternalId, plan, bases, input })
+      return releaseView
+    },
+  }
+  return { repository: repository as unknown as WafReleaseRepository, created }
+}
+
+test('rollback republishes historical payloads through the same fail-closed pipeline', async () => {
+  const source = rollbackSourceMounted()
+  const { repository, created } = rollbackRepositoryFake(source)
+  const { service, requests, reads } = buildService({ releases: repository })
+
+  const result = await service.rollback(actor, source.publicId, { idempotencyKey: 'rb-1' }, 'rb')
+  assert.equal(result, releaseView)
+
+  // The validator saw the exact historical script bytes and a representative
+  // index carrying the historical functions (only the version integer differs).
+  const scriptRequest = requests.find((request) => request.kind === 'edge_function_script')
+  const indexRequest = requests.find((request) => request.kind === 'edge_function_index')
+  assert.ok(scriptRequest)
+  assert.ok(indexRequest)
+  assert.equal(Buffer.from(scriptRequest.payload).toString('utf8'), historicalScript)
+  const validatedIndex = JSON.parse(Buffer.from(indexRequest.payload).toString('utf8')) as {
+    version: number
+    functions: unknown[]
+  }
+  assert.equal(validatedIndex.version, 1)
+  assert.deepEqual(validatedIndex.functions, source.plan.functions)
+
+  assert.deepEqual(reads, [
+    { dataId: EDGE_FUNCTIONS_DATA_ID, group: EDGE_FUNCTIONS_GROUP },
+    { dataId: edgeFunctionScriptDataId('waf'), group: EDGE_FUNCTIONS_GROUP },
+  ])
+
+  assert.equal(created.length, 1)
+  assert.equal(created[0]?.plan, source.plan)
+  const input = created[0]?.input
+  assert.equal(input?.idempotencyKey, 'rb-1')
+  // Provenance: the content's historical generator revision, not today's.
+  assert.equal(input?.generatorRevision, 'waf-generator-v0-old')
+  assert.equal(input?.rollbackOfSequence, '4')
+  assert.equal(input?.description, 'rollback of WAF edge functions #4')
+  // The rollback request identity differs from a direct create, so replaying
+  // the idempotency key against a create request is rejected.
+  assert.notEqual(
+    (input?.requestSha256 as Buffer | undefined)?.toString('hex'),
+    sha256(canonicalJson({ kind: 'waf_edge_functions' })).toString('hex'),
+  )
+})
+
+test('rollback of an unmount source validates and reads only the index', async () => {
+  const source: WafRollbackSource = {
+    publicId: '00000000-0000-4000-8000-00000000000f',
+    sequence: '2',
+    generatorRevision: 'waf-generator-v1',
+    plan: {
+      mode: 'unmount',
+      functionName: 'waf',
+      script: null,
+      scriptSha256: null,
+      functions: [],
+      ruleCount: 0,
+    },
+  }
+  const { repository, created } = rollbackRepositoryFake(source)
+  const { service, requests, reads } = buildService({ releases: repository })
+
+  await service.rollback(actor, source.publicId, { idempotencyKey: 'rb-2' }, 'rb')
+
+  assert.equal(requests.length, 1)
+  assert.equal(requests[0]?.kind, 'edge_function_index')
+  assert.deepEqual(reads, [{ dataId: EDGE_FUNCTIONS_DATA_ID, group: EDGE_FUNCTIONS_GROUP }])
+  assert.equal(created[0]?.plan.mode, 'unmount')
+  assert.equal(created[0]?.bases.script, null)
+})
+
+test('rollback fails closed on stale payloads and unknown releases', async () => {
+  let persisted = false
+  const source = rollbackSourceMounted()
+  const { repository } = rollbackRepositoryFake(source)
+  ;(repository as unknown as { create: () => never }).create = () => {
+    persisted = true
+    throw new Error('Unexpected persistence')
+  }
+  const { service } = buildService({
+    validatorOverrides: {
+      valid: false,
+      errors: [{ code: 'script_compile_failed', offset: 3, message: 'stale script' }],
+    },
+    releases: repository,
+  })
+  await assert.rejects(
+    service.rollback(actor, source.publicId, { idempotencyKey: 'rb-3' }, 'rb'),
+    (error: unknown) => {
+      assert.ok(error instanceof AppError)
+      assert.equal(error.code, 'WAF_ROLLBACK_NOT_PUBLISHABLE')
+      assert.equal(error.statusCode, 422)
+      return true
+    },
+  )
+  assert.equal(persisted, false)
+
+  const missing = rollbackRepositoryFake(null)
+  const { service: empty } = buildService({ releases: missing.repository })
+  await assert.rejects(
+    empty.rollback(actor, '00000000-0000-4000-8000-0000000000ff', { idempotencyKey: 'k' }, 'r'),
+    (error: unknown) => error instanceof AppError && error.statusCode === 404,
+  )
+})
+
+test('rollback requires the publisher role and rejects rollbacks while unavailable', async () => {
+  const source = rollbackSourceMounted()
+  const { repository } = rollbackRepositoryFake(source)
+  const { service } = buildService({ role: 'viewer', releases: repository })
+  await assert.rejects(
+    service.rollback(actor, source.publicId, { idempotencyKey: 'k' }, 'r'),
+    (error: unknown) => error instanceof AppError && error.statusCode === 403,
+  )
+
+  const unavailableService = new UnavailableWafReleaseService()
+  await assert.rejects(
+    unavailableService.rollback(),
+    (error: unknown) => error instanceof AppError && error.statusCode === 503,
   )
 })

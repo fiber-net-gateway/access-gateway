@@ -12,7 +12,7 @@ import { DocumentRepository } from '../../crypto/document-repository.js'
 import type { DatabasePool } from '../../database/types.js'
 import { withTransaction } from '../../database/transaction.js'
 import type { NacosResourceValue } from '../../integrations/nacos/model.js'
-import { conflict, notFound } from '../../shared/errors.js'
+import { conflict, notFound, unprocessable } from '../../shared/errors.js'
 import { bufferToPublicId, createPublicId, publicIdToBuffer } from '../../shared/ids.js'
 import { canonicalJson, sha256 } from '../../shared/json.js'
 import { mysqlDateTimeToRfc3339 } from '../../shared/time.js'
@@ -50,11 +50,20 @@ export interface PreparedWafReleasePlan {
   readonly ruleCount: number
 }
 
+/** A historical release's immutable payloads, rebuilt into a publishable plan. */
+export interface WafRollbackSource {
+  readonly publicId: string
+  readonly sequence: string
+  readonly generatorRevision: string
+  readonly plan: PreparedWafReleasePlan
+}
+
 interface ReleaseRow extends RowDataPacket {
   internal_id: string
   public_id: Buffer
   sequence_no: string
   status: WafReleaseView['status']
+  description: string
   mode: WafReleaseView['mode']
   function_name: string
   script_sha256: Buffer | null
@@ -80,6 +89,7 @@ interface ResourceRow extends RowDataPacket {
 const selectRelease = `
   SELECT
     rel.id AS internal_id, rel.public_id, rel.sequence_no, rel.status,
+    rel.description,
     JSON_UNQUOTE(JSON_EXTRACT(item.diff_summary_json, '$.mode')) AS mode,
     JSON_UNQUOTE(JSON_EXTRACT(item.diff_summary_json, '$.functionName')) AS function_name,
     FROM_HEX(JSON_UNQUOTE(JSON_EXTRACT(item.diff_summary_json, '$.scriptSha256'))) AS script_sha256,
@@ -115,6 +125,67 @@ function publishedIndexVersion(base: NacosResourceValue): bigint {
   }
 }
 
+// Light structural parse of a stored index payload back into wire entries.
+// This only rebuilds the rollback plan; the service re-runs the full native
+// validator on the rebuilt payloads before anything is persisted.
+function parseWireIndexFunctions(text: string): WafWireIndexFunctionEntry[] | null {
+  let value: unknown
+  try {
+    value = JSON.parse(text)
+  } catch {
+    return null
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const functions = (value as { functions?: unknown }).functions
+  if (!Array.isArray(functions)) return null
+  const entries: WafWireIndexFunctionEntry[] = []
+  for (const entry of functions) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null
+    const record = entry as Record<string, unknown>
+    if (
+      typeof record.name !== 'string' ||
+      typeof record.sha256 !== 'string' ||
+      !/^[0-9a-f]{64}$/u.test(record.sha256) ||
+      !Array.isArray(record.mounts)
+    ) {
+      return null
+    }
+    const mounts: WafWireIndexFunctionEntry['mounts'][number][] = []
+    for (const mount of record.mounts) {
+      if (!mount || typeof mount !== 'object' || Array.isArray(mount)) return null
+      const mountRecord = mount as Record<string, unknown>
+      const projects = mountRecord.projects
+      if (!projects || typeof projects !== 'object' || Array.isArray(projects)) return null
+      const projectsRecord = projects as Record<string, unknown>
+      const include = projectsRecord.include
+      const exclude = projectsRecord.exclude ?? []
+      if (!Array.isArray(include) || include.some((item) => typeof item !== 'string')) return null
+      if (!Array.isArray(exclude) || exclude.some((item) => typeof item !== 'string')) return null
+      if (typeof mountRecord.priority !== 'number' || !Number.isSafeInteger(mountRecord.priority)) {
+        return null
+      }
+      mounts.push({
+        projects: { include: [...include], exclude: [...exclude] },
+        priority: mountRecord.priority,
+      })
+    }
+    entries.push({ name: record.name, sha256: record.sha256, mounts })
+  }
+  return entries
+}
+
+interface RollbackSourceRow extends RowDataPacket {
+  internal_id: string
+  public_id: Buffer
+  sequence_no: string
+  compiler_revision: string
+  diff_summary_json: string
+  script_document_id: string | null
+  script_target_sha256: Buffer | null
+  index_document_id: string | null
+  index_target_sha256: Buffer | null
+}
+
 export class WafReleaseRepository {
   readonly #pool: DatabasePool
   readonly #documents: DocumentRepository
@@ -144,6 +215,8 @@ export class WafReleaseRepository {
       generatorRevision: string
       validatorContractVersion: number
       validatorRevision: string
+      description?: string
+      rollbackOfSequence?: string | null
     },
     requestId: string,
   ): Promise<WafReleaseView> {
@@ -288,13 +361,14 @@ export class WafReleaseRepository {
             (public_id, environment_id, sequence_no, kind, status, title, description,
              compiler_revision, idempotency_key, request_sha256, validation_errors_json,
              native_validator_contract, native_validator_revision, created_by, ready_at)
-           VALUES (?, ?, ?, 'edge_functions', 'ready', ?, '', ?, ?, ?, JSON_ARRAY(), ?, ?, ?,
+           VALUES (?, ?, ?, 'edge_functions', 'ready', ?, ?, ?, ?, ?, JSON_ARRAY(), ?, ?, ?,
                    CURRENT_TIMESTAMP(6))`,
           [
             publicIdToBuffer(releasePublicId),
             environmentInternalId,
             sequence.toString(),
             `WAF edge functions #${sequence.toString()}`,
+            input.description ?? '',
             input.generatorRevision,
             input.idempotencyKey,
             input.requestSha256,
@@ -389,6 +463,7 @@ export class WafReleaseRepository {
             functionName: plan.functionName,
             scriptSha256: plan.mode === 'mounted' ? plan.scriptSha256 : null,
             ruleCount: plan.ruleCount,
+            ...(input.rollbackOfSequence ? { rollbackOf: input.rollbackOfSequence } : {}),
           },
         })
       },
@@ -397,6 +472,131 @@ export class WafReleaseRepository {
     const result = await this.find(releasePublicId)
     if (!result) throw new Error('WAF release could not be reloaded')
     return result
+  }
+
+  // Rollback rebuilds a publishable plan from a historical release's immutable
+  // payload documents: content is verified against the digests recorded when
+  // the release was created, and the service re-validates it through today's
+  // native validator before persisting. The new release allocates a fresh
+  // index version; release history is never rewritten. Any persisted release
+  // of this environment is an eligible source.
+  async loadRollbackSource(
+    environmentInternalId: string,
+    releasePublicId: string,
+  ): Promise<WafRollbackSource | null> {
+    const [rows] = await this.#pool.execute<RollbackSourceRow[]>(
+      `SELECT rel.id AS internal_id, rel.public_id, rel.sequence_no,
+              rel.compiler_revision, item.diff_summary_json,
+              script_res.payload_document_id AS script_document_id,
+              script_res.target_sha256 AS script_target_sha256,
+              index_res.payload_document_id AS index_document_id,
+              index_res.target_sha256 AS index_target_sha256
+       FROM releases rel
+       INNER JOIN release_items item
+         ON item.release_id = rel.id AND item.kind = 'edge_functions'
+       LEFT JOIN release_resources script_res
+         ON script_res.release_id = rel.id AND script_res.kind = 'edge_function_script'
+       LEFT JOIN release_resources index_res
+         ON index_res.release_id = rel.id AND index_res.kind = 'edge_function_index'
+       WHERE rel.public_id = ? AND rel.environment_id = ? AND rel.kind = 'edge_functions'
+       LIMIT 1`,
+      [publicIdToBuffer(releasePublicId), environmentInternalId],
+    )
+    const row = rows[0]
+    if (!row) return null
+
+    const invalid = (detail: string) =>
+      unprocessable(
+        'WAF_ROLLBACK_PAYLOAD_INVALID',
+        `The historical WAF release payload is unusable: ${detail}`,
+      )
+
+    let summary: {
+      mode?: unknown
+      functionName?: unknown
+      scriptSha256?: unknown
+      ruleCount?: unknown
+    }
+    try {
+      summary = JSON.parse(row.diff_summary_json) as typeof summary
+    } catch {
+      throw invalid('the diff summary is not valid JSON')
+    }
+    if (summary.mode !== 'mounted' && summary.mode !== 'unmount') {
+      throw invalid('the diff summary mode is unknown')
+    }
+    if (typeof summary.functionName !== 'string' || summary.functionName.length === 0) {
+      throw invalid('the diff summary function name is missing')
+    }
+    if (
+      typeof summary.ruleCount !== 'number' ||
+      !Number.isSafeInteger(summary.ruleCount) ||
+      summary.ruleCount < 0
+    ) {
+      throw invalid('the diff summary rule count is invalid')
+    }
+
+    if (!row.index_document_id) throw invalid('the index payload document is missing')
+    const indexText =
+      (await this.#documents.decryptByInternalId(this.#pool, row.index_document_id))?.toString(
+        'utf8',
+      ) ?? null
+    if (indexText === null) throw invalid('the index payload document is unreadable')
+    if (
+      row.index_target_sha256 &&
+      sha256(indexText).toString('hex') !== row.index_target_sha256.toString('hex')
+    ) {
+      throw invalid('the index payload digest does not match the release record')
+    }
+    const functions = parseWireIndexFunctions(indexText)
+    if (!functions) throw invalid('the index payload is not a function index')
+
+    if (summary.mode === 'unmount') {
+      if (functions.length !== 0) throw invalid('the unmount release carries mounted functions')
+      return {
+        publicId: bufferToPublicId(row.public_id),
+        sequence: row.sequence_no,
+        generatorRevision: row.compiler_revision,
+        plan: {
+          mode: 'unmount',
+          functionName: summary.functionName,
+          script: null,
+          scriptSha256: null,
+          functions,
+          ruleCount: summary.ruleCount,
+        },
+      }
+    }
+
+    if (!row.script_document_id) throw invalid('the script payload document is missing')
+    const scriptText =
+      (await this.#documents.decryptByInternalId(this.#pool, row.script_document_id))?.toString(
+        'utf8',
+      ) ?? null
+    if (scriptText === null) throw invalid('the script payload document is unreadable')
+    const scriptSha256 = sha256(scriptText).toString('hex')
+    if (row.script_target_sha256 && scriptSha256 !== row.script_target_sha256.toString('hex')) {
+      throw invalid('the script payload digest does not match the release record')
+    }
+    // The stored index must reference exactly these script bytes under the
+    // release's function name (single-function v1 generator output).
+    const indexed = functions.filter((entry) => entry.sha256 === scriptSha256)
+    if (indexed.length !== 1 || indexed[0]!.name !== summary.functionName) {
+      throw invalid('the stored index does not reference the release script')
+    }
+    return {
+      publicId: bufferToPublicId(row.public_id),
+      sequence: row.sequence_no,
+      generatorRevision: row.compiler_revision,
+      plan: {
+        mode: 'mounted',
+        functionName: summary.functionName,
+        script: scriptText,
+        scriptSha256,
+        functions,
+        ruleCount: summary.ruleCount,
+      },
+    }
   }
 
   async list(environmentInternalId: string): Promise<readonly WafReleaseView[]> {
@@ -540,6 +740,7 @@ export class WafReleaseRepository {
       scriptSha256: row.script_sha256?.toString('hex') ?? null,
       ruleCount: Number(row.rule_count),
       indexVersion: row.index_version,
+      description: row.description ?? '',
       resources,
       publication: {
         jobId: row.job_public_id ? bufferToPublicId(row.job_public_id) : null,
