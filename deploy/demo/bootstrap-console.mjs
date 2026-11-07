@@ -142,8 +142,9 @@ if (versionList.items.length === 0) {
       baseVersionId: null,
       changeSummary: 'Initialize the Docker demo routes',
       model: {
-        schemaVersion: 4,
+        schemaVersion: 6,
         kind: 'project_routes_yaml',
+        hostAliases: [],
         networkPolicy: {
           source: 'route',
           httpsRedirect: 'off',
@@ -153,6 +154,7 @@ if (versionList.items.length === 0) {
         routes: [
           {
             id: '00000000-0000-4000-8000-000000000001',
+            format: 'yaml',
             source: `path: /
 type: RESPONSE
 status: 200
@@ -163,6 +165,7 @@ body:
           },
           {
             id: '00000000-0000-4000-8000-000000000002',
+            format: 'yaml',
             source: `path: /health
 type: RESPONSE
 status: 200
