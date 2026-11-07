@@ -157,7 +157,7 @@ export class WafPolicyDraftRepository {
       this.#pool,
       async (transaction) => {
         const [rows] = await transaction.execute<LockedDraftRow[]>(
-          `SELECT id, environment_id, lock_version
+          `SELECT id, public_id, environment_id, lock_version
            FROM waf_policy_drafts
            WHERE environment_id = ?
            FOR UPDATE`,
