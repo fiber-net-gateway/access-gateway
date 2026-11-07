@@ -14,6 +14,7 @@ import type { WafPolicy, WafPolicyDraftView } from '../api/types'
 export interface WafPolicyDraftWorkspace {
   draft: WafPolicyDraftView | null
   policy: WafPolicy | null
+  savedPolicy: WafPolicy | null
   dirty: boolean
   loading: boolean
   saving: boolean
@@ -107,6 +108,7 @@ export function useWafPolicyDraft(): WafPolicyDraftWorkspace {
   return {
     draft,
     policy,
+    savedPolicy,
     dirty,
     loading,
     saving,

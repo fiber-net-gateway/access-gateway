@@ -6,7 +6,7 @@ import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 
-import { compileWafPolicy } from './generator.js'
+import { compileWafPolicy, locateScriptOffset } from './generator.js'
 import type { WafPolicy, WafRule } from './model.js'
 import { WAF_FUNCTION_NAME, WAF_MOUNT_PRIORITY } from './model.js'
 import { validateWafPolicy } from './validate.js'
@@ -288,3 +288,71 @@ test(
     }
   },
 )
+
+test('rule spans locate each rule block and its match text by script byte offset', () => {
+  const input = policy({
+    rules: [
+      // Declared first but executes last: spans keep the declaration index.
+      rule({ id: 'late-rule', priority: 200, name: '中文名称', match: '$req.path == "/late"' }),
+      rule({
+        id: 'early-rule',
+        priority: 10,
+        match: '  strings.contains($req.path, "/中文")  ',
+        scope: { methods: ['GET', 'POST'] },
+        exclusions: [{ project: 'api.example.com', reason: 'false positive' }],
+      }),
+      rule({ id: 'multi-line', priority: 300, match: '$req.path == "/a"\n  && $req.path == "/b"' }),
+    ],
+  })
+  const result = compileOrThrow(input)
+  assert.equal(result.kind, 'mounted')
+  if (result.kind !== 'mounted') {
+    return
+  }
+
+  const script = Buffer.from(result.script, 'utf8')
+  const byteOffset = (text: string): number => script.indexOf(Buffer.from(text, 'utf8'))
+
+  assert.deepEqual(
+    result.ruleSpans.map((span) => span.ruleIndex),
+    [1, 0, 2],
+  )
+  for (const span of result.ruleSpans) {
+    const block = script.subarray(span.start, span.end).toString('utf8')
+    assert.ok(block.startsWith(`// ${input.rules[span.ruleIndex]!.id} (priority`))
+    assert.ok(block.endsWith('}\n'))
+  }
+
+  // The match text is found behind multi-byte names, exclusions and scope.
+  assert.equal(result.ruleSpans[0]!.matchStart, byteOffset('strings.contains($req.path, "/中文")'))
+  assert.equal(result.ruleSpans[1]!.matchStart, byteOffset('$req.path == "/late"'))
+  assert.equal(result.ruleSpans[2]!.matchStart, byteOffset('$req.path == "/a"'))
+
+  // Positions count from the authored text: a single-line match keeps its
+  // trimmed leading spaces in the column, and columns are characters, not bytes.
+  const earlyMatch = input.rules[1]!.match
+  assert.deepEqual(locateScriptOffset(input, result, byteOffset('文') + 3), {
+    ruleIndex: 1,
+    match: { line: 1, column: earlyMatch.indexOf('文') + 2 },
+  })
+  assert.deepEqual(locateScriptOffset(input, result, byteOffset('&& $req.path == "/b"')), {
+    ruleIndex: 2,
+    match: { line: 2, column: 3 },
+  })
+
+  // An unbalanced expression fails on the generated `{`: clamp to the match end.
+  const lateMatch = input.rules[0]!.match
+  const openingBrace = result.ruleSpans[1]!.matchStart + Buffer.byteLength(lateMatch) + 3
+  assert.equal(script.subarray(openingBrace, openingBrace + 1).toString('utf8'), '{')
+  assert.deepEqual(locateScriptOffset(input, result, openingBrace), {
+    ruleIndex: 0,
+    match: { line: 1, column: lateMatch.length + 1 },
+  })
+
+  // Generated guards belong to the rule but not to its match text, and the
+  // script header belongs to no rule at all.
+  assert.deepEqual(locateScriptOffset(input, result, byteOffset('$ctx.project != ')), {
+    ruleIndex: 1,
+  })
+  assert.equal(locateScriptOffset(input, result, 0), null)
+})

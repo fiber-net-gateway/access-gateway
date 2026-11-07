@@ -1017,26 +1017,28 @@ function isWafCompilePreview(value: unknown): value is WafCompilePreviewView {
   if (!isRecord(value)) return false
   const compilation = value.compilation
   const compilationOk =
-    isRecord(compilation) &&
-    (compilation.kind === 'unmount'
-      ? compilation.reason === 'no-rules' || compilation.reason === 'no-mounted-projects'
-      : compilation.kind === 'mounted' &&
-        typeof compilation.script === 'string' &&
-        typeof compilation.scriptSha256 === 'string' &&
-        typeof compilation.functionName === 'string' &&
-        typeof compilation.mountPriority === 'number' &&
-        Array.isArray(compilation.mounts) &&
-        compilation.mounts.every(
-          (mount) => isRecord(mount) && isStringList(mount.include) && isStringList(mount.exclude),
-        ) &&
-        isStringList(compilation.ruleOrder) &&
-        Array.isArray(compilation.directives) &&
-        compilation.directives.every(
-          (directive) =>
-            isRecord(directive) &&
-            typeof directive.name === 'string' &&
-            isStringList(directive.cidrs),
-        ))
+    compilation === null ||
+    (isRecord(compilation) &&
+      (compilation.kind === 'unmount'
+        ? compilation.reason === 'no-rules' || compilation.reason === 'no-mounted-projects'
+        : compilation.kind === 'mounted' &&
+          typeof compilation.script === 'string' &&
+          typeof compilation.scriptSha256 === 'string' &&
+          typeof compilation.functionName === 'string' &&
+          typeof compilation.mountPriority === 'number' &&
+          Array.isArray(compilation.mounts) &&
+          compilation.mounts.every(
+            (mount) =>
+              isRecord(mount) && isStringList(mount.include) && isStringList(mount.exclude),
+          ) &&
+          isStringList(compilation.ruleOrder) &&
+          Array.isArray(compilation.directives) &&
+          compilation.directives.every(
+            (directive) =>
+              isRecord(directive) &&
+              typeof directive.name === 'string' &&
+              isStringList(directive.cidrs),
+          )))
   return (
     typeof value.valid === 'boolean' &&
     Array.isArray(value.issues) &&
@@ -1050,6 +1052,8 @@ function isWafCompilePreview(value: unknown): value is WafCompilePreviewView {
         typeof error.code === 'string' &&
         (error.field === undefined || typeof error.field === 'string') &&
         (error.offset === undefined || typeof error.offset === 'number') &&
+        (error.line === undefined || typeof error.line === 'number') &&
+        (error.column === undefined || typeof error.column === 'number') &&
         typeof error.message === 'string',
     ) &&
     (value.validator === null ||

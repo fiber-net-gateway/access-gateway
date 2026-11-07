@@ -95,6 +95,36 @@ const wafPolicySchema = {
   },
 } as const
 
+// compile-preview is the authoring feedback loop: value-level mistakes have to
+// come back as structured validateWafPolicy issues with field paths, not as a
+// bare 400. Its body therefore keeps only the structural skeleton the validator
+// relies on (object/array/scalar types and required keys).
+const valueConstraintKeywords = new Set([
+  'const',
+  'enum',
+  'maxItems',
+  'maxLength',
+  'maxProperties',
+  'maximum',
+  'minLength',
+  'minimum',
+  'pattern',
+])
+
+function structuralSchema(schema: unknown): unknown {
+  if (Array.isArray(schema)) {
+    return schema.map(structuralSchema)
+  }
+  if (typeof schema !== 'object' || schema === null) {
+    return schema
+  }
+  return Object.fromEntries(
+    Object.entries(schema)
+      .filter(([keyword]) => !valueConstraintKeywords.has(keyword))
+      .map(([keyword, value]) => [keyword, structuralSchema(value)]),
+  )
+}
+
 const wafPolicyDraftResponseSchema = {
   type: 'object',
   additionalProperties: false,
@@ -222,7 +252,8 @@ const wafCompilePreviewResponseSchema = {
         },
       },
     },
-    compilation: wafCompilationSchema,
+    // Null when the policy has field-level issues and nothing was compiled.
+    compilation: { anyOf: [...wafCompilationSchema.anyOf, { type: 'null' }] },
     scriptValid: { type: ['boolean', 'null'] },
     scriptErrors: {
       type: 'array',
@@ -234,6 +265,8 @@ const wafCompilePreviewResponseSchema = {
           code: { type: 'string' },
           field: { type: 'string' },
           offset: { type: 'integer' },
+          line: { type: 'integer' },
+          column: { type: 'integer' },
           message: { type: 'string' },
         },
       },
@@ -467,7 +500,7 @@ export function registerWafRoutes(
     '/api/waf/policy/compile-preview',
     {
       schema: {
-        body: wafPolicySchema,
+        body: structuralSchema(wafPolicySchema),
         response: { 200: wafCompilePreviewResponseSchema },
       },
     },

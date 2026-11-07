@@ -409,7 +409,7 @@ function WafPublicationPreview({ onCreateFromDraft, working }: WafPublicationPre
 
         const planned: PlannedEdgeFunction[] = []
         const wafCompilation =
-          policyResult.compilation.kind === 'mounted' ? policyResult.compilation : null
+          policyResult.compilation?.kind === 'mounted' ? policyResult.compilation : null
         if (wafCompilation) {
           planned.push({
             name: wafCompilation.functionName,

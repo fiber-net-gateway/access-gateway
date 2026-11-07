@@ -406,8 +406,12 @@ export interface WafPolicyIssue {
 
 export interface WafScriptError {
   code: string
+  /** rules[i].match or rules[i] once attributed to a rule; else the validator's field. */
   field?: string
   offset?: number
+  /** 1-based position inside the rule's match text. */
+  line?: number
+  column?: number
   message: string
 }
 
@@ -432,7 +436,8 @@ export type WafCompilation = WafMountedCompilation | WafUnmountCompilation
 export interface WafCompilePreviewView {
   valid: boolean
   issues: readonly WafPolicyIssue[]
-  compilation: WafCompilation
+  /** Null when field-level issues stopped compilation. */
+  compilation: WafCompilation | null
   scriptValid: boolean | null
   scriptErrors: readonly WafScriptError[]
   validator: { contractVersion: number; revision: string } | null

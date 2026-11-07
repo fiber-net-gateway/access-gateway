@@ -2693,6 +2693,234 @@ button:disabled {
   padding: 12px 16px;
 }
 
+.waf-rule-list-note {
+  margin: 0 0 8px;
+}
+
+.waf-rule-list {
+  display: grid;
+  overflow: hidden;
+  margin: 0;
+  padding: 0;
+  border: 1px solid #d5ddd4;
+  border-radius: 14px;
+  background: #fff;
+  list-style: none;
+}
+
+.waf-rule-row {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr) minmax(0, 330px) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 12px 9px 14px;
+  border-top: 1px solid #e6eae4;
+}
+
+.waf-rule-row:first-child {
+  border-top: 0;
+}
+
+.waf-rule-row > .status-chip {
+  justify-self: start;
+}
+
+.waf-rule-row > button {
+  min-height: 32px;
+  padding: 0 12px;
+  font-size: 0.7rem;
+}
+
+.waf-rule-row-main {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.waf-rule-row-title {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 8px;
+}
+
+.waf-rule-row-title strong,
+.waf-rule-row-detail,
+.waf-rule-row-facts span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.waf-rule-row-title strong {
+  color: #17221e;
+  font-size: 0.78rem;
+}
+
+.waf-rule-row-title .status-chip {
+  flex: none;
+  min-height: 19px;
+  padding: 1px 7px;
+}
+
+.waf-rule-row-detail {
+  color: #6d7d75;
+  font-family: 'SFMono-Regular', Consolas, monospace;
+  font-size: 0.66rem;
+}
+
+.waf-rule-row-facts {
+  display: grid;
+  grid-template-columns: 32px 76px minmax(0, 1fr) 44px;
+  gap: 10px;
+  color: #526059;
+  font-size: 0.68rem;
+}
+
+.waf-severity-critical {
+  background: #812b28;
+  color: #fff4f1;
+}
+
+.waf-severity-high {
+  background: #f3d4d0;
+  color: #812b28;
+}
+
+.waf-severity-medium {
+  background: #f4ecc9;
+  color: #6b5a1e;
+}
+
+.waf-severity-low {
+  background: #e3e7e1;
+  color: #546058;
+}
+
+.waf-rule-dialog {
+  display: flex;
+  overflow: hidden;
+  flex-direction: column;
+  max-height: calc(100dvh - 48px);
+  padding: 0;
+}
+
+.waf-rule-dialog-header {
+  display: grid;
+  gap: 4px;
+  padding: 18px 24px 12px;
+  border-bottom: 1px solid #e2e7e0;
+}
+
+.waf-rule-dialog-header small {
+  color: #6e7b74;
+  font-size: 0.68rem;
+}
+
+.waf-rule-dialog-body {
+  display: grid;
+  overflow: auto;
+  gap: 14px;
+  padding: 16px 24px;
+}
+
+.waf-rule-dialog-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 24px;
+  border-top: 1px solid #e2e7e0;
+}
+
+.waf-rule-dialog-footer .dialog-actions {
+  margin-top: 0;
+}
+
+.waf-rule-dialog label {
+  margin-top: 0;
+}
+
+.waf-rule-dialog [aria-invalid='true'] {
+  border-color: #c14f38;
+}
+
+.waf-rule-fields {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.waf-rule-scope {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  padding: 2px 14px 14px;
+}
+
+.waf-rule-match {
+  display: grid;
+  gap: 6px;
+}
+
+.waf-rule-match .yaml-code-editor {
+  border-radius: 9px;
+}
+
+.waf-rule-match .cm-editor {
+  min-height: 120px;
+  max-height: 260px;
+}
+
+.waf-rule-field-label {
+  color: #536159;
+  font-size: 0.7rem;
+  font-weight: 720;
+}
+
+.waf-rule-check {
+  margin: 0;
+  color: #6e7b74;
+  font-size: 0.67rem;
+}
+
+.waf-rule-section {
+  border: 1px solid #d7ddd5;
+  border-radius: 11px;
+  background: #f7f9f5;
+}
+
+.waf-rule-section summary {
+  padding: 10px 14px;
+  color: #536159;
+  cursor: pointer;
+  font-size: 0.7rem;
+  font-weight: 700;
+}
+
+.waf-rule-section .waf-exclusions {
+  padding: 2px 14px 14px;
+  border-top: 0;
+}
+
+.waf-rule-section .settings-note {
+  margin: 0;
+}
+
+.waf-rule-problems {
+  flex: none;
+  overflow: auto;
+  max-height: 112px;
+  margin: 0 24px 12px;
+  border: 1px solid #e3b4a5;
+  border-radius: 9px;
+}
+
+.waf-rule-problems li,
+.waf-preview-issues li {
+  grid-template-columns: 120px 150px minmax(0, 1fr);
+}
+
 .waf-exclusions {
   display: grid;
   gap: 8px;
@@ -2811,6 +3039,22 @@ button:disabled {
   display: block;
   font-weight: 400;
   color: #6d7d75;
+}
+
+/* The sidebar keeps its column down to 850px, so rows run out of room well
+   before the shell does. */
+@media (max-width: 1240px) {
+  .waf-rule-row {
+    grid-template-columns: 48px minmax(0, 1fr) auto;
+  }
+
+  .waf-rule-row-facts {
+    display: flex;
+    flex-wrap: wrap;
+    grid-row: 2;
+    grid-column: 2 / -1;
+    gap: 2px 12px;
+  }
 }
 
 @media (max-width: 1080px) {
@@ -2947,6 +3191,24 @@ button:disabled {
 
   .waf-exclusion-form {
     grid-template-columns: 1fr;
+  }
+
+  .waf-rule-fields {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .waf-rule-fields label:first-child {
+    grid-column: 1 / -1;
+  }
+
+  .waf-rule-scope {
+    grid-template-columns: 1fr;
+  }
+
+  .waf-rule-problems li,
+  .waf-preview-issues li {
+    grid-template-columns: 1fr;
+    gap: 2px;
   }
 
   .documentation-toolbar {
