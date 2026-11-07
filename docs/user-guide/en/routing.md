@@ -5,8 +5,8 @@ the Host, Path, Method, condition, CIDR, `RESPONSE`, `PROXY`, and publication be
 this repository. The final authority is the wire codec, route compiler, and Native Validator in
 `native/access-server`, not browser-side editor hints.
 
-> Qualification: this guide describes the repository-owned C++ data plane and pinned Fiber revision
-> `0fda7764bf94944aca4b674ab5ab311184703118`. Production script-corpus differential verification and
+> Qualification: this guide describes the repository-owned C++ data plane and the Fiber revision
+> pinned by the `third_party/fiber-gateway-cpp` gitlink. Production script-corpus differential verification and
 > the final cutover gates are not all complete. This guide does not claim production cutover readiness.
 
 ## 1. Core model

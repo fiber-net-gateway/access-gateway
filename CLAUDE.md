@@ -27,7 +27,7 @@ Operator → React console (web) → Fastify API (server) → MySQL
 
 Key invariants (keep these distinct in storage, APIs, metrics, and UI):
 
-- **Lifecycle states**: draft (saved by console) → published (written to rnacos) → active (proven on a specific instance). A successful rnacos write or readback is **not** activation evidence. Until the data plane exposes typed per-instance evidence, report activation as unknown rather than inferring success.
+- **Lifecycle states**: draft (saved by console) → published (written to rnacos) → active (proven on a specific instance). A successful rnacos write or readback is **not** activation evidence. Without fresh, typed per-instance evidence, report activation as unknown rather than inferring success.
 - **Native codec is the source of truth** for fields, defaults, scalar coercion, semantic validation, and failure-old-snapshot behavior. The console validates in stages (field syntax → cross-resource → full environment) and publication deterministically compiles its model into the native wire format.
 - Config candidates are fully parsed and compiled before immutable publication; invalid candidates retain the prior active snapshot; same-version candidates are ignored; removing a project/Host mapping differs from a failed update.
 - Publication is a multi-resource workflow (persist an immutable release first, record every Data ID write/readback/failure/evidence independently), never a rnacos transaction. Rollback creates a new release from historical content; it never rewrites release history.
@@ -88,13 +88,15 @@ Document any test that cannot be run and why; do not claim production compatibil
 
 ## rnacos contract
 
-| Purpose                    | Data ID                                 | Group           |
-| -------------------------- | --------------------------------------- | --------------- |
-| Project list               | `ploto.unified-access.projects`         | `ACCESS-SERVER` |
-| Project route              | `ploto.unified-access.route.<project>`  | `ACCESS-SERVER` |
-| TLS certificate snapshot   | `ploto.unified-access.tls-certificates` | `ACCESS-SERVER` |
-| Gray rules                 | `ploto.unified-access.gray-match`       | `DEFAULT_GROUP` |
-| Test-env cluster whitelist | `ploto.test.temp-cluster-apps`          | `DEFAULT_GROUP` |
+| Purpose                    | Data ID                                     | Group           |
+| -------------------------- | ------------------------------------------- | --------------- |
+| Project list               | `ploto.unified-access.projects`             | `ACCESS-SERVER` |
+| Project route              | `ploto.unified-access.route.<project>`      | `ACCESS-SERVER` |
+| TLS certificate snapshot   | `ploto.unified-access.tls-certificates`     | `ACCESS-SERVER` |
+| Edge function index        | `ploto.unified-access.edge-functions`       | `ACCESS-SERVER` |
+| Edge function script       | `ploto.unified-access.edge-function.<name>` | `ACCESS-SERVER` |
+| Gray rules                 | `ploto.unified-access.gray-match`           | `DEFAULT_GROUP` |
+| Test-env cluster whitelist | `ploto.test.temp-cluster-apps`              | `DEFAULT_GROUP` |
 
 The project list is a semicolon-separated string, not JSON. Route and gray-rule payloads must retain the native compatibility codec's Java wire behavior. `ploto.test.temp-cluster-apps` (JSON map of service → cluster set) is consumed by the data plane only when `ACCESS_SERVER_TEST_MODE=true` — it gates the request-specified-cluster fallback to the configured cluster; it is not published by the console and carries no activation evidence. Any change to the wire model, defaults, validation, routing behavior, publication semantics, or activation evidence is cross-component work: update the native codec/runtime and tests first (or in the same change), then server schemas/services, frontend types and editors, fixtures, and user docs.
 

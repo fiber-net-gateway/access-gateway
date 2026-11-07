@@ -5,8 +5,7 @@ Routes. TypeScript below is notation for parameters and return values only. The 
 TypeScript/JavaScript engine and does not read `.d.ts` files.
 
 The implementation comes from `native/access-server/src/runtime/AccessScriptRuntime.cpp` and the `script`
-and `http_script` modules in pinned Fiber revision
-`0fda7764bf94944aca4b674ab5ab311184703118`.
+and `http_script` modules of the Fiber revision pinned by the `third_party/fiber-gateway-cpp` gitlink.
 
 ## 1. Runtime overview
 
