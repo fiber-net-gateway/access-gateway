@@ -21,6 +21,7 @@ import type {
   TlsCertificateReleaseView,
   WafCompilePreviewView,
   WafEdgeFunctionsView,
+  WafRulePackView,
   WafMode,
   WafPolicy,
   WafPolicyDraftView,
@@ -1047,6 +1048,19 @@ function isWafEdgeFunctions(value: unknown): value is WafEdgeFunctionsView {
         (script.content === null || typeof script.content === 'string'),
     )
   )
+}
+
+function isWafRulePack(value: unknown): value is WafRulePackView {
+  return (
+    isRecord(value) &&
+    typeof value.version === 'string' &&
+    Array.isArray(value.rules) &&
+    value.rules.every(isWafRule)
+  )
+}
+
+export async function fetchWafRulePack(signal?: AbortSignal): Promise<WafRulePackView> {
+  return requestJson('/api/waf/rule-pack', { signal }, isWafRulePack)
 }
 
 export async function fetchWafPolicyDraft(signal?: AbortSignal): Promise<WafPolicyDraftView> {

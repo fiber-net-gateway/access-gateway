@@ -3,8 +3,9 @@ import type { FastifyInstance } from 'fastify'
 import { badRequest } from '../../shared/errors.js'
 import { requireActor } from '../auth/http.js'
 import type { AuthService } from '../auth/model.js'
-import type { WafCompilePreviewView, WafService } from './service.js'
 import type { WafReleaseService } from './release-service.js'
+import { wafRulePackView } from './rule-pack.js'
+import type { WafCompilePreviewView, WafService } from './service.js'
 
 function parseIfMatch(value: string | undefined): string {
   if (!value) {
@@ -103,6 +104,16 @@ const wafPolicyDraftResponseSchema = {
     lockVersion: { type: 'string', pattern: '^(0|[1-9][0-9]*)$' },
     createdAt: { type: 'string', format: 'date-time' },
     updatedAt: { type: 'string', format: 'date-time' },
+  },
+} as const
+
+const wafRulePackResponseSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['version', 'rules'],
+  properties: {
+    version: { type: 'string', minLength: 1, maxLength: 64 },
+    rules: { type: 'array', items: wafRuleSchema },
   },
 } as const
 
@@ -298,6 +309,16 @@ export function registerWafRoutes(
       )
       reply.header('cache-control', 'no-store')
       return result
+    },
+  )
+
+  app.get(
+    '/api/waf/rule-pack',
+    { schema: { response: { 200: wafRulePackResponseSchema } } },
+    async () => {
+      // Static curated data shipped with the console build; viewer-readable.
+      await requireActor(auth)
+      return wafRulePackView()
     },
   )
 

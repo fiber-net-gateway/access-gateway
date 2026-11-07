@@ -150,6 +150,22 @@ const edgeFunctions = {
   ],
 }
 
+const rulePack = {
+  version: 'waf-rule-pack-v1',
+  rules: [
+    policy.rules[0], // same id as the draft rule → skipped on import
+    {
+      id: 'sqli-union-select',
+      name: 'union select 注入探测',
+      severity: 'critical',
+      priority: 100,
+      action: 'block',
+      phase: 'request_head',
+      match: 'strings.match($req.uri, "(?i)union(?:[+%20]|\\\\s)+select")',
+    },
+  ],
+}
+
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
@@ -189,6 +205,9 @@ function installApiMock() {
     }
     if (url === '/api/waf/policy' && (!init?.method || init.method === 'GET')) {
       return jsonResponse(policyDraft)
+    }
+    if (url === '/api/waf/rule-pack') {
+      return jsonResponse(rulePack)
     }
     if (url === '/api/waf/policy' && init?.method === 'PUT') {
       const body = JSON.parse(String(init.body)) as { policy: typeof policy }
@@ -297,6 +316,14 @@ describe('WAF console pages', () => {
     // The debounced compile preview renders the mounted compilation summary.
     expect(await screen.findByText(/挂载函数 waf · 脚本 \d+ 行/u)).toBeTruthy()
 
+    // Importing the starter rule pack skips the existing id and appends the rest
+    // into the dirty working copy.
+    await user.click(screen.getByRole('button', { name: '导入起手规则包' }))
+    expect(
+      await screen.findByText(/已导入 1 条（waf-rule-pack-v1），跳过已存在 1 条/u),
+    ).toBeTruthy()
+    expect(await screen.findByText('union select 注入探测')).toBeTruthy()
+
     await user.click(screen.getByRole('radio', { name: /关闭/u }))
     await user.click(screen.getByRole('button', { name: '保存策略草稿' }))
 
@@ -308,6 +335,8 @@ describe('WAF console pages', () => {
       expect(new Headers(saveCall?.[1]?.headers).get('If-Match')).toBe('"3"')
       const body = JSON.parse(String(saveCall?.[1]?.body)) as { policy: typeof policy }
       expect(body.policy.defaultMode).toBe('off')
+      expect(body.policy.rules.length).toBe(2)
+      expect(body.policy.rules[1]?.id).toBe('sqli-union-select')
       expect(body.policy.rules[0]?.exclusions).toEqual([
         { project: 'api.example.com', reason: '误报待修' },
       ])
