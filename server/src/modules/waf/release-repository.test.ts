@@ -44,7 +44,7 @@ function rollbackRow(fixture: Fixture): RowDataPacket {
     public_id: publicIdToBuffer(releasePublicId),
     sequence_no: '4',
     compiler_revision: 'waf-generator-v1',
-    diff_summary_json: JSON.stringify(fixture.diffSummary),
+    diff_summary_json: fixture.diffSummary,
     index_document_id: fixture.indexText === null ? null : 'index-doc',
     index_target_sha256:
       fixture.indexText === null

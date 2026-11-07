@@ -112,7 +112,7 @@ const selectRelease = `
     rel.description,
     JSON_UNQUOTE(JSON_EXTRACT(item.diff_summary_json, '$.mode')) AS mode,
     JSON_UNQUOTE(JSON_EXTRACT(item.diff_summary_json, '$.functionName')) AS function_name,
-    FROM_HEX(JSON_UNQUOTE(JSON_EXTRACT(item.diff_summary_json, '$.scriptSha256'))) AS script_sha256,
+    UNHEX(JSON_UNQUOTE(JSON_EXTRACT(item.diff_summary_json, '$.scriptSha256'))) AS script_sha256,
     CAST(JSON_UNQUOTE(JSON_EXTRACT(item.diff_summary_json, '$.ruleCount')) AS UNSIGNED)
       AS rule_count,
     CAST(JSON_UNQUOTE(JSON_EXTRACT(item.diff_summary_json, '$.indexVersion')) AS CHAR)
@@ -277,7 +277,7 @@ interface RollbackSourceRow extends RowDataPacket {
   public_id: Buffer
   sequence_no: string
   compiler_revision: string
-  diff_summary_json: string
+  diff_summary_json: unknown
   script_document_id: string | null
   script_target_sha256: Buffer | null
   index_document_id: string | null
@@ -635,7 +635,12 @@ export class WafReleaseRepository {
       ruleCount?: unknown
     }
     try {
-      summary = JSON.parse(row.diff_summary_json) as typeof summary
+      // mysql2 hands JSON columns back already parsed.
+      summary = (
+        typeof row.diff_summary_json === 'string'
+          ? JSON.parse(row.diff_summary_json)
+          : row.diff_summary_json
+      ) as typeof summary
     } catch {
       throw invalid('the diff summary is not valid JSON')
     }
