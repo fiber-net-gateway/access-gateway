@@ -211,6 +211,7 @@ matcher 的结构优先级。
 | `max_client_body_size` | RESPONSE/PROXY        | Route 请求体限制；缺失或数值 0 使用 server 默认值                                                                      |
 | `max_proxy_body_size`  | PROXY                 | 非零时覆盖 upstream response body 限制                                                                                 |
 | `websocket_timeout`    | PROXY                 | 大于 0 时允许 WebSocket tunnel，并作为隧道读写 timeout                                                                 |
+| `edge_function_body`   | PROXY                 | 可选；`true` 为 `request_body` 阶段边缘函数开启请求体缓冲重放（白名单 content-type、限额内缓冲，超限跳过函数）         |
 | `flush`                | PROXY                 | `true` 双向开启低延迟 body flush（请求与响应），并写 `X-Accel-Buffering: no`                                           |
 | `allows`               | 全部                  | CIDR allow/deny sequence；`!` 前缀表示 deny                                                                            |
 | `upstream_tls`         | PROXY                 | native-only 不可变出站 TLS transport profile                                                                           |
