@@ -245,8 +245,9 @@ export function WafEdgeFunctionsPage() {
                 <span>
                   <strong>{fn.name}</strong>
                   <small>
-                    {fn.enabled ? '已启用' : '已停用'} · {fn.mounts.length} 个挂载 ·{' '}
-                    {fn.script.split('\n').length} 行脚本
+                    {fn.enabled ? '已启用' : '已停用'} ·{' '}
+                    {fn.phase === 'request_body' ? '请求体' : '请求头'} · {fn.mounts.length} 个挂载
+                    · {fn.script.split('\n').length} 行脚本
                   </small>
                 </span>
               </button>
@@ -303,7 +304,11 @@ export function WafEdgeFunctionsPage() {
                 <span className={`status-chip status-chip-${fn.scriptValid ? 'ready' : 'pending'}`}>
                   {fn.scriptValid ? '脚本可编译' : '脚本错误'}
                 </span>{' '}
-                <strong>{fn.name}</strong> <small>sha256 {fn.scriptSha256.slice(0, 12)}…</small>
+                <strong>{fn.name}</strong>{' '}
+                <small>
+                  {fn.phase === 'request_body' ? '请求体' : '请求头'} · sha256{' '}
+                  {fn.scriptSha256.slice(0, 12)}…
+                </small>
                 {fn.errors.length > 0 ? (
                   <ul className="route-issues">
                     {fn.errors.map((error, errorIndex) => (
@@ -394,7 +399,30 @@ function FunctionEditor({ func, diagnostics, onUpdate, onRemove }: FunctionEdito
             }}
           />
         </label>
+        <label>
+          执行阶段
+          <select
+            aria-label={`${title} 执行阶段`}
+            value={func.phase ?? 'request_head'}
+            onChange={(event) =>
+              onUpdate({
+                ...func,
+                phase: event.target.value === 'request_body' ? 'request_body' : undefined,
+              })
+            }
+          >
+            <option value="request_head">请求头（路由匹配前）</option>
+            <option value="request_body">请求体（仅 PROXY 路由 opt-in）</option>
+          </select>
+        </label>
       </div>
+      {func.phase === 'request_body' ? (
+        <p className="settings-note">
+          请求体函数只在标记 edge_function_body 的 PROXY 路由上运行：控制台校验通过的白名单
+          content-type（json/表单/xml/文本）且请求体不超过限额时缓冲重放；$req.body
+          仅在该阶段可引用。
+        </p>
+      ) : null}
 
       <div className="waf-match-editor">
         <Suspense fallback={<p role="status">正在加载脚本编辑器…</p>}>
@@ -566,6 +594,12 @@ function LiveEdgeFunctionsSnapshot() {
                   <strong>{entry.name}</strong>
                   <small>
                     {entry.sha256 ? `脚本 ${entry.sha256.slice(0, 16)}…` : '无脚本摘要'} ·{' '}
+                    {entry.phase === 'request_body'
+                      ? '请求体阶段'
+                      : entry.phase === 'request_head'
+                        ? '请求头阶段'
+                        : '未声明阶段（默认请求头）'}{' '}
+                    ·{' '}
                     {entry.mounts
                       .map(
                         (mount) =>

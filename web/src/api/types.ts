@@ -14,7 +14,7 @@ export interface CapabilityView {
 }
 
 export interface AccessConfigLimits {
-  schemaVersion: 3
+  schemaVersion: 5
   projectList: {
     maxPayloadBytes: number
     maxProjects: number
@@ -58,7 +58,6 @@ export interface AccessConfigLimits {
   edgeFunctions: {
     maxPayloadBytes: number
     maxFunctions: number
-    maxFunctionIdBytes: number
     maxFunctionNameBytes: number
     maxMountsPerFunction: number
     maxGlobsPerSelector: number
@@ -70,6 +69,7 @@ export interface AccessConfigLimits {
     maxCidrsPerDirective: number
     maxCidrBytes: number
     maxInputFieldBytes: number
+    maxBodyPhaseBytes: number
   }
 }
 
@@ -466,9 +466,13 @@ export interface WafReleaseView {
   publishedAt: string | null
 }
 
+export type EdgeFunctionPhase = 'request_head' | 'request_body'
+
 export interface WafEdgeFunctionIndexEntryView {
   name: string
   sha256: string | null
+  /** 'request_head' | 'request_body' when declared; null = absent on the wire. */
+  phase: EdgeFunctionPhase | null
   mounts: readonly {
     projects: { include: readonly string[]; exclude: readonly string[] }
     priority: number | null
@@ -486,6 +490,8 @@ export interface WafEdgeFunctionDraftFunction {
   name: string
   description?: string
   enabled: boolean
+  /** Execution phase; omitted = request_head (the wire default). */
+  phase?: EdgeFunctionPhase
   script: string
   mounts: readonly WafEdgeFunctionMountDraft[]
 }
@@ -506,6 +512,7 @@ export interface WafEdgeFunctionsDraftView {
 
 export interface WafEdgeFunctionCompileResult {
   name: string
+  phase: EdgeFunctionPhase
   scriptSha256: string
   scriptValid: boolean
   errors: readonly WafScriptError[]

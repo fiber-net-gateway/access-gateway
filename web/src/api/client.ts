@@ -113,7 +113,7 @@ function hasPositiveIntegers(value: Record<string, unknown>, keys: readonly stri
 function isAccessConfigLimits(value: unknown): value is AccessConfigLimits {
   if (
     !isRecord(value) ||
-    value.schemaVersion !== 3 ||
+    value.schemaVersion !== 5 ||
     !isRecord(value.projectList) ||
     !isRecord(value.projectRoute) ||
     !isRecord(value.grayRules) ||
@@ -165,7 +165,6 @@ function isAccessConfigLimits(value: unknown): value is AccessConfigLimits {
     hasPositiveIntegers(value.edgeFunctions, [
       'maxPayloadBytes',
       'maxFunctions',
-      'maxFunctionIdBytes',
       'maxFunctionNameBytes',
       'maxMountsPerFunction',
       'maxGlobsPerSelector',
@@ -177,6 +176,7 @@ function isAccessConfigLimits(value: unknown): value is AccessConfigLimits {
       'maxCidrsPerDirective',
       'maxCidrBytes',
       'maxInputFieldBytes',
+      'maxBodyPhaseBytes',
     ])
   )
 }
@@ -941,6 +941,9 @@ function isWafEdgeFunctionDraftFunction(value: unknown): value is WafEdgeFunctio
     typeof value.name === 'string' &&
     (value.description === undefined || typeof value.description === 'string') &&
     typeof value.enabled === 'boolean' &&
+    (value.phase === undefined ||
+      value.phase === 'request_head' ||
+      value.phase === 'request_body') &&
     typeof value.script === 'string' &&
     Array.isArray(value.mounts) &&
     value.mounts.every(isWafEdgeFunctionMountDraft)
@@ -981,6 +984,7 @@ function isWafEdgeFunctionCompilePreview(
       (fn) =>
         isRecord(fn) &&
         typeof fn.name === 'string' &&
+        (fn.phase === 'request_head' || fn.phase === 'request_body') &&
         typeof fn.scriptSha256 === 'string' &&
         typeof fn.scriptValid === 'boolean' &&
         Array.isArray(fn.errors) &&
@@ -1107,6 +1111,9 @@ function isWafEdgeFunctions(value: unknown): value is WafEdgeFunctionsView {
         isRecord(entry) &&
         typeof entry.name === 'string' &&
         (entry.sha256 === null || typeof entry.sha256 === 'string') &&
+        (entry.phase === null ||
+          entry.phase === 'request_head' ||
+          entry.phase === 'request_body') &&
         Array.isArray(entry.mounts) &&
         entry.mounts.every(
           (mount) =>

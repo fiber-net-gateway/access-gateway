@@ -135,6 +135,7 @@ const edgeFunctions = {
       {
         name: 'waf',
         sha256: '1'.repeat(64),
+        phase: null,
         mounts: [
           {
             projects: { include: ['*'], exclude: ['legacy.example.com'] },
@@ -146,6 +147,7 @@ const edgeFunctions = {
       {
         name: 'old-fn',
         sha256: '9'.repeat(64),
+        phase: 'request_body',
         mounts: [{ projects: { include: ['*'], exclude: [] }, priority: 500, ratio: null }],
       },
     ],
@@ -191,7 +193,15 @@ const edgeFunctionsDraft = {
 const edgeCompilePreview = {
   valid: true,
   issues: [],
-  functions: [{ name: 'bot-trap', scriptSha256: 'b'.repeat(64), scriptValid: true, errors: [] }],
+  functions: [
+    {
+      name: 'bot-trap',
+      phase: 'request_head',
+      scriptSha256: 'b'.repeat(64),
+      scriptValid: true,
+      errors: [],
+    },
+  ],
   validator: { contractVersion: 1, revision: 'test' },
 }
 
@@ -501,9 +511,30 @@ describe('WAF console pages', () => {
       expect(body.draft.functions[0]?.mounts[0]?.ratio).toBe(5000)
     })
 
+    // Switching the function to the request_body phase annotates the editor,
+    // rides the compile preview, and reaches the saved draft.
+    const phaseSelect = screen.getByRole('combobox', { name: '函数 bot-trap 执行阶段' })
+    await user.selectOptions(phaseSelect, 'request_body')
+    expect(screen.getByText(/\$req\.body 仅在该阶段可引用/u)).toBeTruthy()
+    await waitFor(() => {
+      const calls = fetchMock.mock.calls.filter(
+        ([url, init]) =>
+          url === '/api/waf/edge-functions/compile-preview' && init?.method === 'POST',
+      )
+      const phased = calls.some((call) => {
+        const body = JSON.parse(String(call?.[1]?.body)) as {
+          functions: { phase?: string; script: string }[]
+        }
+        return body.functions[0]?.phase === 'request_body'
+      })
+      expect(phased).toBe(true)
+    })
+
     // The live rnacos snapshot stays visible below the authoring surface.
     expect(screen.getByText('索引版本：5')).toBeTruthy()
     expect(screen.getByText(/exclude=legacy\.example\.com/u)).toBeTruthy()
+    expect(screen.getByText(/old-fn/u)).toBeTruthy()
+    expect(screen.getByText(/请求体阶段/u)).toBeTruthy()
   })
 
   test('shows WAF hit statistics grouped per rule with joined policy metadata', async () => {
