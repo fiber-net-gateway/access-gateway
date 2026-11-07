@@ -17,11 +17,14 @@ import type { Actor } from '../auth/model.js'
 import { EnvironmentRepository } from '../environments/repository.js'
 import type { EnvironmentView } from '../environments/model.js'
 import { compileWafPolicy } from './generator.js'
+import { emptyEdgeFunctionsDraft, type EdgeFunctionsDraft } from './edge-function-model.js'
+import { EdgeFunctionDraftRepository } from './edge-function-repository.js'
 import { WAF_FUNCTION_NAME, WAF_MOUNT_PRIORITY, type WafPolicy } from './model.js'
 import {
   EDGE_FUNCTIONS_DATA_ID,
   EDGE_FUNCTIONS_GROUP,
   edgeFunctionScriptDataId,
+  isScriptDataIdSafeName,
   type CreateWafReleaseInput,
   type QueueWafPublicationResult,
   type RollbackWafReleaseInput,
@@ -70,11 +73,6 @@ const representativeIndexVersion = 1
 // ever fetches a handful of scripts and never trusts the stored index to be
 // console-authored.
 const liveScriptReadLimit = 16
-const scriptDataIdSafeNamePattern = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/u
-
-function isScriptDataIdSafeName(name: string): boolean {
-  return scriptDataIdSafeNamePattern.test(name)
-}
 
 function parseLiveIndex(content: string): {
   version: number | null
@@ -125,6 +123,7 @@ function parseLiveIndex(content: string): {
                 exclude: stringList(projects.exclude),
               },
               priority: typeof mountRecord.priority === 'number' ? mountRecord.priority : null,
+              ratio: typeof mountRecord.ratio === 'number' ? mountRecord.ratio : null,
             },
           ]
         })
@@ -144,34 +143,15 @@ function parseLiveIndex(content: string): {
   }
 }
 
-function planFromPolicy(policy: WafPolicy): {
-  plan: Omit<PreparedWafReleasePlan, 'functions'>
-  functions: readonly WafWireIndexFunctionEntry[]
-} {
+function planFromPolicy(
+  policy: WafPolicy,
+  functionsDraft: EdgeFunctionsDraft,
+): PreparedWafReleasePlan {
   const compilation = compileWafPolicy(policy)
-  if (compilation.kind === 'unmount') {
-    return {
-      plan: {
-        mode: 'unmount',
-        functionName: WAF_FUNCTION_NAME,
-        script: null,
-        scriptSha256: null,
-        ruleCount: policy.rules.length,
-      },
-      functions: [],
-    }
-  }
-  const [selector] = compilation.mounts
-  return {
-    plan: {
-      mode: 'mounted',
-      functionName: compilation.functionName,
-      script: compilation.script,
-      scriptSha256: compilation.scriptSha256,
-      ruleCount: policy.rules.length,
-    },
-    functions: [
-      {
+  const wafMounted = compilation.kind !== 'unmount'
+  const [selector] = compilation.kind === 'mounted' ? compilation.mounts : []
+  const wafEntry: WafWireIndexFunctionEntry | null = wafMounted
+    ? {
         name: compilation.functionName,
         sha256: compilation.scriptSha256,
         mounts: [
@@ -183,13 +163,54 @@ function planFromPolicy(policy: WafPolicy): {
             priority: compilation.mountPriority ?? WAF_MOUNT_PRIORITY,
           },
         ],
-      },
-    ],
+      }
+    : null
+
+  const handwritten = functionsDraft.functions.filter((fn) => fn.enabled)
+  const entries: WafWireIndexFunctionEntry[] = [
+    ...(wafEntry ? [wafEntry] : []),
+    ...handwritten.map((fn) => ({
+      name: fn.name,
+      sha256: sha256(fn.script).toString('hex'),
+      mounts: fn.mounts.map((mount) => ({
+        projects: {
+          include: [...mount.projects.include],
+          exclude: [...(mount.projects.exclude ?? [])],
+        },
+        priority: mount.priority ?? 0,
+        // Omit the wire default (10000) so canonical index bytes stay minimal.
+        ...(mount.ratio !== undefined && mount.ratio !== 10_000 ? { ratio: mount.ratio } : {}),
+      })),
+    })),
+  ]
+  // Deterministic declaration order: ascending lowest-mount priority, then
+  // name — the codec executes mounts in priority order and breaks ties by
+  // declaration, so the published order must not depend on draft array order.
+  const minPriority = (entry: WafWireIndexFunctionEntry): number =>
+    Math.min(...entry.mounts.map((mount) => mount.priority))
+  entries.sort((a, b) => minPriority(a) - minPriority(b) || (a.name < b.name ? -1 : 1))
+
+  const scripts: PreparedWafReleasePlan['scripts'] = [
+    ...(wafMounted && compilation.kind === 'mounted'
+      ? [{ name: compilation.functionName, script: compilation.script }]
+      : []),
+    ...handwritten.map((fn) => ({ name: fn.name, script: fn.script })),
+  ]
+
+  return {
+    mode: wafMounted ? 'mounted' : 'unmount',
+    functionName: wafEntry?.name ?? WAF_FUNCTION_NAME,
+    script: wafMounted && compilation.kind === 'mounted' ? compilation.script : null,
+    scriptSha256: wafEntry?.sha256 ?? null,
+    ruleCount: policy.rules.length,
+    functions: entries,
+    scripts,
   }
 }
 
 export class DefaultWafReleaseService implements WafReleaseService {
   readonly #drafts: WafPolicyDraftRepository
+  readonly #functionDrafts: EdgeFunctionDraftRepository
   readonly #releases: WafReleaseRepository
   readonly #environments: EnvironmentRepository
   readonly #validator: NativeValidator
@@ -197,12 +218,14 @@ export class DefaultWafReleaseService implements WafReleaseService {
 
   constructor(
     drafts: WafPolicyDraftRepository,
+    functionDrafts: EdgeFunctionDraftRepository,
     releases: WafReleaseRepository,
     environments: EnvironmentRepository,
     validator: NativeValidator,
     nacos: NacosClient,
   ) {
     this.#drafts = drafts
+    this.#functionDrafts = functionDrafts
     this.#releases = releases
     this.#environments = environments
     this.#validator = validator
@@ -236,15 +259,23 @@ export class DefaultWafReleaseService implements WafReleaseService {
         issues.map((issue) => ({ path: issue.field, code: issue.code, message: issue.message })),
       )
     }
+    const functionsDraftView = await this.#functionDrafts.findByEnvironmentInternalId(
+      workspace.internalId,
+    )
+    const functionsDraft = functionsDraftView?.draft ?? emptyEdgeFunctionsDraft()
+    const plan = planFromPolicy(draft.policy, functionsDraft)
+    this.#checkCardinalityLimits(plan)
 
-    const { plan, functions } = planFromPolicy(draft.policy)
-    await this.#validatePlan(plan, functions, requestId, 'WAF_COMPILATION_NOT_PUBLISHABLE')
-    const bases = await this.#readBases(workspace, plan.functionName, plan.mode)
+    await this.#validatePlan(plan, requestId, 'WAF_COMPILATION_NOT_PUBLISHABLE')
+    const bases = await this.#readBases(
+      workspace,
+      plan.scripts.map((entry) => entry.name),
+    )
 
     return this.#releases.create(
       actor,
       workspace.internalId,
-      { ...plan, functions },
+      plan,
       bases,
       {
         idempotencyKey: input.idempotencyKey,
@@ -282,13 +313,12 @@ export class DefaultWafReleaseService implements WafReleaseService {
 
     const source = await this.#releases.loadRollbackSource(workspace.internalId, releaseId)
     if (!source) throw notFound('WAF release')
-    await this.#validatePlan(
-      source.plan,
-      source.plan.functions,
-      requestId,
-      'WAF_ROLLBACK_NOT_PUBLISHABLE',
+    this.#checkCardinalityLimits(source.plan)
+    await this.#validatePlan(source.plan, requestId, 'WAF_ROLLBACK_NOT_PUBLISHABLE')
+    const bases = await this.#readBases(
+      workspace,
+      source.plan.scripts.map((entry) => entry.name),
     )
-    const bases = await this.#readBases(workspace, source.plan.functionName, source.plan.mode)
 
     return this.#releases.create(
       actor,
@@ -422,30 +452,26 @@ export class DefaultWafReleaseService implements WafReleaseService {
     }
   }
 
-  // Fail-closed: both wire payloads must compile through the native validator
-  // before a Release can be prepared (§4.1 全环境校验). Rollback reuses this
-  // with its own error code so operators can tell a stale historical payload
-  // from a bad draft compilation.
+  // Fail-closed: every script payload plus the index must pass the native
+  // validator before a Release can be prepared (§4.1 全环境校验). Rollback
+  // reuses this with its own error code so operators can tell a stale
+  // historical payload from a bad draft compilation.
   async #validatePlan(
-    plan: Omit<PreparedWafReleasePlan, 'functions'>,
-    functions: readonly WafWireIndexFunctionEntry[],
+    plan: PreparedWafReleasePlan,
     requestId: string,
     errorCode: string,
   ): Promise<void> {
-    const validations = []
-    if (plan.mode === 'mounted' && plan.script !== null) {
-      validations.push(
-        this.#validator.validate({
-          requestId,
-          kind: 'edge_function_script',
-          project: '',
-          payload: Buffer.from(plan.script, 'utf8'),
-        }),
-      )
-    }
+    const validations = plan.scripts.map((entry) =>
+      this.#validator.validate({
+        requestId,
+        kind: 'edge_function_script',
+        project: '',
+        payload: Buffer.from(entry.script, 'utf8'),
+      }),
+    )
     const representativeIndex = canonicalJson({
       version: representativeIndexVersion,
-      functions,
+      functions: plan.functions,
     })
     validations.push(
       this.#validator.validate({
@@ -476,26 +502,57 @@ export class DefaultWafReleaseService implements WafReleaseService {
     }
   }
 
+  // Pre-flight the cardinality ceilings the native codec enforces so the
+  // operator sees a precise error instead of a validator dump. The validator
+  // re-checks everything; these are the checks it cannot attribute cleanly.
+  #checkCardinalityLimits(plan: PreparedWafReleasePlan): void {
+    const limits = this.#validator.limits?.edgeFunctions
+    if (!limits) return
+    if (plan.functions.length > limits.maxFunctions) {
+      throw unprocessable(
+        'EDGE_FUNCTION_COUNT_EXCEEDED',
+        `A release may mount at most ${limits.maxFunctions} edge functions`,
+      )
+    }
+    const totalScriptBytes = plan.scripts.reduce(
+      (total, entry) => total + Buffer.byteLength(entry.script, 'utf8'),
+      0,
+    )
+    if (totalScriptBytes > limits.maxTotalScriptBytes) {
+      throw unprocessable(
+        'EDGE_FUNCTION_SCRIPT_BUDGET_EXCEEDED',
+        `The release scripts total ${totalScriptBytes} bytes, above the ${limits.maxTotalScriptBytes}-byte snapshot budget`,
+      )
+    }
+  }
+
   async #readBases(
     workspace: EnvironmentView & { internalId: string },
-    functionName: string,
-    mode: PreparedWafReleasePlan['mode'],
-  ): Promise<{ index: NacosResourceValue; script: NacosResourceValue | null }> {
+    scriptNames: readonly string[],
+  ): Promise<{
+    index: NacosResourceValue
+    scripts: { name: string; base: NacosResourceValue }[]
+  }> {
     const target: NacosTarget = {
       endpoint: workspace.nacos.endpoint,
       namespace: workspace.nacos.namespace,
       tenant: workspace.nacos.tenant,
       credentialConfigured: workspace.nacos.credentialConfigured,
     }
-    const scriptDataId = edgeFunctionScriptDataId(functionName)
     try {
-      return {
-        index: await this.#nacos.read(target, EDGE_FUNCTIONS_DATA_ID, EDGE_FUNCTIONS_GROUP),
-        script:
-          mode === 'mounted'
-            ? await this.#nacos.read(target, scriptDataId, EDGE_FUNCTIONS_GROUP)
-            : null,
+      const index = await this.#nacos.read(target, EDGE_FUNCTIONS_DATA_ID, EDGE_FUNCTIONS_GROUP)
+      const scripts: { name: string; base: NacosResourceValue }[] = []
+      for (const name of scriptNames) {
+        scripts.push({
+          name,
+          base: await this.#nacos.read(
+            target,
+            edgeFunctionScriptDataId(name),
+            EDGE_FUNCTIONS_GROUP,
+          ),
+        })
       }
+      return { index, scripts }
     } catch {
       throw unavailable(
         'NACOS_PREFLIGHT_FAILED',

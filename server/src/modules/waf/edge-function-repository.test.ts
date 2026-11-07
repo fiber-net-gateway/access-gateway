@@ -40,7 +40,7 @@ function sampleDraft(): EdgeFunctionsDraft {
   }
 }
 
-function buildPool(dispatch: (sql: string) => unknown[] | undefined): {
+function buildPool(dispatch: (sql: string) => unknown): {
   pool: DatabasePool
   statements: string[]
 } {
