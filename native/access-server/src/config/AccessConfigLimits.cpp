@@ -255,20 +255,14 @@ std::expected<void, AccessConfigError> validate_edge_function_index_limits(const
             return std::unexpected(
                     limit_error(field + ".name", "function name bytes", edge_limits.max_function_name_bytes));
         }
-        if (function.mounts.size() > edge_limits.max_mounts_per_function) {
-            return std::unexpected(limit_error(field + ".mounts", "mount count", edge_limits.max_mounts_per_function));
+        const std::string projects_field = field + ".projects";
+        if (auto error = check_glob_list(function.projects.include, projects_field + ".include",
+                                         edge_limits.max_globs_per_selector, edge_limits.max_glob_bytes)) {
+            return std::unexpected(std::move(*error));
         }
-        for (std::size_t mount_index = 0; mount_index < function.mounts.size(); ++mount_index) {
-            const EdgeFunctionProjectsSelector &projects = function.mounts[mount_index].projects;
-            const std::string projects_field = indexed_field(field + ".mounts", mount_index, "projects");
-            if (auto error = check_glob_list(projects.include, projects_field + ".include",
-                                             edge_limits.max_globs_per_selector, edge_limits.max_glob_bytes)) {
-                return std::unexpected(std::move(*error));
-            }
-            if (auto error = check_glob_list(projects.exclude, projects_field + ".exclude",
-                                             edge_limits.max_globs_per_selector, edge_limits.max_glob_bytes)) {
-                return std::unexpected(std::move(*error));
-            }
+        if (auto error = check_glob_list(function.projects.exclude, projects_field + ".exclude",
+                                         edge_limits.max_globs_per_selector, edge_limits.max_glob_bytes)) {
+            return std::unexpected(std::move(*error));
         }
     }
     return {};

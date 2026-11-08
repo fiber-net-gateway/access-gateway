@@ -2454,10 +2454,7 @@ TEST(ProxyExecutorTest, SplicesHandlerPrefetchedBodyIntoTheUpstreamRequest) {
         fiber::access_server::EdgeFunctionIndexEntry entry;
         entry.name = "probe";
         entry.phase = fiber::access_server::EdgeFunctionPhase::RequestBody;
-        entry.mounts = {fiber::access_server::EdgeFunctionMountConfig{
-                .projects = fiber::access_server::EdgeFunctionProjectsSelector{.include = {"*"}},
-                .priority = 0,
-        }};
+        entry.projects = fiber::access_server::EdgeFunctionProjectsSelector{.include = {"*"}};
         state.index.functions.push_back(std::move(entry));
         store.set_edge_functions(std::make_shared<fiber::access_server::EdgeFunctionsState>(std::move(state)));
     };

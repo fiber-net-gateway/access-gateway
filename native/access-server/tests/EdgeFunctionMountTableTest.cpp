@@ -14,41 +14,27 @@ namespace {
 
 using fiber::access_server::edge_glob_matches;
 using fiber::access_server::EdgeFunctionIndexEntry;
-using fiber::access_server::EdgeFunctionMountConfig;
 using fiber::access_server::EdgeFunctionMounted;
 using fiber::access_server::EdgeFunctionMountTable;
 using fiber::access_server::EdgeFunctionProgram;
 using fiber::access_server::EdgeFunctionProjectsSelector;
 using fiber::access_server::EdgeFunctionsState;
 
-EdgeFunctionMountConfig mount(std::vector<std::string> include, std::int32_t priority,
-                              std::vector<std::string> exclude = {}, std::int32_t ratio = -1) {
-    // ratio < 0 means "leave the struct default" so tests can assert it.
-    if (ratio < 0) {
-        return EdgeFunctionMountConfig{
-                .projects =
-                        EdgeFunctionProjectsSelector{
-                                .include = std::move(include),
-                                .exclude = std::move(exclude),
-                        },
-                .priority = priority,
-        };
-    }
-    return EdgeFunctionMountConfig{
-            .projects =
-                    EdgeFunctionProjectsSelector{
-                            .include = std::move(include),
-                            .exclude = std::move(exclude),
-                    },
-            .priority = priority,
-            .ratio = ratio,
-    };
-}
-
-EdgeFunctionIndexEntry function(std::string name, std::vector<EdgeFunctionMountConfig> mounts) {
+EdgeFunctionIndexEntry function(std::string name, std::vector<std::string> include, std::int32_t priority = 0,
+                                std::vector<std::string> exclude = {},
+                                std::int32_t ratio = fiber::access_server::kEdgeFunctionFullRatio) {
     EdgeFunctionIndexEntry entry;
     entry.name = std::move(name);
-    entry.mounts = std::move(mounts);
+    entry.projects = EdgeFunctionProjectsSelector{.include = std::move(include), .exclude = std::move(exclude)};
+    entry.priority = priority;
+    entry.ratio = ratio;
+    return entry;
+}
+
+EdgeFunctionIndexEntry canary(std::string name, std::vector<std::string> include, std::int32_t ratio,
+                              std::string replaces) {
+    EdgeFunctionIndexEntry entry = function(std::move(name), std::move(include), 0, {}, ratio);
+    entry.replaces = std::move(replaces);
     return entry;
 }
 
@@ -107,7 +93,7 @@ TEST(EdgeGlob, MatchesSingleStarSemantics) {
 }
 
 TEST(EdgeFunctionMountTable, IncludeAndExcludeGlobs) {
-    EdgeFunctionsState state = state_with({function("waf", {mount({"*-web"}, 0, {"internal-*"})})});
+    EdgeFunctionsState state = state_with({function("waf", {"*-web"}, 0, {"internal-*"})});
     const std::vector<std::string> projects = {"loan-web", "internal-web", "loan-app", "api"};
     auto table = build_table(state, projects);
     EXPECT_EQ(mounted_names(*table, "loan-web"), std::vector<std::string_view>({"waf"}));
@@ -117,56 +103,127 @@ TEST(EdgeFunctionMountTable, IncludeAndExcludeGlobs) {
     EXPECT_EQ(table->mounted_project_count(), 1U);
 }
 
-TEST(EdgeFunctionMountTable, FirstMatchingMountWins) {
-    // Declaration order decides: the "loan-*" mount wins there even though the
-    // later "*" mount also matches; elsewhere only "*" applies.
-    EdgeFunctionsState state = state_with({function("f", {mount({"loan-*"}, 1), mount({"*"}, 10)})});
-    const std::vector<std::string> projects = {"loan-web", "api"};
+TEST(EdgeFunctionMountTable, RatioBecomesTheBucketWindowEnd) {
+    // A plain function owns [0, ratio); the default stays the full window.
+    EdgeFunctionsState state = state_with({function("f", {"*"}, 1, {}, 250)});
+    const std::vector<std::string> projects = {"api"};
     auto table = build_table(state, projects);
-    const std::span<const EdgeFunctionMounted> mounted = table->mounted_for("loan-web");
-    ASSERT_EQ(mounted.size(), 1U);
-    EXPECT_EQ(mounted[0].name, "f");
-    EXPECT_EQ(mounted[0].priority, 1);
-    const std::span<const EdgeFunctionMounted> fallback = table->mounted_for("api");
-    ASSERT_EQ(fallback.size(), 1U);
-    EXPECT_EQ(fallback[0].priority, 10);
-}
+    EXPECT_EQ(table->mounted_for("api")[0].bucket_begin, 0);
+    EXPECT_EQ(table->mounted_for("api")[0].bucket_end, 250);
+    EXPECT_FALSE(table->mounted_for("api")[0].always_runs());
+    EXPECT_FALSE(table->mounted_for("api")[0].never_runs());
 
-TEST(EdgeFunctionMountTable, MatchingMountRatioCarriesToMountedEntry) {
-    // The winning mount's ratio travels with the mounted entry; a mount that
-    // leaves ratio unset stays at the must-run default.
-    EdgeFunctionsState state =
-            state_with({function("f", {mount({"loan-*"}, 1, {}, 250), mount({"*"}, 10, {}, 10000)})});
-    const std::vector<std::string> projects = {"loan-web", "api"};
-    auto table = build_table(state, projects);
-    EXPECT_EQ(table->mounted_for("loan-web")[0].ratio, 250);
-    EXPECT_EQ(table->mounted_for("api")[0].ratio, 10000);
-
-    EdgeFunctionsState defaulted = state_with({function("g", {mount({"*"}, 0)})});
+    EdgeFunctionsState defaulted = state_with({function("g", {"*"})});
     auto default_table = build_table(defaulted, projects);
-    EXPECT_EQ(default_table->mounted_for("api")[0].ratio, fiber::access_server::kEdgeFunctionFullRatio);
+    EXPECT_TRUE(default_table->mounted_for("api")[0].always_runs());
+
+    EdgeFunctionsState disabled = state_with({function("h", {"*"}, 0, {}, 0)});
+    auto disabled_table = build_table(disabled, projects);
+    EXPECT_TRUE(disabled_table->mounted_for("api")[0].never_runs());
 }
 
-TEST(EdgeFunctionMountTable, ExcludedFirstMountFallsThroughToSecond) {
-    EdgeFunctionsState state =
-            state_with({function("f", {mount({"loan-*"}, 1, {"loan-internal"}), mount({"loan-*"}, 7)})});
-    const std::vector<std::string> projects = {"loan-web", "loan-internal"};
+TEST(EdgeFunctionMountTable, ReplacesSplitsBucketsOnlyWhereBothAreMounted) {
+    EdgeFunctionsState state = state_with({function("auth-v1", {"*"}), canary("auth-v2", {"loan-*"}, 300, "auth-v1")});
+    const std::vector<std::string> projects = {"loan-web", "api"};
     auto table = build_table(state, projects);
-    EXPECT_EQ(table->mounted_for("loan-web").front().priority, 1);
-    EXPECT_EQ(table->mounted_for("loan-internal").front().priority, 7);
+
+    const std::span<const EdgeFunctionMounted> loan = table->mounted_for("loan-web");
+    ASSERT_EQ(loan.size(), 2U);
+    EXPECT_EQ(loan[0].name, "auth-v1");
+    EXPECT_EQ(loan[0].bucket_begin, 300);
+    EXPECT_EQ(loan[0].bucket_end, 10000);
+    EXPECT_EQ(loan[1].name, "auth-v2");
+    EXPECT_EQ(loan[1].bucket_begin, 0);
+    EXPECT_EQ(loan[1].bucket_end, 300);
+
+    // Outside the canary's selector the target keeps everything.
+    const std::span<const EdgeFunctionMounted> api = table->mounted_for("api");
+    ASSERT_EQ(api.size(), 1U);
+    EXPECT_EQ(api[0].name, "auth-v1");
+    EXPECT_TRUE(api[0].always_runs());
+}
+
+TEST(EdgeFunctionMountTable, ReplacesNeverExtendsTheTargetsReach) {
+    // The target's exclude and include stay authoritative: where it is not
+    // mounted a canary miss runs nothing, it does not pull the target in.
+    EdgeFunctionsState state =
+            state_with({function("auth-v1", {"loan-*"}, 0, {"loan-legacy"}), canary("auth-v2", {"*"}, 300, "auth-v1")});
+    const std::vector<std::string> projects = {"loan-web", "loan-legacy", "api"};
+    auto table = build_table(state, projects);
+    EXPECT_EQ(mounted_names(*table, "loan-web"), (std::vector<std::string_view>{"auth-v1", "auth-v2"}));
+    EXPECT_EQ(mounted_names(*table, "loan-legacy"), (std::vector<std::string_view>{"auth-v2"}));
+    EXPECT_EQ(mounted_names(*table, "api"), (std::vector<std::string_view>{"auth-v2"}));
+}
+
+TEST(EdgeFunctionMountTable, ReplacesKeepsEachFunctionsOwnPriority) {
+    EdgeFunctionIndexEntry stable = function("auth-v1", {"*"}, 100);
+    EdgeFunctionIndexEntry next = canary("auth-v2", {"*"}, 300, "auth-v1");
+    next.priority = 5;
+    EdgeFunctionsState state = state_with({function("between", {"*"}, 50), stable, next});
+    const std::vector<std::string> projects = {"proj"};
+    auto table = build_table(state, projects);
+    EXPECT_EQ(mounted_names(*table, "proj"), (std::vector<std::string_view>{"auth-v2", "between", "auth-v1"}));
+}
+
+TEST(EdgeFunctionMountTable, ReplacesRampEndpointsLeaveOneSideEmpty) {
+    const std::vector<std::string> projects = {"proj"};
+
+    // ratio 0: the canary is staged, the target keeps every bucket and no
+    // request pays for a draw.
+    EdgeFunctionsState staged = state_with({function("auth-v1", {"*"}), canary("auth-v2", {"*"}, 0, "auth-v1")});
+    auto staged_table = build_table(staged, projects);
+    EXPECT_TRUE(staged_table->mounted_for("proj")[0].always_runs());
+    EXPECT_TRUE(staged_table->mounted_for("proj")[1].never_runs());
+
+    // ratio 10000: the target stays mounted for an instant rollback but owns
+    // nothing.
+    EdgeFunctionsState full = state_with({function("auth-v1", {"*"}), canary("auth-v2", {"*"}, 10000, "auth-v1")});
+    auto full_table = build_table(full, projects);
+    EXPECT_TRUE(full_table->mounted_for("proj")[0].never_runs());
+    EXPECT_TRUE(full_table->mounted_for("proj")[1].always_runs());
+}
+
+TEST(EdgeFunctionMountTable, ReplacesRespectsTheTargetsOwnRatio) {
+    const std::vector<std::string> projects = {"proj"};
+
+    // A sampled target keeps what is left of its own window.
+    EdgeFunctionsState narrowed =
+            state_with({function("auth-v1", {"*"}, 0, {}, 5000), canary("auth-v2", {"*"}, 300, "auth-v1")});
+    auto narrowed_table = build_table(narrowed, projects);
+    EXPECT_EQ(narrowed_table->mounted_for("proj")[0].bucket_begin, 300);
+    EXPECT_EQ(narrowed_table->mounted_for("proj")[0].bucket_end, 5000);
+
+    // A canary wider than the target's window leaves it nothing.
+    EdgeFunctionsState covered =
+            state_with({function("auth-v1", {"*"}, 0, {}, 200), canary("auth-v2", {"*"}, 300, "auth-v1")});
+    auto covered_table = build_table(covered, projects);
+    EXPECT_TRUE(covered_table->mounted_for("proj")[0].never_runs());
+}
+
+TEST(EdgeFunctionMountTable, ReplacesAppliesInsideTheBodyChain) {
+    EdgeFunctionIndexEntry stable = function("scan-v1", {"*"});
+    stable.phase = fiber::access_server::EdgeFunctionPhase::RequestBody;
+    EdgeFunctionIndexEntry next = canary("scan-v2", {"*"}, 300, "scan-v1");
+    next.phase = fiber::access_server::EdgeFunctionPhase::RequestBody;
+    EdgeFunctionsState state = state_with({stable, next});
+    const std::vector<std::string> projects = {"proj"};
+    auto table = build_table(state, projects);
+    const std::span<const EdgeFunctionMounted> body = table->mounted_body_for("proj");
+    ASSERT_EQ(body.size(), 2U);
+    EXPECT_EQ(body[0].bucket_begin, 300);
+    EXPECT_EQ(body[1].bucket_end, 300);
 }
 
 TEST(EdgeFunctionMountTable, PriorityOrderKeepsDeclarationTies) {
-    EdgeFunctionsState state = state_with({function("a", {mount({"*"}, 5)}), function("b", {mount({"*"}, 1)}),
-                                           function("c", {mount({"*"}, 5)}), function("d", {mount({"*"}, 9)})});
+    EdgeFunctionsState state = state_with(
+            {function("a", {"*"}, 5), function("b", {"*"}, 1), function("c", {"*"}, 5), function("d", {"*"}, 9)});
     const std::vector<std::string> projects = {"proj"};
     auto table = build_table(state, projects);
     EXPECT_EQ(mounted_names(*table, "proj"), std::vector<std::string_view>({"b", "a", "c", "d"}));
 }
 
 TEST(EdgeFunctionMountTable, PerProjectGroupsAreIndependent) {
-    EdgeFunctionsState state =
-            state_with({function("shared", {mount({"p-*"}, 0)}), function("only-q", {mount({"q"}, 0)})});
+    EdgeFunctionsState state = state_with({function("shared", {"p-*"}, 0), function("only-q", {"q"}, 0)});
     const std::vector<std::string> projects = {"p-1", "q", "r"};
     auto table = build_table(state, projects);
     EXPECT_EQ(mounted_names(*table, "p-1"), std::vector<std::string_view>({"shared"}));
@@ -176,11 +233,12 @@ TEST(EdgeFunctionMountTable, PerProjectGroupsAreIndependent) {
 }
 
 TEST(EdgeFunctionMountTable, BodyPhaseEntriesLandInTheBodyChain) {
-    EdgeFunctionIndexEntry head = function("waf", {mount({"loan-web"}, 100)});
+    EdgeFunctionIndexEntry head = function("waf", {"loan-web"}, 100);
     EdgeFunctionIndexEntry body;
     body.name = "body-scan";
     body.phase = fiber::access_server::EdgeFunctionPhase::RequestBody;
-    body.mounts = {mount({"loan-web"}, 50)};
+    body.projects.include = {"loan-web"};
+    body.priority = 50;
     const EdgeFunctionsState state = state_with({head, body});
     const std::vector<std::string> projects{"loan-web"};
     const std::shared_ptr table = build_table(state, projects);
@@ -192,14 +250,17 @@ TEST(EdgeFunctionMountTable, BodyChainSortsByPriorityIndependently) {
     EdgeFunctionIndexEntry low;
     low.name = "body-low";
     low.phase = fiber::access_server::EdgeFunctionPhase::RequestBody;
-    low.mounts = {mount({"loan-web"}, 200)};
+    low.projects.include = {"loan-web"};
+    low.priority = 200;
     EdgeFunctionIndexEntry high;
     high.name = "body-high";
     high.phase = fiber::access_server::EdgeFunctionPhase::RequestBody;
-    high.mounts = {mount({"loan-web"}, 10)};
+    high.projects.include = {"loan-web"};
+    high.priority = 10;
     EdgeFunctionIndexEntry head_between;
     head_between.name = "head-between";
-    head_between.mounts = {mount({"loan-web"}, 100)};
+    head_between.projects.include = {"loan-web"};
+    head_between.priority = 100;
     const EdgeFunctionsState state = state_with({low, high, head_between});
     const std::vector<std::string> projects{"loan-web"};
     const std::shared_ptr table = build_table(state, projects);
@@ -213,7 +274,8 @@ TEST(EdgeFunctionMountTable, BodyOnlyProjectStillExposesEmptyHeadChain) {
     EdgeFunctionIndexEntry body;
     body.name = "body-scan";
     body.phase = fiber::access_server::EdgeFunctionPhase::RequestBody;
-    body.mounts = {mount({"trade-web"}, 0)};
+    body.projects.include = {"trade-web"};
+    body.priority = 0;
     const EdgeFunctionsState state = state_with({body});
     const std::vector<std::string> projects{"trade-web"};
     const std::shared_ptr table = build_table(state, projects);
@@ -233,14 +295,14 @@ TEST(EdgeFunctionMountTable, EmptyIndexUnmountsEverything) {
 }
 
 TEST(EdgeFunctionMountTable, NoProjectsYieldsEmptyTable) {
-    EdgeFunctionsState state = state_with({function("f", {mount({"*"}, 0)})});
+    EdgeFunctionsState state = state_with({function("f", {"*"}, 0)});
     const std::vector<std::string> projects = {};
     auto table = build_table(state, projects);
     EXPECT_TRUE(table->empty());
 }
 
 TEST(EdgeFunctionMountTable, ProgramPointersAlignWithIndex) {
-    EdgeFunctionsState state = state_with({function("a", {mount({"p"}, 0)}), function("b", {mount({"*"}, 0)})});
+    EdgeFunctionsState state = state_with({function("a", {"p"}, 0), function("b", {"*"}, 0)});
     const std::vector<std::string> projects = {"p", "q"};
     auto table = build_table(state, projects);
     const std::span<const EdgeFunctionMounted> p = table->mounted_for("p");

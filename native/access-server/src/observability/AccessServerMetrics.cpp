@@ -734,8 +734,8 @@ bool AccessServerMetrics::initialize(event::EventLoopGroup &worker_group) {
                                        kFunctionLabels, function_report_overflow_options);
     auto function_sampled_out =
             registry_.register_counter("access_server_function_sampled_out_total",
-                                       "Edge-function mounts skipped by sticky ratio sampling (peer bucket outside "
-                                       "the mount ratio, or ratio 0 = disabled).",
+                                       "Edge-function executions skipped by sticky sampling (client bucket outside "
+                                       "the function's window, ratio 0, or taken over by a replacing canary).",
                                        kFunctionEvaluationLabels, function_sampled_out_options);
     auto function_body_skip =
             registry_.register_counter("access_server_function_body_skipped_total",

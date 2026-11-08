@@ -59,7 +59,6 @@ struct EdgeFunctionLimits {
     std::size_t max_functions = 64;
     // Slug identity cap (the name also forms the script Data ID).
     std::size_t max_function_name_bytes = 64;
-    std::size_t max_mounts_per_function = 16;
     std::size_t max_globs_per_selector = 256;
     std::size_t max_glob_bytes = 255;
     // Per-function script Data ID payload budget.
@@ -84,8 +83,9 @@ struct AccessConfigLimits {
     // Version 3 added EdgeFunctionLimits; version 4 collapses the
     // edge-function identity to a single slug name (maxFunctionIdBytes
     // removed, maxFunctionNameBytes is now the slug cap); version 5 adds the
-    // request-body phase budget (maxBodyPhaseBytes).
-    std::size_t schema_version = 5;
+    // request-body phase budget (maxBodyPhaseBytes); version 6 flattens the
+    // single mount onto the function (maxMountsPerFunction removed).
+    std::size_t schema_version = 6;
     ProjectListLimits project_list;
     ProjectRouteLimits project_route;
     GrayRuleLimits gray_rules;

@@ -185,9 +185,9 @@ struct EdgeFunctionProjectsSelector {
     bool operator==(const EdgeFunctionProjectsSelector &) const = default;
 };
 
-// Sampling denominator: mount-level ratio is basis points out of this value.
+// Sampling denominator: a function's ratio is basis points out of this value.
 // 10000 (kEdgeFunctionFullRatio) means must-run; below it is a sticky sample
-// over crc32(peer IP) % kEdgeFunctionFullRatio; 0 is mounted-but-disabled.
+// over crc32(client IP) % kEdgeFunctionFullRatio; 0 is mounted-but-disabled.
 inline constexpr std::int32_t kEdgeFunctionFullRatio = 10000;
 
 // Execution phase of one function (design §3.2). Head functions run before
@@ -198,15 +198,6 @@ enum class EdgeFunctionPhase : std::uint8_t {
     RequestHead,
     RequestBody,
     Count,
-};
-
-struct EdgeFunctionMountConfig {
-    EdgeFunctionProjectsSelector projects;
-    std::int32_t priority = 0;
-    // [0, kEdgeFunctionFullRatio]; the codec rejects anything outside.
-    std::int32_t ratio = kEdgeFunctionFullRatio;
-
-    bool operator==(const EdgeFunctionMountConfig &) const = default;
 };
 
 struct EdgeFunctionIndexEntry {
@@ -220,7 +211,14 @@ struct EdgeFunctionIndexEntry {
     // request_head (default) or request_body; a head-phase script that
     // references $req.body fails to compile (fail-closed).
     EdgeFunctionPhase phase = EdgeFunctionPhase::RequestHead;
-    std::vector<EdgeFunctionMountConfig> mounts;
+    EdgeFunctionProjectsSelector projects;
+    std::int32_t priority = 0;
+    // [0, kEdgeFunctionFullRatio]; the codec rejects anything outside.
+    std::int32_t ratio = kEdgeFunctionFullRatio;
+    // Version canary (design §3.1): the function this one takes over inside
+    // its ratio, empty when it replaces nothing. On a project where both are
+    // mounted a request runs exactly one of them.
+    std::string replaces;
 
     bool operator==(const EdgeFunctionIndexEntry &) const = default;
 };

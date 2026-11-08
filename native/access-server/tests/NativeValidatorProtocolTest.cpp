@@ -180,7 +180,7 @@ TEST(NativeValidatorProtocolTest, ReportsStableLimitErrorsWithoutEchoingValues) 
 
 TEST(NativeValidatorProtocolTest, DescribesTheRuntimeConfigLimits) {
     const std::string response = fiber::access_server::native_validator_config_limits_response();
-    EXPECT_NE(response.find(R"("schemaVersion":5)"), std::string::npos) << response;
+    EXPECT_NE(response.find(R"("schemaVersion":6)"), std::string::npos) << response;
     EXPECT_NE(response.find(R"("maxUpstreamTlsProfiles":256)"), std::string::npos) << response;
     EXPECT_NE(response.find(R"("maxUpstreamTlsCaPemBytes":524288)"), std::string::npos) << response;
     EXPECT_NE(response.find(R"("maxPayloadBytes":4194304)"), std::string::npos) << response;
@@ -203,10 +203,10 @@ TEST(NativeValidatorProtocolTest, ValidatesEdgeFunctionIndexCandidates) {
         "functions": [
             {"name": "waf",
              "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-             "mounts": [{"projects": {"include": ["*"]}}]},
+             "projects": {"include": ["*"]}},
             {"name": "audit",
              "sha256": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
-             "mounts": [{"projects": {"include": ["loan-*"]}, "priority": 10}]}
+             "projects": {"include": ["loan-*"]}, "priority": 10}
         ]
     })";
 
@@ -235,12 +235,22 @@ TEST(NativeValidatorProtocolTest, ValidatesEdgeFunctionIndexCandidates) {
             request("edge_function_index", "",
                     R"({"version":1,"functions":[{"name":"waf",)"
                     R"("sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",)"
-                    R"("mounts":[{"projects":{"include":["*"]}}]},)"
+                    R"("projects":{"include":["*"]}},)"
                     R"({"name":"waf","sha256":"fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",)"
-                    R"("mounts":[{"projects":{"include":["*"]}}]}]})"));
+                    R"("projects":{"include":["*"]}}]})"));
     EXPECT_NE(invalid.find(R"("valid":false)"), std::string::npos) << invalid;
     EXPECT_NE(invalid.find(R"("code":"conflict")"), std::string::npos) << invalid;
     EXPECT_NE(invalid.find("functions[1]"), std::string::npos) << invalid;
+
+    // A replaces target outside the index fails the same way, so the console
+    // cannot publish a canary the data plane would refuse.
+    const std::string dangling = fiber::access_server::process_native_validator_request(
+            request("edge_function_index", "",
+                    R"({"version":1,"functions":[{"name":"auth-v2",)"
+                    R"("sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",)"
+                    R"("projects":{"include":["*"]},"ratio":300,"replaces":"auth-v1"}]})"));
+    EXPECT_NE(dangling.find(R"("valid":false)"), std::string::npos) << dangling;
+    EXPECT_NE(dangling.find("functions[0].replaces"), std::string::npos) << dangling;
 }
 
 TEST(NativeValidatorProtocolTest, CompilesEdgeFunctionScriptsWithCidrDirective) {
