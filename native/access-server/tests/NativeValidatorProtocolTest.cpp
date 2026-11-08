@@ -192,7 +192,7 @@ TEST(NativeValidatorProtocolTest, DescribesTheRuntimeConfigLimits) {
     EXPECT_NE(response.find(R"("maxFunctionNameBytes":64)"), std::string::npos) << response;
     EXPECT_NE(response.find(R"("maxScriptPayloadBytes":1048576,"maxTotalScriptBytes":8388608)"), std::string::npos)
             << response;
-    EXPECT_NE(response.find(R"("maxCidrDirectivesPerScript":16,"maxCidrsPerDirective":256)"), std::string::npos)
+    EXPECT_NE(response.find(R"("maxCidrDirectivesPerScript":16,"maxCidrsPerDirective":1024)"), std::string::npos)
             << response;
     EXPECT_NE(response.find(R"("maxInputFieldBytes":8192,"maxBodyPhaseBytes":1048576)"), std::string::npos) << response;
 }

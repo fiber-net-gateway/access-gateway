@@ -171,7 +171,7 @@ export const fallbackAccessConfigLimits: AccessConfigLimits = {
     maxTotalScriptBytes: 8_388_608,
     maxReportsPerExecution: 16,
     maxCidrDirectivesPerScript: 16,
-    maxCidrsPerDirective: 256,
+    maxCidrsPerDirective: 1_024,
     maxCidrBytes: 64,
     maxInputFieldBytes: 8_192,
     maxBodyPhaseBytes: 1_048_576,

@@ -199,7 +199,7 @@ if (!office.contains($conn.remote_addr) && strings.match($req.uri, "(?i)union\\s
 - **运行期**：`contains(ip)` 为纯 C++ 区间匹配——无 VM 循环、无堆分配、无逐次解析。方法集 v1 仅 `contains(string) -> boolean`。
 - **软失败语义**：`null`（`$conn.remote_addr` 转换失败时为 null）、空串、畸形 IP → `false`。注意两个方向的含义：allowlist 场景 false = 不在名单（偏保守）；**blocklist 场景 false = 放行**——规则作者必须意识到畸形 IP 的行为。
 - CIDR 变化 = 脚本文本变化 = 新 hash = 重新发布重编译，全部发生在配置期，无运行期成本。
-- limits：每 directive CIDR 数上限（对齐 `max_cidrs_per_route = 256`）、每脚本 directive 数、字面量字节上限，进 `EdgeFunctionLimits`。
+- limits：每 directive CIDR 数上限（`max_cidrs_per_directive = 1024`；初版对齐 `max_cidrs_per_route` 的 256，2026-11 提升，路由/灰度侧维持 256）、每脚本 directive 数、字面量字节上限，进 `EdgeFunctionLimits`。
 
 ### 3.5 `ctx.report(event, label)`
 

@@ -69,7 +69,7 @@ struct EdgeFunctionLimits {
     std::size_t max_reports_per_execution = 16;
     // cidr directive budgets for the restricted edge-function library.
     std::size_t max_cidr_directives_per_script = 16;
-    std::size_t max_cidrs_per_directive = 256;
+    std::size_t max_cidrs_per_directive = 1024;
     std::size_t max_cidr_bytes = 64;
     // Truncation applied to request fields exposed to edge functions.
     std::size_t max_input_field_bytes = 8U << 10U;
