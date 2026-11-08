@@ -34,9 +34,20 @@ struct EdgeFunctionMounted {
     std::string_view name; // borrowed from the table's storage
     EdgeFunctionProgram *program; // borrowed; the table owns the shared_ptr
     std::int32_t priority = 0;
-    // Sticky sampling threshold from the matching mount (design §3.1): the
-    // executor compares one per-request crc32(peer IP) bucket against it.
-    std::int32_t ratio = kEdgeFunctionFullRatio;
+    // Half-open sticky bucket window (design §3.1): the function runs when the
+    // request's crc32(client IP) bucket falls inside [bucket_begin, bucket_end).
+    // bucket_end is the function's ratio; bucket_begin is raised past a canary's
+    // ratio on projects where that canary replaces this function, so the two
+    // windows never overlap and a request runs exactly one of them.
+    std::int32_t bucket_begin = 0;
+    std::int32_t bucket_end = kEdgeFunctionFullRatio;
+
+    // The full window needs no draw, which keeps must-run chains free of it.
+    [[nodiscard]] bool always_runs() const noexcept {
+        return bucket_begin <= 0 && bucket_end >= kEdgeFunctionFullRatio;
+    }
+    // ratio 0, or fully taken over by a canary: no bucket can land inside.
+    [[nodiscard]] bool never_runs() const noexcept { return bucket_begin >= bucket_end; }
 };
 
 // Joint index (docs/edge-functions-and-waf-design.md §3.6): the
@@ -46,10 +57,11 @@ struct EdgeFunctionMounted {
 // skips the whole edge-function path.
 class EdgeFunctionMountTable final {
 public:
-    // Expands every function's mounts against the published project names.
-    // Per project, functions run in priority order (ascending), ties broken
-    // by index declaration order; the first mount (declaration order) that
-    // matches a project decides that function's priority for it.
+    // Expands every function's project selector against the published project
+    // names. Per project, functions run in priority order (ascending), ties
+    // broken by index declaration order. A function named by `replaces` keeps
+    // its own slot and loses the canary's buckets on projects where both are
+    // mounted; elsewhere its window is untouched.
     [[nodiscard]] static std::shared_ptr<const EdgeFunctionMountTable>
     build(const EdgeFunctionsState &state, std::span<const std::string_view> project_names);
 

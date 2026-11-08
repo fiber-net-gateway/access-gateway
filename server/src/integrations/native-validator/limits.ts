@@ -40,7 +40,6 @@ const edgeFunctionKeys = [
   'maxPayloadBytes',
   'maxFunctions',
   'maxFunctionNameBytes',
-  'maxMountsPerFunction',
   'maxGlobsPerSelector',
   'maxGlobBytes',
   'maxScriptPayloadBytes',
@@ -77,7 +76,7 @@ function isAtMost(value: unknown, upperBound: unknown): boolean {
 }
 
 export function isAccessConfigLimits(value: unknown): value is AccessConfigLimits {
-  if (!isRecord(value) || value.schemaVersion !== 5) return false
+  if (!isRecord(value) || value.schemaVersion !== 6) return false
   if (
     !isRecord(value.projectList) ||
     !isRecord(value.projectRoute) ||
@@ -121,7 +120,7 @@ export function isAccessConfigLimits(value: unknown): value is AccessConfigLimit
 // bounded transport envelope. Publication still fails closed without a
 // validator revision and its probed limits.
 export const fallbackAccessConfigLimits: AccessConfigLimits = {
-  schemaVersion: 5,
+  schemaVersion: 6,
   projectList: {
     maxPayloadBytes: 262_144,
     maxProjects: 1_024,
@@ -166,7 +165,6 @@ export const fallbackAccessConfigLimits: AccessConfigLimits = {
     maxPayloadBytes: 262_144,
     maxFunctions: 64,
     maxFunctionNameBytes: 64,
-    maxMountsPerFunction: 16,
     maxGlobsPerSelector: 256,
     maxGlobBytes: 255,
     maxScriptPayloadBytes: 1_048_576,

@@ -106,21 +106,22 @@ test('golden fixture policies compile to their committed scripts byte-for-byte',
   }
 })
 
-test('mixed fixture: one function per group, ordered by group priority, mounts carry the scope', async () => {
+test('mixed fixture: one function per group, ordered by group priority, selectors carry the scope', async () => {
   const functions = mountedFunctions(await fixturePolicy('mixed'))
   assert.deepEqual(
-    functions.map((fn) => [fn.functionName, fn.mountPriority, fn.ruleOrder]),
+    functions.map((fn) => [fn.functionName, fn.priority, fn.ruleOrder]),
     [
       ['waf-scanner', 50, ['scanner-ua']],
       ['waf-core', 100, ['sqli-0023', 'path-traversal']],
     ],
   )
   const [scanner, core] = functions
-  assert.deepEqual(scanner?.mounts, [
-    { include: ['loan-*', 'trade-*'], exclude: ['loan-admin-legacy'] },
-  ])
+  assert.deepEqual(scanner?.projects, {
+    include: ['loan-*', 'trade-*'],
+    exclude: ['loan-admin-legacy'],
+  })
   // Exemptions and off-mode projects land in the same wire exclude list.
-  assert.deepEqual(core?.mounts, [{ include: ['*'], exclude: ['loan-admin-legacy', 'loan-web'] }])
+  assert.deepEqual(core?.projects, { include: ['*'], exclude: ['loan-admin-legacy', 'loan-web'] })
   // Both rules' identical CIDR sets (authored in different orders) share net1.
   assert.deepEqual(core?.directives, [{ name: 'net1', cidrs: ['10.164.44.2/32', '172.28.0.0/16'] }])
   assert.equal(core?.script.match(/directive net1/gu)?.length, 1)
@@ -128,7 +129,7 @@ test('mixed fixture: one function per group, ordered by group priority, mounts c
 
 test('allowlist fixture: a group mounts on exactly the projects it lists', async () => {
   const fn = onlyFunction(await fixturePolicy('allowlist'))
-  assert.deepEqual(fn.mounts, [{ include: ['loan-admin', 'trade-web'], exclude: [] }])
+  assert.deepEqual(fn.projects, { include: ['loan-admin', 'trade-web'], exclude: [] })
   assert.ok(fn.script.includes('$ctx.project == "trade-web"'))
 })
 
@@ -261,14 +262,15 @@ test('a project override only reaches the groups the project belongs to', () => 
     functions.find((fn) => fn.groupId === id)!
 
   assert.equal(byGroup('trade', after).scriptSha256, byGroup('trade', before).scriptSha256)
-  assert.deepEqual(byGroup('trade', after).mounts, byGroup('trade', before).mounts)
+  assert.deepEqual(byGroup('trade', after).projects, byGroup('trade', before).projects)
   assert.notEqual(byGroup('loan', after).scriptSha256, byGroup('loan', before).scriptSha256)
-  assert.deepEqual(byGroup('loan', after).mounts, [{ include: ['loan-*'], exclude: ['loan-api'] }])
+  assert.deepEqual(byGroup('loan', after).projects, { include: ['loan-*'], exclude: ['loan-api'] })
   // loan-web is exempt from this group, so its block override must not show up.
   assert.ok(!byGroup('partial', after).script.includes('loan-web'))
-  assert.deepEqual(byGroup('partial', after).mounts, [
-    { include: ['*'], exclude: ['loan-api', 'loan-web'] },
-  ])
+  assert.deepEqual(byGroup('partial', after).projects, {
+    include: ['*'],
+    exclude: ['loan-api', 'loan-web'],
+  })
 })
 
 test('scope chains fold into prefix/equality chains before the match expression', () => {

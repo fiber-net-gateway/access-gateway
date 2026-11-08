@@ -225,8 +225,7 @@ struct EvidenceCapture {
 // Wire helpers mirroring the codec fixtures: the script Data ID is derived
 // from the slug name (ploto.unified-access.edge-function.<name>).
 std::string function_json(const std::string &name, const std::string &sha256) {
-    return "{\"name\": \"" + name + "\", \"sha256\": \"" + sha256 +
-           "\", \"mounts\": [{\"projects\": {\"include\": [\"*\"]}}]}";
+    return "{\"name\": \"" + name + "\", \"sha256\": \"" + sha256 + "\", \"projects\": {\"include\": [\"*\"]}}";
 }
 
 std::string index_json(std::string functions) {
@@ -817,10 +816,9 @@ TEST(EdgeFunctionsWatcherTest, SameBytesInTwoPhasesCompileAndCacheSeparately) {
         // entry must compile (phase joins the cache key) and the head entry
         // stays usable; both programs live in the cache.
         const std::string script = "return true;";
-        const std::string two_phases =
-                index_json(function_json("head-fn", sha256_hex(script)) + "," +
-                           "{\"name\": \"body-fn\", \"sha256\": \"" + sha256_hex(script) +
-                           "\", \"phase\": \"request_body\", \"mounts\": [{\"projects\": {\"include\": [\"*\"]}}]}");
+        const std::string two_phases = index_json(
+                function_json("head-fn", sha256_hex(script)) + "," + "{\"name\": \"body-fn\", \"sha256\": \"" +
+                sha256_hex(script) + "\", \"phase\": \"request_body\", \"projects\": {\"include\": [\"*\"]}}");
         service.push(fiber::access_server::kEdgeFunctionIndexDataId, two_phases, "idx-1");
         service.push(script_data_id("head-fn"), script);
         service.push(script_data_id("body-fn"), script);

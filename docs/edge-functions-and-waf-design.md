@@ -1,6 +1,6 @@
 # 边缘函数与 WAF 设计
 
-- 状态：P1（native 数据面）、P2（server/web WAF 控制面，e5925f7）、P3 ③fail-close（908a1d2）、④起手规则包（ca691d8）、⑤命中统计页（a093da2）、②手写边缘函数开放（草稿存储 8404ea0 + 多函数发布 969c214 + 控制台 70b26ad）均已实施；剩 P3 ①body phase。2026-11-06 修订（slug `name` 身份 + 挂载级 `ratio` 采样）已随 P2 落地。
+- 状态：P1（native 数据面）、P2（server/web WAF 控制面，e5925f7）、P3 ③fail-close（908a1d2）、④起手规则包（ca691d8）、⑤命中统计页（a093da2）、②手写边缘函数开放（草稿存储 8404ea0 + 多函数发布 969c214 + 控制台 70b26ad）均已实施；剩 P3 ①body phase。2026-11-06 修订（slug `name` 身份 + 挂载级 `ratio` 采样）已随 P2 落地。 2026-11-07 修订（挂载拍平到函数条目 + `replaces` 版本灰度 + 抽签键改用解析后的客户端地址，limits schemaVersion 6）同日落地。
 - 日期：2026-11-05（修订：2026-11-06）
 - 适用范围：`native/access-server/`（边缘函数执行钩子）、`server/`（WAF 规则模型 + 代码生成器 + 发布资源）、`web/`（WAF 管理页）
 - 分层结论：**数据面不理解 WAF**。数据面只提供通用的"边缘函数"钩子；WAF 是控制面的第一个编译目标，规则在发布前被组合并生成一段 Fiber 脚本，作为普通边缘函数下发执行。
@@ -52,14 +52,28 @@ WAF/边缘函数是全新能力，**没有 Java wire 兼容包袱**：错误码�
     {
       "name": "waf-sqli",
       "sha256": "…64 位小写 hex…",
-      "mounts": [
-        { "projects": { "include": ["*"], "exclude": ["loan-admin-legacy"] }, "priority": 100 }
-      ]
+      "projects": { "include": ["*"], "exclude": ["loan-admin-legacy"] },
+      "priority": 100
     },
     {
       "name": "bot-trap",
       "sha256": "…64 位小写 hex…",
-      "mounts": [{ "projects": { "include": ["*"] }, "ratio": 1000 }]
+      "projects": { "include": ["*"] },
+      "ratio": 1000
+    },
+    {
+      "name": "auth-v1",
+      "sha256": "…64 位小写 hex…",
+      "projects": { "include": ["*"] },
+      "priority": 200
+    },
+    {
+      "name": "auth-v2",
+      "sha256": "…64 位小写 hex…",
+      "projects": { "include": ["loan-*"] },
+      "priority": 200,
+      "ratio": 300,
+      "replaces": "auth-v1"
     }
   ]
 }
@@ -76,32 +90,43 @@ WAF/边缘函数是全新能力，**没有 Java wire 兼容包袱**：错误码�
 
 函数条目（`functions[i]`）：
 
-| 字段     | 类型   | 必填 | 约束                                                                   | 语义                                                                                                     |
-| -------- | ------ | ---- | ---------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
-| `name`   | string | 是   | `[a-z0-9-]` 1-64 字节，首尾必须字母数字，索引内唯一（重复 = conflict） | slug 身份；脚本 Data ID = `ploto.unified-access.edge-function.` + `name`，watcher/validator 派生，不上线 |
-| `sha256` | string | 是   | 恰 64 个小写十六进制字符                                               | 对发布写入的脚本文本字节（UTF-8）计算；内容寻址编译缓存的键；watcher 逐脚本校验                          |
-| `phase`  | string | 否   | `"request_head"`（缺省）或 `"request_body"`，其它拒绝                  | 执行阶段（P3 ①，已实施）：head 阶段脚本引用 `$req.body` 编译失败（fail-closed）；body 阶段语义见 §3.2    |
-| `mounts` | array  | 是   | 非空，≤ 16 条                                                          | 挂载条目（下表）；纯挂载语义，无策略含义                                                                 |
+| 字段               | 类型            | 必填 | 约束                                                                   | 语义                                                                                                     |
+| ------------------ | --------------- | ---- | ---------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `name`             | string          | 是   | `[a-z0-9-]` 1-64 字节，首尾必须字母数字，索引内唯一（重复 = conflict） | slug 身份；脚本 Data ID = `ploto.unified-access.edge-function.` + `name`，watcher/validator 派生，不上线 |
+| `sha256`           | string          | 是   | 恰 64 个小写十六进制字符                                               | 对发布写入的脚本文本字节（UTF-8）计算；内容寻址编译缓存的键；watcher 逐脚本校验                          |
+| `phase`            | string          | 否   | `"request_head"`（缺省）或 `"request_body"`，其它拒绝                  | 执行阶段（P3 ①，已实施）：head 阶段脚本引用 `$req.body` 编译失败（fail-closed）；body 阶段语义见 §3.2    |
+| `projects`         | object          | 是   |                                                                        | 项目名选择器                                                                                             |
+| `projects.include` | array\<string\> | 是   | ≥ 1 条，≤ 256 条                                                       | 项目名 glob；先命中 include，再被 exclude 否决                                                           |
+| `projects.exclude` | array\<string\> | 否   | ≤ 256 条，默认 `[]`                                                    | 否决名单                                                                                                 |
+| `priority`         | integer         | 否   | [0, 1000000]，默认 0                                                   | 升序执行；同序按索引声明序（稳定）                                                                       |
+| `ratio`            | integer         | 否   | [0, 10000]，默认 10000                                                 | 采样比例（万分比）：缺省 = 必跑；< 10000 = 粘性采样；0 = 挂载保留但禁用（见下"挂载采样"）                |
+| `replaces`         | string          | 否   | 目标 slug；约束见下"版本灰度"                                          | 版本灰度：本函数在 `ratio` 比例内取代目标函数，两者互斥执行（见下"版本灰度"）                            |
 
-挂载条目（`functions[i].mounts[j]`）：
-
-| 字段               | 类型            | 必填 | 约束                   | 语义                                                                                      |
-| ------------------ | --------------- | ---- | ---------------------- | ----------------------------------------------------------------------------------------- |
-| `projects`         | object          | 是   |                        | 项目名选择器                                                                              |
-| `projects.include` | array\<string\> | 是   | ≥ 1 条，≤ 256 条       | 项目名 glob；先命中 include，再被 exclude 否决                                            |
-| `projects.exclude` | array\<string\> | 否   | ≤ 256 条，默认 `[]`    | 否决名单                                                                                  |
-| `priority`         | integer         | 否   | [0, 1000000]，默认 0   | 升序执行；同序按索引声明序（稳定）                                                        |
-| `ratio`            | integer         | 否   | [0, 10000]，默认 10000 | 采样比例（万分比）：缺省 = 必跑；< 10000 = 粘性采样；0 = 挂载保留但禁用（见下"挂载采样"） |
+**挂载拍平（2026-11-07 修订）**：一个函数只有一组项目选择器、一个 `priority`、一个 `ratio`，它们直接写在函数条目上。此前的 `mounts[]` 只有一个独特价值——同一函数在不同项目用不同比例或优先级，WAF 生成器固定只产一条、手写函数未见使用，而 `projects.include/exclude` 本身已能选多个项目；代价是 first-match 语义和一层嵌套。`maxMountsPerFunction` 随之删除。不再能表达"已全量某项目、其余项目 3%"的二维阶梯：要么先按项目扩（比例 10000），要么全项目同比例。
 
 glob 规则：非空可打印文本、不含 `;`（项目列表 wire 以分号分隔，项目名里不会有它）、单条 ≤ 255 字节；通配语法为单星 `*`（带回溯匹配），无 `?`/`**`/字符类。
 
-**挂载采样（`ratio`，2026-11-06 修订新增）**：缺省/10000 = 必跑（作者视图的 `must`）；< 10000 = 按比例采样执行（作者视图的 `maybe`，比例 = `ratio`/10000）；0 = 挂载保留但禁用（订阅与证据不断，比卸载再重挂温和）。采样判定为**粘性单次抽签**：请求期至多计算一次 `crc32(对端 IP 原始字节) % 10000`（CRC-32，zlib 多项式/Java zip 同构，`fiber::util::Crc32`，v4/v6 字节数组直算），该请求命中的全部采样挂载用**同一抽签值**对比各自阈值，未达阈值即跳过该函数（计入 `function_sampled_out_total`，不执行、不进 GcHeap）。粘性带来两个必然性质：同一客户端行为一致（block 灰度期不会一半请求拦一半放）；阈值单调（ratio 从 1000 提到 2000 只增不减，原命中者继续命中，指标前后可比）。快照内该项目命中的函数列表全部必跑时不抽签——纯必跑 fleet 零额外成本。已知限制：独立阈值**不是互斥分群**（表达不了"90% 老 + 10% 新、绝不双跑"）——新内容灰度走"新名 `maybe` 小比例试用 → 转正换必跑"，试用期新旧函数会在部分请求上双跑（先发送者赢，log 模式无感）；互斥分群留 v2。
+**挂载采样（`ratio`，2026-11-06 修订新增）**：缺省/10000 = 必跑（作者视图的 `must`）；< 10000 = 按比例采样执行（作者视图的 `maybe`，比例 = `ratio`/10000）；0 = 挂载保留但禁用（订阅与证据不断，比卸载再重挂温和）。采样判定为**粘性单次抽签**：请求期至多计算一次 `crc32(客户端 IP 原始字节) % 10000`（CRC-32，zlib 多项式/Java zip 同构，`fiber::util::Crc32`，v4/v6 字节数组直算），该请求命中的全部采样函数用**同一抽签值**对比各自的桶区间，落在区间外即跳过该函数（计入 `function_sampled_out_total`，不执行、不进 GcHeap）。粘性带来两个必然性质：同一客户端行为一致（block 灰度期不会一半请求拦一半放）；阈值单调（ratio 从 1000 提到 2000 只增不减，原命中者继续命中，指标前后可比）。快照内该项目命中的函数列表全部必跑时不抽签——纯必跑 fleet 零额外成本。
 
-**作者格式与 wire 格式分离**（对齐 web 路由 YAML → JSON wire 的既有先例）。P3 ② 实施后控制台的作者格式是**函数优先草稿**（环境级单例：`functions[]` = `name`/`description`/`enabled`/`phase`（缺省 `request_head`，P3 ①）/`script`/`mounts[]`，mount 含 `include`/`exclude` glob、`priority`、`ratio`），发布时由 server 合并 WAF 生成条目、按声明序+最低挂载优先级排序、对脚本内容计算 sha256、套上 `version`；wire 只认函数优先 + 严格 JSON（无注释、未知字段拒绝）。早期设想的 mount-first 作者视图（`temp/edge-functions.json` 的 `must`/`maybe` 条目）被该草稿模型覆盖，其 `must` ≡ 缺省 `ratio` 10000、`maybe` ≡ `ratio < 10000`，表达力等价（一函数多挂载直接写在函数条目内）。编译预览与发布校验都**按各自 phase** 走原生 validator（`edge_function_script` 请求带 `phase` 字段，缺省 = request_head）：head 阶段引用 `$req.body` 在预览即失败，不会拖到发布或运行期。
+**抽签键（2026-11-07 修订）**：抽签用解析后的 `client_address`，无解析结果时退回 socket 对端。`direct` 模式下两者相同；经 CDN 或 LB 接入的实例必须把 `ACCESS_SERVER_CLIENT_METADATA_MODE` 配成 `trusted_proxy` 或 `legacy_headers`，否则抽签仍落在中间节点上：对端只有少量 IP 时比例严重失真（`ratio=300`、16 个连续对端 IP 均匀分流的模拟中，灰度完全没流量的概率约 61%，最高可到 37.5%），用户换节点时还会在版本间跳动。切换此键会让既有 ratio 函数的命中人群重新洗牌一次。`legacy_headers` 下客户端能伪造地址头的入口，抽签同样可被操纵。
+
+**版本灰度（`replaces`，2026-11-07 修订新增，取代原"互斥分群留 v2"）**：`replaces` 声明本函数取代哪个函数，目标条目**完全不改**。组装快照时按项目计算互斥的半开桶区间：在两者都挂载的项目上，灰度函数占 `[0, ratio)`，目标让出这段、保留 `[ratio, 目标 ratio)`；其余项目目标不受影响。上例 `loan-*` 上 `auth-v2` = [0,300)、`auth-v1` = [300,10000)，其他项目 `auth-v1` 全量。性质：
+
+- **绝不双跑**：两个区间不相交，请求只跑其中一个；提高 `ratio` 时用户只会单向迁到新版本。
+- **回滚 = 删除或禁用灰度函数**：目标从未被改动，移除后行为完全还原。
+- **只收窄、不扩大**：目标保留自己的 `priority`、`include`、`exclude`，未挂载目标的项目上未命中时什么都不跑。这也是不采用"未命中时执行替代函数"的原因——那会把目标带到它被明确排除的项目，且要求目标摘掉自己的挂载（否则跑两次），上灰度和回滚都得同时改两个函数。
+- **不是异常兜底**：灰度函数报错仍走 fail-open/fail-close，不回退到目标，所以字段不叫 `fallback`。
+- 端点都合法：`ratio` 0 = 全走目标（已上线、不放量），10000 = 全走新版本、目标留作即时回滚（窗口为空，不抽签也不执行，计入 `sampled_out`）。
+
+codec 约束（`replaces` 需要全索引，解析完全部条目后校验；违反 = 整个索引拒绝、保留旧快照）：目标必须在索引内、不能指向自己、`phase` 必须相同、目标自身不能再声明 `replaces`（不支持链）、一个目标只能被一个函数取代（否则多个灰度争抢同一段低位桶，又回到双跑）。声明顺序无关。身份上新旧版本是两个函数（`name` 决定脚本 Data ID），转正后名字与指标序列随之变化；控制台提供"创建灰度版本"（`auth` → `auth-v2`，1% 起步）与"转正"，后者只在 `ratio` = 10000 且挂载范围与目标一致时可用，此时目标已不执行任何请求，删除它是纯清理、不改变流量。
+
+已知限制：所有采样函数共用一个桶，同时进行的多个灰度落在同一批低位桶的客户端上，彼此完全相关，出问题难归因（需要时按函数名加盐，代价是每个函数一次 CRC）；WAF 生成函数不能作为目标（控制台校验拒绝），规则组改动的灰度仍靠 log/block 模式；body 阶段的采样判定在缓冲之后，低比例的 body 函数也让全部 opt-in 请求付缓冲成本。
+
+**作者格式与 wire 格式分离**（对齐 web 路由 YAML → JSON wire 的既有先例）。P3 ② 实施后控制台的作者格式是**函数优先草稿**（环境级单例：`functions[]` = `name`/`description`/`enabled`/`phase`（缺省 `request_head`，P3 ①）/`script`/`projects`（`include`/`exclude` glob）/`priority`/`ratio`/`replaces`），发布时由 server 合并 WAF 生成条目、按 `priority`+名称排序、对脚本内容计算 sha256、套上 `version`；wire 只认函数优先 + 严格 JSON（无注释、未知字段拒绝）。早期设想的 mount-first 作者视图（`temp/edge-functions.json` 的 `must`/`maybe` 条目）被该草稿模型覆盖，其 `must` ≡ 缺省 `ratio` 10000、`maybe` ≡ `ratio < 10000`，表达力等价。编译预览与发布校验都**按各自 phase** 走原生 validator（`edge_function_script` 请求带 `phase` 字段，缺省 = request_head）：head 阶段引用 `$req.body` 在预览即失败，不会拖到发布或运行期。
 
 脚本 Data ID（每函数一个）：内容为纯脚本文本，sha256 必须与索引一致（不一致 = 组装失败，全或无保留旧快照）；空串/NotFound = 该函数保持当前（keep-current），与索引的 keep-current 语义对齐。limits：索引 payload ≤ 256 KiB、单脚本 ≤ 1 MiB、快照内全部脚本合计 ≤ 8 MiB。
 
-limits 同步修订：`maxFunctionIdBytes` 删除（身份只剩一个），`maxFunctionNameBytes` 128 → 64（从展示名上限变为 slug 上限），`--describe-config-limits` schemaVersion 3 → 4；`ratio` 为固定值域 [0,10000]（同 `priority` 的 [0,1000000]），不设 limits 字段。P1 已提交的 codec/validator/server 镜像（master `23c2388`）仍是修订前形态（`id` + 可空 `name` + `dataId`、无 `ratio`），本修订的实现变更为下一步（未部署、P2 未消费，零迁移）。body phase（P3 ①）追加 `edgeFunctions.maxBodyPhaseBytes`（缺省 1 MiB），schemaVersion 4 → 5。
+limits 同步修订：`maxFunctionIdBytes` 删除（身份只剩一个），`maxFunctionNameBytes` 128 → 64（从展示名上限变为 slug 上限），`--describe-config-limits` schemaVersion 3 → 4；`ratio` 为固定值域 [0,10000]（同 `priority` 的 [0,1000000]），不设 limits 字段。P1 已提交的 codec/validator/server 镜像（master `23c2388`）仍是修订前形态（`id` + 可空 `name` + `dataId`、无 `ratio`），本修订的实现变更为下一步（未部署、P2 未消费，零迁移）。body phase（P3 ①）追加 `edgeFunctions.maxBodyPhaseBytes`（缺省 1 MiB），schemaVersion 4 → 5。 挂载拍平（2026-11-07）删除 `maxMountsPerFunction`，schemaVersion 5 → 6；`replaces` 复用 slug 约束，不设 limits 字段。
 
 - 项目级 WAF mode（off/log/block）**不设 wire 字段**：由生成器折叠——mode 为 `off` 的项目进其所在各组的 `exclude`（零执行成本），`log`/`block` 项目共享组脚本，block 规则命中后按 `$ctx.project` 判定。
 - 脚本 Data ID 的身份 = 索引中的 `sha256`；脚本文本不变则 hash 不变，watcher 编译产物按内容寻址复用（改挂载只 bump 索引版本，不重写脚本）。
@@ -123,7 +148,7 @@ gray matcher → host match → host policy（X-Entry / HTTPS 强制）→ 【�
 执行语义：
 
 1. host→project 解析后取该项目挂载的函数列表（快照索引），按 `priority` 升序、同序按索引内声明序执行。
-2. `ratio` 采样在执行前判定（§3.1 挂载采样）：命中的函数列表存在任一采样挂载（ratio < 10000）时，请求期计算一次 `crc32(对端 IP 原始字节) % 10000` 并与各挂载阈值比较，未达阈值 = 跳过该函数（计入 `function_sampled_out_total`，不执行、无 GcHeap 成本）；全部必跑时不抽签，零额外成本。
+2. 采样在执行前判定（§3.1 挂载采样）：命中的函数列表存在任一非全量函数时，请求期计算一次 `crc32(客户端 IP 原始字节) % 10000` 并与各函数的桶区间比较，落在区间外 = 跳过该函数（计入 `function_sampled_out_total`，不执行、无 GcHeap 成本）；全部必跑时不抽签，零额外成本。桶区间在快照组装时算好（`ratio` 与 `replaces` 都折叠进去），请求期不解析函数间关系。
 3. 每个函数是独立编译产物，**共享该请求已有的每请求 GcHeap**（`ScriptExecutionContext`）。执行用 `exec_async`（`resp.*` 含异步 opcode，`exec_sync` 遇异步指令会 panic）；纯同步函数的 `exec_async` 不挂起，成本与 `exec_sync` 相同。无新增 per-request 分配。
 4. **短路判定零新协议**：函数执行后检查 `ScriptExchangeCtx::response_header_sent()`（已存在，`AccessScriptRuntime.cpp` 已在用）——已发送即终结请求，不执行后续函数与路由；未发送则继续。
 5. 未挂载函数的项目零成本（索引为空，不进入任何脚本路径）。
@@ -197,7 +222,7 @@ if (!office.contains($conn.remote_addr) && strings.match($req.uri, "(?i)union\\s
 
 - metrics（命名对齐 `access_server_*` 既有风格）：
   - `access_server_function_evaluations_total{function, project}`（项目 label 走 bounded 动态家族）
-  - `access_server_function_sampled_out_total{function, project}`（ratio 采样未命中跳过；与 evaluations 对比即实测命中率）
+  - `access_server_function_sampled_out_total{function, project}`（桶区间外跳过，含 ratio 0 与被灰度取代的部分；与 evaluations 对比即实测命中率。版本灰度无需新指标：直接对比两个函数的 evaluations，比较错误率时按 evaluations 归一化）
   - `access_server_function_duration_seconds`（histogram，function label）
   - `access_server_function_errors_total{function, reason}`（Exception/Abort/Timeout/OversizeReport）
   - `access_server_function_events_total{function, event, label}`（§3.5）
@@ -278,10 +303,10 @@ projectModes:
 ## 5. 性能预算
 
 - 挂载项目每请求：1 次 `exec_async`（GcHeap 已存在，无新增分配；纯同步函数不挂起，成本同 `exec_sync`）+ 生成代码的前置字符串链；CIDR 判断为纯 C++ 区间匹配，无 VM 参与。
-- ratio 采样：每请求至多一次 crc32(对端 IP 字节) + 整数比较（无分配）；命中的函数列表全部必跑（ratio 缺省/10000）时不抽签，零成本。
+- 采样：每请求至多一次 crc32(客户端 IP 字节) + 整数比较（无分配）；命中的函数列表全部必跑（ratio 缺省/10000）时不抽签，零成本。`replaces` 的桶区间在快照组装时算好，请求期没有额外成本。
 - 目标：典型 50 规则集函数求值 p99 < 100µs；`benchmark:native` 尚无边缘函数基准，这个目标还没有量化基线。
 - 规则组实测（2026-11-07，compose 栈，单项目，WSL2，静态响应路由，起手规则包 9 条全部 log 且不命中，5 轮中位数）：access-server 每请求 CPU（cgroup `usage_usec`）无 WAF 32.4µs、1 个组 37.1µs、6 个组 38.6µs，即 WAF 约 +5µs，每多一组约 +0.3µs；三者的吞吐与延迟差异都在噪声内，该测试受压测客户端限制（约 2.9 万 RPS）。
-- 未挂载项目零成本；mode=off 项目经挂载排除零成本；ratio=0 函数只余一次阈值比较。
+- 未挂载项目零成本；mode=off 项目经挂载排除零成本；区间为空的函数（ratio=0 或被全量取代）只余一次比较。
 - 热路径承诺：数据面侧短路判定（`response_header_sent()`）与索引查表无分配。
 
 ## 6. 安全与失败语义
@@ -291,7 +316,7 @@ projectModes:
 - **VM 无 step budget**（`InterpreterVm` 无指令预算；`ScriptAbortReason::Timeout` 仅有枚举位）。v1 缓解：方言静态封堵（无函数定义/递归/`while`，唯一循环是 for-of over 有限容器）+ 表达式/脚本/产物上限 + 输入截断。根治手段是**上游建议**：InterpreterVm 增加可选 step budget/deadline；顺带建议上游更新 `docs/script-guide`（`strings.match/findAll` 在当前 pin 已注册，文档仍写"未注册"）。
 - 正则：`strings.match` 为 RE2 线性实现 + 编译缓存 + WorkBudget，无回溯炸弹。CIDR 经 directive 编译期解析，畸形 CIDR 在发布期失败。
 - 生成器安全：转义器单测 + 黄金 fixtures + validator fail-closed 三层兜底。
-- 部署依赖与顺序：**fleet 需先升级到 pin ≥ 4a5f12b8**（`strings.match/findAll` 依赖；111/218/219 目前在旧 pin）。新二进制在无函数索引时零行为变化——先升二进制（ctl upgrade，窗口 <2ms），再发布首个函数索引 + 脚本，灰度顺序：单项目 log 模式 → 观察 → block；函数级另有 `ratio` 采样阶梯（§3.1）：小比例试跑 → 提比例 → 100%（转缺省/必跑）。
+- 部署依赖与顺序：**fleet 需先升级到 pin ≥ 4a5f12b8**（`strings.match/findAll` 依赖；111/218/219 目前在旧 pin）。新二进制在无函数索引时零行为变化——先升二进制（ctl upgrade，窗口 <2ms），再发布首个函数索引 + 脚本，灰度顺序：单项目 log 模式 → 观察 → block；函数级另有 `ratio` 采样阶梯（§3.1）：小比例试跑 → 提比例 → 100%（转缺省/必跑）。 2026-11-07 的 wire 变更（拍平 + `replaces`）非向后兼容：codec 拒绝未知字段，旧二进制收到新索引会保留旧快照、灰度不生效，反向同理，因此先升全部实例与 validator，再发布新索引。
 
 ## 7. 阶段计划
 

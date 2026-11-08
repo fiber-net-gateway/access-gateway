@@ -14,7 +14,6 @@ import {
   MAX_DESCRIPTION_BYTES,
   MAX_DRAFT_FUNCTIONS,
   MAX_GLOBS_PER_SELECTOR,
-  MAX_MOUNTS_PER_FUNCTION,
   MAX_SCRIPT_BYTES_PER_FUNCTION,
   MAX_TOTAL_DRAFT_SCRIPT_BYTES,
   type EdgeFunctionDraftFunction,
@@ -154,32 +153,9 @@ export function validateEdgeFunctionsDraft(draft: unknown): EdgeFunctionValidati
       totalScriptBytes += scriptBytes
     }
 
-    if (!Array.isArray(function_.mounts)) {
-      issues.push({
-        field: `${path}.mounts`,
-        code: 'invalid_field',
-        message: 'mounts must be an array',
-      })
-      return
-    }
-    if (function_.mounts.length > MAX_MOUNTS_PER_FUNCTION) {
-      issues.push({
-        field: `${path}.mounts`,
-        code: 'too_many_entries',
-        message: `a function may hold at most ${MAX_MOUNTS_PER_FUNCTION} mounts`,
-      })
-    }
-    if (function_.enabled === true && function_.mounts.length === 0) {
-      issues.push({
-        field: `${path}.mounts`,
-        code: 'missing_field',
-        message: 'an enabled function needs at least one mount',
-      })
-    }
-    function_.mounts.forEach((mount, mountIndex) => {
-      validateMount(mount, `${path}.mounts[${mountIndex}]`, issues)
-    })
+    validateMount(function_, path, issues)
   })
+  validateReplaces(record.functions, issues)
 
   if (totalScriptBytes > MAX_TOTAL_DRAFT_SCRIPT_BYTES) {
     issues.push({
@@ -191,12 +167,12 @@ export function validateEdgeFunctionsDraft(draft: unknown): EdgeFunctionValidati
   return issues
 }
 
-function validateMount(mount: unknown, path: string, issues: EdgeFunctionValidationIssue[]): void {
-  if (typeof mount !== 'object' || mount === null || Array.isArray(mount)) {
-    issues.push({ field: path, code: 'invalid_field', message: 'mount must be an object' })
-    return
-  }
-  const record = mount as {
+function validateMount(
+  fn: Partial<EdgeFunctionDraftFunction>,
+  path: string,
+  issues: EdgeFunctionValidationIssue[],
+): void {
+  const record = fn as {
     projects?: { include?: unknown; exclude?: unknown }
     priority?: unknown
     ratio?: unknown
@@ -206,7 +182,7 @@ function validateMount(mount: unknown, path: string, issues: EdgeFunctionValidat
     issues.push({
       field: `${path}.projects`,
       code: 'invalid_field',
-      message: 'mount projects must be an object',
+      message: 'projects must be an object',
     })
     return
   }
@@ -272,4 +248,55 @@ function validateMount(mount: unknown, path: string, issues: EdgeFunctionValidat
       message: `ratio must be an integer in [${EDGE_FUNCTION_RATIO_MIN}, ${EDGE_FUNCTION_RATIO_MAX}]`,
     })
   }
+}
+
+// `replaces` relationships, mirroring the native index codec so a broken canary
+// fails here with a field path instead of at release time. Disabled functions
+// never reach the wire, so only enabled ones are held to the cross-function
+// rules; the slug check applies regardless.
+function validateReplaces(
+  functions: readonly unknown[],
+  issues: EdgeFunctionValidationIssue[],
+): void {
+  const entries = functions.map((fn) =>
+    typeof fn === 'object' && fn !== null && !Array.isArray(fn)
+      ? (fn as Partial<EdgeFunctionDraftFunction>)
+      : null,
+  )
+  const byName = new Map(entries.flatMap((fn) => (fn?.name ? [[fn.name, fn] as const] : [])))
+  const claimed = new Set<string>()
+  entries.forEach((fn, index) => {
+    if (fn?.replaces === undefined) return
+    const reject = (code: string, message: string): void => {
+      issues.push({ field: `functions[${index}].replaces`, code, message })
+    }
+    if (typeof fn.replaces !== 'string' || !functionNamePattern.test(fn.replaces)) {
+      reject('invalid_field', 'replaces must name a function slug')
+      return
+    }
+    if (fn.enabled !== true) return
+    if (fn.replaces === fn.name) {
+      reject('invalid_replaces', 'a function cannot replace itself')
+      return
+    }
+    if (isWafFunctionName(fn.replaces)) {
+      reject('invalid_replaces', 'generated WAF functions cannot be replaced')
+      return
+    }
+    const target = byName.get(fn.replaces)
+    if (target?.enabled !== true) {
+      reject('invalid_replaces', `replaces target "${fn.replaces}" must be an enabled function`)
+      return
+    }
+    if ((target.phase ?? 'request_head') !== (fn.phase ?? 'request_head')) {
+      reject('invalid_replaces', `replaces target "${fn.replaces}" runs in a different phase`)
+    }
+    if (target.replaces !== undefined) {
+      reject('invalid_replaces', `replaces target "${fn.replaces}" must not replace another`)
+    }
+    if (claimed.has(fn.replaces)) {
+      reject('invalid_replaces', `"${fn.replaces}" is already replaced by another function`)
+    }
+    claimed.add(fn.replaces)
+  })
 }

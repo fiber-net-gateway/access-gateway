@@ -40,7 +40,6 @@ using fiber::access_server::ClientMetadataResolver;
 using fiber::access_server::ClientMetadataResolverOptions;
 using fiber::access_server::EdgeFunctionIndexEntry;
 using fiber::access_server::EdgeFunctionLibrary;
-using fiber::access_server::EdgeFunctionMountConfig;
 using fiber::access_server::EdgeFunctionProgram;
 using fiber::access_server::EdgeFunctionProjectsSelector;
 using fiber::access_server::EdgeFunctionsState;
@@ -184,22 +183,46 @@ void publish_response_route(RouteConfigStore &store) {
     EXPECT_TRUE(published) << (published ? "" : published.error().message);
 }
 
-EdgeFunctionMountConfig mounted_everywhere(std::int32_t priority) {
-    return EdgeFunctionMountConfig{
+// How a test function is mounted; add_function copies it onto the index entry.
+struct TestMount {
+    EdgeFunctionProjectsSelector projects;
+    std::int32_t priority = 0;
+    std::int32_t ratio = fiber::access_server::kEdgeFunctionFullRatio;
+    std::string replaces;
+};
+
+void apply_mount(EdgeFunctionIndexEntry &entry, TestMount mount) {
+    entry.projects = std::move(mount.projects);
+    entry.priority = mount.priority;
+    entry.ratio = mount.ratio;
+    entry.replaces = std::move(mount.replaces);
+}
+
+TestMount mounted_everywhere(std::int32_t priority) {
+    return TestMount{
             .projects = EdgeFunctionProjectsSelector{.include = {"*"}},
             .priority = priority,
     };
 }
 
-EdgeFunctionMountConfig mounted_everywhere(std::int32_t priority, std::int32_t ratio) {
-    return EdgeFunctionMountConfig{
+TestMount mounted_everywhere(std::int32_t priority, std::int32_t ratio) {
+    return TestMount{
             .projects = EdgeFunctionProjectsSelector{.include = {"*"}},
             .priority = priority,
             .ratio = ratio,
     };
 }
 
-// Same sticky-sampling bucket as the executor: crc32 over the raw peer IP
+TestMount canary_of(std::string target, std::int32_t priority, std::int32_t ratio) {
+    return TestMount{
+            .projects = EdgeFunctionProjectsSelector{.include = {"*"}},
+            .priority = priority,
+            .ratio = ratio,
+            .replaces = std::move(target),
+    };
+}
+
+// Same sticky-sampling bucket as the executor: crc32 over the raw client IP
 // bytes % 10000. Deterministic, so fixture addresses with known buckets can
 // be brute-forced at test time instead of hard-coded.
 std::uint32_t sampling_bucket(const fiber::net::IpAddress &peer) {
@@ -222,15 +245,15 @@ fiber::net::SocketAddress address_with_bucket(std::uint32_t wanted) {
     return {};
 }
 
-EdgeFunctionMountConfig mounted_on(std::string project_glob, std::int32_t priority) {
-    return EdgeFunctionMountConfig{
+TestMount mounted_on(std::string project_glob, std::int32_t priority) {
+    return TestMount{
             .projects = EdgeFunctionProjectsSelector{.include = {std::move(project_glob)}},
             .priority = priority,
     };
 }
 
 void add_function(EdgeFunctionsState &state, EdgeFunctionLibrary &library, std::string name, std::string_view source,
-                  std::vector<EdgeFunctionMountConfig> mounts) {
+                  TestMount mount) {
     auto compiled = library.compile(source);
     ASSERT_TRUE(compiled.has_value()) << (compiled ? "" : compiled.error().message);
     if (!compiled) {
@@ -240,7 +263,7 @@ void add_function(EdgeFunctionsState &state, EdgeFunctionLibrary &library, std::
     state.programs.push_back(std::make_shared<EdgeFunctionProgram>(std::move(*compiled)));
     EdgeFunctionIndexEntry entry;
     entry.name = std::move(name);
-    entry.mounts = std::move(mounts);
+    apply_mount(entry, std::move(mount));
     state.index.functions.push_back(std::move(entry));
 }
 
@@ -309,6 +332,94 @@ TEST(EdgeFunctionExecutor, RatioZeroMountStaysDisabledButChainContinues) {
     EXPECT_NE(response.find(" 403 "), std::string::npos) << response;
     EXPECT_NE(response_body(response).find("after-disabled"), std::string::npos) << response;
     EXPECT_EQ(response.find("never-off"), std::string::npos) << response;
+}
+
+TEST(EdgeFunctionExecutor, SamplingFollowsTheResolvedClientAddress) {
+    // Behind a proxy the socket peer is an intermediary shared by many clients,
+    // so the draw must follow the resolved client address. The rig resolves
+    // X-Real-Ip (legacy headers); without one the peer stands in, which is what
+    // RatioSamplingExecutesOnlySampledPeers covers.
+    RouteConfigStore store;
+    publish_response_route(store);
+    EdgeFunctionLibrary library;
+    EdgeFunctionsState state;
+    add_function(state, library, "canary", R"(resp.send(403, "canary-blocked");)", {mounted_everywhere(0, 1)});
+    store.set_edge_functions(std::make_shared<EdgeFunctionsState>(std::move(state)));
+
+    const fiber::net::SocketAddress hit = address_with_bucket(0);
+    const fiber::net::SocketAddress miss = address_with_bucket(9999);
+    const auto from_client = [](const fiber::net::SocketAddress &client) {
+        return "GET /anything HTTP/1.1\r\n"
+               "Host: api.example.com\r\n"
+               "X-Real-Ip: " +
+               client.ip().to_string() +
+               "\r\n"
+               "Connection: close\r\n"
+               "\r\n";
+    };
+
+    const std::string sampled = run_request(store, from_client(hit), miss);
+    EXPECT_NE(response_body(sampled).find("canary-blocked"), std::string::npos) << sampled;
+
+    const std::string skipped = run_request(store, from_client(miss), hit);
+    EXPECT_NE(response_body(skipped).find("route-body"), std::string::npos) << skipped;
+}
+
+TEST(EdgeFunctionExecutor, ReplacesRunsExactlyOneVersionPerClient) {
+    // Each version answers, so whichever the chain reaches first would win if
+    // the other's window leaked. Running both priority orders proves the
+    // windows exclude each other in both directions.
+    for (const auto &[stable_priority, canary_priority]: {std::pair{1, 2}, std::pair{2, 1}}) {
+        RouteConfigStore store;
+        publish_response_route(store);
+        EdgeFunctionLibrary library;
+        EdgeFunctionsState state;
+        add_function(state, library, "auth-v1", R"(resp.send(200, "stable-version");)",
+                     {mounted_everywhere(stable_priority)});
+        add_function(state, library, "auth-v2", R"(resp.send(200, "canary-version");)",
+                     {canary_of("auth-v1", canary_priority, 300)});
+        store.set_edge_functions(std::make_shared<EdgeFunctionsState>(std::move(state)));
+
+        for (const std::uint32_t bucket: {0U, 299U}) {
+            const std::string response = run_request(store, request(), address_with_bucket(bucket));
+            EXPECT_NE(response_body(response).find("canary-version"), std::string::npos)
+                    << "bucket " << bucket << ": " << response;
+        }
+        for (const std::uint32_t bucket: {300U, 9999U}) {
+            const std::string response = run_request(store, request(), address_with_bucket(bucket));
+            EXPECT_NE(response_body(response).find("stable-version"), std::string::npos)
+                    << "bucket " << bucket << ": " << response;
+        }
+    }
+}
+
+TEST(EdgeFunctionExecutor, FullRatioCanaryTakesEveryClient) {
+    RouteConfigStore store;
+    publish_response_route(store);
+    EdgeFunctionLibrary library;
+    EdgeFunctionsState state;
+    add_function(state, library, "auth-v1", R"(resp.send(200, "stable-version");)", {mounted_everywhere(1)});
+    add_function(state, library, "auth-v2", R"(resp.send(200, "canary-version");)", {canary_of("auth-v1", 2, 10000)});
+    store.set_edge_functions(std::make_shared<EdgeFunctionsState>(std::move(state)));
+
+    const std::string response = run_request(store, request(), address_with_bucket(9999));
+    EXPECT_NE(response_body(response).find("canary-version"), std::string::npos) << response;
+}
+
+TEST(EdgeFunctionExecutor, CanaryMissRunsNothingWhereTheTargetIsNotMounted) {
+    RouteConfigStore store;
+    publish_response_route(store);
+    EdgeFunctionLibrary library;
+    EdgeFunctionsState state;
+    add_function(state, library, "auth-v1", R"(resp.send(200, "stable-version");)", {mounted_on("not-orders", 0)});
+    add_function(state, library, "auth-v2", R"(resp.send(200, "canary-version");)", {canary_of("auth-v1", 0, 300)});
+    store.set_edge_functions(std::make_shared<EdgeFunctionsState>(std::move(state)));
+
+    const std::string canary = run_request(store, request(), address_with_bucket(0));
+    EXPECT_NE(response_body(canary).find("canary-version"), std::string::npos) << canary;
+
+    const std::string miss = run_request(store, request(), address_with_bucket(9999));
+    EXPECT_NE(response_body(miss).find("route-body"), std::string::npos) << miss;
 }
 
 TEST(EdgeFunctionExecutor, ExceptionFailsOpenToRouting) {
@@ -499,7 +610,7 @@ void publish_proxy_route(RouteConfigStore &store, bool edge_function_body) {
 }
 
 void add_body_function(EdgeFunctionsState &state, EdgeFunctionLibrary &library, std::string name,
-                       std::string_view source, std::vector<EdgeFunctionMountConfig> mounts) {
+                       std::string_view source, TestMount mount) {
     auto compiled = library.compile(source, fiber::access_server::EdgeFunctionPhase::RequestBody);
     ASSERT_TRUE(compiled.has_value()) << (compiled ? "" : compiled.error().message);
     if (!compiled) {
@@ -510,7 +621,7 @@ void add_body_function(EdgeFunctionsState &state, EdgeFunctionLibrary &library, 
     EdgeFunctionIndexEntry entry;
     entry.name = std::move(name);
     entry.phase = fiber::access_server::EdgeFunctionPhase::RequestBody;
-    entry.mounts = std::move(mounts);
+    apply_mount(entry, std::move(mount));
     state.index.functions.push_back(std::move(entry));
 }
 

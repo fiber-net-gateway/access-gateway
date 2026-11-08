@@ -149,12 +149,7 @@ TEST(AccessConfigMetricsTest, RendersEdgeFunctionEventsAndSnapshotGauges) {
             EdgeFunctionIndexEntry{
                     .name = "waf",
                     .sha256_hex = std::string(64, '0'),
-                    .mounts =
-                            std::vector<EdgeFunctionMountConfig>{
-                                    EdgeFunctionMountConfig{
-                                            .projects = EdgeFunctionProjectsSelector{.include = {"*"}},
-                                    },
-                            },
+                    .projects = EdgeFunctionProjectsSelector{.include = {"*"}},
             },
     };
     state->programs = std::vector<std::shared_ptr<EdgeFunctionProgram>>{

@@ -17,18 +17,17 @@ using fiber::access_server::AccessConfigErrorCode;
 using fiber::access_server::AccessConfigLimits;
 using fiber::access_server::EdgeFunctionIndexConfig;
 using fiber::access_server::EdgeFunctionIndexEntry;
-using fiber::access_server::EdgeFunctionMountConfig;
 using fiber::access_server::parse_edge_function_index_config;
 using fiber::access_server::validate_edge_function_index_limits;
 
 const char *kValidSha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-const char *kAllProjects = R"({"projects": {"include": ["*"]}})";
+const char *kAllProjects = R"("projects": {"include": ["*"]})";
 
-// mounts_json is a single mount object; the wire wraps it in an array. The
+// mount_fields is spliced into the function object after name and sha256. The
 // script Data ID is derived from the name and never appears in the JSON.
 std::string function_json(const std::string &name, std::string sha256 = kValidSha256,
-                          std::string mounts_json = kAllProjects) {
-    return "{\"name\": \"" + name + "\", \"sha256\": \"" + sha256 + "\", \"mounts\": [" + mounts_json + "]}";
+                          std::string mount_fields = kAllProjects) {
+    return "{\"name\": \"" + name + "\", \"sha256\": \"" + sha256 + "\", " + mount_fields + "}";
 }
 
 std::string index_json(std::string_view version, std::string functions) {
@@ -68,17 +67,15 @@ TEST(EdgeFunctionConfigCodec, ParsesFullIndex) {
                 "name": "waf-generated",
                 "sha256": ")" + std::string(kValidSha256) +
                                 R"(",
-                "mounts": [
-                    {"projects": {"include": ["loan-*", "trade-web"], "exclude": ["loan-admin-legacy"]},
-                     "priority": 100, "ratio": 1000},
-                    {"projects": {"include": ["*"]}}
-                ]
+                "projects": {"include": ["loan-*", "trade-web"], "exclude": ["loan-admin-legacy"]},
+                "priority": 100,
+                "ratio": 1000
             },
             {
                 "name": "audit",
                 "sha256": ")" + std::string(kValidSha256) +
                                 R"(",
-                "mounts": [{"projects": {"include": ["trade-web"]}, "priority": 0}]
+                "projects": {"include": ["trade-web"]}
             }
         ]
     })";
@@ -92,22 +89,21 @@ TEST(EdgeFunctionConfigCodec, ParsesFullIndex) {
     const EdgeFunctionIndexEntry &first = config.functions[0];
     EXPECT_EQ(first.name, "waf-generated");
     EXPECT_EQ(first.sha256_hex, kValidSha256);
-    ASSERT_EQ(first.mounts.size(), 2U);
-    EXPECT_EQ(first.mounts[0].priority, 100);
-    EXPECT_EQ(first.mounts[0].ratio, 1000);
-    ASSERT_EQ(first.mounts[0].projects.include.size(), 2U);
-    EXPECT_EQ(first.mounts[0].projects.include[0], "loan-*");
-    EXPECT_EQ(first.mounts[0].projects.include[1], "trade-web");
-    ASSERT_EQ(first.mounts[0].projects.exclude.size(), 1U);
-    EXPECT_EQ(first.mounts[0].projects.exclude[0], "loan-admin-legacy");
-    EXPECT_EQ(first.mounts[1].priority, 0);
-    EXPECT_EQ(first.mounts[1].ratio, fiber::access_server::kEdgeFunctionFullRatio);
-    ASSERT_EQ(first.mounts[1].projects.include.size(), 1U);
-    EXPECT_EQ(first.mounts[1].projects.include[0], "*");
-    EXPECT_TRUE(first.mounts[1].projects.exclude.empty());
+    EXPECT_EQ(first.priority, 100);
+    EXPECT_EQ(first.ratio, 1000);
+    ASSERT_EQ(first.projects.include.size(), 2U);
+    EXPECT_EQ(first.projects.include[0], "loan-*");
+    EXPECT_EQ(first.projects.include[1], "trade-web");
+    ASSERT_EQ(first.projects.exclude.size(), 1U);
+    EXPECT_EQ(first.projects.exclude[0], "loan-admin-legacy");
+    EXPECT_TRUE(first.replaces.empty());
 
-    EXPECT_EQ(config.functions[1].name, "audit");
-    EXPECT_EQ(config.functions[1].mounts[0].ratio, fiber::access_server::kEdgeFunctionFullRatio);
+    // Omitted mount fields take their defaults.
+    const EdgeFunctionIndexEntry &second = config.functions[1];
+    EXPECT_EQ(second.name, "audit");
+    EXPECT_EQ(second.priority, 0);
+    EXPECT_EQ(second.ratio, fiber::access_server::kEdgeFunctionFullRatio);
+    EXPECT_TRUE(second.projects.exclude.empty());
 }
 
 TEST(EdgeFunctionConfigCodec, PhaseDefaultsToRequestHead) {
@@ -122,8 +118,7 @@ TEST(EdgeFunctionConfigCodec, PhaseRequestBodyAccepted) {
     auto parsed = parse_edge_function_index_config(
             R"({"version": 3, "functions": [)"
             R"({"name": "body-scan", "sha256": ")" +
-            std::string(kValidSha256) +
-            R"(", "phase": "request_body", "mounts": [{"projects": {"include": ["loan-*"]}}]}]})");
+            std::string(kValidSha256) + R"(", "phase": "request_body", "projects": {"include": ["loan-*"]}}]})");
     ASSERT_TRUE(parsed.has_value());
     ASSERT_TRUE(parsed->has_value());
     ASSERT_EQ((*parsed)->functions.size(), 1U);
@@ -131,20 +126,19 @@ TEST(EdgeFunctionConfigCodec, PhaseRequestBodyAccepted) {
 }
 
 TEST(EdgeFunctionConfigCodec, UnknownPhaseRejected) {
-    const AccessConfigError error =
-            parse_error(R"({"version": 3, "functions": [)"
-                        R"({"name": "body-scan", "sha256": ")" +
-                        std::string(kValidSha256) +
-                        R"(", "phase": "response", "mounts": [{"projects": {"include": ["loan-*"]}}]}]})");
+    const AccessConfigError error = parse_error(R"({"version": 3, "functions": [)"
+                                                R"({"name": "body-scan", "sha256": ")" +
+                                                std::string(kValidSha256) +
+                                                R"(", "phase": "response", "projects": {"include": ["loan-*"]}}]})");
     EXPECT_EQ(error.code, AccessConfigErrorCode::InvalidField);
     EXPECT_EQ(error.field, "functions[0].phase");
 }
 
 TEST(EdgeFunctionConfigCodec, PhaseMustBeText) {
-    const AccessConfigError error = parse_error(
-            R"({"version": 3, "functions": [)"
-            R"({"name": "body-scan", "sha256": ")" +
-            std::string(kValidSha256) + R"(", "phase": 2, "mounts": [{"projects": {"include": ["loan-*"]}}]}]})");
+    const AccessConfigError error =
+            parse_error(R"({"version": 3, "functions": [)"
+                        R"({"name": "body-scan", "sha256": ")" +
+                        std::string(kValidSha256) + R"(", "phase": 2, "projects": {"include": ["loan-*"]}}]})");
     EXPECT_EQ(error.code, AccessConfigErrorCode::InvalidField);
     EXPECT_EQ(error.field, "functions[0].phase");
 }
@@ -186,15 +180,19 @@ TEST(EdgeFunctionConfigCodec, UnknownFieldsRejected) {
     EXPECT_EQ(entry_error.code, AccessConfigErrorCode::InvalidField);
     // The pre-revision identity fields are gone from the wire: carrying them
     // again is an unknown-field failure, not a conflict.
-    EXPECT_EQ(parse_error(index_json("1", "{\"id\": \"waf\", \"sha256\": \"" + std::string(kValidSha256) +
-                                                  "\", \"mounts\": [" + kAllProjects + "]}"))
+    EXPECT_EQ(parse_error(index_json("1", "{\"id\": \"waf\", \"sha256\": \"" + std::string(kValidSha256) + "\", " +
+                                                  kAllProjects + "}"))
                       .field,
               "functions[0].id");
-    EXPECT_EQ(
-            parse_error(index_json("1", "{\"dataId\": \"ploto.unified-access.edge-function.waf\", \"sha256\": \"" +
-                                                std::string(kValidSha256) + "\", \"mounts\": [" + kAllProjects + "]}"))
-                    .field,
-            "functions[0].dataId");
+    EXPECT_EQ(parse_error(index_json("1", "{\"dataId\": \"ploto.unified-access.edge-function.waf\", \"sha256\": \"" +
+                                                  std::string(kValidSha256) + "\", " + kAllProjects + "}"))
+                      .field,
+              "functions[0].dataId");
+    // The mounts array was flattened onto the function, so it is unknown now.
+    EXPECT_EQ(parse_error(index_json("1", function_json("waf", kValidSha256,
+                                                        R"("mounts": [{"projects": {"include": ["*"]}}])")))
+                      .field,
+              "functions[0].mounts");
 }
 
 TEST(EdgeFunctionConfigCodec, InvalidFunctionNamesRejected) {
@@ -223,90 +221,152 @@ TEST(EdgeFunctionConfigCodec, DuplicateFunctionNameRejected) {
 }
 
 TEST(EdgeFunctionConfigCodec, MissingEntryFieldsRejected) {
-    const AccessConfigError no_name = parse_error(
-            index_json("1", "{\"sha256\": \"" + std::string(kValidSha256) + "\", \"mounts\": [" + kAllProjects + "]}"));
+    const AccessConfigError no_name =
+            parse_error(index_json("1", "{\"sha256\": \"" + std::string(kValidSha256) + "\", " + kAllProjects + "}"));
     EXPECT_EQ(no_name.field, "functions[0].name");
 
     const AccessConfigError no_sha256 =
-            parse_error(index_json("1", "{\"name\": \"waf\", \"mounts\": [" + std::string(kAllProjects) + "]}"));
+            parse_error(index_json("1", "{\"name\": \"waf\", " + std::string(kAllProjects) + "}"));
     EXPECT_EQ(no_sha256.field, "functions[0].sha256");
 
-    const AccessConfigError no_mounts =
+    const AccessConfigError no_projects =
             parse_error(index_json("1", "{\"name\": \"waf\", \"sha256\": \"" + std::string(kValidSha256) + "\"}"));
-    EXPECT_EQ(no_mounts.field, "functions[0].mounts");
-
-    const AccessConfigError empty_mounts = parse_error(index_json("1", function_json("waf", kValidSha256, "")));
-    EXPECT_EQ(empty_mounts.field, "functions[0].mounts");
+    EXPECT_EQ(no_projects.field, "functions[0].projects");
 }
 
 TEST(EdgeFunctionConfigCodec, SelectorMustIncludeAtLeastOneGlob) {
     const AccessConfigError error =
-            parse_error(index_json("1", function_json("waf", kValidSha256, R"({"projects": {"include": []}})")));
+            parse_error(index_json("1", function_json("waf", kValidSha256, R"("projects": {"include": []})")));
     EXPECT_EQ(error.code, AccessConfigErrorCode::InvalidField);
-    EXPECT_EQ(error.field, "functions[0].mounts[0].projects");
+    EXPECT_EQ(error.field, "functions[0].projects");
 }
 
 TEST(EdgeFunctionConfigCodec, SelectorWithoutProjectsRejected) {
     const AccessConfigError error =
-            parse_error(index_json("1", function_json("waf", kValidSha256, R"({"priority": 5})")));
-    EXPECT_EQ(error.field, "functions[0].mounts[0]");
+            parse_error(index_json("1", function_json("waf", kValidSha256, R"("priority": 5)")));
+    EXPECT_EQ(error.field, "functions[0].projects");
 }
 
 TEST(EdgeFunctionConfigCodec, PriorityRangeEnforced) {
     for (const std::string priority: {"-1", "1000001", R"("5")"}) {
-        const AccessConfigError error = parse_error(
-                index_json("1", function_json("waf", kValidSha256,
-                                              R"({"projects": {"include": ["*"]}, "priority": )" + priority + "}")));
+        const AccessConfigError error = parse_error(index_json(
+                "1", function_json("waf", kValidSha256, R"("projects": {"include": ["*"]}, "priority": )" + priority)));
         if (priority == R"("5")") {
             EXPECT_EQ(error.code, AccessConfigErrorCode::InvalidField) << "priority: " << priority;
         } else {
             EXPECT_EQ(error.code, AccessConfigErrorCode::OutOfRange) << "priority: " << priority;
         }
-        EXPECT_EQ(error.field, "functions[0].mounts[0].priority") << "priority: " << priority;
+        EXPECT_EQ(error.field, "functions[0].priority") << "priority: " << priority;
     }
 }
 
 TEST(EdgeFunctionConfigCodec, RatioRangeEnforced) {
     for (const std::string ratio: {"-1", "10001", R"("5")"}) {
-        const AccessConfigError error = parse_error(
-                index_json("1", function_json("waf", kValidSha256,
-                                              R"({"projects": {"include": ["*"]}, "ratio": )" + ratio + "}")));
+        const AccessConfigError error = parse_error(index_json(
+                "1", function_json("waf", kValidSha256, R"("projects": {"include": ["*"]}, "ratio": )" + ratio)));
         if (ratio == R"("5")") {
             EXPECT_EQ(error.code, AccessConfigErrorCode::InvalidField) << "ratio: " << ratio;
         } else {
             EXPECT_EQ(error.code, AccessConfigErrorCode::OutOfRange) << "ratio: " << ratio;
         }
-        EXPECT_EQ(error.field, "functions[0].mounts[0].ratio") << "ratio: " << ratio;
+        EXPECT_EQ(error.field, "functions[0].ratio") << "ratio: " << ratio;
     }
 
     // Both endpoints of the closed domain are legal: 10000 = must-run,
     // 0 = mounted-but-disabled.
     for (const std::string ratio: {"0", "10000"}) {
-        auto parsed = parse_edge_function_index_config(
-                index_json("1", function_json("waf", kValidSha256,
-                                              R"({"projects": {"include": ["*"]}, "ratio": )" + ratio + "}")));
+        auto parsed = parse_edge_function_index_config(index_json(
+                "1", function_json("waf", kValidSha256, R"("projects": {"include": ["*"]}, "ratio": )" + ratio)));
         ASSERT_TRUE(parsed.has_value() && parsed->has_value()) << "ratio: " << ratio;
-        EXPECT_EQ((*parsed)->functions[0].mounts[0].ratio, std::stoi(ratio)) << "ratio: " << ratio;
+        EXPECT_EQ((*parsed)->functions[0].ratio, std::stoi(ratio)) << "ratio: " << ratio;
     }
+}
+
+std::string canary_json(const std::string &name, const std::string &replaces, std::string_view extra = {}) {
+    return function_json(name, kValidSha256,
+                         std::string(kAllProjects) + R"(, "ratio": 300, "replaces": ")" + replaces + "\"" +
+                                 std::string(extra));
+}
+
+TEST(EdgeFunctionConfigCodec, ReplacesParsesAndKeepsTheTargetUntouched) {
+    auto parsed = parse_edge_function_index_config(
+            index_json("1", function_json("auth-v1") + ", " + canary_json("auth-v2", "auth-v1")));
+    ASSERT_TRUE(parsed.has_value() && parsed->has_value());
+    ASSERT_EQ((*parsed)->functions.size(), 2U);
+    EXPECT_TRUE((*parsed)->functions[0].replaces.empty());
+    EXPECT_EQ((*parsed)->functions[1].replaces, "auth-v1");
+    EXPECT_EQ((*parsed)->functions[1].ratio, 300);
+}
+
+TEST(EdgeFunctionConfigCodec, ReplacesDoesNotDependOnDeclarationOrder) {
+    // The server sorts by priority, so a canary may precede its target.
+    auto parsed = parse_edge_function_index_config(
+            index_json("1", canary_json("auth-v2", "auth-v1") + ", " + function_json("auth-v1")));
+    ASSERT_TRUE(parsed.has_value() && parsed->has_value());
+}
+
+TEST(EdgeFunctionConfigCodec, ReplacesMustBeASlug) {
+    const AccessConfigError error = parse_error(index_json("1", canary_json("auth-v2", "Not A Slug")));
+    EXPECT_EQ(error.code, AccessConfigErrorCode::InvalidField);
+    EXPECT_EQ(error.field, "functions[0].replaces");
+
+    const AccessConfigError numeric = parse_error(
+            index_json("1", function_json("auth-v2", kValidSha256, std::string(kAllProjects) + R"(, "replaces": 7)")));
+    EXPECT_EQ(numeric.code, AccessConfigErrorCode::InvalidField);
+    EXPECT_EQ(numeric.field, "functions[0].replaces");
+}
+
+TEST(EdgeFunctionConfigCodec, ReplacesRejectsItselfAndMissingTargets) {
+    const AccessConfigError self = parse_error(index_json("1", canary_json("auth-v2", "auth-v2")));
+    EXPECT_EQ(self.code, AccessConfigErrorCode::InvalidField);
+    EXPECT_EQ(self.field, "functions[0].replaces");
+
+    const AccessConfigError missing = parse_error(index_json("1", canary_json("auth-v2", "auth-v1")));
+    EXPECT_EQ(missing.code, AccessConfigErrorCode::InvalidField);
+    EXPECT_EQ(missing.field, "functions[0].replaces");
+}
+
+TEST(EdgeFunctionConfigCodec, ReplacesRejectsAnotherPhase) {
+    const AccessConfigError error = parse_error(index_json(
+            "1", function_json("auth-v1") + ", " + canary_json("auth-v2", "auth-v1", R"(, "phase": "request_body")")));
+    EXPECT_EQ(error.code, AccessConfigErrorCode::Conflict);
+    EXPECT_EQ(error.field, "functions[1].replaces");
+}
+
+TEST(EdgeFunctionConfigCodec, ReplacesRejectsChains) {
+    const AccessConfigError error =
+            parse_error(index_json("1", function_json("auth-v1") + ", " + canary_json("auth-v2", "auth-v1") + ", " +
+                                                canary_json("auth-v3", "auth-v2")));
+    EXPECT_EQ(error.code, AccessConfigErrorCode::Conflict);
+    EXPECT_EQ(error.field, "functions[2].replaces");
+}
+
+TEST(EdgeFunctionConfigCodec, ReplacesRejectsTwoCanariesOfOneTarget) {
+    // Both would claim the same low buckets and double-run.
+    const AccessConfigError error =
+            parse_error(index_json("1", function_json("auth-v1") + ", " + canary_json("auth-v2", "auth-v1") + ", " +
+                                                canary_json("auth-v3", "auth-v1")));
+    EXPECT_EQ(error.code, AccessConfigErrorCode::Conflict);
+    EXPECT_EQ(error.field, "functions[2].replaces");
 }
 
 TEST(EdgeFunctionConfigCodec, GlobCharsetEnforced) {
     for (const std::string glob: {std::string("a;b"), std::string("")}) {
-        const AccessConfigError error = parse_error(index_json(
-                "1", function_json("waf", kValidSha256, R"({"projects": {"include": [")" + glob + R"("]}})")));
+        const AccessConfigError error = parse_error(
+                index_json("1", function_json("waf", kValidSha256, R"("projects": {"include": [")" + glob + R"("]})")));
         EXPECT_EQ(error.code, AccessConfigErrorCode::InvalidField) << "glob: '" << glob << "'";
-        EXPECT_EQ(error.field, "functions[0].mounts[0].projects.include[0]") << "glob: '" << glob << "'";
+        EXPECT_EQ(error.field, "functions[0].projects.include[0]") << "glob: '" << glob << "'";
     }
     // A raw newline inside a JSON string never reaches the glob check; the
     // JSON parser rejects control characters first.
-    const AccessConfigError json_error = parse_error(
-            index_json("1", function_json("waf", kValidSha256, "{\"projects\": {\"include\": [\"a\nb\"]}}")));
+    const AccessConfigError json_error =
+            parse_error(index_json("1", function_json("waf", kValidSha256, "\"projects\": {\"include\": [\"a\nb\"]}")));
     EXPECT_EQ(json_error.code, AccessConfigErrorCode::InvalidJson);
 }
 
 TEST(EdgeFunctionConfigCodec, LimitsEnforced) {
     const std::string content =
-            index_json("1", function_json("waf", kValidSha256, R"({"projects": {"include": ["*", "loan-*"]}})"));
+            index_json("1", function_json("waf", kValidSha256, R"("projects": {"include": ["*", "loan-*"]})"));
 
     AccessConfigLimits small{};
     small.edge_functions.max_functions = 0;
@@ -319,7 +379,7 @@ TEST(EdgeFunctionConfigCodec, LimitsEnforced) {
     tiny_glob.edge_functions.max_globs_per_selector = 1;
     error = parse_edge_function_index_config(content, tiny_glob);
     ASSERT_FALSE(error.has_value());
-    EXPECT_EQ(error.error().field, "functions[0].mounts[0].projects.include");
+    EXPECT_EQ(error.error().field, "functions[0].projects.include");
 
     AccessConfigLimits tiny_payload{};
     tiny_payload.edge_functions.max_payload_bytes = 8;
@@ -334,9 +394,7 @@ TEST(EdgeFunctionConfigLimits, StandaloneValidatorChecksConstructedConfigs) {
     EdgeFunctionIndexEntry entry;
     entry.name = "waf";
     entry.sha256_hex = kValidSha256;
-    EdgeFunctionMountConfig mount;
-    mount.projects.include.push_back("*");
-    entry.mounts.push_back(mount);
+    entry.projects.include.push_back("*");
     config.functions.push_back(entry);
 
     EXPECT_TRUE(validate_edge_function_index_limits(config).has_value());
@@ -357,7 +415,7 @@ TEST(EdgeFunctionConfigLimits, StandaloneValidatorChecksConstructedConfigs) {
     small_glob.edge_functions.max_glob_bytes = 0;
     error = validate_edge_function_index_limits(config, small_glob);
     ASSERT_FALSE(error.has_value());
-    EXPECT_EQ(error.error().field, "functions[0].mounts[0].projects.include[0]");
+    EXPECT_EQ(error.error().field, "functions[0].projects.include[0]");
 }
 
 } // namespace

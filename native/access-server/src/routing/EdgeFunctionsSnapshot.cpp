@@ -37,32 +37,9 @@ bool star_glob(std::string_view pattern, std::string_view value) noexcept {
     return pattern_pos == pattern.size();
 }
 
-// First mount (declaration order) whose selector matches the project decides
-// the mount; later mounts of the same function are ignored for that project.
-const EdgeFunctionMountConfig *matching_mount(const EdgeFunctionIndexEntry &function, std::string_view project) {
-    for (const EdgeFunctionMountConfig &mount: function.mounts) {
-        bool included = false;
-        for (const std::string &glob: mount.projects.include) {
-            if (star_glob(glob, project)) {
-                included = true;
-                break;
-            }
-        }
-        if (!included) {
-            continue;
-        }
-        bool excluded = false;
-        for (const std::string &glob: mount.projects.exclude) {
-            if (star_glob(glob, project)) {
-                excluded = true;
-                break;
-            }
-        }
-        if (!excluded) {
-            return &mount;
-        }
-    }
-    return nullptr;
+bool selector_matches(const EdgeFunctionProjectsSelector &selector, std::string_view project) {
+    const auto matches = [project](const std::string &glob) { return star_glob(glob, project); };
+    return std::ranges::any_of(selector.include, matches) && std::ranges::none_of(selector.exclude, matches);
 }
 
 } // namespace
@@ -82,6 +59,19 @@ EdgeFunctionMountTable::build(const EdgeFunctionsState &state, std::span<const s
         table->name_storage_.push_back(function.name);
     }
 
+    // replacer_of[i] is the canary taking over function i, if any. The codec
+    // guarantees at most one per target.
+    std::vector<const EdgeFunctionIndexEntry *> replacer_of(state.index.functions.size(), nullptr);
+    for (const EdgeFunctionIndexEntry &function: state.index.functions) {
+        if (function.replaces.empty()) {
+            continue;
+        }
+        const auto target = std::ranges::find(state.index.functions, function.replaces, &EdgeFunctionIndexEntry::name);
+        if (target != state.index.functions.end()) {
+            replacer_of[static_cast<std::size_t>(target - state.index.functions.begin())] = &function;
+        }
+    }
+
     // Per project: the mounted functions split into head and body chains
     // (declaration order), then a stable sort by priority per chain so equal
     // priorities keep declaration order.
@@ -96,15 +86,17 @@ EdgeFunctionMountTable::build(const EdgeFunctionsState &state, std::span<const s
         ProjectGroup group{.project = project, .head = {}, .body = {}};
         for (std::size_t function_index = 0; function_index < state.index.functions.size(); ++function_index) {
             const EdgeFunctionIndexEntry &function = state.index.functions[function_index];
-            const EdgeFunctionMountConfig *mount = matching_mount(function, project);
-            if (mount == nullptr) {
+            if (!selector_matches(function.projects, project)) {
                 continue;
             }
+            const EdgeFunctionIndexEntry *const replacer = replacer_of[function_index];
+            const bool replaced = replacer != nullptr && selector_matches(replacer->projects, project);
             EdgeFunctionMounted mounted{
                     .name = table->name_storage_[function_index],
                     .program = table->owned_programs_[function_index].get(),
-                    .priority = mount->priority,
-                    .ratio = mount->ratio,
+                    .priority = function.priority,
+                    .bucket_begin = replaced ? replacer->ratio : 0,
+                    .bucket_end = function.ratio,
             };
             if (function.phase == EdgeFunctionPhase::RequestBody) {
                 group.body.push_back(mounted);

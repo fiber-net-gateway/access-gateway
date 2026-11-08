@@ -153,7 +153,8 @@ HTTPS 重定向在明文监听器上生效。在反向代理之后，客户端�
 边缘函数是挂载在一组 Project 上的脚本，可以检查请求，并在它进入路由的常规处理之前直接响应。WAF 基于边缘函数实现，也可以手写函数。
 
 - **阶段**：`request_head` 在路由匹配之前运行，所以未命中路由的路径同样受保护。`request_body` 在匹配之后运行，读取缓冲的 `$req.body`，仅限开启 `edge_function_body: true` 的 PROXY 路由，且限于 JSON、表单、文本和 XML 类型，上限 1 MiB。
-- **挂载**：每个挂载包含项目 `include` 和 `exclude` glob、执行 `priority`，以及按客户端 IP 粘性采样的 `ratio`。
+- **挂载**：每个函数有项目 `include` 和 `exclude` glob、执行 `priority`，以及按客户端 IP 粘性采样的 `ratio`。
+- **版本灰度**：`replaces` 声明新版本在 `ratio` 比例内取代哪个函数。每个请求只跑其中一个，老函数的配置不动，删掉新函数即可还原。在 CDN 或负载均衡之后，需要配置 `ACCESS_SERVER_CLIENT_METADATA_MODE`，让采样看到真实客户端而不是中间节点。
 - **能力**：读取请求，通过 `resp.*` 提前响应，用 `ctx.report(event, label)` 计数事件，用 `cidr` directive 判断地址。函数不能修改请求，也不能调用上游。
 - **失败处理**：运行时错误默认 fail-open。设置 `ACCESS_SERVER_EDGE_FUNCTION_FAIL_CLOSE=true` 后改为返回 503。
 
@@ -250,7 +251,7 @@ WAF 规则在 Console 中编写并编译成边缘函数，数据面没有任何 
 
 ### 手写边缘函数
 
-专门的页面用于编辑函数脚本、阶段和挂载，并提供逐函数的 native 编译预览。手写函数和 WAF 生成的函数一起发布。`waf` 和 `waf-*` 是生成器的保留名，一份快照最多 64 个函数。
+专门的页面用于编辑函数脚本、阶段和挂载，并提供逐函数的 native 编译预览。可以从现有函数创建灰度版本，并在它接管全部流量后转正。手写函数和 WAF 生成的函数一起发布。`waf` 和 `waf-*` 是生成器的保留名，一份快照最多 64 个函数。
 
 ### 权限与审计
 

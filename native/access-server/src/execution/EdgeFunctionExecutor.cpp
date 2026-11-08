@@ -24,13 +24,16 @@ DEFINE_LOGGER(LOG_EDGE_FUNCTION, kAccessServerEdgeFunctionLogger);
 constexpr std::string_view kErrorReasonException = "exception";
 constexpr std::string_view kErrorReasonAbort = "abort";
 
-// Sticky sampling bucket (design §3.1 挂载采样): CRC-32 over the peer IP
+// Sticky sampling bucket (design §3.1 挂载采样): CRC-32 over the client IP
 // bytes (v4 or v6, branch-free), so the same client lands in the same bucket
-// on every request and on every instance. Computed at most once per request
-// and shared by all sampled mounts, which keeps cohorts monotone: raising a
-// ratio only adds clients, never swaps them.
-std::uint32_t sampling_bucket(const net::IpAddress &peer) noexcept {
-    return fiber::util::Crc32::compute(std::span<const std::uint8_t>{peer.data(), peer.byte_size()}) %
+// on every request and on every instance. The resolved client address is what
+// makes that true behind a CDN or load balancer, where the socket peer is an
+// intermediary; it falls back to the peer when none resolved. Computed at most
+// once per request and shared by all sampled functions, which keeps cohorts
+// monotone: raising a ratio only adds clients, never swaps them.
+std::uint32_t sampling_bucket(const ClientMetadata &client) noexcept {
+    const net::IpAddress &address = client.has_client_address ? client.client_address : client.peer_address;
+    return fiber::util::Crc32::compute(std::span<const std::uint8_t>{address.data(), address.byte_size()}) %
            static_cast<std::uint32_t>(kEdgeFunctionFullRatio);
 }
 
@@ -91,17 +94,18 @@ EdgeFunctionExecutor::run(std::span<const EdgeFunctionMounted> mounted, http_scr
     // is lazy — full-ratio requests never compute it.
     std::optional<std::uint32_t> bucket;
     for (const EdgeFunctionMounted &entry: mounted) {
-        if (entry.ratio < kEdgeFunctionFullRatio) {
-            if (entry.ratio <= 0) {
-                // ratio 0 is mounted-but-disabled: subscription and evidence
-                // stay live, execution stays off.
+        if (!entry.always_runs()) {
+            if (entry.never_runs()) {
+                // Mounted but disabled, or fully taken over by a canary:
+                // subscription and evidence stay live, execution stays off.
                 telemetry.record_edge_function_sampled_out(entry.name, project);
                 continue;
             }
             if (!bucket.has_value()) {
-                bucket = sampling_bucket(telemetry.client_metadata().peer_address);
+                bucket = sampling_bucket(telemetry.client_metadata());
             }
-            if (*bucket >= static_cast<std::uint32_t>(entry.ratio)) {
+            if (*bucket < static_cast<std::uint32_t>(entry.bucket_begin) ||
+                *bucket >= static_cast<std::uint32_t>(entry.bucket_end)) {
                 telemetry.record_edge_function_sampled_out(entry.name, project);
                 continue;
             }

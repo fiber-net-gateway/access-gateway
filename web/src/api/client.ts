@@ -21,7 +21,6 @@ import type {
   TlsCertificateReleaseView,
   WafCompilePreviewView,
   WafEdgeFunctionDraftFunction,
-  WafEdgeFunctionMountDraft,
   WafEdgeFunctionsDraft,
   WafEdgeFunctionsDraftView,
   WafEdgeFunctionsView,
@@ -115,7 +114,7 @@ function hasPositiveIntegers(value: Record<string, unknown>, keys: readonly stri
 function isAccessConfigLimits(value: unknown): value is AccessConfigLimits {
   if (
     !isRecord(value) ||
-    value.schemaVersion !== 5 ||
+    value.schemaVersion !== 6 ||
     !isRecord(value.projectList) ||
     !isRecord(value.projectRoute) ||
     !isRecord(value.grayRules) ||
@@ -168,7 +167,6 @@ function isAccessConfigLimits(value: unknown): value is AccessConfigLimits {
       'maxPayloadBytes',
       'maxFunctions',
       'maxFunctionNameBytes',
-      'maxMountsPerFunction',
       'maxGlobsPerSelector',
       'maxGlobBytes',
       'maxScriptPayloadBytes',
@@ -938,17 +936,6 @@ function isWafPolicyDraft(value: unknown): value is WafPolicyDraftView {
   )
 }
 
-function isWafEdgeFunctionMountDraft(value: unknown): value is WafEdgeFunctionMountDraft {
-  return (
-    isRecord(value) &&
-    isRecord(value.projects) &&
-    isStringList(value.projects.include) &&
-    (value.projects.exclude === undefined || isStringList(value.projects.exclude)) &&
-    (value.priority === undefined || typeof value.priority === 'number') &&
-    (value.ratio === undefined || typeof value.ratio === 'number')
-  )
-}
-
 function isWafEdgeFunctionDraftFunction(value: unknown): value is WafEdgeFunctionDraftFunction {
   return (
     isRecord(value) &&
@@ -959,8 +946,12 @@ function isWafEdgeFunctionDraftFunction(value: unknown): value is WafEdgeFunctio
       value.phase === 'request_head' ||
       value.phase === 'request_body') &&
     typeof value.script === 'string' &&
-    Array.isArray(value.mounts) &&
-    value.mounts.every(isWafEdgeFunctionMountDraft)
+    isRecord(value.projects) &&
+    isStringList(value.projects.include) &&
+    (value.projects.exclude === undefined || isStringList(value.projects.exclude)) &&
+    (value.priority === undefined || typeof value.priority === 'number') &&
+    (value.ratio === undefined || typeof value.ratio === 'number') &&
+    (value.replaces === undefined || typeof value.replaces === 'string')
   )
 }
 
@@ -1034,11 +1025,10 @@ function isWafFunctionCompilation(value: unknown): value is WafFunctionCompilati
     typeof value.functionName === 'string' &&
     typeof value.script === 'string' &&
     typeof value.scriptSha256 === 'string' &&
-    typeof value.mountPriority === 'number' &&
-    Array.isArray(value.mounts) &&
-    value.mounts.every(
-      (mount) => isRecord(mount) && isStringList(mount.include) && isStringList(mount.exclude),
-    ) &&
+    typeof value.priority === 'number' &&
+    isRecord(value.projects) &&
+    isStringList(value.projects.include) &&
+    isStringList(value.projects.exclude) &&
     isStringList(value.ruleOrder) &&
     Array.isArray(value.directives) &&
     value.directives.every(
@@ -1148,16 +1138,12 @@ function isWafEdgeFunctions(value: unknown): value is WafEdgeFunctionsView {
         (entry.phase === null ||
           entry.phase === 'request_head' ||
           entry.phase === 'request_body') &&
-        Array.isArray(entry.mounts) &&
-        entry.mounts.every(
-          (mount) =>
-            isRecord(mount) &&
-            isRecord(mount.projects) &&
-            isStringList(mount.projects.include) &&
-            isStringList(mount.projects.exclude) &&
-            (mount.priority === null || typeof mount.priority === 'number') &&
-            (mount.ratio === null || typeof mount.ratio === 'number'),
-        ),
+        isRecord(entry.projects) &&
+        isStringList(entry.projects.include) &&
+        isStringList(entry.projects.exclude) &&
+        (entry.priority === null || typeof entry.priority === 'number') &&
+        (entry.ratio === null || typeof entry.ratio === 'number') &&
+        (entry.replaces === null || typeof entry.replaces === 'string'),
     )
   ) {
     return false

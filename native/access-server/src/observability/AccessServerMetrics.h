@@ -244,9 +244,9 @@ public:
         // ctx.report calls dropped because the per-function per-request report
         // budget was exhausted (design §3.5 overflow counter).
         void edge_function_report_overflow(std::string_view function) noexcept;
-        // Mounts skipped by sticky ratio sampling (design §3.1 挂载采样):
-        // the function stayed mounted but this request's peer bucket fell
-        // outside the mount's ratio (or the ratio is 0 = disabled).
+        // Executions skipped by sticky sampling (design §3.1 挂载采样): the
+        // function stayed mounted but this request's client bucket fell
+        // outside the function's window (ratio 0, or a replacing canary).
         void edge_function_sampled_out(std::string_view function, std::string_view project) noexcept;
         // Body-phase chains that were mounted for the project but not executed,
         // by the fixed skip vocabulary (route not opted in / route not a proxy

@@ -247,8 +247,8 @@ const wafCompilationSchema = {
               'functionName',
               'script',
               'scriptSha256',
-              'mountPriority',
-              'mounts',
+              'priority',
+              'projects',
               'ruleOrder',
               'directives',
             ],
@@ -257,17 +257,14 @@ const wafCompilationSchema = {
               functionName: { type: 'string' },
               script: { type: 'string' },
               scriptSha256: { type: 'string', pattern: '^[0-9a-f]{64}$' },
-              mountPriority: { type: 'integer' },
-              mounts: {
-                type: 'array',
-                items: {
-                  type: 'object',
-                  additionalProperties: false,
-                  required: ['include', 'exclude'],
-                  properties: {
-                    include: { type: 'array', items: { type: 'string' } },
-                    exclude: { type: 'array', items: { type: 'string' } },
-                  },
+              priority: { type: 'integer' },
+              projects: {
+                type: 'object',
+                additionalProperties: false,
+                required: ['include', 'exclude'],
+                properties: {
+                  include: { type: 'array', items: { type: 'string' } },
+                  exclude: { type: 'array', items: { type: 'string' } },
                 },
               },
               ruleOrder: { type: 'array', items: { type: 'string' } },
@@ -354,11 +351,23 @@ interface SaveWafPolicyBody {
 
 // Coarse shape only: the service re-validates with precise field paths
 // (edge-function-validate.ts) and the native validator compiles each script.
-const edgeFunctionMountSchema = {
+const edgeFunctionNameSchema = {
+  type: 'string',
+  minLength: 1,
+  maxLength: 64,
+  pattern: '^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$',
+} as const
+
+const edgeFunctionDraftFunctionSchema = {
   type: 'object',
   additionalProperties: false,
-  required: ['projects'],
+  required: ['name', 'enabled', 'script', 'projects'],
   properties: {
+    name: edgeFunctionNameSchema,
+    description: { type: 'string', minLength: 1, maxLength: 255 },
+    enabled: { type: 'boolean' },
+    phase: { type: 'string', enum: ['request_head', 'request_body'] },
+    script: { type: 'string', minLength: 1, maxLength: 1048576 },
     projects: {
       type: 'object',
       additionalProperties: false,
@@ -379,25 +388,7 @@ const edgeFunctionMountSchema = {
     },
     priority: { type: 'integer', minimum: 0, maximum: 1000000 },
     ratio: { type: 'integer', minimum: 0, maximum: 10000 },
-  },
-} as const
-
-const edgeFunctionDraftFunctionSchema = {
-  type: 'object',
-  additionalProperties: false,
-  required: ['name', 'enabled', 'script', 'mounts'],
-  properties: {
-    name: {
-      type: 'string',
-      minLength: 1,
-      maxLength: 64,
-      pattern: '^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$',
-    },
-    description: { type: 'string', minLength: 1, maxLength: 255 },
-    enabled: { type: 'boolean' },
-    phase: { type: 'string', enum: ['request_head', 'request_body'] },
-    script: { type: 'string', minLength: 1, maxLength: 1048576 },
-    mounts: { type: 'array', maxItems: 16, items: edgeFunctionMountSchema },
+    replaces: edgeFunctionNameSchema,
   },
 } as const
 
@@ -852,7 +843,15 @@ function registerWafReleaseRoutes(
                     items: {
                       type: 'object',
                       additionalProperties: false,
-                      required: ['name', 'sha256', 'phase', 'mounts'],
+                      required: [
+                        'name',
+                        'sha256',
+                        'phase',
+                        'projects',
+                        'priority',
+                        'ratio',
+                        'replaces',
+                      ],
                       properties: {
                         name: { type: 'string' },
                         sha256: { type: ['string', 'null'] },
@@ -860,27 +859,18 @@ function registerWafReleaseRoutes(
                           type: ['string', 'null'],
                           enum: ['request_head', 'request_body', null],
                         },
-                        mounts: {
-                          type: 'array',
-                          items: {
-                            type: 'object',
-                            additionalProperties: false,
-                            required: ['projects', 'priority', 'ratio'],
-                            properties: {
-                              projects: {
-                                type: 'object',
-                                additionalProperties: false,
-                                required: ['include', 'exclude'],
-                                properties: {
-                                  include: { type: 'array', items: { type: 'string' } },
-                                  exclude: { type: 'array', items: { type: 'string' } },
-                                },
-                              },
-                              priority: { type: ['integer', 'null'] },
-                              ratio: { type: ['integer', 'null'], minimum: 0, maximum: 10000 },
-                            },
+                        projects: {
+                          type: 'object',
+                          additionalProperties: false,
+                          required: ['include', 'exclude'],
+                          properties: {
+                            include: { type: 'array', items: { type: 'string' } },
+                            exclude: { type: 'array', items: { type: 'string' } },
                           },
                         },
+                        priority: { type: ['integer', 'null'] },
+                        ratio: { type: ['integer', 'null'], minimum: 0, maximum: 10000 },
+                        replaces: { type: ['string', 'null'] },
                       },
                     },
                   },

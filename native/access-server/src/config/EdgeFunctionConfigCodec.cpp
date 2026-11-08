@@ -3,6 +3,7 @@
 #include "AccessConfigErrorBuilder.h"
 #include "AccessConfigJson.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -125,70 +126,34 @@ DecodeResult<std::vector<std::string>> glob_list(const AccessJsonValue &value, c
     return result;
 }
 
-DecodeResult<EdgeFunctionMountConfig> mount_config(const AccessJsonValue &value, const std::string &field,
-                                                   const EdgeFunctionLimits &limits) {
+DecodeResult<EdgeFunctionProjectsSelector> projects_selector(const AccessJsonValue &value, const std::string &field,
+                                                             const EdgeFunctionLimits &limits) {
     if (!value.is_object()) {
-        return std::unexpected(invalid_field(field, "expected a mount object"));
+        return std::unexpected(invalid_field(field, "expected a projects selector"));
     }
-    EdgeFunctionMountConfig mount;
-    bool have_projects = false;
-    for (const auto &property: value.as_object()) {
-        if (property.key == "projects") {
-            have_projects = true;
-            const std::string projects_field = child(field, "projects");
-            if (!property.value.is_object()) {
-                return std::unexpected(invalid_field(projects_field, "expected a projects selector"));
-            }
-            for (const auto &selector: property.value.as_object()) {
-                const std::string selector_path = child(projects_field, selector.key);
-                if (selector.key == "include") {
-                    auto decoded = glob_list(selector.value, selector_path, limits);
-                    if (!decoded) {
-                        return std::unexpected(std::move(decoded.error()));
-                    }
-                    mount.projects.include = std::move(*decoded);
-                } else if (selector.key == "exclude") {
-                    auto decoded = glob_list(selector.value, selector_path, limits);
-                    if (!decoded) {
-                        return std::unexpected(std::move(decoded.error()));
-                    }
-                    mount.projects.exclude = std::move(*decoded);
-                } else {
-                    return unknown_key(selector_path);
-                }
-            }
-            if (mount.projects.include.empty()) {
-                return std::unexpected(
-                        invalid_field(projects_field, "selector must declare at least one include glob"));
-            }
-        } else if (property.key == "priority") {
-            const std::string priority_field = child(field, "priority");
-            auto decoded = strict_int32(property.value, priority_field);
+    EdgeFunctionProjectsSelector projects;
+    for (const auto &selector: value.as_object()) {
+        const std::string selector_path = child(field, selector.key);
+        if (selector.key == "include") {
+            auto decoded = glob_list(selector.value, selector_path, limits);
             if (!decoded) {
                 return std::unexpected(std::move(decoded.error()));
             }
-            if (*decoded < 0 || *decoded > kMaxPriority) {
-                return std::unexpected(out_of_range(priority_field, "priority must be within [0, 1000000]"));
-            }
-            mount.priority = *decoded;
-        } else if (property.key == "ratio") {
-            const std::string ratio_field = child(field, "ratio");
-            auto decoded = strict_int32(property.value, ratio_field);
+            projects.include = std::move(*decoded);
+        } else if (selector.key == "exclude") {
+            auto decoded = glob_list(selector.value, selector_path, limits);
             if (!decoded) {
                 return std::unexpected(std::move(decoded.error()));
             }
-            if (*decoded < 0 || *decoded > kEdgeFunctionFullRatio) {
-                return std::unexpected(out_of_range(ratio_field, "ratio must be within [0, 10000]"));
-            }
-            mount.ratio = *decoded;
+            projects.exclude = std::move(*decoded);
         } else {
-            return unknown_key(child(field, property.key));
+            return unknown_key(selector_path);
         }
     }
-    if (!have_projects) {
-        return std::unexpected(invalid_field(field, "mount is missing the projects selector"));
+    if (projects.include.empty()) {
+        return std::unexpected(invalid_field(field, "selector must declare at least one include glob"));
     }
-    return mount;
+    return projects;
 }
 
 DecodeResult<EdgeFunctionIndexEntry> index_entry(const AccessJsonValue &value, const std::string &field,
@@ -197,7 +162,7 @@ DecodeResult<EdgeFunctionIndexEntry> index_entry(const AccessJsonValue &value, c
         return std::unexpected(invalid_field(field, "expected a function object"));
     }
     EdgeFunctionIndexEntry entry;
-    bool have_mounts = false;
+    bool have_projects = false;
     for (const auto &property: value.as_object()) {
         const std::string path = child(field, property.key);
         if (property.key == "name") {
@@ -226,23 +191,36 @@ DecodeResult<EdgeFunctionIndexEntry> index_entry(const AccessJsonValue &value, c
             } else {
                 return std::unexpected(invalid_field(path, "phase must be request_head or request_body"));
             }
-        } else if (property.key == "mounts") {
-            have_mounts = true;
-            if (!property.value.is_array() || property.value.as_array().empty()) {
-                return std::unexpected(invalid_field(path, "expected a non-empty mounts array"));
+        } else if (property.key == "projects") {
+            have_projects = true;
+            auto decoded = projects_selector(property.value, path, limits);
+            if (!decoded) {
+                return std::unexpected(std::move(decoded.error()));
             }
-            if (property.value.as_array().size() > limits.max_mounts_per_function) {
-                return std::unexpected(limit_exceeded(path, "mount count exceeds the configured limit"));
+            entry.projects = std::move(*decoded);
+        } else if (property.key == "priority") {
+            auto decoded = strict_int32(property.value, path);
+            if (!decoded) {
+                return std::unexpected(std::move(decoded.error()));
             }
-            const auto &array = property.value.as_array();
-            entry.mounts.reserve(array.size());
-            for (std::size_t index = 0; index < array.size(); ++index) {
-                auto decoded = mount_config(array[index], index_path(path, index), limits);
-                if (!decoded) {
-                    return std::unexpected(std::move(decoded.error()));
-                }
-                entry.mounts.push_back(std::move(*decoded));
+            if (*decoded < 0 || *decoded > kMaxPriority) {
+                return std::unexpected(out_of_range(path, "priority must be within [0, 1000000]"));
             }
+            entry.priority = *decoded;
+        } else if (property.key == "ratio") {
+            auto decoded = strict_int32(property.value, path);
+            if (!decoded) {
+                return std::unexpected(std::move(decoded.error()));
+            }
+            if (*decoded < 0 || *decoded > kEdgeFunctionFullRatio) {
+                return std::unexpected(out_of_range(path, "ratio must be within [0, 10000]"));
+            }
+            entry.ratio = *decoded;
+        } else if (property.key == "replaces") {
+            if (!property.value.is_text() || !valid_function_name(property.value.as_text())) {
+                return std::unexpected(invalid_field(path, "replaces must name a function slug"));
+            }
+            entry.replaces.assign(property.value.as_text());
         } else {
             return unknown_key(path);
         }
@@ -253,10 +231,45 @@ DecodeResult<EdgeFunctionIndexEntry> index_entry(const AccessJsonValue &value, c
     if (entry.sha256_hex.empty()) {
         return std::unexpected(invalid_field(child(field, "sha256"), "function is missing the sha256 field"));
     }
-    if (!have_mounts) {
-        return std::unexpected(invalid_field(child(field, "mounts"), "function is missing the mounts field"));
+    if (!have_projects) {
+        return std::unexpected(invalid_field(child(field, "projects"), "function is missing the projects selector"));
     }
     return entry;
+}
+
+// `replaces` relationships need the whole index, so they run after every entry
+// decoded. The rules keep one project's bucket windows disjoint: a chain or a
+// second canary of one target would leave two functions claiming a bucket. The
+// index is capped at max_functions, so the quadratic scan stays small.
+DecodeResult<void> validate_replaces(const EdgeFunctionIndexConfig &config) {
+    const auto &functions = config.functions;
+    for (std::size_t index = 0; index < functions.size(); ++index) {
+        const EdgeFunctionIndexEntry &function = functions[index];
+        if (function.replaces.empty()) {
+            continue;
+        }
+        const std::string field = child(index_path("functions", index), "replaces");
+        if (function.replaces == function.name) {
+            return std::unexpected(invalid_field(field, "function cannot replace itself"));
+        }
+        const auto target = std::ranges::find(functions, function.replaces, &EdgeFunctionIndexEntry::name);
+        if (target == functions.end()) {
+            return std::unexpected(invalid_field(field, "replaces target is not in the index"));
+        }
+        if (target->phase != function.phase) {
+            return config_error(AccessConfigErrorCode::Conflict, field, "replaces target runs in a different phase");
+        }
+        if (!target->replaces.empty()) {
+            return config_error(AccessConfigErrorCode::Conflict, field, "replaces target must not replace another");
+        }
+        for (std::size_t other = 0; other < index; ++other) {
+            if (functions[other].replaces == function.replaces) {
+                return config_error(AccessConfigErrorCode::Conflict, field,
+                                    "replaces target is already replaced by " + functions[other].name);
+            }
+        }
+    }
+    return {};
 }
 
 } // namespace
@@ -328,6 +341,9 @@ EdgeFunctionIndexResult parse_edge_function_index_config(std::string_view conten
     }
     if (auto within_limits = validate_edge_function_index_limits(config, limits); !within_limits) {
         return std::unexpected(std::move(within_limits.error()));
+    }
+    if (auto valid = validate_replaces(config); !valid) {
+        return std::unexpected(std::move(valid.error()));
     }
     return std::optional<EdgeFunctionIndexConfig>(std::move(config));
 }

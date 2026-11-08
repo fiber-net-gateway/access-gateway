@@ -16,7 +16,7 @@ const YamlCodeEditor = lazy(async () => {
 })
 
 const maxFunctions = 64
-const maxMountsPerFunction = 16
+const fullRatio = 10000
 const functionNamePattern = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/u
 
 function csvToList(value: string): string[] {
@@ -31,8 +31,49 @@ function newFunction(name: string): WafEdgeFunctionDraftFunction {
     name,
     enabled: true,
     script: 'return true;',
-    mounts: [{ projects: { include: ['*'] } }],
+    projects: { include: ['*'] },
   }
+}
+
+// `auth` → `auth-v2`, `auth-v2` → `auth-v3`, skipping names already taken. A
+// version slug is the only way to run two scripts side by side: the name is
+// the function's identity and derives its script Data ID.
+function nextVersionName(name: string, taken: ReadonlySet<string>): string {
+  const match = /^(.+)-v(\d+)$/u.exec(name)
+  const base = match?.[1] ?? name
+  for (let version = match ? Number(match[2]) + 1 : 2; ; version += 1) {
+    const suffix = `-v${version}`
+    const candidate = `${base.slice(0, 64 - suffix.length).replace(/-+$/u, '')}${suffix}`
+    if (!taken.has(candidate)) return candidate
+  }
+}
+
+function selectorKey(projects: WafEdgeFunctionDraftFunction['projects']): string {
+  const sorted = (list: readonly string[]): string => [...list].sort().join(',')
+  return `${sorted(projects.include)}|${sorted(projects.exclude ?? [])}`
+}
+
+// Promotion deletes the replaced function, so it must be a pure cleanup: at
+// full ratio over the same projects the target already runs nowhere, and
+// removing it changes no request. Anything else would silently unmount the
+// target from projects the canary does not cover.
+function promotionBlocker(
+  canary: WafEdgeFunctionDraftFunction,
+  target: WafEdgeFunctionDraftFunction | undefined,
+): string | null {
+  if (!target) return `草稿中没有函数 ${canary.replaces ?? ''}`
+  if (!canary.enabled) return '请先启用本函数'
+  if ((canary.ratio ?? fullRatio) !== fullRatio) return '请先把采样比例升到 10000'
+  if (selectorKey(canary.projects) !== selectorKey(target.projects)) {
+    return `挂载范围需与 ${target.name} 一致`
+  }
+  return null
+}
+
+function rolloutSummary(fn: WafEdgeFunctionDraftFunction): string {
+  const ratio = fn.ratio ?? fullRatio
+  if (fn.replaces) return `灰度 ${ratio}/10000 取代 ${fn.replaces}`
+  return ratio === fullRatio ? '全量' : `采样 ${ratio}/10000`
 }
 
 // Byte offset → 1-based line/column for editor diagnostics.
@@ -143,6 +184,26 @@ export function WafEdgeFunctionsPage() {
     if (selected?.name === name) setSelectedName(null)
   }
 
+  // A new version starts as a 1% canary of the source, same script and scope.
+  const createCanary = (source: WafEdgeFunctionDraftFunction): void => {
+    const name = nextVersionName(source.name, new Set(functions.map((fn) => fn.name)))
+    updateFunctions((current) => [
+      ...current,
+      { ...source, name, ratio: 100, replaces: source.name },
+    ])
+    setSelectedName(name)
+  }
+
+  const promote = (canary: WafEdgeFunctionDraftFunction): void => {
+    updateFunctions((current) =>
+      current
+        .filter((fn) => fn.name !== canary.replaces)
+        .map((fn) =>
+          fn.name === canary.name ? { ...fn, ratio: undefined, replaces: undefined } : fn,
+        ),
+    )
+  }
+
   if (loading) {
     return <div className="route-empty-state page-loading-state">正在加载边缘函数…</div>
   }
@@ -246,8 +307,8 @@ export function WafEdgeFunctionsPage() {
                   <strong>{fn.name}</strong>
                   <small>
                     {fn.enabled ? '已启用' : '已停用'} ·{' '}
-                    {fn.phase === 'request_body' ? '请求体' : '请求头'} · {fn.mounts.length} 个挂载
-                    · {fn.script.split('\n').length} 行脚本
+                    {fn.phase === 'request_body' ? '请求体' : '请求头'} · {rolloutSummary(fn)} ·{' '}
+                    {fn.script.split('\n').length} 行脚本
                   </small>
                 </span>
               </button>
@@ -260,7 +321,10 @@ export function WafEdgeFunctionsPage() {
         <FunctionEditor
           diagnostics={scriptDiagnostics(preview, functions.indexOf(selected), selected)}
           func={selected}
+          functions={functions}
           key={selected.name}
+          onCreateCanary={() => createCanary(selected)}
+          onPromote={() => promote(selected)}
           onRemove={() => removeFunction(selected.name)}
           onUpdate={updateSelected}
         />
@@ -336,27 +400,55 @@ export function WafEdgeFunctionsPage() {
 
 interface FunctionEditorProps {
   func: WafEdgeFunctionDraftFunction
+  functions: readonly WafEdgeFunctionDraftFunction[]
   diagnostics: readonly YamlCodeEditorDiagnostic[]
   onUpdate(next: WafEdgeFunctionDraftFunction): void
   onRemove(): void
+  onCreateCanary(): void
+  onPromote(): void
 }
 
-function FunctionEditor({ func, diagnostics, onUpdate, onRemove }: FunctionEditorProps) {
+function FunctionEditor({
+  func,
+  functions,
+  diagnostics,
+  onUpdate,
+  onRemove,
+  onCreateCanary,
+  onPromote,
+}: FunctionEditorProps) {
   const title = `函数 ${func.name}`
-  const setMount = (
-    index: number,
-    patch: Partial<WafEdgeFunctionDraftFunction['mounts'][number]>,
-  ) =>
-    onUpdate({
-      ...func,
-      mounts: func.mounts.map((mount, mountIndex) =>
-        mountIndex === index ? { ...mount, ...patch } : mount,
-      ),
-    })
+  const phase = func.phase ?? 'request_head'
+  const replaceable = functions.filter(
+    (fn) =>
+      fn.name !== func.name &&
+      (fn.phase ?? 'request_head') === phase &&
+      fn.replaces === undefined &&
+      !functions.some((other) => other.name !== func.name && other.replaces === fn.name),
+  )
+  // Keep a now-invalid target selectable so the validator's issue stays visible
+  // instead of the field silently reading as "none".
+  const replaceOptions =
+    func.replaces === undefined || replaceable.some((fn) => fn.name === func.replaces)
+      ? replaceable.map((fn) => fn.name)
+      : [func.replaces, ...replaceable.map((fn) => fn.name)]
+  const canaryBlocker = func.replaces
+    ? '灰度中的函数不能再创建灰度版本'
+    : functions.some((fn) => fn.replaces === func.name)
+      ? '本函数已有灰度版本'
+      : functions.length >= maxFunctions
+        ? `函数数量已达上限 ${maxFunctions}`
+        : null
+  const promoteBlocker = func.replaces
+    ? promotionBlocker(
+        func,
+        functions.find((fn) => fn.name === func.replaces),
+      )
+    : null
 
   return (
     <section className="route-card" aria-labelledby={`waf-fn-${func.name}-title`}>
-      <header className="route-card-header">
+      <header className="route-card-header waf-function-header">
         <div>
           <strong id={`waf-fn-${func.name}-title`}>{func.name}</strong>
           <small>{func.description || '手写函数'}</small>
@@ -370,6 +462,26 @@ function FunctionEditor({ func, diagnostics, onUpdate, onRemove }: FunctionEdito
             />
             启用
           </label>
+          <button
+            className="button-secondary"
+            disabled={canaryBlocker !== null}
+            onClick={onCreateCanary}
+            title={canaryBlocker ?? undefined}
+            type="button"
+          >
+            创建灰度版本
+          </button>
+          {func.replaces ? (
+            <button
+              className="button-secondary"
+              disabled={promoteBlocker !== null}
+              onClick={onPromote}
+              title={promoteBlocker ?? `移除 ${func.replaces}，本函数转为普通全量函数`}
+              type="button"
+            >
+              转正
+            </button>
+          ) : null}
           <button className="button-danger" onClick={onRemove} type="button">
             移除函数
           </button>
@@ -438,98 +550,85 @@ function FunctionEditor({ func, diagnostics, onUpdate, onRemove }: FunctionEdito
       </div>
 
       <div className="waf-function-mounts">
-        <strong>
-          挂载（{func.mounts.length}/{maxMountsPerFunction}）
-        </strong>
+        <strong>挂载</strong>
         <p className="settings-note">
           include/exclude 为 Project 主域名通配（如 loan-*），优先级越小越先执行；采样比例
           0-10000，默认 10000（全量），按客户端 IP 粘性采样。
         </p>
-        {func.mounts.map((mount, index) => (
-          <div className="waf-rule-grid" key={index}>
-            <label>
-              include（逗号分隔）
-              <input
-                aria-label={`${title} 挂载 ${index + 1} include`}
-                value={mount.projects.include.join(', ')}
-                onChange={(event) =>
-                  setMount(index, {
-                    projects: {
-                      ...mount.projects,
-                      include: csvToList(event.target.value),
-                    },
-                  })
-                }
-              />
-            </label>
-            <label>
-              exclude（逗号分隔）
-              <input
-                aria-label={`${title} 挂载 ${index + 1} exclude`}
-                value={(mount.projects.exclude ?? []).join(', ')}
-                onChange={(event) =>
-                  setMount(index, {
-                    projects: {
-                      ...mount.projects,
-                      exclude: csvToList(event.target.value),
-                    },
-                  })
-                }
-              />
-            </label>
-            <label>
-              优先级
-              <input
-                aria-label={`${title} 挂载 ${index + 1} 优先级`}
-                inputMode="numeric"
-                max={1000000}
-                min={0}
-                type="number"
-                value={mount.priority ?? 0}
-                onChange={(event) => setMount(index, { priority: Number(event.target.value) })}
-              />
-            </label>
-            <label>
-              采样比例（‱）
-              <input
-                aria-label={`${title} 挂载 ${index + 1} 采样比例`}
-                inputMode="numeric"
-                max={10000}
-                min={0}
-                type="number"
-                value={mount.ratio ?? 10000}
-                onChange={(event) => setMount(index, { ratio: Number(event.target.value) })}
-              />
-            </label>
-            <div className="route-card-actions">
-              <button
-                className="button-danger"
-                onClick={() =>
-                  onUpdate({
-                    ...func,
-                    mounts: func.mounts.filter((_, mountIndex) => mountIndex !== index),
-                  })
-                }
-                title={`移除挂载 ${index + 1}`}
-                type="button"
-              >
-                移除挂载
-              </button>
-            </div>
-          </div>
-        ))}
-        <div className="form-actions">
-          <button
-            className="button-secondary"
-            disabled={func.mounts.length >= maxMountsPerFunction}
-            onClick={() =>
-              onUpdate({ ...func, mounts: [...func.mounts, { projects: { include: ['*'] } }] })
-            }
-            type="button"
-          >
-            + 添加挂载
-          </button>
+        <div className="waf-rule-grid">
+          <label>
+            include（逗号分隔）
+            <input
+              aria-label={`${title} include`}
+              value={func.projects.include.join(', ')}
+              onChange={(event) =>
+                onUpdate({
+                  ...func,
+                  projects: { ...func.projects, include: csvToList(event.target.value) },
+                })
+              }
+            />
+          </label>
+          <label>
+            exclude（逗号分隔）
+            <input
+              aria-label={`${title} exclude`}
+              value={(func.projects.exclude ?? []).join(', ')}
+              onChange={(event) =>
+                onUpdate({
+                  ...func,
+                  projects: { ...func.projects, exclude: csvToList(event.target.value) },
+                })
+              }
+            />
+          </label>
+          <label>
+            优先级
+            <input
+              aria-label={`${title} 优先级`}
+              inputMode="numeric"
+              max={1000000}
+              min={0}
+              type="number"
+              value={func.priority ?? 0}
+              onChange={(event) => onUpdate({ ...func, priority: Number(event.target.value) })}
+            />
+          </label>
+          <label>
+            采样比例（‱）
+            <input
+              aria-label={`${title} 采样比例`}
+              inputMode="numeric"
+              max={fullRatio}
+              min={0}
+              type="number"
+              value={func.ratio ?? fullRatio}
+              onChange={(event) => onUpdate({ ...func, ratio: Number(event.target.value) })}
+            />
+          </label>
+          <label>
+            取代函数
+            <select
+              aria-label={`${title} 取代函数`}
+              value={func.replaces ?? ''}
+              onChange={(event) => onUpdate({ ...func, replaces: event.target.value || undefined })}
+            >
+              <option value="">无（未命中时不执行）</option>
+              {replaceOptions.map((name) => (
+                <option key={name} value={name}>
+                  {name}
+                </option>
+              ))}
+            </select>
+          </label>
         </div>
+        {func.replaces ? (
+          <p className="settings-note">
+            在两个函数都挂载的项目上，采样比例内的客户端只跑本函数，其余只跑 {func.replaces}
+            ，绝不双跑；{func.replaces}{' '}
+            未挂载的项目未命中时不执行。这不是异常兜底：本函数报错不会回退到 {func.replaces}。
+          </p>
+        ) : null}
       </div>
     </section>
   )
@@ -600,18 +699,13 @@ function LiveEdgeFunctionsSnapshot() {
                         ? '请求头阶段'
                         : '未声明阶段（默认请求头）'}{' '}
                     ·{' '}
-                    {entry.mounts
-                      .map(
-                        (mount) =>
-                          `挂载 include=${mount.projects.include.join(',') || '*'} exclude=${
-                            mount.projects.exclude.join(',') || '-'
-                          } 优先级 ${mount.priority ?? '未知'}${
-                            mount.ratio !== null && mount.ratio !== 10000
-                              ? ` 采样 ${mount.ratio}/10000`
-                              : ''
-                          }`,
-                      )
-                      .join('；')}
+                    {`挂载 include=${entry.projects.include.join(',') || '*'} exclude=${
+                      entry.projects.exclude.join(',') || '-'
+                    } 优先级 ${entry.priority ?? '未知'}${
+                      entry.ratio !== null && entry.ratio !== fullRatio
+                        ? ` 采样 ${entry.ratio}/10000`
+                        : ''
+                    }${entry.replaces ? ` 取代 ${entry.replaces}` : ''}`}
                   </small>
                 </span>
               </div>

@@ -4,10 +4,11 @@
 // Console-internal, function-first authoring model — the same view as the
 // wire function index minus `version`/`sha256`, which the release pipeline
 // derives. It subsumes the interim mount-first authoring file
-// (temp/edge-functions.json): one function may carry several mounts, and
-// mount glob semantics match the native codec exactly. WAF-generated functions
-// are not part of this draft; releases merge them in, so their slugs are
-// reserved here (isWafFunctionName).
+// (temp/edge-functions.json): each function carries one project selector whose
+// glob semantics match the native codec exactly, and `replaces` turns it into a
+// version canary of another function. WAF-generated functions are not part of
+// this draft; releases merge them in, so their slugs are reserved here
+// (isWafFunctionName).
 //
 // Hard constraints (§7 "先扛住硬约束") are enforced in stages: these
 // field-level caps mirror the native edge-function limits
@@ -22,7 +23,6 @@ export const EDGE_FUNCTIONS_DRAFT_SCHEMA_VERSION = 1
 
 // Mirrors AccessConfigLimits.edgeFunctions defaults; see the header comment.
 export const MAX_DRAFT_FUNCTIONS = 64
-export const MAX_MOUNTS_PER_FUNCTION = 16
 export const MAX_GLOBS_PER_SELECTOR = 256
 export const MAX_GLOB_BYTES = 255
 export const MAX_FUNCTION_NAME_BYTES = 64
@@ -46,17 +46,6 @@ export const EDGE_FUNCTION_RATIO_MAX = 10_000
 export const EDGE_FUNCTION_PHASES = ['request_head', 'request_body'] as const
 export type EdgeFunctionPhase = (typeof EDGE_FUNCTION_PHASES)[number]
 
-export interface EdgeFunctionMountDraft {
-  readonly projects: {
-    readonly include: readonly string[]
-    readonly exclude?: readonly string[]
-  }
-  /** Execution order hint, ascending; wire default 0. */
-  readonly priority?: number
-  /** Sticky sampling ratio in ten-thousandths; wire default 10000 = always. */
-  readonly ratio?: number
-}
-
 export interface EdgeFunctionDraftFunction {
   /** Slug identity ([a-z0-9-], alphanumeric edges, ≤ 64 bytes). */
   readonly name: string
@@ -67,7 +56,21 @@ export interface EdgeFunctionDraftFunction {
   /** Execution phase; omitted = request_head (the wire default). */
   readonly phase?: EdgeFunctionPhase
   readonly script: string
-  readonly mounts: readonly EdgeFunctionMountDraft[]
+  /** Project name globs: a project must match include and no exclude. */
+  readonly projects: {
+    readonly include: readonly string[]
+    readonly exclude?: readonly string[]
+  }
+  /** Execution order hint, ascending; wire default 0. */
+  readonly priority?: number
+  /** Sticky sampling ratio in ten-thousandths; wire default 10000 = always. */
+  readonly ratio?: number
+  /**
+   * Version canary: the function this one takes over inside `ratio`. Where both
+   * are mounted a request runs exactly one of them; the target's own entry
+   * stays untouched, so removing this field restores it completely.
+   */
+  readonly replaces?: string
 }
 
 export interface EdgeFunctionsDraft {

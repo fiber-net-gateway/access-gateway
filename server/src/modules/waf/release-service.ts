@@ -107,30 +107,12 @@ function parseLiveIndex(content: string): {
     if (typeof entry !== 'object' || entry === null) return []
     const functionRecord = entry as Record<string, unknown>
     if (typeof functionRecord.name !== 'string') return []
-    const mounts = Array.isArray(functionRecord.mounts)
-      ? functionRecord.mounts.flatMap((mount): WafEdgeFunctionIndexEntryView['mounts'] => {
-          if (typeof mount !== 'object' || mount === null) return []
-          const mountRecord = mount as Record<string, unknown>
-          const projects =
-            typeof mountRecord.projects === 'object' && mountRecord.projects !== null
-              ? (mountRecord.projects as Record<string, unknown>)
-              : {}
-          const stringList = (value: unknown): string[] =>
-            Array.isArray(value)
-              ? value.filter((item): item is string => typeof item === 'string')
-              : []
-          return [
-            {
-              projects: {
-                include: stringList(projects.include),
-                exclude: stringList(projects.exclude),
-              },
-              priority: typeof mountRecord.priority === 'number' ? mountRecord.priority : null,
-              ratio: typeof mountRecord.ratio === 'number' ? mountRecord.ratio : null,
-            },
-          ]
-        })
-      : []
+    const projects =
+      typeof functionRecord.projects === 'object' && functionRecord.projects !== null
+        ? (functionRecord.projects as Record<string, unknown>)
+        : {}
+    const stringList = (value: unknown): string[] =>
+      Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : []
     return [
       {
         name: functionRecord.name,
@@ -139,7 +121,10 @@ function parseLiveIndex(content: string): {
           functionRecord.phase === 'request_head' || functionRecord.phase === 'request_body'
             ? functionRecord.phase
             : null,
-        mounts,
+        projects: { include: stringList(projects.include), exclude: stringList(projects.exclude) },
+        priority: typeof functionRecord.priority === 'number' ? functionRecord.priority : null,
+        ratio: typeof functionRecord.ratio === 'number' ? functionRecord.ratio : null,
+        replaces: typeof functionRecord.replaces === 'string' ? functionRecord.replaces : null,
       },
     ]
   })
@@ -162,10 +147,8 @@ function planFromPolicy(
     ...generated.map((fn) => ({
       name: fn.functionName,
       sha256: fn.scriptSha256,
-      mounts: fn.mounts.map((selector) => ({
-        projects: { include: [...selector.include], exclude: [...selector.exclude] },
-        priority: fn.mountPriority,
-      })),
+      projects: { include: [...fn.projects.include], exclude: [...fn.projects.exclude] },
+      priority: fn.priority,
     })),
     ...handwritten.map((fn) => ({
       name: fn.name,
@@ -173,23 +156,20 @@ function planFromPolicy(
       // Omit the wire default (request_head) so canonical index bytes stay
       // minimal; a body-phase function only buffers for opted-in routes.
       ...(fn.phase === 'request_body' ? { phase: 'request_body' as const } : {}),
-      mounts: fn.mounts.map((mount) => ({
-        projects: {
-          include: [...mount.projects.include],
-          exclude: [...(mount.projects.exclude ?? [])],
-        },
-        priority: mount.priority ?? 0,
-        // Omit the wire default (10000) so canonical index bytes stay minimal.
-        ...(mount.ratio !== undefined && mount.ratio !== 10_000 ? { ratio: mount.ratio } : {}),
-      })),
+      projects: {
+        include: [...fn.projects.include],
+        exclude: [...(fn.projects.exclude ?? [])],
+      },
+      priority: fn.priority ?? 0,
+      // Omit the wire default (10000) so canonical index bytes stay minimal.
+      ...(fn.ratio !== undefined && fn.ratio !== 10_000 ? { ratio: fn.ratio } : {}),
+      ...(fn.replaces !== undefined ? { replaces: fn.replaces } : {}),
     })),
   ]
-  // Deterministic declaration order: ascending lowest-mount priority, then
-  // name — the codec executes mounts in priority order and breaks ties by
-  // declaration, so the published order must not depend on draft array order.
-  const minPriority = (entry: WafWireIndexFunctionEntry): number =>
-    Math.min(...entry.mounts.map((mount) => mount.priority))
-  entries.sort((a, b) => minPriority(a) - minPriority(b) || (a.name < b.name ? -1 : 1))
+  // Deterministic declaration order: ascending priority, then name — the codec
+  // executes functions in priority order and breaks ties by declaration, so the
+  // published order must not depend on draft array order.
+  entries.sort((a, b) => a.priority - b.priority || (a.name < b.name ? -1 : 1))
 
   const scripts: PreparedWafReleasePlan['scripts'] = [
     ...generated.map((fn) => ({ name: fn.functionName, script: fn.script })),

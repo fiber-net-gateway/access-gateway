@@ -18,7 +18,8 @@ const functions = [
   {
     name: 'waf',
     sha256: scriptSha256,
-    mounts: [{ projects: { include: ['*'], exclude: ['loan-admin-legacy'] }, priority: 100 }],
+    projects: { include: ['*'], exclude: ['loan-admin-legacy'] },
+    priority: 100,
   },
 ]
 const mountedIndexText = canonicalJson({ version: 4, functions })
@@ -124,9 +125,9 @@ test('loadRollbackSource reads the generated functions of a grouped release', as
   const otherScript = 'return true;'
   const otherSha = sha256(otherScript).toString('hex')
   const grouped = [
-    { name: 'waf-core', sha256: scriptSha256, mounts: functions[0]!.mounts },
-    { name: 'waf-other', sha256: otherSha, mounts: functions[0]!.mounts },
-    { name: 'bot-trap', sha256: otherSha, mounts: functions[0]!.mounts },
+    { ...functions[0]!, name: 'waf-core', sha256: scriptSha256 },
+    { ...functions[0]!, name: 'waf-other', sha256: otherSha },
+    { ...functions[0]!, name: 'bot-trap', sha256: otherSha },
   ]
   const { repository } = buildRepository({
     diffSummary: {
@@ -154,12 +155,46 @@ test('loadRollbackSource reads the generated functions of a grouped release', as
   ])
 })
 
+test('loadRollbackSource keeps replaces, or rollback would silently double-run', async () => {
+  const canaryScript = 'return false;'
+  const canarySha = sha256(canaryScript).toString('hex')
+  const canaried = [
+    ...functions,
+    { ...functions[0]!, name: 'bot-next', sha256: canarySha, ratio: 300, replaces: 'waf' },
+  ]
+  const { repository } = buildRepository({
+    diffSummary: mountedSummary,
+    indexText: canonicalJson({ version: 4, functions: canaried }),
+    scripts: [
+      { name: 'waf', script: scriptText },
+      { name: 'bot-next', script: canaryScript },
+    ],
+  })
+
+  const source = await repository.loadRollbackSource(environmentInternalId, releasePublicId)
+
+  assert.deepEqual(source?.plan.functions, canaried)
+})
+
+test('loadRollbackSource refuses an unusable replaces value', async () => {
+  const { repository } = buildRepository({
+    diffSummary: mountedSummary,
+    indexText: canonicalJson({ version: 4, functions: [{ ...functions[0]!, replaces: 7 }] }),
+    scripts: [{ name: 'waf', script: scriptText }],
+  })
+
+  await assert.rejects(
+    repository.loadRollbackSource(environmentInternalId, releasePublicId),
+    /WAF release payload is unusable/,
+  )
+})
+
 test('loadRollbackSource rebuilds a multi-function plan with every script', async () => {
   const trapScript =
     'if (($header.user_agent contains "zgrab")) { ctx.report("bot.hit", "zgrab"); }\nreturn true;'
   const trapSha = sha256(trapScript).toString('hex')
   const multiFunctions = [
-    { name: 'bot-trap', sha256: trapSha, mounts: [{ projects: { include: ['*'] }, priority: 50 }] },
+    { name: 'bot-trap', sha256: trapSha, projects: { include: ['*'] }, priority: 50 },
     ...functions,
   ]
   const { repository } = buildRepository({

@@ -84,12 +84,12 @@ export interface WafEdgeFunctionIndexEntryView {
   sha256: string | null
   /** 'request_body' or 'request_head' (including explicit); null = absent. */
   phase: 'request_head' | 'request_body' | null
-  mounts: readonly {
-    projects: { include: readonly string[]; exclude: readonly string[] }
-    priority: number | null
-    /** Sticky sampling ratio; null = absent on the wire (default 10000). */
-    ratio: number | null
-  }[]
+  projects: { include: readonly string[]; exclude: readonly string[] }
+  priority: number | null
+  /** Sticky sampling ratio; null = absent on the wire (default 10000). */
+  ratio: number | null
+  /** The function this one takes over inside `ratio`; null = none. */
+  replaces: string | null
 }
 
 export interface WafEdgeFunctionsView {
