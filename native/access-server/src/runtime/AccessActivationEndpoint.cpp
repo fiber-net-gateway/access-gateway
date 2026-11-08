@@ -19,19 +19,6 @@
 namespace fiber::access_server {
 namespace {
 
-class StringSink final : public json::OutputSink {
-public:
-    explicit StringSink(std::string &output) noexcept : output_(&output) {}
-
-    [[nodiscard]] bool write(const char *data, std::size_t length) override {
-        output_->append(data, length);
-        return true;
-    }
-
-private:
-    std::string *output_ = nullptr;
-};
-
 struct PageRequest {
     std::optional<std::uint64_t> revision;
     std::size_t offset = 0;
@@ -211,7 +198,7 @@ std::string encode_page(const AccessActivationEvidenceSnapshot &snapshot, const 
                         std::size_t offset, std::size_t limit) {
     std::string output;
     output.reserve(8192U + limit * 1024U);
-    StringSink sink(output);
+    json::StringSink sink(output);
     json::Generator generator(sink);
     generator.set_option(json::Generator::Option::ValidateUtf8);
 

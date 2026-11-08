@@ -13,19 +13,6 @@
 namespace fiber::access_server {
 namespace {
 
-class StringSink final : public json::OutputSink {
-public:
-    explicit StringSink(std::string &output) noexcept : output_(output) {}
-
-    [[nodiscard]] bool write(const char *data, std::size_t size) override {
-        output_.append(data, size);
-        return true;
-    }
-
-private:
-    std::string &output_;
-};
-
 void append_ascii(std::string &output, std::string_view text) {
     for (const unsigned char ch: text) {
         output.push_back(ch < 0x80U ? static_cast<char>(ch) : '?');
@@ -42,7 +29,7 @@ void append_status(std::string &output, int status) {
 
 std::string render_json(const Exception &error) {
     std::string output;
-    StringSink sink(output);
+    json::StringSink sink(output);
     json::Generator generator(sink);
     using Result = json::Generator::Result;
     if (generator.map_open() != Result::OK || generator.string("name", 4) != Result::OK ||

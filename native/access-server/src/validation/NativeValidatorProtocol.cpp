@@ -77,19 +77,6 @@ struct ValidationResult {
     std::vector<ValidationError> errors;
 };
 
-class StringSink final : public json::OutputSink {
-public:
-    explicit StringSink(std::string &output) noexcept : output_(&output) {}
-
-    [[nodiscard]] bool write(const char *data, std::size_t length) override {
-        output_->append(data, length);
-        return true;
-    }
-
-private:
-    std::string *output_;
-};
-
 bool set_present(ValidatorRequest &out, RequestField field, JsonParser &parser) noexcept {
     const auto flag = static_cast<std::uint8_t>(field);
     if ((out.present & flag) != 0) {
@@ -437,7 +424,7 @@ bool write_size(Generator &generator, std::string_view key, std::size_t value) {
 
 std::string encode_config_limits() {
     std::string output;
-    StringSink sink(output);
+    json::StringSink sink(output);
     Generator generator(sink);
     const ProjectListLimits &project_list = kAccessConfigLimits.project_list;
     const ProjectRouteLimits &project_route = kAccessConfigLimits.project_route;
@@ -505,7 +492,7 @@ std::string encode_config_limits() {
 
 std::string encode_response(const ValidationResult &result) {
     std::string output;
-    StringSink sink(output);
+    json::StringSink sink(output);
     Generator generator(sink);
     generator.set_option(Generator::Option::ValidateUtf8);
 
@@ -578,7 +565,19 @@ std::string process_native_validator_request(std::string_view input) {
     }
 
     std::string payload;
-    if (!util::base64_decode(request.payload_base64, payload)) {
+    bool base64_ok = false;
+    const std::size_t decoded_bytes = util::base64_decoded_size(request.payload_base64, base64_ok);
+    if (!base64_ok) {
+        return encode_response(ValidationResult{
+                .errors = {{
+                        .code = "invalid_request",
+                        .field = "payloadBase64",
+                        .message = "payloadBase64 is not valid basic Base64",
+                }},
+        });
+    }
+    payload.resize(decoded_bytes);
+    if (!util::base64_decode_into(request.payload_base64, reinterpret_cast<std::uint8_t *>(payload.data()))) {
         return encode_response(ValidationResult{
                 .errors = {{
                         .code = "invalid_request",

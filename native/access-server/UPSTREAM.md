@@ -10,7 +10,7 @@ HTTP, JSON/script, Nacos, CAT, and Prometheus modules are consumed from the pinn
 historical application import revision.
 
 The current reusable Fiber dependency is pinned at
-`625f0b469db78b2527498dbd1e79e343234f2b97` (upstream `master`, fetched 2026-11-06). The pinned
+`34dc642614bf00366a610b073874a4505c831239` (upstream `master`, fetched 2026-11-08). The pinned
 revision carries no repository-owned compatibility patches: the TLS dynamic-credential lifetime
 defect ([upstream issue #41](https://github.com/fiber-net-gateway/fiber-gateway-cpp/issues/41)),
 briefly patched against `f832d5458d3bfca1cefa45a4c7a6cb1cd0662f23`, is fixed upstream in `90ed153`
@@ -18,6 +18,33 @@ briefly patched against `f832d5458d3bfca1cefa45a4c7a6cb1cd0662f23`, is fixed ups
 The repository-owned regression
 `ProxyExecutorTest.StreamsChunkedUpstreamWhoseFramingArrivesSeparatelyFromPayload` still guards
 the HTTP/1 chunked split-framing fix from the application side.
+The reviewed update range from the previous pin is
+`625f0b469db78b2527498dbd1e79e343234f2b97..34dc6426` (fifteen non-merge commits, fast-forward).
+Its behavioral core is the noexcept JSON codec rework (`fd96c61b`): `json::OutputSink` and
+`json::Generator` are `noexcept` end to end, allocation failure surfaces as a `Result` error
+instead of a propagating `bad_alloc`, and the codec grew streaming primitives
+(`json::StringSink`, `string_begin`/`string_end`, `bytes_written`, a `MAX_STACK = 128` container
+nesting bound). `Base64` moves to a two-phase allocation-free API
+(`base64_encoded_size`/`base64_encode_into`, `base64_decoded_size`/`base64_decode_into`,
+replacing the removed `std::string` overloads); access-server adapted its two decode sites —
+the route base64 body (`ProjectConfigCompiler`) and the validator payload
+(`NativeValidatorProtocol`) now precheck `base64_decoded_size`, so an oversize response body is
+rejected before its decoded bytes are allocated — and its four local `OutputSink` subclasses
+collapse onto upstream `json::StringSink`, except the frame-capped `AccessControlProtocol` sink,
+which keeps its cap and gains the `bad_alloc`-returns-`false` guard. `d9a03dd2` moves the
+no-content response rule (HEAD, 204, 304) into `HttpExchange`: body writes on such responses are
+discarded at the exchange layer, HTTP/2 no longer sends DATA frames on a HEAD response, and the
+built-in error pages answer HEAD like GET; access-server had no own no-content handling and
+needed no change. `339c6cb1` defaults QUIC endpoint UDP sockets to no `SO_REUSEADDR`; the h3
+listener opts into `reuse_port` explicitly and the boss-mode socket handoff is unaffected. The
+`http_script` commits bound `req.readJson`/`req.readBinary`/`proxyPass` bodies by a GC heap
+limit (`e2794218`, `8664a7a0`, `112406fd`), encode large JSON responses into `IoBufChain` as
+they are produced (`bb55be5e`, `22ee426a`), decode query strings without throwing (`6d61431a`),
+and answer HEAD/204/304 from scripts (`ce394e1e`) — all inside the edge-function engine, with no
+console, wire, or publication change. The remaining commits are codec internals made noexcept
+(`Utf`, `JsonLex`, `JsonDecode`, `JsonPath`, `ab26ad3c` unfinished-token rejection, `0655a82d`
+ending the held-token rescan per chunk), allocation-free websocket handshake (`89aeb863`) and
+script host functions (`83347a6e`), and OOM-injection test support (`tests/support/AllocFailure.h`).
 The reviewed update range from the previous pin is
 `4a5f12b8b374045975e21410e3987447a550043e..625f0b469db78b2527498dbd1e79e343234f2b97` (seven
 non-merge commits, fast-forward). Its behavioral core is the script constant model rework

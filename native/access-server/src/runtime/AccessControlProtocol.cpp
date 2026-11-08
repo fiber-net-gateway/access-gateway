@@ -91,11 +91,15 @@ std::size_t field_index(std::string_view name) noexcept {
 class StringSink final : public json::OutputSink {
 public:
     explicit StringSink(std::string &out) noexcept : out_(out) {}
-    bool write(const char *data, std::size_t size) override {
+    bool write(const char *data, std::size_t size) noexcept override {
         if (size > kAccessControlMaxFrame - out_.size()) {
             return false;
         }
-        out_.append(data, size);
+        try {
+            out_.append(data, size);
+        } catch (const std::bad_alloc &) {
+            return false;
+        }
         return true;
     }
 

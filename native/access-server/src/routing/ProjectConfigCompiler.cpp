@@ -788,13 +788,21 @@ std::expected<CompiledRoute, AccessConfigError> compile_route(std::string_view p
         if (source.body) {
             const RouteBodyConfig &body = *source.body;
             if (body.type == BodyType::Base64) {
-                if (!body.content || !util::base64_decode(*body.content, response.body)) {
+                bool base64_ok = false;
+                const std::size_t decoded_bytes =
+                        body.content ? util::base64_decoded_size(*body.content, base64_ok) : 0;
+                if (!base64_ok) {
                     return std::unexpected(route_error(AccessConfigErrorCode::InvalidField, route_index, "body",
                                                        "invalid base64 response body"));
                 }
-                if (response.body.size() > budget.limits().max_static_response_body_bytes) {
+                if (decoded_bytes > budget.limits().max_static_response_body_bytes) {
                     return std::unexpected(route_error(AccessConfigErrorCode::LimitExceeded, route_index, "body",
                                                        "response body bytes exceed the configured limit"));
+                }
+                response.body.resize(decoded_bytes);
+                if (!util::base64_decode_into(*body.content, reinterpret_cast<std::uint8_t *>(response.body.data()))) {
+                    return std::unexpected(route_error(AccessConfigErrorCode::InvalidField, route_index, "body",
+                                                       "invalid base64 response body"));
                 }
                 response.body_kind = ResponseBodyKind::Base64;
             } else if (body.type == BodyType::Text) {
