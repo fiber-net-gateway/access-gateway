@@ -2955,6 +2955,30 @@ button:disabled {
   gap: 8px;
 }
 
+/* The route card grid reserves collapse and type columns this header lacks. */
+.route-card-header.waf-function-header {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.waf-function-header .route-card-actions {
+  flex-wrap: wrap;
+  grid-column: auto;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.waf-function-header .route-card-actions label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.waf-function-header .route-card-actions button {
+  font-size: 0.75rem;
+  white-space: nowrap;
+}
+
 .waf-function-mounts {
   display: grid;
   gap: 8px;
@@ -3423,6 +3447,14 @@ button:disabled {
 
   .route-card-header {
     grid-template-columns: 27px 25px minmax(0, 1fr);
+  }
+
+  .route-card-header.waf-function-header {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .waf-function-header .route-card-actions {
+    justify-content: flex-start;
   }
 
   .script-route-match-fields {

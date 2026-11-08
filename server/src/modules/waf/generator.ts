@@ -4,7 +4,7 @@
 // group's semantics change.
 //
 // Each group with rules and a mode other than off compiles to one edge function
-// `waf-<group id>`: the group's project selector becomes the wire mount, and
+// `waf-<group id>`: the group's project selector becomes the wire `projects`, and
 // its rules become the script. Shape of a generated script:
 //   - `cidr` directive declarations at the top (shared, deduplicated across
 //     the group's rules by identical CIDR set, named net1..netN in canonical
@@ -57,8 +57,8 @@ export interface WafFunctionCompilation {
   readonly functionName: string
   readonly script: string
   readonly scriptSha256: string
-  readonly mountPriority: number
-  readonly mounts: readonly WafMountSelector[]
+  readonly priority: number
+  readonly projects: WafMountSelector
   /** Rule ids in generated execution order (priority asc, declaration ties). */
   readonly ruleOrder: readonly string[]
   readonly directives: readonly WafDirective[]
@@ -315,8 +315,8 @@ function compileGroup(
     functionName,
     script,
     scriptSha256,
-    mountPriority: group.priority,
-    mounts: [groupMountSelector(group, sets)],
+    priority: group.priority,
+    projects: groupMountSelector(group, sets),
     ruleOrder: orderedRules.map(({ rule }) => rule.id),
     directives,
     ruleSpans: ruleSpans(lines, ruleBlocks),

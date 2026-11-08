@@ -9,7 +9,7 @@ export type NativeValidationKind =
 export type NativeValidatorScriptPhase = 'request_head' | 'request_body'
 
 export interface AccessConfigLimits {
-  schemaVersion: 5
+  schemaVersion: 6
   projectList: {
     maxPayloadBytes: number
     maxProjects: number
@@ -54,7 +54,6 @@ export interface AccessConfigLimits {
     maxPayloadBytes: number
     maxFunctions: number
     maxFunctionNameBytes: number
-    maxMountsPerFunction: number
     maxGlobsPerSelector: number
     maxGlobBytes: number
     maxScriptPayloadBytes: number

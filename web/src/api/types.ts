@@ -14,7 +14,7 @@ export interface CapabilityView {
 }
 
 export interface AccessConfigLimits {
-  schemaVersion: 5
+  schemaVersion: 6
   projectList: {
     maxPayloadBytes: number
     maxProjects: number
@@ -59,7 +59,6 @@ export interface AccessConfigLimits {
     maxPayloadBytes: number
     maxFunctions: number
     maxFunctionNameBytes: number
-    maxMountsPerFunction: number
     maxGlobsPerSelector: number
     maxGlobBytes: number
     maxScriptPayloadBytes: number
@@ -436,8 +435,8 @@ export interface WafFunctionCompilation {
   functionName: string
   script: string
   scriptSha256: string
-  mountPriority: number
-  mounts: readonly { include: readonly string[]; exclude: readonly string[] }[]
+  priority: number
+  projects: { include: readonly string[]; exclude: readonly string[] }
   ruleOrder: readonly string[]
   directives: readonly { name: string; cidrs: readonly string[] }[]
 }
@@ -506,17 +505,11 @@ export interface WafEdgeFunctionIndexEntryView {
   sha256: string | null
   /** 'request_head' | 'request_body' when declared; null = absent on the wire. */
   phase: EdgeFunctionPhase | null
-  mounts: readonly {
-    projects: { include: readonly string[]; exclude: readonly string[] }
-    priority: number | null
-    ratio: number | null
-  }[]
-}
-
-export interface WafEdgeFunctionMountDraft {
-  projects: { include: readonly string[]; exclude?: readonly string[] }
-  priority?: number
-  ratio?: number
+  projects: { include: readonly string[]; exclude: readonly string[] }
+  priority: number | null
+  ratio: number | null
+  /** The function this one takes over inside `ratio`; null = none. */
+  replaces: string | null
 }
 
 export interface WafEdgeFunctionDraftFunction {
@@ -526,7 +519,11 @@ export interface WafEdgeFunctionDraftFunction {
   /** Execution phase; omitted = request_head (the wire default). */
   phase?: EdgeFunctionPhase
   script: string
-  mounts: readonly WafEdgeFunctionMountDraft[]
+  projects: { include: readonly string[]; exclude?: readonly string[] }
+  priority?: number
+  ratio?: number
+  /** Version canary: the function this one takes over inside `ratio`. */
+  replaces?: string
 }
 
 export interface WafEdgeFunctionsDraft {

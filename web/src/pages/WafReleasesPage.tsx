@@ -339,36 +339,27 @@ interface PlannedEdgeFunction {
   sha256: string
   script: string
   source: 'waf' | 'handwritten'
-  mountsKey: string
+  mountKey: string
 }
 
 interface LiveEdgeFunction {
   sha256: string | null
   content: string | null
-  mountsKey: string
+  mountKey: string
 }
 
 // Normalized mount signature: ratio defaults to the wire value 10000 both in
 // drafts (undefined) and in the live view (null), so a default-vs-default
-// comparison does not show as a change.
+// comparison does not show as a change; replaces normalizes the same way.
 function mountSignature(mount: {
   projects: { include: readonly string[]; exclude: readonly string[] }
   priority: number
   ratio?: number | null
+  replaces?: string | null
 }): string {
   return `${mount.projects.include.join(',')}|${mount.projects.exclude.join(',')}|${
     mount.priority
-  }|${mount.ratio ?? 10_000}`
-}
-
-function mountsSignature(
-  mounts: readonly {
-    projects: { include: readonly string[]; exclude: readonly string[] }
-    priority: number
-    ratio?: number | null
-  }[],
-): string {
-  return mounts.map(mountSignature).join(';')
+  }|${mount.ratio ?? 10_000}|${mount.replaces ?? ''}`
 }
 
 // 发布预览 (§4.4): compile BOTH saved drafts (WAF policy + handwritten edge
@@ -413,12 +404,7 @@ function WafPublicationPreview({ onCreateFromDraft, working }: WafPublicationPre
             sha256: fn.scriptSha256,
             script: fn.script,
             source: 'waf',
-            mountsKey: mountsSignature(
-              fn.mounts.map((mount) => ({
-                projects: { include: mount.include, exclude: mount.exclude },
-                priority: fn.mountPriority,
-              })),
-            ),
+            mountKey: mountSignature({ projects: fn.projects, priority: fn.priority }),
           })
         }
         for (const fn of functionsDraft.draft.functions) {
@@ -430,16 +416,12 @@ function WafPublicationPreview({ onCreateFromDraft, working }: WafPublicationPre
             sha256: sha.scriptSha256,
             script: fn.script,
             source: 'handwritten',
-            mountsKey: mountsSignature(
-              fn.mounts.map((mount) => ({
-                projects: {
-                  include: mount.projects.include,
-                  exclude: mount.projects.exclude ?? [],
-                },
-                priority: mount.priority ?? 0,
-                ratio: mount.ratio,
-              })),
-            ),
+            mountKey: mountSignature({
+              projects: { include: fn.projects.include, exclude: fn.projects.exclude ?? [] },
+              priority: fn.priority ?? 0,
+              ratio: fn.ratio,
+              replaces: fn.replaces,
+            }),
           })
         }
 
@@ -450,13 +432,12 @@ function WafPublicationPreview({ onCreateFromDraft, working }: WafPublicationPre
               sha256: entry.sha256,
               content:
                 liveView.scripts.find((script) => script.name === entry.name)?.content ?? null,
-              mountsKey: mountsSignature(
-                entry.mounts.map((mount) => ({
-                  projects: mount.projects,
-                  priority: mount.priority ?? 0,
-                  ratio: mount.ratio,
-                })),
-              ),
+              mountKey: mountSignature({
+                projects: entry.projects,
+                priority: entry.priority ?? 0,
+                ratio: entry.ratio,
+                replaces: entry.replaces,
+              }),
             })
           }
         }
@@ -513,13 +494,13 @@ function WafPublicationPreview({ onCreateFromDraft, working }: WafPublicationPre
             {preview.planned.map((fn) => {
               const liveEntry = preview.live.get(fn.name)
               const scriptChanged = liveEntry ? liveEntry.sha256 !== fn.sha256 : false
-              const mountsChanged = liveEntry ? liveEntry.mountsKey !== fn.mountsKey : false
+              const mountChanged = liveEntry ? liveEntry.mountKey !== fn.mountKey : false
               const status =
                 liveEntry === undefined
                   ? 'added'
                   : scriptChanged
                     ? 'script'
-                    : mountsChanged
+                    : mountChanged
                       ? 'mounts'
                       : 'same'
               return (

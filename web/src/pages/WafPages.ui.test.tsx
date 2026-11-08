@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { createMemoryRouter } from 'react-router'
@@ -92,8 +92,8 @@ const compilePreview = {
         functionName: 'waf-core',
         script: 'function waf() {\n  return 1\n}\n',
         scriptSha256: 'a'.repeat(64),
-        mountPriority: 100,
-        mounts: [{ include: ['*'], exclude: ['api.example.com', 'legacy.example.com'] }],
+        priority: 100,
+        projects: { include: ['*'], exclude: ['api.example.com', 'legacy.example.com'] },
         ruleOrder: ['probe-0001'],
         directives: [],
       },
@@ -160,19 +160,19 @@ const edgeFunctions = {
         name: 'waf-core',
         sha256: '1'.repeat(64),
         phase: null,
-        mounts: [
-          {
-            projects: { include: ['*'], exclude: ['api.example.com', 'legacy.example.com'] },
-            priority: 100,
-            ratio: null,
-          },
-        ],
+        projects: { include: ['*'], exclude: ['api.example.com', 'legacy.example.com'] },
+        priority: 100,
+        ratio: null,
+        replaces: null,
       },
       {
         name: 'old-fn',
         sha256: '9'.repeat(64),
         phase: 'request_body',
-        mounts: [{ projects: { include: ['*'], exclude: [] }, priority: 500, ratio: null }],
+        projects: { include: ['*'], exclude: [] },
+        priority: 500,
+        ratio: null,
+        replaces: null,
       },
     ],
     parseError: null,
@@ -198,13 +198,9 @@ const edgeFunctionsDraft = {
         enabled: true,
         script:
           'if (($header.user_agent contains "zgrab")) { ctx.report("bot.hit", "zgrab"); }\nreturn true;',
-        mounts: [
-          {
-            projects: { include: ['loan-*'], exclude: ['loan-admin-legacy'] },
-            priority: 200,
-            ratio: 5000,
-          },
-        ],
+        projects: { include: ['loan-*'], exclude: ['loan-admin-legacy'] },
+        priority: 200,
+        ratio: 5000,
       },
     ],
   },
@@ -935,7 +931,7 @@ describe('WAF console pages', () => {
         draft: typeof edgeFunctionsDraft.draft
       }
       expect(body.draft.functions[0]?.script).toBe('return false;')
-      expect(body.draft.functions[0]?.mounts[0]?.ratio).toBe(5000)
+      expect(body.draft.functions[0]?.ratio).toBe(5000)
     })
 
     // Switching the function to the request_body phase annotates the editor,
@@ -962,6 +958,63 @@ describe('WAF console pages', () => {
     expect(screen.getByText(/exclude=api\.example\.com,legacy\.example\.com/u)).toBeTruthy()
     expect(screen.getByText(/old-fn/u)).toBeTruthy()
     expect(screen.getByText(/请求体阶段/u)).toBeTruthy()
+  })
+
+  test('starts a version canary and only promotes it once removing the target is a no-op', async () => {
+    const fetchMock = installApiMock()
+    const router = createMemoryRouter(appRoutes, { initialEntries: ['/waf/edge-functions'] })
+    const user = userEvent.setup()
+    render(<RouterProvider router={router} />)
+
+    await user.click(await screen.findByRole('button', { name: '创建灰度版本' }))
+
+    // The new version opens as a 1% canary of its source, same script and scope.
+    const ratio = (await screen.findByRole('spinbutton', {
+      name: '函数 bot-trap-v2 采样比例',
+    })) as HTMLInputElement
+    expect(ratio.value).toBe('100')
+    const replaces = screen.getByRole('combobox', {
+      name: '函数 bot-trap-v2 取代函数',
+    }) as HTMLSelectElement
+    expect(replaces.value).toBe('bot-trap')
+    expect(screen.getByText(/这不是异常兜底/u)).toBeTruthy()
+    expect(
+      (screen.getByRole('button', { name: '创建灰度版本' }) as HTMLButtonElement).disabled,
+    ).toBe(true)
+
+    // Below full ratio the target still serves traffic, so promotion is blocked.
+    const promote = screen.getByRole('button', { name: '转正' }) as HTMLButtonElement
+    expect(promote.disabled).toBe(true)
+    expect(promote.title).toContain('10000')
+
+    // At full ratio a narrower scope would unmount the target elsewhere.
+    fireEvent.change(ratio, { target: { value: '10000' } })
+    const include = screen.getByRole('textbox', {
+      name: '函数 bot-trap-v2 include',
+    }) as HTMLInputElement
+    fireEvent.change(include, { target: { value: 'loan-web' } })
+    expect(promote.disabled).toBe(true)
+    expect(promote.title).toContain('挂载范围')
+
+    fireEvent.change(include, { target: { value: 'loan-*' } })
+    expect(promote.disabled).toBe(false)
+    await user.click(promote)
+
+    // The target is gone and the survivor is an ordinary full-traffic function.
+    expect(screen.queryByRole('button', { name: '转正' })).toBeNull()
+    await user.click(screen.getByRole('button', { name: '保存函数草稿' }))
+    await waitFor(() => {
+      const saveCall = fetchMock.mock.calls.find(
+        ([url, init]) => url === '/api/waf/edge-functions/draft' && init?.method === 'PUT',
+      )
+      expect(saveCall).toBeTruthy()
+      const body = JSON.parse(String(saveCall?.[1]?.body)) as {
+        draft: { functions: { name: string; ratio?: number; replaces?: string }[] }
+      }
+      expect(body.draft.functions.map((fn) => fn.name)).toEqual(['bot-trap-v2'])
+      expect(body.draft.functions[0]?.ratio).toBeUndefined()
+      expect(body.draft.functions[0]?.replaces).toBeUndefined()
+    })
   })
 
   test('shows WAF hit statistics grouped per rule with joined policy metadata', async () => {

@@ -67,13 +67,14 @@ function draft(overrides: Partial<EdgeFunctionsDraft> = {}): EdgeFunctionsDraft 
         enabled: true,
         script:
           'if (($header.user_agent contains "zgrab")) { ctx.report("bot.hit", "zgrab"); }\nreturn true;',
-        mounts: [{ projects: { include: ['*'] }, priority: 50 }],
+        projects: { include: ['*'] },
+        priority: 50,
       },
       {
         name: 'parked',
         enabled: false,
         script: 'return true;',
-        mounts: [{ projects: { include: ['*'] } }],
+        projects: { include: ['*'] },
       },
     ],
     ...overrides,
@@ -212,13 +213,13 @@ test('compilePreview surfaces native errors per function without stopping the ch
         name: 'good-one',
         enabled: true,
         script: 'return true;',
-        mounts: [{ projects: { include: ['*'] } }],
+        projects: { include: ['*'] },
       },
       {
         name: 'bad-one',
         enabled: true,
         script: 'broken (',
-        mounts: [{ projects: { include: ['*'] } }],
+        projects: { include: ['*'] },
       },
     ],
   }
@@ -248,7 +249,7 @@ test('compilePreview reports field-level issues without calling the validator', 
 
   const view = await service.compilePreview(
     actor,
-    { schemaVersion: 1, functions: [{ name: 'WAF', enabled: true, script: 'x', mounts: [] }] },
+    { schemaVersion: 1, functions: [{ name: 'WAF', enabled: true, script: 'x' }] },
     'request-1',
   )
 
@@ -272,14 +273,14 @@ test('compilePreview compiles each function in its declared phase', async () => 
         name: 'head-guard',
         enabled: true,
         script: 'return true;',
-        mounts: [{ projects: { include: ['*'] } }],
+        projects: { include: ['*'] },
       },
       {
         name: 'body-scan',
         enabled: true,
         phase: 'request_body',
         script: 'if (strings.match($req.body, "x")) { resp.send(403, "no"); } return true;',
-        mounts: [{ projects: { include: ['*'] } }],
+        projects: { include: ['*'] },
       },
     ],
   }

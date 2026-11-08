@@ -40,12 +40,12 @@ export interface WafWireIndexFunctionEntry {
   readonly sha256: string
   /** Omitted = wire default request_head. */
   readonly phase?: 'request_head' | 'request_body'
-  readonly mounts: readonly {
-    readonly projects: { readonly include: readonly string[]; readonly exclude: readonly string[] }
-    readonly priority: number
-    /** Omitted = wire default 10000 (always run). */
-    readonly ratio?: number
-  }[]
+  readonly projects: { readonly include: readonly string[]; readonly exclude: readonly string[] }
+  readonly priority: number
+  /** Omitted = wire default 10000 (always run). */
+  readonly ratio?: number
+  /** Omitted = not a version canary. */
+  readonly replaces?: string
 }
 
 /** Script payload for one index entry; published before the index. */
@@ -195,8 +195,7 @@ function parseWireIndexFunctions(text: string): WafWireIndexFunctionEntry[] | nu
     if (
       typeof record.name !== 'string' ||
       typeof record.sha256 !== 'string' ||
-      !/^[0-9a-f]{64}$/u.test(record.sha256) ||
-      !Array.isArray(record.mounts)
+      !/^[0-9a-f]{64}$/u.test(record.sha256)
     ) {
       return null
     }
@@ -207,41 +206,39 @@ function parseWireIndexFunctions(text: string): WafWireIndexFunctionEntry[] | nu
           ? record.phase
           : null
     if (phase === null) return null
-    const mounts: WafWireIndexFunctionEntry['mounts'][number][] = []
-    for (const mount of record.mounts) {
-      if (!mount || typeof mount !== 'object' || Array.isArray(mount)) return null
-      const mountRecord = mount as Record<string, unknown>
-      const projects = mountRecord.projects
-      if (!projects || typeof projects !== 'object' || Array.isArray(projects)) return null
-      const projectsRecord = projects as Record<string, unknown>
-      const include = projectsRecord.include
-      const exclude = projectsRecord.exclude ?? []
-      if (!Array.isArray(include) || include.some((item) => typeof item !== 'string')) return null
-      if (!Array.isArray(exclude) || exclude.some((item) => typeof item !== 'string')) return null
-      if (typeof mountRecord.priority !== 'number' || !Number.isSafeInteger(mountRecord.priority)) {
-        return null
-      }
-      const ratio =
-        mountRecord.ratio === undefined
-          ? undefined
-          : typeof mountRecord.ratio === 'number' &&
-              Number.isSafeInteger(mountRecord.ratio) &&
-              mountRecord.ratio >= 0 &&
-              mountRecord.ratio <= 10_000
-            ? mountRecord.ratio
-            : null
-      if (ratio === null) return null
-      mounts.push({
-        projects: { include: [...include], exclude: [...exclude] },
-        priority: mountRecord.priority,
-        ...(ratio !== undefined ? { ratio } : {}),
-      })
+    const projects = record.projects
+    if (!projects || typeof projects !== 'object' || Array.isArray(projects)) return null
+    const projectsRecord = projects as Record<string, unknown>
+    const include = projectsRecord.include
+    const exclude = projectsRecord.exclude ?? []
+    if (!Array.isArray(include) || include.some((item) => typeof item !== 'string')) return null
+    if (!Array.isArray(exclude) || exclude.some((item) => typeof item !== 'string')) return null
+    if (typeof record.priority !== 'number' || !Number.isSafeInteger(record.priority)) {
+      return null
     }
+    const ratio =
+      record.ratio === undefined
+        ? undefined
+        : typeof record.ratio === 'number' &&
+            Number.isSafeInteger(record.ratio) &&
+            record.ratio >= 0 &&
+            record.ratio <= 10_000
+          ? record.ratio
+          : null
+    if (ratio === null) return null
+    // Dropping this on rollback would pass validation yet silently double-run
+    // the target, so an unusable value fails the rebuild instead.
+    const replaces =
+      record.replaces === undefined || typeof record.replaces === 'string' ? record.replaces : null
+    if (replaces === null) return null
     entries.push({
       name: record.name,
       sha256: record.sha256,
       ...(phase !== undefined ? { phase } : {}),
-      mounts,
+      projects: { include: [...include], exclude: [...exclude] },
+      priority: record.priority,
+      ...(ratio !== undefined ? { ratio } : {}),
+      ...(replaces !== undefined ? { replaces } : {}),
     })
   }
   return entries

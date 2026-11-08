@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import type { EdgeFunctionsDraft } from './edge-function-model.js'
+import type { EdgeFunctionDraftFunction, EdgeFunctionsDraft } from './edge-function-model.js'
 import { validateEdgeFunctionsDraft } from './edge-function-validate.js'
 
 function draft(overrides: Partial<EdgeFunctionsDraft> = {}): EdgeFunctionsDraft {
@@ -13,9 +13,8 @@ function draft(overrides: Partial<EdgeFunctionsDraft> = {}): EdgeFunctionsDraft 
         enabled: true,
         script:
           'if ((strings.contains($req.uri, "/trap"))) { ctx.report("bot.hit", "trap"); }\nreturn true;',
-        mounts: [
-          { projects: { include: ['loan-*'], exclude: ['loan-admin-legacy'] }, priority: 200 },
-        ],
+        projects: { include: ['loan-*'], exclude: ['loan-admin-legacy'] },
+        priority: 200,
       },
     ],
     ...overrides,
@@ -46,37 +45,37 @@ test('function names must be slugs, unique, and not reserved', () => {
         name: 'Bad_Name',
         enabled: true,
         script: 'return true;',
-        mounts: [{ projects: { include: ['*'] } }],
+        projects: { include: ['*'] },
       },
       {
         name: 'bot-trap',
         enabled: true,
         script: 'return true;',
-        mounts: [{ projects: { include: ['*'] } }],
+        projects: { include: ['*'] },
       },
       {
         name: 'bot-trap',
         enabled: true,
         script: 'return true;',
-        mounts: [{ projects: { include: ['*'] } }],
+        projects: { include: ['*'] },
       },
       {
         name: 'waf',
         enabled: true,
         script: 'return true;',
-        mounts: [{ projects: { include: ['*'] } }],
+        projects: { include: ['*'] },
       },
       {
         name: 'waf-sqli',
         enabled: true,
         script: 'return true;',
-        mounts: [{ projects: { include: ['*'] } }],
+        projects: { include: ['*'] },
       },
       {
         name: 'wafer',
         enabled: true,
         script: 'return true;',
-        mounts: [{ projects: { include: ['*'] } }],
+        projects: { include: ['*'] },
       },
     ],
   })
@@ -88,41 +87,56 @@ test('function names must be slugs, unique, and not reserved', () => {
   assert.ok(!fields.some((field) => field.startsWith('functions[5]')))
 })
 
-test('disabled functions may omit mounts; enabled functions need one', () => {
+test('every function needs a project selector, enabled or not', () => {
   const issues = validateEdgeFunctionsDraft({
     schemaVersion: 1,
     functions: [
-      { name: 'parked', enabled: false, script: 'return true;', mounts: [] },
-      { name: 'live', enabled: true, script: 'return true;', mounts: [] },
+      { name: 'parked', enabled: false, script: 'return true;' },
+      { name: 'live', enabled: true, script: 'return true;' },
     ],
   })
-  assert.equal(issues.length, 1)
-  assert.equal(issues[0]!.field, 'functions[1].mounts')
-  assert.equal(issues[0]!.code, 'missing_field')
+  assert.deepEqual(
+    issues.map((issue) => issue.field),
+    ['functions[0].projects', 'functions[1].projects'],
+  )
 })
 
-test('mount selectors, priority, and ratio are range-checked', () => {
+test('the removed mounts array no longer satisfies the selector', () => {
   const issues = validateEdgeFunctionsDraft({
     schemaVersion: 1,
     functions: [
       {
-        name: 'bad-mounts',
+        name: 'legacy',
         enabled: true,
         script: 'return true;',
-        mounts: [
-          {
-            projects: { include: ['a;b'], exclude: [] },
-            priority: 1_000_001,
-            ratio: 10_001,
-          },
-        ],
+        mounts: [{ projects: { include: ['*'] } }],
+      },
+    ],
+  })
+  assert.deepEqual(
+    issues.map((issue) => issue.field),
+    ['functions[0].projects'],
+  )
+})
+
+test('selectors, priority, and ratio are range-checked', () => {
+  const issues = validateEdgeFunctionsDraft({
+    schemaVersion: 1,
+    functions: [
+      {
+        name: 'bad-selector',
+        enabled: true,
+        script: 'return true;',
+        projects: { include: ['a;b'], exclude: [] },
+        priority: 1_000_001,
+        ratio: 10_001,
       },
     ],
   })
   const fields = issues.map((issue) => `${issue.field}:${issue.code}`)
-  assert.ok(fields.includes('functions[0].mounts[0].projects.include[0]:invalid_glob'))
-  assert.ok(fields.includes('functions[0].mounts[0].priority:invalid_field'))
-  assert.ok(fields.includes('functions[0].mounts[0].ratio:invalid_field'))
+  assert.ok(fields.includes('functions[0].projects.include[0]:invalid_glob'))
+  assert.ok(fields.includes('functions[0].priority:invalid_field'))
+  assert.ok(fields.includes('functions[0].ratio:invalid_field'))
 })
 
 test('include must be a non-empty array; glob bytes are bounded', () => {
@@ -133,11 +147,99 @@ test('include must be a non-empty array; glob bytes are bounded', () => {
         name: 'empty-include',
         enabled: true,
         script: 'return true;',
-        mounts: [{ projects: { include: [] } }],
+        projects: { include: [] },
       },
     ],
   })
-  assert.ok(issues.some((issue) => issue.field === 'functions[0].mounts[0].projects.include'))
+  assert.ok(issues.some((issue) => issue.field === 'functions[0].projects.include'))
+})
+
+function canaryDraft(
+  canary: Partial<EdgeFunctionDraftFunction>,
+  ...others: EdgeFunctionDraftFunction[]
+): EdgeFunctionsDraft {
+  const stable: EdgeFunctionDraftFunction = {
+    name: 'auth-v1',
+    enabled: true,
+    script: 'return true;',
+    projects: { include: ['*'] },
+  }
+  return {
+    schemaVersion: 1,
+    functions: [
+      stable,
+      { ...stable, name: 'auth-v2', ratio: 300, replaces: 'auth-v1', ...canary },
+      ...others,
+    ],
+  }
+}
+
+function replacesIssues(draft: EdgeFunctionsDraft): string[] {
+  return validateEdgeFunctionsDraft(draft)
+    .filter((issue) => issue.field.endsWith('.replaces'))
+    .map((issue) => `${issue.field}:${issue.code}`)
+}
+
+test('a canary may replace an enabled function of the same phase', () => {
+  assert.deepEqual(validateEdgeFunctionsDraft(canaryDraft({})), [])
+  // Both ramp endpoints are legal: 0 keeps all traffic on the target, 10000
+  // moves it all while the target stays for an instant rollback.
+  assert.deepEqual(validateEdgeFunctionsDraft(canaryDraft({ ratio: 0 })), [])
+  assert.deepEqual(validateEdgeFunctionsDraft(canaryDraft({ ratio: 10_000 })), [])
+})
+
+test('replaces must be a slug even on a disabled function', () => {
+  assert.deepEqual(replacesIssues(canaryDraft({ enabled: false, replaces: 'Not A Slug' })), [
+    'functions[1].replaces:invalid_field',
+  ])
+})
+
+test('a disabled canary is not held to the cross-function rules', () => {
+  assert.deepEqual(replacesIssues(canaryDraft({ enabled: false, replaces: 'gone' })), [])
+})
+
+test('replaces rejects itself, missing targets, and generated WAF functions', () => {
+  for (const replaces of ['auth-v2', 'gone', 'waf-core']) {
+    assert.deepEqual(
+      replacesIssues(canaryDraft({ replaces })),
+      ['functions[1].replaces:invalid_replaces'],
+      replaces,
+    )
+  }
+})
+
+test('replaces rejects a disabled target, which never reaches the wire', () => {
+  const parked: EdgeFunctionDraftFunction = {
+    name: 'parked',
+    enabled: false,
+    script: 'return true;',
+    projects: { include: ['*'] },
+  }
+  assert.deepEqual(replacesIssues(canaryDraft({ replaces: 'parked' }, parked)), [
+    'functions[1].replaces:invalid_replaces',
+  ])
+})
+
+test('replaces rejects a target in another phase', () => {
+  assert.deepEqual(replacesIssues(canaryDraft({ phase: 'request_body' })), [
+    'functions[1].replaces:invalid_replaces',
+  ])
+})
+
+test('replaces rejects chains and two canaries of one target', () => {
+  const chained: EdgeFunctionDraftFunction = {
+    name: 'auth-v3',
+    enabled: true,
+    script: 'return true;',
+    projects: { include: ['*'] },
+    replaces: 'auth-v2',
+  }
+  assert.deepEqual(replacesIssues(canaryDraft({}, chained)), [
+    'functions[2].replaces:invalid_replaces',
+  ])
+  assert.deepEqual(replacesIssues(canaryDraft({}, { ...chained, replaces: 'auth-v1' })), [
+    'functions[2].replaces:invalid_replaces',
+  ])
 })
 
 test('scripts are bounded per function and in total', () => {
@@ -149,7 +251,7 @@ test('scripts are bounded per function and in total', () => {
         name: 'huge',
         enabled: true,
         script: bigScript,
-        mounts: [{ projects: { include: ['*'] } }],
+        projects: { include: ['*'] },
       },
     ],
   })
@@ -168,7 +270,7 @@ test('scripts are bounded per function and in total', () => {
       name: `bulk-${index}`,
       enabled: true,
       script: chunk,
-      mounts: [{ projects: { include: ['*'] } }],
+      projects: { include: ['*'] },
     })),
   })
   assert.ok(total.some((issue) => issue.field === 'functions' && issue.code === 'limit_exceeded'))
@@ -182,7 +284,7 @@ test('lone surrogates are rejected in scripts and globs', () => {
         name: 'surrogate',
         enabled: true,
         script: 'return "\ud800";',
-        mounts: [{ projects: { include: ['ok'] } }],
+        projects: { include: ['ok'] },
       },
     ],
   })
@@ -199,7 +301,7 @@ test('phase must be request_head or request_body when present', () => {
             enabled: true,
             phase: 'request_body',
             script: 'return true;',
-            mounts: [{ projects: { include: ['*'] } }],
+            projects: { include: ['*'] },
           },
         ],
       }),
@@ -215,7 +317,7 @@ test('phase must be request_head or request_body when present', () => {
             enabled: true,
             phase: 'request_head',
             script: 'return true;',
-            mounts: [{ projects: { include: ['*'] } }],
+            projects: { include: ['*'] },
           },
         ],
       }),
@@ -230,7 +332,7 @@ test('phase must be request_head or request_body when present', () => {
           enabled: true,
           phase: 'response' as unknown as EdgeFunctionsDraft['functions'][number]['phase'],
           script: 'return true;',
-          mounts: [{ projects: { include: ['*'] } }],
+          projects: { include: ['*'] },
         },
       ],
     }),

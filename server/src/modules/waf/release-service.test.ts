@@ -293,7 +293,8 @@ test('create compiles a mounted policy into script + index payloads and reads bo
     {
       name: 'waf-core',
       sha256: generated?.scriptSha256,
-      mounts: [{ projects: { include: ['*'], exclude: ['loan-admin-legacy'] }, priority: 100 }],
+      projects: { include: ['*'], exclude: ['loan-admin-legacy'] },
+      priority: 100,
     },
   ])
   assert.deepEqual(plan.functions, validatedIndex.functions)
@@ -344,19 +345,22 @@ test('create merges handwritten functions with the generated WAF function', asyn
         enabled: true,
         script:
           'if (($header.user_agent contains "zgrab")) { ctx.report("bot.hit", "zgrab"); }\nreturn true;',
-        mounts: [{ projects: { include: ['*'] }, priority: 300, ratio: 1000 }],
+        projects: { include: ['*'] },
+        priority: 300,
+        ratio: 1000,
       },
       {
         name: 'before-waf',
         enabled: true,
         script: 'return true;',
-        mounts: [{ projects: { include: ['loan-*'] }, priority: 50 }],
+        projects: { include: ['loan-*'] },
+        priority: 50,
       },
       {
         name: 'parked',
         enabled: false,
         script: 'return true;',
-        mounts: [],
+        projects: { include: ['*'] },
       },
     ],
   }
@@ -365,15 +369,15 @@ test('create merges handwritten functions with the generated WAF function', asyn
 
   const plan = created?.[0]?.plan
   assert.ok(plan)
-  // Deterministic order: ascending lowest-mount priority, then name.
+  // Deterministic order: ascending priority, then name.
   assert.deepEqual(
     plan.functions.map((entry) => entry.name),
     ['before-waf', 'waf-core', 'after-waf'],
   )
   // ratio omitted on the wire at the 10000 default, emitted otherwise.
   assert.deepEqual(
-    plan.functions.map((entry) => entry.mounts.map((mount) => mount.ratio ?? null)),
-    [[null], [null], [1000]],
+    plan.functions.map((entry) => entry.ratio ?? null),
+    [null, null, 1000],
   )
   assert.deepEqual(
     plan.scripts.map((entry) => entry.name),
@@ -433,21 +437,10 @@ test('create publishes one function per enabled group, each with its own mount',
   const plan = created?.[0]?.plan
   assert.ok(plan)
   assert.deepEqual(
-    plan.functions.map((entry) => [entry.name, entry.mounts]),
+    plan.functions.map((entry) => [entry.name, entry.projects, entry.priority]),
     [
-      [
-        'waf-loan',
-        [
-          {
-            projects: { include: ['loan-*'], exclude: ['loan-admin-legacy', 'loan-web'] },
-            priority: 100,
-          },
-        ],
-      ],
-      [
-        'waf-core',
-        [{ projects: { include: ['*'], exclude: ['loan-admin-legacy'] }, priority: 200 }],
-      ],
+      ['waf-loan', { include: ['loan-*'], exclude: ['loan-admin-legacy', 'loan-web'] }, 100],
+      ['waf-core', { include: ['*'], exclude: ['loan-admin-legacy'] }, 200],
     ],
   )
   assert.deepEqual(
@@ -459,6 +452,29 @@ test('create publishes one function per enabled group, each with its own mount',
   assert.equal(requests.filter((r) => r.kind === 'edge_function_script').length, 2)
 })
 
+test('create publishes a version canary with replaces, leaving the target untouched', async () => {
+  const stable = {
+    name: 'auth-v1',
+    enabled: true,
+    script: 'return true;',
+    projects: { include: ['*'] },
+    priority: 100,
+  }
+  const functionsDraft: EdgeFunctionsDraft = {
+    schemaVersion: 1,
+    functions: [stable, { ...stable, name: 'auth-v2', ratio: 300, replaces: 'auth-v1' }],
+  }
+  const { service, created } = buildService({ functionsDraft })
+  await service.create(actor, { idempotencyKey: 'key-canary' }, 'request-canary')
+
+  const entries = created?.[0]?.plan.functions ?? []
+  const byName = new Map(entries.map((entry) => [entry.name, entry]))
+  assert.equal(byName.get('auth-v2')?.replaces, 'auth-v1')
+  assert.equal(byName.get('auth-v2')?.ratio, 300)
+  assert.equal('replaces' in byName.get('auth-v1')!, false)
+  assert.equal('ratio' in byName.get('auth-v1')!, false)
+})
+
 test('create refuses a handwritten function the WAF now owns the name of', async () => {
   const functionsDraft: EdgeFunctionsDraft = {
     schemaVersion: 1,
@@ -467,7 +483,7 @@ test('create refuses a handwritten function the WAF now owns the name of', async
         name: 'waf-candidate',
         enabled: true,
         script: 'return true;',
-        mounts: [{ projects: { include: ['*'] } }],
+        projects: { include: ['*'] },
       },
     ],
   }
@@ -489,14 +505,16 @@ test('create carries request_body phase onto the wire and validates scripts per 
         phase: 'request_body',
         script:
           'if (strings.match($req.body, "forbidden")) { resp.send(403, "no"); }\nreturn true;',
-        mounts: [{ projects: { include: ['*'] }, priority: 300 }],
+        projects: { include: ['*'] },
+        priority: 300,
       },
       {
         name: 'head-guard',
         enabled: true,
         phase: 'request_head',
         script: 'return true;',
-        mounts: [{ projects: { include: ['*'] }, priority: 300 }],
+        projects: { include: ['*'] },
+        priority: 300,
       },
     ],
   }
@@ -539,7 +557,8 @@ test('create publishes handwritten functions even when the WAF policy unmounts',
         name: 'bot-trap',
         enabled: true,
         script: 'return true;',
-        mounts: [{ projects: { include: ['*'] }, ratio: 0 }],
+        projects: { include: ['*'] },
+        ratio: 0,
       },
     ],
   }
@@ -556,9 +575,10 @@ test('create publishes handwritten functions even when the WAF policy unmounts',
     plan?.functions.map((entry) => entry.name),
     ['bot-trap'],
   )
-  assert.deepEqual(plan?.functions[0]?.mounts, [
-    { projects: { include: ['*'], exclude: [] }, priority: 0, ratio: 0 },
-  ])
+  const [published] = plan?.functions ?? []
+  assert.deepEqual(published?.projects, { include: ['*'], exclude: [] })
+  assert.equal(published?.priority, 0)
+  assert.equal(published?.ratio, 0)
   assert.deepEqual(
     plan?.scripts.map((entry) => entry.name),
     ['bot-trap'],
@@ -648,12 +668,13 @@ test('representative index serialization is stable under canonicalJson', () => {
     {
       name: 'waf',
       sha256: 'a'.repeat(64),
-      mounts: [{ projects: { include: ['*'], exclude: [] }, priority: 100 }],
+      projects: { include: ['*'], exclude: [] },
+      priority: 100,
     },
   ]
   assert.equal(
     canonicalJson({ version: 1, functions }),
-    `{"functions":[{"mounts":[{"priority":100,"projects":{"exclude":[],"include":["*"]}}],"name":"waf","sha256":"${'a'.repeat(64)}"}],"version":1}`,
+    `{"functions":[{"name":"waf","priority":100,"projects":{"exclude":[],"include":["*"]},"sha256":"${'a'.repeat(64)}"}],"version":1}`,
   )
 })
 
@@ -671,7 +692,8 @@ function rollbackSourceMounted(): WafRollbackSource {
         {
           name: 'waf',
           sha256: sha256(historicalScript).toString('hex'),
-          mounts: [{ projects: { include: ['*'], exclude: [] }, priority: 100 }],
+          projects: { include: ['*'], exclude: [] },
+          priority: 100,
         },
       ],
       scripts: [{ name: 'waf', script: historicalScript }],
@@ -863,8 +885,9 @@ test('currentEdgeFunctions returns the live index and script bytes from rnacos',
       [
         EDGE_FUNCTIONS_DATA_ID,
         liveIndexValue([
-          { name: 'waf', sha256: 'a'.repeat(64), mounts: [liveMount] },
-          { name: 'body-scan', sha256: 'a'.repeat(64), phase: 'request_body', mounts: [liveMount] },
+          { name: 'waf', sha256: 'a'.repeat(64), ...liveMount },
+          { name: 'body-scan', sha256: 'a'.repeat(64), phase: 'request_body', ...liveMount },
+          { name: 'body-next', sha256: 'a'.repeat(64), ...liveMount, ratio: 300, replaces: 'waf' },
         ]),
       ],
       [
@@ -874,6 +897,10 @@ test('currentEdgeFunctions returns the live index and script bytes from rnacos',
       [
         edgeFunctionScriptDataId('body-scan'),
         { exists: true, content: '// body', sha256: 'b'.repeat(32), md5: 'b'.repeat(16) },
+      ],
+      [
+        edgeFunctionScriptDataId('body-next'),
+        { exists: true, content: '// next', sha256: 'c'.repeat(32), md5: 'c'.repeat(16) },
       ],
     ]),
   )
@@ -885,22 +912,41 @@ test('currentEdgeFunctions returns the live index and script bytes from rnacos',
     { dataId: EDGE_FUNCTIONS_DATA_ID, group: EDGE_FUNCTIONS_GROUP },
     { dataId: liveScriptDataId, group: EDGE_FUNCTIONS_GROUP },
     { dataId: edgeFunctionScriptDataId('body-scan'), group: EDGE_FUNCTIONS_GROUP },
+    { dataId: edgeFunctionScriptDataId('body-next'), group: EDGE_FUNCTIONS_GROUP },
   ])
   assert.equal(view.index.exists, true)
   assert.equal(view.index.version, 7)
   assert.equal(view.index.parseError, null)
   assert.deepEqual(view.index.functions, [
-    { name: 'waf', sha256: 'a'.repeat(64), phase: null, mounts: [{ ...liveMount, ratio: null }] },
+    {
+      name: 'waf',
+      sha256: 'a'.repeat(64),
+      phase: null,
+      ...liveMount,
+      ratio: null,
+      replaces: null,
+    },
     {
       name: 'body-scan',
       sha256: 'a'.repeat(64),
       phase: 'request_body',
-      mounts: [{ ...liveMount, ratio: null }],
+      ...liveMount,
+      ratio: null,
+      replaces: null,
+    },
+    {
+      name: 'body-next',
+      sha256: 'a'.repeat(64),
+      phase: null,
+      ...liveMount,
+      ratio: 300,
+      replaces: 'waf',
     },
   ])
   assert.deepEqual(view.scripts, [
     { name: 'waf', exists: true, sha256: 'a'.repeat(32), content: liveScript },
     { name: 'body-scan', exists: true, sha256: 'b'.repeat(32), content: '// body' },
+    { name: 'body-next', exists: true, sha256: 'c'.repeat(32), content: '// next' },
   ])
 })
 
@@ -952,8 +998,8 @@ test('currentEdgeFunctions still lists foreign names but never reads unsafe scri
       [
         EDGE_FUNCTIONS_DATA_ID,
         liveIndexValue([
-          { name: 'waf', sha256: 'a'.repeat(64), mounts: [liveMount] },
-          { name: '../evil', sha256: 'b'.repeat(64), mounts: [] },
+          { name: 'waf', sha256: 'a'.repeat(64), ...liveMount },
+          { name: '../evil', sha256: 'b'.repeat(64), ...liveMount },
           { no: 'name entry' },
         ]),
       ],

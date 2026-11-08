@@ -32,9 +32,8 @@ function sampleDraft(): EdgeFunctionsDraft {
         description: 'first handwritten function',
         enabled: true,
         script: 'return true;',
-        mounts: [
-          { projects: { include: ['loan-*'], exclude: ['loan-admin-legacy'] }, priority: 200 },
-        ],
+        projects: { include: ['loan-*'], exclude: ['loan-admin-legacy'] },
+        priority: 200,
       },
     ],
   }
