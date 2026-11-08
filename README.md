@@ -201,8 +201,12 @@ before it reaches the route's normal handling. They power the WAF and can also b
 - **Phases:** `request_head` runs before route matching, so unmatched paths are covered too.
   `request_body` runs after matching and reads a buffered `$req.body`, only on PROXY routes with
   `edge_function_body: true`, for JSON, form, text, and XML content types, within a 1 MiB cap.
-- **Mounting:** each mount has project `include` and `exclude` globs, an execution `priority`, and a
-  sticky sampling `ratio` keyed on the client IP.
+- **Mounting:** each function has project `include` and `exclude` globs, an execution `priority`,
+  and a sticky sampling `ratio` keyed on the client IP.
+- **Version canary:** `replaces` names the function a new version takes over inside its `ratio`.
+  Each request runs exactly one of the two, the old function's configuration stays untouched, and
+  removing the new function restores it. Behind a CDN or load balancer, set
+  `ACCESS_SERVER_CLIENT_METADATA_MODE` so sampling sees real clients rather than the intermediary.
 - **Capabilities:** read the request, respond early through `resp.*`, count events with
   `ctx.report(event, label)`, and test addresses with a `cidr` directive. Functions cannot modify
   the request or call upstreams.
@@ -339,7 +343,8 @@ The recommended rollout is one Project in `log` mode, then review the hit statis
 ### Handwritten edge functions
 
 A dedicated page edits function scripts, phases, and mounts, with per-function native compile
-previews. Handwritten and WAF-generated functions publish together. The names `waf` and `waf-*` are
+previews. It starts a version canary from an existing function and promotes it once it owns all the
+traffic. Handwritten and WAF-generated functions publish together. The names `waf` and `waf-*` are
 reserved for the generator, and a snapshot can hold up to 64 functions in total.
 
 ### Access control and audit
