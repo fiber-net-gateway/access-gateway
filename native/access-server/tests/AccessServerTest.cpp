@@ -587,7 +587,10 @@ std::string websocket_accept(std::string_view key) {
     if (SHA1(reinterpret_cast<const std::uint8_t *>(source.data()), source.size(), digest.data()) == nullptr) {
         return {};
     }
-    return util::base64_encode(digest.data(), digest.size());
+    std::string accept;
+    accept.resize(util::base64_encoded_size(digest.size()));
+    util::base64_encode_into(digest.data(), digest.size(), accept.data());
+    return accept;
 }
 
 // Minimal blocking HTTP/1.1 WebSocket upstream: one connection, one upgraded

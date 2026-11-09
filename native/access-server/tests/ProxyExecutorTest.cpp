@@ -510,7 +510,10 @@ std::string websocket_accept(std::string_view key) {
     if (SHA1(reinterpret_cast<const std::uint8_t *>(source.data()), source.size(), digest.data()) == nullptr) {
         return {};
     }
-    return fiber::util::base64_encode(digest.data(), digest.size());
+    std::string accept;
+    accept.resize(fiber::util::base64_encoded_size(digest.size()));
+    fiber::util::base64_encode_into(digest.data(), digest.size(), accept.data());
+    return accept;
 }
 
 fiber::async::Task<void> serve_upstream(fiber::http::HttpExchange &exchange, UpstreamState *state) {

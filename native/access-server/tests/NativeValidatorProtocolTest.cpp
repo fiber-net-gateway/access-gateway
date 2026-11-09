@@ -9,9 +9,15 @@
 
 namespace {
 
+std::string base64_string(const std::uint8_t *data, std::size_t len) {
+    std::string out;
+    out.resize(fiber::util::base64_encoded_size(len));
+    fiber::util::base64_encode_into(data, len, out.data());
+    return out;
+}
+
 std::string request(std::string_view kind, std::string_view project, std::string_view payload) {
-    const std::string encoded =
-            fiber::util::base64_encode(reinterpret_cast<const std::uint8_t *>(payload.data()), payload.size());
+    const std::string encoded = base64_string(reinterpret_cast<const std::uint8_t *>(payload.data()), payload.size());
     return R"({"contractVersion":1,"requestId":"test-request","kind":")" + std::string(kind) + R"(","project":")" +
            std::string(project) + R"(","payloadBase64":")" + encoded + R"("})";
 }
@@ -282,8 +288,7 @@ TEST(NativeValidatorProtocolTest, ReportsEdgeScriptCompileErrorsWithoutEchoingSo
 }
 
 std::string phase_request(std::string_view payload, std::string_view phase) {
-    const std::string encoded =
-            fiber::util::base64_encode(reinterpret_cast<const std::uint8_t *>(payload.data()), payload.size());
+    const std::string encoded = base64_string(reinterpret_cast<const std::uint8_t *>(payload.data()), payload.size());
     return R"({"contractVersion":1,"requestId":"test-request","kind":"edge_function_script","phase":")" +
            std::string(phase) + R"(","project":"","payloadBase64":")" + encoded + R"("})";
 }
