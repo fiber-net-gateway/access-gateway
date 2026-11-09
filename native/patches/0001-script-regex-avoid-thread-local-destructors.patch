@@ -1,0 +1,29 @@
+diff --git a/src/script/std/RegexCache.cpp b/src/script/std/RegexCache.cpp
+index 52aea29e..c962d14b 100644
+--- a/src/script/std/RegexCache.cpp
++++ b/src/script/std/RegexCache.cpp
+@@ -56,13 +56,20 @@ private:
+ } // namespace
+ 
+ const regex::Regex *cached_regex(std::string_view pattern) {
+-    thread_local PatternCache cache;
+-    return cache.get(pattern);
++    // Intentionally leaked per thread. A destructed thread_local emits
++    // __cxa_thread_atexit, and libc++abi's implementation references
++    // __cxa_thread_atexit_impl (glibc >= 2.18), which breaks targets that
++    // link against glibc 2.17. Worker threads are long-lived and the cache is
++    // bounded (kCapacity), so the leak is bounded by the thread count.
++    static thread_local PatternCache *cache = new PatternCache();
++    return cache->get(pattern);
+ }
+ 
+ regex::Scratch &regex_scratch() {
+-    thread_local regex::Scratch scratch;
+-    return scratch;
++    // Same glibc 2.17 constraint as cached_regex above: leak instead of
++    // registering a thread-local destructor.
++    static thread_local regex::Scratch *scratch = new regex::Scratch();
++    return *scratch;
+ }
+ 
+ } // namespace fiber::script::std_lib

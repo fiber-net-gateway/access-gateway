@@ -1,7 +1,7 @@
 # Native compatibility patches
 
 Temporary, narrowly scoped patches applied on top of the pinned
-`third_party/fiber-gateway-cpp` submodule revision (`270035b7707b8d3825e31eca2d1c67d1da1ef640`,
+`third_party/fiber-gateway-cpp` submodule revision (`8277303c0a664fe88f9a2b9ab345312dc90c36f3`,
 see `native/access-server/UPSTREAM.md`). Each patch exists because the pinned
 revision contains a defect that blocks this product, the fix belongs upstream,
 and waiting for a pin update is not acceptable.
@@ -18,7 +18,16 @@ the rest, and update the revision check in `apply.sh`.
 
 ## Patches
 
-None. The pinned revision carries no compatibility patches.
+- `0001-script-regex-avoid-thread-local-destructors.patch` —
+  `cached_regex`/`regex_scratch` used `thread_local` objects with non-trivial
+  destructors, which emits `__cxa_thread_atexit` calls and pulls libc++abi's
+  `cxa_thread_atexit.cpp.o`. Modern libc++abi references
+  `__cxa_thread_atexit_impl` (glibc >= 2.18) with a hard versioned symbol, so
+  the binary fails to load on the CentOS 7 gateways (glibc 2.17). The patch
+  leaks one bounded cache and one scratch per worker thread instead of
+  registering destructors. Upstream fix: drop the destructible `thread_local`
+  (or provide a portable thread-at-exit fallback); once the pin carries it,
+  this patch must be dropped.
 
 ## Retired patches
 
