@@ -10,7 +10,7 @@ HTTP, JSON/script, Nacos, CAT, and Prometheus modules are consumed from the pinn
 historical application import revision.
 
 The current reusable Fiber dependency is pinned at
-`34dc642614bf00366a610b073874a4505c831239` (upstream `master`, fetched 2026-11-08). The pinned
+`8277303c0a664fe88f9a2b9ab345312dc90c36f3` (upstream `master`, fetched 2026-11-09). The pinned
 revision carries no repository-owned compatibility patches: the TLS dynamic-credential lifetime
 defect ([upstream issue #41](https://github.com/fiber-net-gateway/fiber-gateway-cpp/issues/41)),
 briefly patched against `f832d5458d3bfca1cefa45a4c7a6cb1cd0662f23`, is fixed upstream in `90ed153`
@@ -18,6 +18,13 @@ briefly patched against `f832d5458d3bfca1cefa45a4c7a6cb1cd0662f23`, is fixed ups
 The repository-owned regression
 `ProxyExecutorTest.StreamsChunkedUpstreamWhoseFramingArrivesSeparatelyFromPayload` still guards
 the HTTP/1 chunked split-framing fix from the application side.
+The reviewed update range from the previous pin is
+`34dc642614bf00366a610b073874a4505c831239..8277303c0a664fe88f9a2b9ab345312dc90c36f3` (a single
+non-merge commit, fast-forward). `8277303c` is an internal `http_script` cleanup: the
+`$conn.remote_addr` constant now renders through `IpAddress::to_string_view` into a
+`kMaxTextLen` buffer instead of the hand-rolled `inet_ntop` family/byte selection, and an
+unrenderable address still yields `null`. No public header change; access-server needed no
+adaptation.
 The reviewed update range from the previous pin is
 `625f0b469db78b2527498dbd1e79e343234f2b97..34dc6426` (fifteen non-merge commits, fast-forward).
 Its behavioral core is the noexcept JSON codec rework (`fd96c61b`): `json::OutputSink` and
