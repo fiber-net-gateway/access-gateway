@@ -15,10 +15,16 @@
 #include <vector>
 
 #include <fiber/async/Spawn.h>
+#include <fiber/cat/CatClient.h>
+#include <fiber/cat/CatClientConfig.h>
+#include <fiber/common/IoError.h>
 #include <fiber/common/util/Crc32.h>
 #include <fiber/event/EventLoopGroup.h>
 #include <fiber/http/Http1Connection.h>
 #include <fiber/http/HttpExchange.h>
+#include <fiber/net/TcpListener.h>
+#include <fiber/net/TcpStream.h>
+#include <sys/socket.h>
 #include "HttpTransportStub.h"
 #include "config/AccessConfig.h"
 #include "config/AccessConfigLimits.h"
@@ -877,6 +883,222 @@ TEST(EdgeFunctionExecutor, HeadFunctionsStillRunBeforeBodyPhase) {
     const std::string response = run_request(store, post_json("x"));
     EXPECT_NE(response_body(response).find("head-wins"), std::string::npos) << response;
     EXPECT_EQ(response_body(response).find("body-wins"), std::string::npos) << response;
+}
+
+// ---- per-execution CAT transactions (Access.EdgeFunction) ----
+
+fiber::common::IoResult<std::uint16_t> collector_port(int fd) {
+    sockaddr_storage bound{};
+    socklen_t length = sizeof(bound);
+    if (::getsockname(fd, reinterpret_cast<sockaddr *>(&bound), &length) != 0) {
+        return std::unexpected(fiber::common::IoErr::NotSupported);
+    }
+    fiber::net::SocketAddress address;
+    if (!fiber::net::SocketAddress::from_sockaddr(reinterpret_cast<sockaddr *>(&bound), length, address)) {
+        return std::unexpected(fiber::common::IoErr::NotSupported);
+    }
+    return address.port();
+}
+
+fiber::async::Task<fiber::common::IoResult<void>> read_exact(fiber::net::TcpStream &stream, std::uint8_t *data,
+                                                             std::size_t size) noexcept {
+    std::size_t offset = 0;
+    while (offset < size) {
+        auto read = co_await stream.read(data + offset, size - offset, 2s);
+        if (!read) {
+            co_return std::unexpected(read.error());
+        }
+        if (*read == 0) {
+            co_return std::unexpected(fiber::common::IoErr::NotConnected);
+        }
+        offset += *read;
+    }
+    co_return fiber::common::IoResult<void>{};
+}
+
+// Accepts one collector connection and reads its first frame (4-byte
+// big-endian length prefix + payload): the completed message tree of the
+// request. Anything later on the connection is ignored.
+fiber::async::DetachedTask
+run_frame_collector(fiber::event::EventLoop *loop, std::promise<std::uint16_t> *port_promise,
+                    std::promise<std::optional<std::vector<std::uint8_t>>> *frame_promise) {
+    fiber::net::TcpListener listener(*loop);
+    auto bound = listener.bind({fiber::net::IpAddress::loopback_v4(), 0}, {});
+    if (!bound) {
+        port_promise->set_value(0);
+        frame_promise->set_value(std::nullopt);
+        co_return;
+    }
+    const auto port = collector_port(listener.fd());
+    if (!port) {
+        port_promise->set_value(0);
+        frame_promise->set_value(std::nullopt);
+        co_return;
+    }
+    port_promise->set_value(*port);
+
+    auto accepted = co_await listener.accept();
+    if (!accepted) {
+        frame_promise->set_value(std::nullopt);
+        co_return;
+    }
+    fiber::net::TcpStream stream(*loop, accepted->release_fd(), accepted->take_peer());
+    std::array<std::uint8_t, 4> prefix{};
+    auto prefix_result = co_await read_exact(stream, prefix.data(), prefix.size());
+    if (!prefix_result) {
+        stream.close();
+        listener.close();
+        frame_promise->set_value(std::nullopt);
+        co_return;
+    }
+    const std::size_t payload_size = static_cast<std::size_t>(prefix[0]) << 24 |
+                                     static_cast<std::size_t>(prefix[1]) << 16 |
+                                     static_cast<std::size_t>(prefix[2]) << 8 | prefix[3];
+    if (payload_size == 0 || payload_size > (1U << 20)) {
+        stream.close();
+        listener.close();
+        frame_promise->set_value(std::nullopt);
+        co_return;
+    }
+    std::vector<std::uint8_t> frame(prefix.begin(), prefix.end());
+    frame.resize(prefix.size() + payload_size);
+    auto payload_result = co_await read_exact(stream, frame.data() + prefix.size(), payload_size);
+    stream.close();
+    listener.close();
+    frame_promise->set_value(payload_result ? std::optional<std::vector<std::uint8_t>>{std::move(frame)} : std::nullopt);
+}
+
+// One request driven with a live CAT client whose collector is the fake above;
+// the client is shut down before completion so the frame has been submitted.
+fiber::async::DetachedTask run_request_with_cat(fiber::event::EventLoop *loop, std::uint16_t collector_port,
+                                                const RouteConfigStore *store, std::string request, std::string *output,
+                                                std::promise<void> *done,
+                                                fiber::access_server::AccessProxyAdapter proxy_adapter) {
+    fiber::cat::CatClientConfigParams params{
+            .app_key = "edge-function-test",
+            .hostname = "test-host",
+            .ip = "127.0.0.1",
+            .thread_group_name = "test",
+            .thread_id = "0",
+            .thread_name = "worker",
+            .bootstrap_collectors =
+                    {
+                            fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), collector_port),
+                    },
+    };
+    auto config = fiber::cat::CatClientConfig::create(std::move(params));
+    if (!config) {
+        ADD_FAILURE() << "failed to construct CAT test config";
+        done->set_value();
+        co_return;
+    }
+    fiber::cat::CatClientOptions options;
+    options.collector_connect_timeout = 1s;
+    options.collector_write_timeout = 1s;
+    auto created = fiber::cat::CatClient::create(*loop, std::move(*config), options);
+    if (!created) {
+        ADD_FAILURE() << "failed to construct CAT test client";
+        done->set_value();
+        co_return;
+    }
+    std::unique_ptr<fiber::cat::CatClient> client = std::move(*created);
+    if (!client->start()) {
+        ADD_FAILURE() << "failed to start CAT test client";
+        done->set_value();
+        co_return;
+    }
+
+    auto transport = std::make_unique<RecordingTransport>(*loop, std::move(request), *output);
+    fiber::access_server::AccessRequestHandler access_handler(store->snapshot_provider(), {}, {}, proxy_adapter);
+    ClientMetadataResolver client_metadata_resolver(ClientMetadataResolverOptions{
+            .mode = ClientMetadataMode::LegacyHeaders,
+    });
+    fiber::http::HttpHandler handler = [&access_handler, &client_metadata_resolver,
+                                        &client](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+        fiber::access_server::AccessRequestTelemetry telemetry(exchange, nullptr, client.get(),
+                                                              &client_metadata_resolver);
+        co_await access_handler.handle(exchange, telemetry);
+    };
+    fiber::http::Http1Connection connection(std::move(transport), handler, {});
+    co_await connection.run();
+    co_await client->shutdown();
+    done->set_value();
+}
+
+std::size_t count_of(std::string_view haystack, std::string_view needle) {
+    std::size_t count = 0;
+    for (std::size_t at = haystack.find(needle); at != std::string_view::npos;
+         at = haystack.find(needle, at + needle.size())) {
+        ++count;
+    }
+    return count;
+}
+
+TEST(EdgeFunctionExecutor, RecordsCatTransactionPerExecutionWithCostTags) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    std::promise<std::uint16_t> port_promise;
+    auto port_future = port_promise.get_future();
+    std::promise<std::optional<std::vector<std::uint8_t>>> frame_promise;
+    auto frame_future = frame_promise.get_future();
+    fiber::async::spawn(group.at(0), [&] { return run_frame_collector(&group.at(0), &port_promise, &frame_promise); });
+
+    const std::uint16_t port = port_future.wait_for(2s) == std::future_status::ready ? port_future.get() : 0;
+    if (port == 0) {
+        group.stop();
+        group.join();
+        FAIL() << "collector did not bind";
+        return;
+    }
+
+    // Head chain: a failing function (fails open into the next) plus a quiet
+    // observer; body chain: a responder. Three executions must produce three
+    // Access.EdgeFunction transactions in the request's message tree.
+    RouteConfigStore store;
+    publish_proxy_route(store, true);
+    EdgeFunctionLibrary library;
+    EdgeFunctionsState state;
+    add_function(state, library, "broken", R"(ctx.report(1, "x"); true)", {mounted_everywhere(1)});
+    add_function(state, library, "observer", R"(return true;)", {mounted_everywhere(2)});
+    add_body_function(state, library, "body-guard", R"(resp.send(200, "cat-body-done");)", {mounted_everywhere(0)});
+    store.set_edge_functions(std::make_shared<EdgeFunctionsState>(std::move(state)));
+
+    CapturedBodyProxy capture;
+    std::string output;
+    std::promise<void> done;
+    auto completed = done.get_future();
+    fiber::async::spawn(group.at(0), [&] {
+        return run_request_with_cat(&group.at(0), port, &store, post_json("x"), &output, &done,
+                                    body_proxy_adapter(capture));
+    });
+
+    const bool request_done = completed.wait_for(5s) == std::future_status::ready;
+    const bool frame_ready = frame_future.wait_for(5s) == std::future_status::ready;
+    group.stop();
+    group.join();
+    ASSERT_TRUE(request_done);
+    ASSERT_TRUE(frame_ready);
+
+    // The CAT-enabled path still serves the request through the short-circuit.
+    EXPECT_NE(output.find(" 200 "), std::string::npos) << output;
+    EXPECT_NE(response_body(output).find("cat-body-done"), std::string::npos) << output;
+
+    const std::optional<std::vector<std::uint8_t>> frame = frame_future.get();
+    ASSERT_TRUE(frame.has_value());
+    ASSERT_GT(frame->size(), 7U);
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(frame->data() + 4), 3), "NT1");
+    const std::string payload(frame->begin() + 4, frame->end());
+
+    EXPECT_EQ(count_of(payload, "Access.EdgeFunction"), 3U);
+    EXPECT_EQ(count_of(payload, "phase=head"), 2U);
+    EXPECT_EQ(count_of(payload, "phase=body"), 1U);
+    EXPECT_EQ(count_of(payload, "alloc_bytes="), 3U);
+    EXPECT_EQ(count_of(payload, "reason=exception"), 1U);
+    EXPECT_EQ(count_of(payload, "reason=abort"), 0U);
+    EXPECT_NE(payload.find("broken"), std::string::npos);
+    EXPECT_NE(payload.find("observer"), std::string::npos);
+    EXPECT_NE(payload.find("body-guard"), std::string::npos);
 }
 
 } // namespace

@@ -3,6 +3,7 @@
 
 #include "../execution/ClientMetadata.h"
 #include "../routing/RequestTraceServices.h"
+#include "AccessEdgeFunctionTransaction.h"
 #include "AccessProviderTransaction.h"
 #include "RequestObservability.h"
 #include "ScriptExecutionContext.h"
@@ -152,6 +153,9 @@ public:
     }
     [[nodiscard]] AccessProviderTransaction start_provider_transaction(std::string_view name) noexcept {
         return observability_.start_provider_transaction(name);
+    }
+    [[nodiscard]] AccessEdgeFunctionTransaction start_edge_function_transaction(std::string_view name) noexcept {
+        return observability_.start_edge_function_transaction(name);
     }
     void start_websocket_session(std::string_view name, bool extended_connect) noexcept {
         observability_.start_websocket_session(name, extended_connect);

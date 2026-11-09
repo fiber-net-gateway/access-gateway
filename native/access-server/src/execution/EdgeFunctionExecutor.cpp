@@ -1,5 +1,6 @@
 #include "EdgeFunctionExecutor.h"
 
+#include "../observability/AccessEdgeFunctionTransaction.h"
 #include "../observability/AccessRequestTelemetry.h"
 #include "../observability/AccessServerLogCategories.h"
 
@@ -78,7 +79,7 @@ private:
 fiber::async::Task<EdgeFunctionOutcome>
 EdgeFunctionExecutor::run(std::span<const EdgeFunctionMounted> mounted, http_script::ScriptExchangeCtx &script_context,
                           AccessRequestTelemetry &telemetry, std::string_view project, std::string_view host,
-                          bool fail_close, std::string_view request_body) noexcept {
+                          EdgeFunctionPhase phase, bool fail_close, std::string_view request_body) noexcept {
     if (mounted.empty()) {
         co_return EdgeFunctionOutcome::Continue;
     }
@@ -112,16 +113,24 @@ EdgeFunctionExecutor::run(std::span<const EdgeFunctionMounted> mounted, http_scr
         }
         edge.begin_function(entry.name);
         script_context.set_services(&edge);
+        // Per-execution CAT transaction (a no-op without a CAT root): the
+        // script heap is quiescent inside this window — only this function
+        // allocates on it — so lifetime-counter deltas attribute cleanly.
+        AccessEdgeFunctionTransaction transaction = telemetry.start_edge_function_transaction(entry.name);
+        transaction.add_phase(phase);
+        const script::GcHeapStats heap_before = script_context.heap().stats();
         const std::chrono::steady_clock::time_point started = std::chrono::steady_clock::now();
         script::JsValue root = script::JsValue::make_undefined();
         const script::ScriptResult result =
                 co_await entry.program->program.exec_async(root, &script_context, script_context.heap());
         const std::chrono::nanoseconds elapsed = std::chrono::steady_clock::now() - started;
         script_context.set_services(previous_services);
+        transaction.add_cost(heap_before, script_context.heap().stats());
 
         telemetry.record_edge_function_evaluated(entry.name, project);
         telemetry.record_edge_function_duration(entry.name, elapsed);
         if (script_context.response_header_sent()) {
+            transaction.complete_success();
             LOG(LOG_EDGE_FUNCTION, INFO) << "edge_function_short_circuit"
                                          << " trace_id=\"" << telemetry.trace_id() << "\"" << " project=\"" << project
                                          << "\"" << " host=\"" << host << "\"" << " function=\"" << entry.name << "\"";
@@ -131,8 +140,10 @@ EdgeFunctionExecutor::run(std::span<const EdgeFunctionMounted> mounted, http_scr
             case script::ScriptResultKind::Void:
             case script::ScriptResultKind::Value:
                 // Completed without writing a response: continue the chain.
+                transaction.complete_success();
                 break;
             case script::ScriptResultKind::Exception:
+                transaction.complete_error(kErrorReasonException);
                 telemetry.record_edge_function_error(entry.name, kErrorReasonException);
                 LOG(LOG_EDGE_FUNCTION, WARN)
                         << "edge_function_error"
@@ -143,6 +154,7 @@ EdgeFunctionExecutor::run(std::span<const EdgeFunctionMounted> mounted, http_scr
                 }
                 break;
             case script::ScriptResultKind::Abort:
+                transaction.complete_error(kErrorReasonAbort, script::abort_reason_name(result.abort().reason));
                 telemetry.record_edge_function_error(entry.name, kErrorReasonAbort);
                 LOG(LOG_EDGE_FUNCTION, WARN)
                         << "edge_function_error"

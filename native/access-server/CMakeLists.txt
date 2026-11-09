@@ -92,6 +92,7 @@ access_server_add_component(access_server_execution
     "${CMAKE_CURRENT_LIST_DIR}/src/execution/RoutePolicyEvaluator.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/execution/TemplateEvaluator.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/execution/UpstreamTlsClientPolicy.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/observability/AccessEdgeFunctionTransaction.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/observability/AccessProviderTransaction.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/observability/AccessRequestTelemetry.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/observability/RequestObservability.cpp"

@@ -533,6 +533,18 @@ AccessProviderTransaction RequestObservability::start_provider_transaction(std::
     return AccessProviderTransaction(std::move(*transaction));
 }
 
+AccessEdgeFunctionTransaction
+RequestObservability::start_edge_function_transaction(std::string_view name) noexcept {
+    if (!root_.valid()) {
+        return {};
+    }
+    auto transaction = root_.start_transaction("Access.EdgeFunction", name);
+    if (!transaction) {
+        return {};
+    }
+    return AccessEdgeFunctionTransaction(std::move(*transaction));
+}
+
 void RequestObservability::start_websocket_session(std::string_view name, bool extended_connect) noexcept {
     if (!root_.valid() || websocket_event_.valid()) {
         return;

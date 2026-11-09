@@ -407,7 +407,7 @@ async::Task<Result<void>> AccessRequestHandler::handle_impl(http::HttpExchange &
         }
         const EdgeFunctionOutcome edge_outcome = co_await EdgeFunctionExecutor::run(
                 edge_mounted, telemetry.script_context(), telemetry, host_match.project->project(),
-                request_host.effective_host, options_.edge_function_fail_close);
+                request_host.effective_host, EdgeFunctionPhase::RequestHead, options_.edge_function_fail_close);
         switch (edge_outcome) {
             case EdgeFunctionOutcome::Responded:
                 co_return Result<void>{};
@@ -515,7 +515,8 @@ async::Task<Result<void>> AccessRequestHandler::handle_impl(http::HttpExchange &
                     }
                     const EdgeFunctionOutcome body_outcome = co_await EdgeFunctionExecutor::run(
                             edge_body_mounted, telemetry.script_context(), telemetry, host_match.project->project(),
-                            request_host.effective_host, options_.edge_function_fail_close, body_flat);
+                            request_host.effective_host, EdgeFunctionPhase::RequestBody,
+                            options_.edge_function_fail_close, body_flat);
                     switch (body_outcome) {
                         case EdgeFunctionOutcome::Responded:
                             co_return Result<void>{};

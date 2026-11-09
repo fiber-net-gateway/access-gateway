@@ -229,7 +229,11 @@ if (!office.contains($conn.remote_addr) && strings.match($req.uri, "(?i)union\\s
   - `access_server_function_config_failures_total`（索引/脚本组装失败）
   - `access_server_functions_configured`（gauge，当前快照函数数）
 - **访问日志 19 字段 Java 契约不动**。函数事件（含短路）写独立结构化日志行：requestId/traceId/project/host/function/event/label + 截断的目标片段。
-- CAT：v1 不改事务模型，trace id 已在事件日志中（事务标记形态列为开放项 §8）。
+- CAT：每次**实际执行**（采样命中的挂载；`sampled_out` 不记）在请求 message tree 里记一个子事务 `type=Access.EdgeFunction`、`name=<函数名>`，duration 由客户端在 complete 时取墙钟（含 `co_await` 挂起）。data 标签携带执行代价：
+  - `phase=head|body`（同一函数两阶段各执行一次时产生两个事务）；
+  - `alloc_bytes` = 执行窗口内 `GcHeapStats.allocated_bytes_total` 差分（毛分配量，主口径）；`heap_bytes` = `current_bytes` 差分（净留存，可为负——窗口内阈值回收可能清掉前序函数的垃圾）；窗口内有完成回收时附 `gc`/`gc_freed`。口径为 GC 请求字节数，不含 intern 桶、root 池与分配器开销；
+  - 终态：成功（含短路响应）status=0；Exception/Abort status=ERROR 附 `reason`（与 errors_total 词表一致）及 abort 的 `detail`；协程取消时析构兜底 status=Fail 附 `reason=canceled`。
+  CAT 根不可用（未配置客户端）时全程 no-op。事务在 `Access.Provider` 之前顺序完结，树序天然干净。
 
 ## 4. 控制面：WAF 编译器
 
@@ -334,7 +338,7 @@ projectModes:
 - ~~**上游备忘失效缺陷**：`ScriptExchangeCtx::set_path_vars()` 不清除已备忘的 `$path` 常量~~ **已解决**（上游 `625f0b46`，随本设计实施一同 pin）：`set_path_vars()` 现重置整个常量备忘（单条摘除会断线性探测链），各候选条件读到自己的捕获；`AccessRequestHandlerTest.PathVarConditionSeesEachCandidatesOwnCapture` 已解封守护。
 - **body 阶段 v2 候选**（P3 ① 后仍开放）：content-type 白名单为代码固定 v1（console/数据面均不可配置——可配置清单是配置面攻击面，先固定观察）；`multipart/form-data`、`application/octet-stream` 等是否纳入待真实规则需求；脚本在代理路径上改写响应头（`resp.setHeader` 未 send 即丢弃，见 §3.3 方言脚枪）需要显式契约；`$req.body` 目前整体原样视图（无解析后的 JSON 常量，规则用 `strings.match` 匹配原始字节）。
 - `access_server_function_duration_seconds` 按整数微秒截断（`duration_cast<microseconds>`），1µs 以内的执行记为 0。规则组把脚本拆小后更容易低估，判断函数开销要看 CPU，不要看这个直方图；修复需改 native 记录精度。
-- CAT 事务标记形态（函数短路是否独立 transaction type 或仅 trace 标记）。
+- ~~CAT 事务标记形态~~ **已定案并实施**（§3.7）：每次实际执行记 `Access.EdgeFunction` 子事务（含代价标签），短路不是独立形态——它只是该事务的 status=0 终态。
 - 函数能否读 trace context（`$context` 已含 trace cluster；开放给 `$ctx` 的范围待实现时定）。
 - 响应阶段函数（`phase: response`）与请求改写（`phase: request_rewrite`）的契约扩展——远期，先留枚举位不实现。
 - 限流作为第二个编译目标的可行性（依赖每 worker 状态与时间窗原语，数据面需新增受控 API）。

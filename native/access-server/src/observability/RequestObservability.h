@@ -1,6 +1,7 @@
 #ifndef FIBER_ACCESS_SERVER_REQUEST_OBSERVABILITY_H
 #define FIBER_ACCESS_SERVER_REQUEST_OBSERVABILITY_H
 
+#include "AccessEdgeFunctionTransaction.h"
 #include "AccessProviderTransaction.h"
 #include "AccessServerMetrics.h"
 
@@ -124,6 +125,9 @@ public:
     void set_upstream(ScriptExecutionContext &execution, const ProxyUpstreamEndpoint &endpoint) noexcept;
     void record_cluster_selection(const AccessClusterSelection &selection) noexcept;
     [[nodiscard]] AccessProviderTransaction start_provider_transaction(std::string_view name) noexcept;
+    // One child transaction per actually-executed edge function; the edge
+    // executor owns its lifecycle (phase + cost tags + terminal status).
+    [[nodiscard]] AccessEdgeFunctionTransaction start_edge_function_transaction(std::string_view name) noexcept;
     void start_websocket_session(std::string_view name, bool extended_connect) noexcept;
     void finish_websocket_session(bool closed) noexcept;
 

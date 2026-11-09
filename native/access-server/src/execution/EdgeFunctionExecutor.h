@@ -16,6 +16,9 @@ namespace fiber::access_server {
 
 class AccessRequestTelemetry;
 
+// config/AccessConfig.h: which mount chain is executing.
+enum class EdgeFunctionPhase : std::uint8_t;
+
 // Outcome of the mounted-function chain for one request.
 enum class EdgeFunctionOutcome : std::uint8_t {
     // No function wrote a response; routing proceeds.
@@ -42,13 +45,16 @@ enum class EdgeFunctionOutcome : std::uint8_t {
 // execution later in the request is unaffected.
 class EdgeFunctionExecutor final {
 public:
-    // request_body is the prefetched, cap-bounded body view for the
-    // request_body phase (empty for the request_head phase, where a script
-    // referencing $req.body fails to compile); it must outlive this call.
+    // phase tags the per-execution CAT transaction with the mount chain's
+    // phase: a body-phase function with an empty body is not distinguishable
+    // from the head phase by request_body alone. request_body is the
+    // prefetched, cap-bounded body view for the request_body phase (empty for
+    // the request_head phase, where a script referencing $req.body fails to
+    // compile); it must outlive this call.
     [[nodiscard]] static fiber::async::Task<EdgeFunctionOutcome>
     run(std::span<const EdgeFunctionMounted> mounted, http_script::ScriptExchangeCtx &script_context,
-        AccessRequestTelemetry &telemetry, std::string_view project, std::string_view host, bool fail_close,
-        std::string_view request_body = {}) noexcept;
+        AccessRequestTelemetry &telemetry, std::string_view project, std::string_view host, EdgeFunctionPhase phase,
+        bool fail_close, std::string_view request_body = {}) noexcept;
 };
 
 } // namespace fiber::access_server
