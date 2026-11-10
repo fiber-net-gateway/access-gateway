@@ -305,7 +305,7 @@ void RequestObservability::record_provider_response(const ProxyUpstreamEndpoint 
     if (status_text.empty()) {
         return;
     }
-    metrics_->provider_response_received(proxy_metric_app(endpoint), endpoint.host_header, status_text);
+    metrics_->provider_response_received(endpoint.provider_name, endpoint.host_header, status_text);
 }
 
 void RequestObservability::record_proxy_transport_error(std::string_view app, std::string_view ip_port,
@@ -334,7 +334,7 @@ void RequestObservability::record_response_body_upstream(std::uint64_t bytes) no
 void RequestObservability::record_provider_body_transfer(const ProxyUpstreamEndpoint &endpoint,
                                                          AccessBodyDirection direction, std::uint64_t bytes) noexcept {
     if (metrics_ != nullptr && bytes != 0) {
-        metrics_->provider_body_transferred(proxy_metric_app(endpoint), endpoint.host_header, direction, bytes);
+        metrics_->provider_body_transferred(endpoint.provider_name, endpoint.host_header, direction, bytes);
     }
 }
 
@@ -533,8 +533,7 @@ AccessProviderTransaction RequestObservability::start_provider_transaction(std::
     return AccessProviderTransaction(std::move(*transaction));
 }
 
-AccessEdgeFunctionTransaction
-RequestObservability::start_edge_function_transaction(std::string_view name) noexcept {
+AccessEdgeFunctionTransaction RequestObservability::start_edge_function_transaction(std::string_view name) noexcept {
     if (!root_.valid()) {
         return {};
     }

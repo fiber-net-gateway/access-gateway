@@ -82,9 +82,9 @@ silently disappear after heavy churn. A family with no recorded series emits not
   line - not at body completion. Body or tunnel failures that happen afterwards do not change it.
   Each proxy attempt records its own endpoint, so a request that fails over across instances counts
   each responding endpoint. `app` is the discovery service name for service routes and
-  `<project-name>.project` for addresses routes; that `.project` suffix is a metrics-only naming
-  rule and does not change the CAT provider transaction or access-log names. `ip_port` is the
-  upstream endpoint's `host:port`.
+  `<project-name>.ups` for addresses routes — the same identity the CAT `Access.Provider`
+  transaction name and the access-log appName column record. `ip_port` is the upstream endpoint's
+  `host:port`.
 - `access_server_proxy_errors_total{app, ip_port, error}` (cap 2048) counts upstream transport
   failures per attempt with a coarse error class: `connect` covers everything before the connection
   is usable (name resolution, TCP dial and dial timeouts, TLS handshake); `request_timeout` covers

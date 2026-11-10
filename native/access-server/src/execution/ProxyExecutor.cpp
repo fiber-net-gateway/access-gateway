@@ -358,7 +358,7 @@ void record_provider_failure(AccessProviderTransaction &provider, AccessRequestT
     telemetry.record_proxy_failure(metric_failure_phase(proxy_failure.phase));
     const std::string_view error_label = proxy_error_label(proxy_failure.phase, proxy_failure.io_error);
     if (!error_label.empty()) {
-        telemetry.record_proxy_transport_error(proxy_metric_app(endpoint), endpoint.host_header, error_label);
+        telemetry.record_proxy_transport_error(endpoint.provider_name, endpoint.host_header, error_label);
     }
     if (is_upstream_call_failure(proxy_failure.phase)) {
         attempt.failed();

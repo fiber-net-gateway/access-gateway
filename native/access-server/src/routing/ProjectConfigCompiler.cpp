@@ -15,7 +15,7 @@ namespace {
 
 constexpr std::string_view kDefaultServiceCluster = "default";
 constexpr std::string_view kCallSourceSuffix = ".unifiedAccess";
-constexpr std::string_view kMetricAppSuffix = ".project";
+constexpr std::string_view kStaticAppSuffix = ".ups";
 
 std::string route_path(std::size_t route_index, std::string_view field) {
     std::string path = "routes[";
@@ -926,15 +926,18 @@ std::expected<CompiledRoute, AccessConfigError> compile_route(std::string_view p
                 }
                 addresses.push_back(std::move(*compiled_address));
             }
-            // Metrics-only app identity for static addresses: the project name
-            // distinguishes direct-address routes in the app label dimension
-            // the way the service name does for discovery, without touching
-            // the CAT provider name (which keeps the address authority).
-            std::string metric_app;
-            metric_app.reserve(project.size() + kMetricAppSuffix.size());
-            metric_app.append(project);
-            metric_app.append(kMetricAppSuffix);
-            proxy.address_selector = make_static_proxy_address_selector(std::move(addresses), std::move(metric_app));
+            // App identity for static addresses: "<project>.ups" gives
+            // direct-address routes a stable project-scoped name in the CAT
+            // Access.Provider transaction, the access-log appName column and
+            // the metrics app label, the way the service name does for
+            // discovery. The concrete address stays visible as the CAT
+            // upstream data tag, the access-log backendIp column and the
+            // metrics ip_port label.
+            std::string app;
+            app.reserve(project.size() + kStaticAppSuffix.size());
+            app.append(project);
+            app.append(kStaticAppSuffix);
+            proxy.address_selector = make_static_proxy_address_selector(std::move(addresses), std::move(app));
         } else {
             return std::unexpected(route_error(AccessConfigErrorCode::InvalidCombination, route_index, "service",
                                                "no service or addresses"));

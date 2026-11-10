@@ -60,8 +60,7 @@ ProxyAddressSelectError unavailable_error(ProxyAddressSelectErrorCode code, cons
 
 class StaticProxyAddressSelector final : public ProxyAddressSelector {
 public:
-    StaticProxyAddressSelector(std::vector<AccessUpstreamInstance> addresses, std::string metric_app) :
-        metric_app_(std::move(metric_app)) {
+    StaticProxyAddressSelector(std::vector<AccessUpstreamInstance> addresses, std::string app) : app_(std::move(app)) {
         std::vector<AccessUpstreamSwrr::WeightedInstance> weighted;
         weighted.reserve(addresses.size());
         std::uint64_t selection_token = 0;
@@ -89,15 +88,19 @@ public:
                                           : "static upstream circuit breaker is open";
             return std::unexpected(unavailable_error(code, message));
         }
-        const std::string_view provider_name = selected->instance().authority();
-        return make_proxy_upstream_endpoint(std::move(*selected), provider_name, {}, metric_app_);
+        // The selector's stable app name ("<project>.ups"), never the selected
+        // authority: address-sized names would fork the CAT provider
+        // transaction, the access-log appName column and the metrics series on
+        // every address change or failover. The selected address stays
+        // visible as the endpoint's host_header.
+        return make_proxy_upstream_endpoint(std::move(*selected), app_);
     }
 
-    [[nodiscard]] std::string_view metric_app() const noexcept override { return metric_app_; }
+    [[nodiscard]] std::string_view metric_app() const noexcept override { return app_; }
 
 private:
     AccessUpstreamSwrr swrr_;
-    std::string metric_app_;
+    std::string app_;
 };
 
 class UnavailableServiceAddressSelector final : public ProxyAddressSelector {
@@ -125,8 +128,8 @@ private:
 } // namespace
 
 std::shared_ptr<ProxyAddressSelector> make_static_proxy_address_selector(std::vector<AccessUpstreamInstance> addresses,
-                                                                         std::string metric_app) {
-    return std::make_shared<StaticProxyAddressSelector>(std::move(addresses), std::move(metric_app));
+                                                                         std::string app) {
+    return std::make_shared<StaticProxyAddressSelector>(std::move(addresses), std::move(app));
 }
 
 std::shared_ptr<ProxyAddressSelector> make_unavailable_service_address_selector(std::string service,

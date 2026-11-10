@@ -3059,7 +3059,7 @@ TEST(ProxyExecutorTest, AppliesServerDefaultResponseBodyLimitToChunkedResponses)
     // the body cut), and the route series keeps the delivered status even though
     // the gateway truncated the body. The addresses route carries the metrics-only
     // <project>.project app label.
-    EXPECT_NE(metric_text->find("access_server_provider_responses_total{app=\"orders.project\",ip_port=\"127.0.0.1:" +
+    EXPECT_NE(metric_text->find("access_server_provider_responses_total{app=\"orders.ups\",ip_port=\"127.0.0.1:" +
                                 std::to_string(port) + "\",status_code=\"201\"} 1"),
               std::string::npos);
     EXPECT_NE(metric_text->find("access_server_route_requests_total{host=\"api.example.com\",path=\"/proxy\","
@@ -3071,7 +3071,7 @@ TEST(ProxyExecutorTest, AppliesServerDefaultResponseBodyLimitToChunkedResponses)
     EXPECT_NE(metric_text->find("access_server_response_body_bytes_total{side=\"upstream\"} 5"), std::string::npos);
     EXPECT_NE(metric_text->find("access_server_response_body_bytes_total{side=\"downstream\"} 0"), std::string::npos);
     EXPECT_NE(metric_text->find("access_server_request_body_bytes_total{side=\"downstream\"} 0"), std::string::npos);
-    EXPECT_NE(metric_text->find("access_server_provider_body_bytes_total{app=\"orders.project\",ip_port=\"127.0.0.1:" +
+    EXPECT_NE(metric_text->find("access_server_provider_body_bytes_total{app=\"orders.ups\",ip_port=\"127.0.0.1:" +
                                 std::to_string(port) + "\",direction=\"response\"} 5"),
               std::string::npos);
     EXPECT_NE(metric_text->find("access_server_response_body_size_bytes_count 1"), std::string::npos);
@@ -3163,10 +3163,10 @@ TEST(ProxyExecutorTest, AccountsBodyTransferBytesAcrossAllProxyLegs) {
               std::string::npos);
     // Provider attribution carries the static-route metrics-only app label and
     // the upstream endpoint, per attempt and per direction.
-    EXPECT_NE(metric_text->find("access_server_provider_body_bytes_total{app=\"orders.project\",ip_port=\"127.0.0.1:" +
+    EXPECT_NE(metric_text->find("access_server_provider_body_bytes_total{app=\"orders.ups\",ip_port=\"127.0.0.1:" +
                                 std::to_string(port) + "\",direction=\"request\"} 5"),
               std::string::npos);
-    EXPECT_NE(metric_text->find("access_server_provider_body_bytes_total{app=\"orders.project\",ip_port=\"127.0.0.1:" +
+    EXPECT_NE(metric_text->find("access_server_provider_body_bytes_total{app=\"orders.ups\",ip_port=\"127.0.0.1:" +
                                 std::to_string(port) + "\",direction=\"response\"} 11"),
               std::string::npos);
 
@@ -3244,10 +3244,10 @@ TEST(ProxyExecutorTest, RecordsProviderErrorSeriesWhenTheUpstreamRefusesConnecti
     // The refused dial is a connect-class transport failure against the only
     // upstream address, and the follow-up selection surfaces the exhausted
     // selector as a circuit rejection; no provider response head ever arrived.
-    EXPECT_NE(metric_text->find("access_server_proxy_errors_total{app=\"orders.project\",ip_port=\"" + address +
+    EXPECT_NE(metric_text->find("access_server_proxy_errors_total{app=\"orders.ups\",ip_port=\"" + address +
                                 "\",error=\"connect\"} 1"),
               std::string::npos);
-    EXPECT_NE(metric_text->find("access_server_upstream_circuit_rejections_total{app=\"orders.project\"} 1"),
+    EXPECT_NE(metric_text->find("access_server_upstream_circuit_rejections_total{app=\"orders.ups\"} 1"),
               std::string::npos);
     EXPECT_NE(metric_text->find("access_server_route_requests_total{host=\"api.example.com\",path=\"/proxy\","
                                 "status_code=\"502\"} 1"),
@@ -3894,7 +3894,7 @@ TEST(ProxyExecutorTest, RelaysWebSocketUpgradeAndRawBytesInBothDirections) {
     EXPECT_NE(metric_text->find("access_server_route_requests_total{host=\"api.example.com\",path=\"/proxy\","
                                 "status_code=\"101\"} 1"),
               std::string::npos);
-    EXPECT_NE(metric_text->find("access_server_provider_responses_total{app=\"orders.project\",ip_port=\"127.0.0.1:" +
+    EXPECT_NE(metric_text->find("access_server_provider_responses_total{app=\"orders.ups\",ip_port=\"127.0.0.1:" +
                                 std::to_string(port) + "\",status_code=\"101\"} 1"),
               std::string::npos);
 
@@ -4627,7 +4627,9 @@ TEST(ProxyExecutorTest, WritesJavaCompatibleAccessLogLinesPerProxyAttempt) {
     // receivedPath never carries the query string.
     EXPECT_EQ(first[9], "/proxy");
     EXPECT_FALSE(first[10].empty());
-    EXPECT_NE(first[11].find("127.0.0.1"), std::string::npos) << first[11];
+    // Static addresses route: appName is the stable project-scoped identity
+    // ("<project>.ups"); the concrete address lives in backendIp (first[15]).
+    EXPECT_EQ(first[11], "orders.ups");
     EXPECT_EQ(first[12], "default");
     EXPECT_EQ(first[13], "-");
     EXPECT_EQ(first[14], "default");

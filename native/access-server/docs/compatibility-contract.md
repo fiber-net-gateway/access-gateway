@@ -730,7 +730,10 @@ listener。订阅暂态失败采用封顶指数退避，非法首值被记录为
   开始；响应头到达即定格 httpCode 与 responseMillis，之后的 body/tunnel 失败不回改该行；
   未收到响应头的失败以 `001` 提交。connectNano 为新连接建连耗时（µs×1000，用户决策的
   纳秒等价）或复用连接的负已服务请求数；traceId 取入站 `X-B3-TraceId`，缺失时生成 16 位
-  小写 hex 且不改写入站请求头；appName 为 `access-server-` 拼接 entry 值；receivedPath 不含
+  小写 hex 且不改写入站请求头；网关名列（第 3 列）为 `access-server-` 拼接 network entry；
+  appName 为 provider 名——discovery 路由为服务名，静态 addresses 路由为 `<project>.ups`
+  （与 CAT `Access.Provider` 事务名、metrics app 标签同一身份，具体地址在 backendIp 列与
+  CAT `upstream` 数据标签）；receivedPath 不含
   query，内容不转义、不截断、不采样。路由解析未产生可用 upstream plan 的请求与 RESPONSE
   直出路由不输出行（与 Java ServiceExchange 一致）。写入经 Fiber 共享日志管线异步完成
   （非独立线程），输出到 `ACCESS_SERVER_ACCESS_LOG_DIR` 下的 `access.log`，100 MB 轮转为

@@ -192,7 +192,7 @@ record_dynamic_series_and_collect(fiber::access_server::AccessServerMetrics *met
     worker.route_request_finished({}, "/fallback", "404");
 
     worker.provider_response_received("inventory", "10.0.0.1:8080", "200");
-    worker.provider_response_received("loan.project", "[::1]:9001", "503");
+    worker.provider_response_received("loan.ups", "[::1]:9001", "503");
 
     worker.proxy_transport_error("inventory", "10.0.0.1:8080", "connect");
     worker.proxy_transport_error("inventory", "10.0.0.1:8080", "request_timeout");
@@ -269,7 +269,7 @@ TEST(AccessServerMetricsTest, ExposesRequestLabeledDynamicSeries) {
     EXPECT_NE(collected->find("access_server_provider_responses_total{app=\"inventory\",ip_port=\"10.0.0.1:8080\","
                               "status_code=\"200\"} 1"),
               std::string::npos);
-    EXPECT_NE(collected->find("access_server_provider_responses_total{app=\"loan.project\",ip_port=\"[::1]:9001\","
+    EXPECT_NE(collected->find("access_server_provider_responses_total{app=\"loan.ups\",ip_port=\"[::1]:9001\","
                               "status_code=\"503\"} 1"),
               std::string::npos);
     EXPECT_NE(collected->find("access_server_proxy_errors_total{app=\"inventory\",ip_port=\"10.0.0.1:8080\","
