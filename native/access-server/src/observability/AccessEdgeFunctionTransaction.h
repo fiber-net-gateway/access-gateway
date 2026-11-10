@@ -17,8 +17,12 @@ enum class EdgeFunctionPhase : std::uint8_t;
 // as data tags: the wall duration is computed by the CAT client at complete(),
 // the memory cost from GcHeap lifetime-counter deltas around the execution
 // (GcHeapStats measured in requested GC bytes — string-intern buckets, root
-// pools, and allocator overhead are outside it). An unfinished transaction is
-// failed on destruction, so cancellation cannot leave it pending.
+// pools, and allocator overhead are outside it). Every completed execution
+// records one "result" data tag naming the script result kind (void / value /
+// exception / abort — ScriptResultKind, no invented vocabulary), and error
+// terminals additionally carry the "reason" vocabulary shared with
+// access_server_function_errors_total. An unfinished transaction is failed on
+// destruction, so cancellation cannot leave it pending.
 class AccessEdgeFunctionTransaction final : public common::NonCopyable {
 public:
     AccessEdgeFunctionTransaction() noexcept = default;
@@ -38,11 +42,13 @@ public:
     // earlier function's garbage. gc/gc_freed cover completed mark/sweep
     // cycles inside the window.
     void add_cost(const script::GcHeapStats &before, const script::GcHeapStats &after) noexcept;
-    // Terminal error classification: the fixed reason vocabulary shared with
-    // access_server_function_errors_total, plus the abort reason name.
-    void complete_error(std::string_view reason, std::string_view detail = {}) noexcept;
-    // Completed without an error: returned void/value, or wrote a response.
-    void complete_success() noexcept;
+    // Terminal error classification: result names the script result kind
+    // ("exception"/"abort"), reason is the fixed vocabulary shared with
+    // access_server_function_errors_total, detail the abort reason name.
+    void complete_error(std::string_view result, std::string_view reason, std::string_view detail = {}) noexcept;
+    // Completed without an error (returned void/value, or wrote a response):
+    // result names the script result kind ("void"/"value").
+    void complete_success(std::string_view result) noexcept;
 
 private:
     friend class RequestObservability;

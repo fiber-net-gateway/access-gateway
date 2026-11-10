@@ -25,6 +25,22 @@ DEFINE_LOGGER(LOG_EDGE_FUNCTION, kAccessServerEdgeFunctionLogger);
 constexpr std::string_view kErrorReasonException = "exception";
 constexpr std::string_view kErrorReasonAbort = "abort";
 
+// Lowercased ScriptResultKind name for the per-execution CAT transaction's
+// "result" data tag — the executor's own result classification, verbatim.
+constexpr std::string_view script_result_kind_name(script::ScriptResultKind kind) noexcept {
+    switch (kind) {
+        case script::ScriptResultKind::Value:
+            return "value";
+        case script::ScriptResultKind::Void:
+            return "void";
+        case script::ScriptResultKind::Exception:
+            return "exception";
+        case script::ScriptResultKind::Abort:
+            return "abort";
+    }
+    return {};
+}
+
 // Sticky sampling bucket (design §3.1 挂载采样): CRC-32 over the client IP
 // bytes (v4 or v6, branch-free), so the same client lands in the same bucket
 // on every request and on every instance. The resolved client address is what
@@ -130,7 +146,7 @@ EdgeFunctionExecutor::run(std::span<const EdgeFunctionMounted> mounted, http_scr
         telemetry.record_edge_function_evaluated(entry.name, project);
         telemetry.record_edge_function_duration(entry.name, elapsed);
         if (script_context.response_header_sent()) {
-            transaction.complete_success();
+            transaction.complete_success(script_result_kind_name(result.kind));
             LOG(LOG_EDGE_FUNCTION, INFO) << "edge_function_short_circuit"
                                          << " trace_id=\"" << telemetry.trace_id() << "\"" << " project=\"" << project
                                          << "\"" << " host=\"" << host << "\"" << " function=\"" << entry.name << "\"";
@@ -140,10 +156,10 @@ EdgeFunctionExecutor::run(std::span<const EdgeFunctionMounted> mounted, http_scr
             case script::ScriptResultKind::Void:
             case script::ScriptResultKind::Value:
                 // Completed without writing a response: continue the chain.
-                transaction.complete_success();
+                transaction.complete_success(script_result_kind_name(result.kind));
                 break;
             case script::ScriptResultKind::Exception:
-                transaction.complete_error(kErrorReasonException);
+                transaction.complete_error(script_result_kind_name(result.kind), kErrorReasonException);
                 telemetry.record_edge_function_error(entry.name, kErrorReasonException);
                 LOG(LOG_EDGE_FUNCTION, WARN)
                         << "edge_function_error"
@@ -154,7 +170,8 @@ EdgeFunctionExecutor::run(std::span<const EdgeFunctionMounted> mounted, http_scr
                 }
                 break;
             case script::ScriptResultKind::Abort:
-                transaction.complete_error(kErrorReasonAbort, script::abort_reason_name(result.abort().reason));
+                transaction.complete_error(script_result_kind_name(result.kind), kErrorReasonAbort,
+                                           script::abort_reason_name(result.abort().reason));
                 telemetry.record_edge_function_error(entry.name, kErrorReasonAbort);
                 LOG(LOG_EDGE_FUNCTION, WARN)
                         << "edge_function_error"

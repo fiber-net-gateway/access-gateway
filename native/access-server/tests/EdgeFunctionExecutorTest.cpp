@@ -919,9 +919,8 @@ fiber::async::Task<fiber::common::IoResult<void>> read_exact(fiber::net::TcpStre
 // Accepts one collector connection and reads its first frame (4-byte
 // big-endian length prefix + payload): the completed message tree of the
 // request. Anything later on the connection is ignored.
-fiber::async::DetachedTask
-run_frame_collector(fiber::event::EventLoop *loop, std::promise<std::uint16_t> *port_promise,
-                    std::promise<std::optional<std::vector<std::uint8_t>>> *frame_promise) {
+fiber::async::DetachedTask run_frame_collector(fiber::event::EventLoop *loop, std::promise<std::uint16_t> *port_promise,
+                                               std::promise<std::optional<std::vector<std::uint8_t>>> *frame_promise) {
     fiber::net::TcpListener listener(*loop);
     auto bound = listener.bind({fiber::net::IpAddress::loopback_v4(), 0}, {});
     if (!bound) {
@@ -965,7 +964,8 @@ run_frame_collector(fiber::event::EventLoop *loop, std::promise<std::uint16_t> *
     auto payload_result = co_await read_exact(stream, frame.data() + prefix.size(), payload_size);
     stream.close();
     listener.close();
-    frame_promise->set_value(payload_result ? std::optional<std::vector<std::uint8_t>>{std::move(frame)} : std::nullopt);
+    frame_promise->set_value(payload_result ? std::optional<std::vector<std::uint8_t>>{std::move(frame)}
+                                            : std::nullopt);
 }
 
 // One request driven with a live CAT client whose collector is the fake above;
@@ -1016,7 +1016,7 @@ fiber::async::DetachedTask run_request_with_cat(fiber::event::EventLoop *loop, s
     fiber::http::HttpHandler handler = [&access_handler, &client_metadata_resolver,
                                         &client](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
         fiber::access_server::AccessRequestTelemetry telemetry(exchange, nullptr, client.get(),
-                                                              &client_metadata_resolver);
+                                                               &client_metadata_resolver);
         co_await access_handler.handle(exchange, telemetry);
     };
     fiber::http::Http1Connection connection(std::move(transport), handler, {});
@@ -1094,6 +1094,12 @@ TEST(EdgeFunctionExecutor, RecordsCatTransactionPerExecutionWithCostTags) {
     EXPECT_EQ(count_of(payload, "phase=head"), 2U);
     EXPECT_EQ(count_of(payload, "phase=body"), 1U);
     EXPECT_EQ(count_of(payload, "alloc_bytes="), 3U);
+    // result names the script result kind (ScriptResultKind, verbatim): the
+    // failing head function ends in exception, the observer returns a value,
+    // the body responder falls off the end (void).
+    EXPECT_EQ(count_of(payload, "result=exception"), 1U);
+    EXPECT_EQ(count_of(payload, "result=value"), 1U);
+    EXPECT_EQ(count_of(payload, "result=void"), 1U);
     EXPECT_EQ(count_of(payload, "reason=exception"), 1U);
     EXPECT_EQ(count_of(payload, "reason=abort"), 0U);
     EXPECT_NE(payload.find("broken"), std::string::npos);

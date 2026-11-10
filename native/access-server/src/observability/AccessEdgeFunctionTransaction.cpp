@@ -78,9 +78,13 @@ void AccessEdgeFunctionTransaction::add_cost(const script::GcHeapStats &before,
     }
 }
 
-void AccessEdgeFunctionTransaction::complete_error(std::string_view reason, std::string_view detail) noexcept {
+void AccessEdgeFunctionTransaction::complete_error(std::string_view result, std::string_view reason,
+                                                   std::string_view detail) noexcept {
     if (!valid()) {
         return;
+    }
+    if (!result.empty()) {
+        (void) transaction_.add_data("result", result);
     }
     if (!reason.empty()) {
         (void) transaction_.add_data("reason", reason);
@@ -91,10 +95,11 @@ void AccessEdgeFunctionTransaction::complete_error(std::string_view reason, std:
     (void) transaction_.complete(cat::status::Error);
 }
 
-void AccessEdgeFunctionTransaction::complete_success() noexcept {
+void AccessEdgeFunctionTransaction::complete_success(std::string_view result) noexcept {
     if (!valid()) {
         return;
     }
+    (void) transaction_.add_data("result", result);
     (void) transaction_.complete(cat::status::Success);
 }
 

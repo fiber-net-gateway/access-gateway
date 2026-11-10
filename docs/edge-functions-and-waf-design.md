@@ -232,7 +232,7 @@ if (!office.contains($conn.remote_addr) && strings.match($req.uri, "(?i)union\\s
 - CAT：每次**实际执行**（采样命中的挂载；`sampled_out` 不记）在请求 message tree 里记一个子事务 `type=Access.EdgeFunction`、`name=<函数名>`，duration 由客户端在 complete 时取墙钟（含 `co_await` 挂起）。data 标签携带执行代价：
   - `phase=head|body`（同一函数两阶段各执行一次时产生两个事务）；
   - `alloc_bytes` = 执行窗口内 `GcHeapStats.allocated_bytes_total` 差分（毛分配量，主口径）；`heap_bytes` = `current_bytes` 差分（净留存，可为负——窗口内阈值回收可能清掉前序函数的垃圾）；窗口内有完成回收时附 `gc`/`gc_freed`。口径为 GC 请求字节数，不含 intern 桶、root 池与分配器开销；
-  - 终态：成功（含短路响应）status=0；Exception/Abort status=ERROR 附 `reason`（与 errors_total 词表一致）及 abort 的 `detail`；协程取消时析构兜底 status=Fail 附 `reason=canceled`。
+  - 终态：每次完结附 `result` 数据标签，值为脚本结果种类原词（`value`/`void`/`exception`/`abort`，即 `ScriptResultKind`，不另造词表；短路响应同样按脚本实际返回种类记录）；成功（含短路响应）status=0；Exception/Abort status=ERROR 另附 `reason`（与 errors_total 词表一致）及 abort 的 `detail`；协程取消时析构兜底 status=Fail 附 `reason=canceled`（取消时没有脚本结果，不记 `result`）。
   CAT 根不可用（未配置客户端）时全程 no-op。事务在 `Access.Provider` 之前顺序完结，树序天然干净。
 
 ## 4. 控制面：WAF 编译器
