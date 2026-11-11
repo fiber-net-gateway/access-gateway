@@ -10,14 +10,24 @@ HTTP, JSON/script, Nacos, CAT, and Prometheus modules are consumed from the pinn
 historical application import revision.
 
 The current reusable Fiber dependency is pinned at
-`8277303c0a664fe88f9a2b9ab345312dc90c36f3` (upstream `master`, fetched 2026-11-09). The pinned
-revision carries no repository-owned compatibility patches: the TLS dynamic-credential lifetime
-defect ([upstream issue #41](https://github.com/fiber-net-gateway/fiber-gateway-cpp/issues/41)),
-briefly patched against `f832d5458d3bfca1cefa45a4c7a6cb1cd0662f23`, is fixed upstream in `90ed153`
-(see `native/patches/README.md` for the retired-patch map).
+`47d847858fcdc26054bf12f55c65d44807781d0d` (upstream `master`, fetched 2026-11-11). The pinned
+revision carries one repository-owned compatibility patch — the glibc 2.17 regex-cache
+`thread_local` destructor removal (`native/patches/0001`, see `native/patches/README.md`); the
+historical TLS dynamic-credential lifetime defect
+([upstream issue #41](https://github.com/fiber-net-gateway/fiber-gateway-cpp/issues/41)),
+briefly patched against `f832d5458d3bfca1cefa45a4c7a6cb1cd0662f23`, is fixed upstream in `90ed153`.
 The repository-owned regression
 `ProxyExecutorTest.StreamsChunkedUpstreamWhoseFramingArrivesSeparatelyFromPayload` still guards
 the HTTP/1 chunked split-framing fix from the application side.
+The reviewed update range from the previous pin is
+`8277303c0a664fe88f9a2b9ab345312dc90c36f3..47d847858fcdc26054bf12f55c65d44807781d0d` — not a
+fast-forward: upstream rewrote `master` in full (the two pins share no common ancestor) to redact
+internal hostnames from the history, so the old-lineage hashes cited in the paragraphs below are
+superseded by content-equivalent commits on the rewritten line. The tree difference between the
+two pins is exactly one line — `feature/fiber-lib-h3-fin-strand.md` names
+`lingxi-manager.internal.example.com` where it named the internal production hostname. No library
+source, public header, or build change; access-server needed no adaptation, and
+`native/patches/0001` still applies unchanged and stays bound to the new pin.
 The reviewed update range from the previous pin is
 `34dc642614bf00366a610b073874a4505c831239..8277303c0a664fe88f9a2b9ab345312dc90c36f3` (a single
 non-merge commit, fast-forward). `8277303c` is an internal `http_script` cleanup: the
