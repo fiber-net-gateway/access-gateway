@@ -447,7 +447,9 @@ allows:
 2. 命中任一 deny 时拒绝；
 3. deny 优先于 allow 的最终结果。
 
-来源取自统一的 client metadata。默认 `direct` 使用 socket peer；`trusted_proxy` 只有在 socket peer
+来源取自统一的 client metadata。默认 `direct` 使用入口层合成的 `X-Real-Ip`（`ACCESS_SERVER_NETWORK_ENTRY`
+必填，实例在请求处理前用它覆盖客户端提交的值）：通常是连接对端 IP，`internet` 入口则取 CDN 的
+`EO-Connecting-IP`。合成值缺失或不可解析时回落 socket peer。`trusted_proxy` 只有在 socket peer
 命中 `ACCESS_SERVER_TRUSTED_PROXY_CIDRS` 后，才按 `Forwarded`、`X-Forwarded-For`、
 `X-Real-Ip` 的顺序解析，并从右向左剥离可信代理 hop。非法或超限链回退 socket peer，因此安全模式
 不会因 header 缺失或不可解析而跳过 CIDR。只有显式 `legacy_headers` 模式保留 Java 的缺失/非法

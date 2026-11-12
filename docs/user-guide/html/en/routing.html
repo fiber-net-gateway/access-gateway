@@ -895,8 +895,12 @@ allows:
   <li>deny therefore wins in the final result.</li>
 </ol>
 <p>
-  The source comes from the unified client metadata. <code>direct</code> mode uses the socket peer.
-  After a socket peer matches <code>ACCESS_SERVER_TRUSTED_PROXY_CIDRS</code>,
+  The source comes from the unified client metadata. <code>direct</code> mode uses the
+  entry-synthesized <code>X-Real-Ip</code> (<code>ACCESS_SERVER_NETWORK_ENTRY</code> is required;
+  the instance replaces any client-supplied value before request processing): normally the
+  connection peer, or the CDN&#39;s <code>EO-Connecting-IP</code> behind the
+  <code>internet</code> entry. An absent or unparsable synthesized value falls back to the socket
+  peer. After a socket peer matches <code>ACCESS_SERVER_TRUSTED_PROXY_CIDRS</code>,
   <code>trusted_proxy</code> mode considers <code>Forwarded</code>, <code>X-Forwarded-For</code>,
   then <code>X-Real-Ip</code>, and walks the chain right-to-left across trusted hops. Invalid or
   oversized chains fall back to the socket peer, so safe modes never skip CIDR checks because a

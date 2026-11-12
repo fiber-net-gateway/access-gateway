@@ -391,7 +391,7 @@ cp native/access-server/access-server.env.example access-server.env
 | 注册       | `ACCESS_SERVER_SERVICE_NAME`、`ACCESS_SERVER_CLUSTER`、`ACCESS_SERVER_ADVERTISE_ADDRESS`、`ACCESS_SERVER_ZONE`         |
 | 日志与 CAT | `ACCESS_SERVER_ACCESS_LOG_DIR`、`CAT_*`                                                                                |
 
-`ACCESS_SERVER_NETWORK_ENTRY` 声明该实例服务的入口网络（例如 `internet`、`vdi` 或 `desktop`），缺失时进程拒绝启动。实例根据这个值和连接信息设置 `X-Entry`、`X-Real-Ip`、`X-Forwarded-Proto` 和 `X-Forwarded-For`，并覆盖客户端提交的 `X-Entry`。`internet` 入口还会信任 CDN 的 `EO-Connecting-IP` 作为 `X-Real-Ip`。
+`ACCESS_SERVER_NETWORK_ENTRY` 声明该实例服务的入口网络（例如 `internet`、`vdi` 或 `desktop`），缺失时进程拒绝启动。实例根据这个值和连接信息设置 `X-Entry`、`X-Real-Ip`、`X-Forwarded-Proto` 和 `X-Forwarded-For`，并覆盖客户端提交的 `X-Entry`。`internet` 入口还会信任 CDN 的 `EO-Connecting-IP` 作为 `X-Real-Ip`。路由 `allows`/`denies`、灰度匹配和 CAT/访问日志使用的客户端地址都取自这份合成的 `X-Real-Ip`，因此 CDN 回源流量按真实客户端 IP 命中白名单。
 
 只运行明文时，设置 `ACCESS_SERVER_TLS_ENABLED=false` 和 `ACCESS_SERVER_HTTP3_ENABLED=false`。
 

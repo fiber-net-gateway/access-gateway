@@ -43,7 +43,6 @@ bool apply_network_entry_headers(http::HttpHeaders &headers, const net::IpAddres
         return true;
     }
 
-    const std::string peer_text = peer.to_string();
     if (!headers.set(kEntryHeader, entry, kEntryLowcase.data(), kEntryHash)) {
         return false;
     }
@@ -51,7 +50,9 @@ bool apply_network_entry_headers(http::HttpHeaders &headers, const net::IpAddres
     // nginx parity: the internet edge trusts the CDN's EO-Connecting-IP value
     // verbatim; every other entry (and a missing or empty header) falls back
     // to the connection peer.
-    std::string_view real_ip = peer_text;
+    std::array<char, net::IpAddress::kMaxTextLen> mem{};
+    std::string_view peer_ip = peer.to_string_view(mem);
+    std::string_view real_ip = peer_ip;
     if (entry == kInternetEntry) {
         const std::string_view eo_connecting_ip = headers.get(kEoConnectingIpLowcase, kEoConnectingIpHash);
         if (!eo_connecting_ip.empty()) {
@@ -90,7 +91,7 @@ bool apply_network_entry_headers(http::HttpHeaders &headers, const net::IpAddres
     if (has_incoming) {
         forwarded_for.append(", ");
     }
-    forwarded_for.append(peer_text);
+    forwarded_for.append(peer_ip);
     return headers.set(kForwardedForHeader, forwarded_for, kForwardedForLowcase.data(), kForwardedForHash) != nullptr;
 }
 

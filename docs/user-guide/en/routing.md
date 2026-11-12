@@ -469,7 +469,10 @@ Entries without `!` form the allow set; prefixed entries form the deny set:
 2. any deny match rejects the source;
 3. deny therefore wins in the final result.
 
-The source comes from the unified client metadata. `direct` mode uses the socket peer. After a socket peer
+The source comes from the unified client metadata. `direct` mode uses the entry-synthesized `X-Real-Ip`
+(`ACCESS_SERVER_NETWORK_ENTRY` is required; the instance replaces any client-supplied value before request
+processing): normally the connection peer, or the CDN's `EO-Connecting-IP` behind the `internet` entry. An
+absent or unparsable synthesized value falls back to the socket peer. After a socket peer
 matches `ACCESS_SERVER_TRUSTED_PROXY_CIDRS`, `trusted_proxy` mode considers `Forwarded`,
 `X-Forwarded-For`, then `X-Real-Ip`, and walks the chain right-to-left across trusted hops. Invalid or oversized
 chains fall back to the socket peer, so safe modes never skip CIDR checks because a header is absent or invalid.

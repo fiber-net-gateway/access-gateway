@@ -18,9 +18,14 @@ namespace fiber::access_server {
 // is server-authoritative even with an empty entry: the deployment declared
 // no entry network, so a client-supplied X-Entry is removed rather than
 // adopted, and entry-gated host policies reject the request. Other client
-// headers are untouched when entry is empty. Returns false when header
-// allocation fails; the request then proceeds unmodified, which the legacy
-// client metadata resolver already tolerates.
+// headers are untouched when entry is empty.
+//
+// X-Real-Ip carries the entry network's client address — the connection peer,
+// except for the internet entry where a CDN-provided EO-Connecting-IP wins
+// verbatim — while X-Forwarded-For appends the TCP hop this instance actually
+// accepted. Returns false only when header allocation fails; the caller must
+// then fail the request closed instead of proceeding with client-forgeable
+// values (the worker does).
 [[nodiscard]] bool apply_network_entry_headers(http::HttpHeaders &headers, const net::IpAddress &peer,
                                                std::string_view entry, bool connection_secure) noexcept;
 

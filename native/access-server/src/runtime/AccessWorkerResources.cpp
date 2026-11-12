@@ -81,14 +81,20 @@ async::Task<void> AccessWorkerResources::handle(http::HttpExchange &exchange, bo
     // matching, and upstream forwarding all read these headers. Runs for
     // every request: with a configured entry it replaces the synthesized
     // headers, and with an empty entry it still strips a client-supplied
-    // X-Entry, which must never reach the entry-policy gate. On allocation
-    // failure the request continues unmodified and fails on its own.
+    // X-Entry, which must never reach the entry-policy gate. An allocation
+    // failure must fail the request closed: proceeding would leave a
+    // client-forgeable X-Real-Ip in place of the authoritative entry value
+    // that CIDR policy now attributes the request to. Dropping the exchange
+    // tears the connection down, which the client surfaces as a retryable
+    // error.
     //
     // HttpExchange only exposes request_headers() as const; the exchange is
     // non-const here, so mutating through the reference is defined behavior.
     // TODO(upstream): replace with a mutable accessor on HttpExchange.
-    (void) apply_network_entry_headers(const_cast<http::HttpHeaders &>(exchange.request_headers()),
-                                       exchange.remote_addr().ip(), network_entry_, connection_secure);
+    if (!apply_network_entry_headers(const_cast<http::HttpHeaders &>(exchange.request_headers()),
+                                     exchange.remote_addr().ip(), network_entry_, connection_secure)) {
+        co_return;
+    }
     AccessServerMetrics::Worker &worker = metrics_.worker(event::EventLoop::current().group_index());
     AccessRequestTelemetry telemetry(exchange, &worker, cat_client_, &client_metadata_resolver_, connection_secure);
     telemetry.attach_script_services(script_http_services_);

@@ -1113,7 +1113,12 @@ TEST(AccessRequestHandlerTest, LegacyModeDoesNotRedirectForwardedHttps) {
     EXPECT_EQ(response_body(response), "ready");
 }
 
-TEST(AccessRequestHandlerTest, DirectModeIgnoresSpoofedClientIpAndScheme) {
+// direct mode still derives the scheme from the listener, but CIDR policy
+// follows the X-Real-Ip the entry layer synthesized (the worker's
+// apply_network_entry_headers pass — see NetworkEntryHeadersTest for the
+// spoofing guard) rather than the socket peer, so CDN-fronted clients match
+// their real address.
+TEST(AccessRequestHandlerTest, DirectModeFollowsEntryRealIpForCidrPolicy) {
     HostStrategyConfig strategy;
     strategy.https = HttpsStrategy::Redirect308;
     RouteConfigStore redirect_store;
@@ -1131,10 +1136,19 @@ TEST(AccessRequestHandlerTest, DirectModeIgnoresSpoofedClientIpAndScheme) {
     protected_route.allows = {std::optional<std::string>("10.0.0.0/8")};
     RouteConfigStore cidr_store;
     publish(cidr_store, project({}, {std::move(protected_route)}));
+    const std::string allowed = run_request(cidr_store,
+                                            "GET /allowed HTTP/1.1\r\n"
+                                            "Host: api.example.com\r\n"
+                                            "X-Real-Ip: 10.1.2.3\r\n"
+                                            "Connection: close\r\n\r\n",
+                                            {}, {}, {}, ClientMetadataResolverOptions{});
+    EXPECT_TRUE(allowed.starts_with("HTTP/1.1 200 "));
+    EXPECT_EQ(response_body(allowed), "allowed");
+
     const std::string denied = run_request(cidr_store,
                                            "GET /allowed HTTP/1.1\r\n"
                                            "Host: api.example.com\r\n"
-                                           "X-Real-Ip: 10.1.2.3\r\n"
+                                           "X-Real-Ip: 192.0.2.9\r\n"
                                            "Connection: close\r\n\r\n",
                                            {}, {}, {}, ClientMetadataResolverOptions{});
     EXPECT_TRUE(denied.starts_with("HTTP/1.1 403 Forbidden\r\n"));

@@ -48,23 +48,64 @@ ClientMetadataResolverOptions trusted_options(bool secure = false) {
     };
 }
 
-TEST(ClientMetadataTest, DirectModeIgnoresAllForwardingHeaders) {
+// direct mode attributes the request to the entry-synthesized X-Real-Ip (the
+// resolver contract assumes apply_network_entry_headers ran first): route
+// CIDR policy, gray matching, and the resolved client address all follow it,
+// while forwarding chains and X-Forwarded-Proto stay ignored.
+TEST(ClientMetadataTest, DirectModeAttributesRequestToEntryRealIp) {
     ClientMetadata metadata = resolve(
             {}, "198.51.100.9",
-            {{"Forwarded", "for=10.1.2.3;proto=https"}, {"X-Real-Ip", "10.2.3.4"},
-             {"X-Forwarded-Proto", "https"}});
+            {{"Forwarded", "for=10.1.2.3;proto=https"}, {"X-Real-Ip", "203.0.113.4"}, {"X-Forwarded-Proto", "https"}});
 
-    EXPECT_EQ(metadata.client_address.to_string(), "198.51.100.9");
+    EXPECT_EQ(metadata.client_address.to_string(), "203.0.113.4");
+    EXPECT_TRUE(metadata.has_client_address);
+    EXPECT_EQ(metadata.address_source, ClientAddressSource::EntryRealIp);
+    ASSERT_TRUE(metadata.route_policy_target);
+    EXPECT_TRUE(metadata.route_policy_target->matches(ip("203.0.113.4")));
+    EXPECT_FALSE(metadata.route_policy_target->matches(ip("198.51.100.9")));
+    ASSERT_TRUE(metadata.gray_target);
+    EXPECT_TRUE(metadata.gray_target->matches(ip("203.0.113.4")));
     EXPECT_FALSE(metadata.secure);
     EXPECT_EQ(metadata.external_scheme, "http");
-    EXPECT_EQ(metadata.address_source, ClientAddressSource::SocketPeer);
+    EXPECT_EQ(metadata.scheme_source, ClientSchemeSource::Listener);
+    EXPECT_EQ(metadata.peer_address.to_string(), "198.51.100.9");
     EXPECT_EQ(metadata.forwarding_status, ForwardingStatus::IgnoredDirectMode);
+}
+
+TEST(ClientMetadataTest, DirectModeEntryRealIpAcceptsEndpointForms) {
+    const ClientMetadata with_port = resolve({}, "198.51.100.9", {{"X-Real-Ip", "203.0.113.4:4433"}});
+    EXPECT_EQ(with_port.client_address.to_string(), "203.0.113.4");
+    EXPECT_EQ(with_port.address_source, ClientAddressSource::EntryRealIp);
+
+    const ClientMetadata ipv6 = resolve({}, "198.51.100.9", {{"X-Real-Ip", "[2001:db8::9]:443"}});
+    EXPECT_EQ(ipv6.client_address.to_string(), "2001:db8::9");
+    EXPECT_EQ(ipv6.address_source, ClientAddressSource::EntryRealIp);
+}
+
+// The internet entry copies a CDN-supplied EO-Connecting-IP verbatim, so the
+// synthesized value can be junk; CIDR policy must fail toward the connection
+// peer rather than skipping the rules or matching junk.
+TEST(ClientMetadataTest, DirectModeFallsBackToPeerWhenRealIpIsUnusable) {
+    for (const std::string_view value:
+         {std::string_view("not-an-ip"), std::string_view("192.0.2.8, 192.0.2.9"), std::string_view("unknown")}) {
+        SCOPED_TRACE(value);
+        const ClientMetadata metadata = resolve({}, "198.51.100.9", {{"X-Real-Ip", value}});
+        EXPECT_EQ(metadata.client_address.to_string(), "198.51.100.9");
+        EXPECT_EQ(metadata.address_source, ClientAddressSource::SocketPeer);
+        ASSERT_TRUE(metadata.route_policy_target);
+        EXPECT_TRUE(metadata.route_policy_target->matches(ip("198.51.100.9")));
+        EXPECT_EQ(metadata.forwarding_status, ForwardingStatus::IgnoredDirectMode);
+    }
+
+    const ClientMetadata absent = resolve({}, "198.51.100.9", {{"X-Forwarded-For", "203.0.113.4"}});
+    EXPECT_EQ(absent.client_address.to_string(), "198.51.100.9");
+    EXPECT_EQ(absent.address_source, ClientAddressSource::SocketPeer);
+    EXPECT_EQ(absent.forwarding_status, ForwardingStatus::IgnoredDirectMode);
 }
 
 TEST(ClientMetadataTest, TrustedModeIgnoresHeadersFromAnUntrustedPeer) {
     ClientMetadata metadata = resolve(trusted_options(), "198.51.100.9",
-                                      {{"X-Forwarded-For", "203.0.113.7"},
-                                       {"X-Forwarded-Proto", "https"}});
+                                      {{"X-Forwarded-For", "203.0.113.7"}, {"X-Forwarded-Proto", "https"}});
 
     EXPECT_EQ(metadata.client_address.to_string(), "198.51.100.9");
     EXPECT_FALSE(metadata.peer_trusted);
@@ -73,9 +114,9 @@ TEST(ClientMetadataTest, TrustedModeIgnoresHeadersFromAnUntrustedPeer) {
 }
 
 TEST(ClientMetadataTest, WalksXForwardedForFromTheTrustedSocketPeer) {
-    ClientMetadata metadata = resolve(trusted_options(), "10.0.0.3",
-                                      {{"X-Forwarded-For", "203.0.113.7, 10.0.0.2"},
-                                       {"X-Forwarded-Proto", "https, http"}});
+    ClientMetadata metadata =
+            resolve(trusted_options(), "10.0.0.3",
+                    {{"X-Forwarded-For", "203.0.113.7, 10.0.0.2"}, {"X-Forwarded-Proto", "https, http"}});
 
     EXPECT_TRUE(metadata.peer_trusted);
     EXPECT_EQ(metadata.client_address.to_string(), "203.0.113.7");
@@ -86,10 +127,10 @@ TEST(ClientMetadataTest, WalksXForwardedForFromTheTrustedSocketPeer) {
 }
 
 TEST(ClientMetadataTest, GivesForwardedPriorityAndParsesBracketedIpv6WithPort) {
-    ClientMetadata metadata = resolve(
-            trusted_options(), "10.0.0.3",
-            {{"Forwarded", "for=\"[2001:db8::7]:8443\";proto=HTTPS, for=10.0.0.2;proto=http"},
-             {"X-Forwarded-For", "192.0.2.55"}, {"X-Forwarded-Proto", "http"}});
+    ClientMetadata metadata = resolve(trusted_options(), "10.0.0.3",
+                                      {{"Forwarded", "for=\"[2001:db8::7]:8443\";proto=HTTPS, for=10.0.0.2;proto=http"},
+                                       {"X-Forwarded-For", "192.0.2.55"},
+                                       {"X-Forwarded-Proto", "http"}});
 
     EXPECT_EQ(metadata.client_address.to_string(), "2001:db8::7");
     EXPECT_TRUE(metadata.secure);
@@ -138,8 +179,7 @@ TEST(ClientMetadataTest, SupportsMultipleHeaderFieldsAndXRealIpPort) {
     EXPECT_EQ(chained.client_address.to_string(), "203.0.113.9");
     EXPECT_TRUE(chained.secure);
 
-    ClientMetadata real_ip = resolve(trusted_options(), "10.0.0.3",
-                                     {{"X-Real-Ip", "192.0.2.8:4312"}});
+    ClientMetadata real_ip = resolve(trusted_options(), "10.0.0.3", {{"X-Real-Ip", "192.0.2.8:4312"}});
     EXPECT_EQ(real_ip.client_address.to_string(), "192.0.2.8");
     EXPECT_EQ(real_ip.address_source, ClientAddressSource::XRealIp);
 }
@@ -157,9 +197,9 @@ TEST(ClientMetadataTest, InvalidHigherPriorityHeaderDoesNotDowngrade) {
 }
 
 TEST(ClientMetadataTest, MisalignedProtoFallsBackToListenerWithoutDiscardingAddress) {
-    ClientMetadata metadata = resolve(trusted_options(), "10.0.0.3",
-                                      {{"X-Forwarded-For", "203.0.113.7, 10.0.0.2"},
-                                       {"X-Forwarded-Proto", "https, http, https"}});
+    ClientMetadata metadata =
+            resolve(trusted_options(), "10.0.0.3",
+                    {{"X-Forwarded-For", "203.0.113.7, 10.0.0.2"}, {"X-Forwarded-Proto", "https, http, https"}});
 
     EXPECT_EQ(metadata.client_address.to_string(), "203.0.113.7");
     EXPECT_FALSE(metadata.secure);
@@ -168,8 +208,7 @@ TEST(ClientMetadataTest, MisalignedProtoFallsBackToListenerWithoutDiscardingAddr
 }
 
 TEST(ClientMetadataTest, RejectsDuplicateForwardedParametersAndOversizedChains) {
-    ClientMetadata duplicate = resolve(trusted_options(), "10.0.0.3",
-                                       {{"Forwarded", "for=203.0.113.7;for=192.0.2.1"}});
+    ClientMetadata duplicate = resolve(trusted_options(), "10.0.0.3", {{"Forwarded", "for=203.0.113.7;for=192.0.2.1"}});
     EXPECT_EQ(duplicate.client_address.to_string(), "10.0.0.3");
     EXPECT_EQ(duplicate.forwarding_status, ForwardingStatus::Invalid);
 
@@ -257,8 +296,8 @@ TEST(ClientMetadataTest, LegacyModePreservesCidrSkipAndRawIpv6GrayBehavior) {
     ClientMetadataResolverOptions options{
             .mode = ClientMetadataMode::LegacyHeaders,
     };
-    ClientMetadata invalid = resolve(options, "198.51.100.9",
-                                     {{"X-Real-Ip", "not-an-ip"}, {"X-Forwarded-Proto", "https"}});
+    ClientMetadata invalid =
+            resolve(options, "198.51.100.9", {{"X-Real-Ip", "not-an-ip"}, {"X-Forwarded-Proto", "https"}});
     EXPECT_FALSE(invalid.route_policy_target);
     EXPECT_FALSE(invalid.gray_target);
     EXPECT_TRUE(invalid.secure);

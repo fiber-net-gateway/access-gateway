@@ -281,12 +281,19 @@ mTLS 客户端身份。每个 profile 使用独立的连接池 affinity，不会
 
 `ACCESS_SERVER_CLIENT_METADATA_MODE` 控制请求来源信任边界：
 
-- `direct`（默认）：client IP 取 socket peer，scheme 取业务 listener 的真实 TLS 状态，忽略
-  `Forwarded`、`X-Forwarded-For`、`X-Real-Ip` 和 `X-Forwarded-Proto`；
+- `direct`（默认）：client IP 取入口层合成的 `X-Real-Ip`（`apply_network_entry_headers` 在请求
+  处理前用部署声明的 `ACCESS_SERVER_NETWORK_ENTRY` 覆盖客户端提交的值）：通常即 socket peer，
+  `internet` 入口取 CDN 的 `EO-Connecting-IP`。合成值缺失或不可解析时回落 socket peer，CIDR 不
+  跳过。scheme 取业务 listener 的真实 TLS 状态；`Forwarded`、`X-Forwarded-For`、
+  `X-Forwarded-Proto` 转发链仍被忽略；
 - `trusted_proxy`：仅当 socket peer 命中 `ACCESS_SERVER_TRUSTED_PROXY_CIDRS` 时解析转发头。
   地址优先级为 `Forwarded`、`X-Forwarded-For`、`X-Real-Ip`，并从右向左剥离可信代理 hop；
 - `legacy_headers`：只用于明确的 Java 兼容迁移，保留旧的 header 全信任、非法/缺失
   `X-Real-Ip` 跳过 CIDR 语义，不适用于可被非受信网络访问的 listener。
+
+`ACCESS_SERVER_NETWORK_ENTRY` 必填：声明实例服务的入口网络（如 `internet`、`vdi`、`desktop`），
+缺失时进程拒绝启动。入口头合成分配失败时请求 fail-closed（断开连接），绝不带着可伪造的客户端
+值继续。
 
 `trusted_proxy` 必须提供至少一个严格 IPv4/IPv6 CIDR；其他模式配置该列表会启动失败。非法、重复
 参数、空 hop、超过 32 hop 或 XFF/XFP 数量错位不会降级读取较低优先级 header，而是回退 socket

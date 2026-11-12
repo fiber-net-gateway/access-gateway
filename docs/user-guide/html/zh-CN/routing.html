@@ -868,7 +868,10 @@ allows:
   <li>deny 优先于 allow 的最终结果。</li>
 </ol>
 <p>
-  来源取自统一的 client metadata。默认 <code>direct</code> 使用 socket peer；<code
+  来源取自统一的 client metadata。默认 <code>direct</code> 使用入口层合成的
+  <code>X-Real-Ip</code>（<code>ACCESS_SERVER_NETWORK_ENTRY</code>
+  必填，实例在请求处理前用它覆盖客户端提交的值）：通常是连接对端 IP，<code>internet</code> 入口则取
+  CDN 的 <code>EO-Connecting-IP</code>。合成值缺失或不可解析时回落 socket peer。<code
     >trusted_proxy</code
   >
   只有在 socket peer 命中 <code>ACCESS_SERVER_TRUSTED_PROXY_CIDRS</code> 后，才按

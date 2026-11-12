@@ -521,7 +521,9 @@ invalid configuration, an expired certificate, or a failed bind stops startup.
 `internet`, `vdi`, or `desktop`). The process refuses to start without it. The instance sets
 `X-Entry`, `X-Real-Ip`, `X-Forwarded-Proto`, and `X-Forwarded-For` from this value and the connection,
 replacing any client-supplied `X-Entry`. The `internet` entry also trusts `EO-Connecting-IP` from the
-CDN for `X-Real-Ip`.
+CDN for `X-Real-Ip`. Route `allows`/`denies`, gray matching, and CAT/access logging all source their
+client address from this synthesized `X-Real-Ip`, so CDN-fronted traffic matches allowlists by the
+real client IP.
 
 To run plaintext only, set `ACCESS_SERVER_TLS_ENABLED=false` and
 `ACCESS_SERVER_HTTP3_ENABLED=false`.

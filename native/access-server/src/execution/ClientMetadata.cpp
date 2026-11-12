@@ -360,6 +360,29 @@ void set_exact_targets(ClientMetadata &metadata, const net::IpAddress &address) 
     metadata.gray_target = target;
 }
 
+// direct mode attributes the request to the entry-synthesized X-Real-Ip (see
+// apply_network_entry_headers): server-authoritative on every configured
+// entry — the connection peer, or the CDN's connecting IP behind the internet
+// entry, which is exactly what route CIDR policy and gray matching must see.
+// A value that is absent or does not parse keeps the socket peer: a non-CDN
+// client can send an arbitrary EO-Connecting-IP that synthesis copies
+// verbatim, so CIDR policy must fail toward the real connection instead of
+// skipping (legacy) or trusting junk.
+void apply_entry_real_ip(ClientMetadata &metadata, const http::HttpHeaders &headers) noexcept {
+    const std::string_view real_ip = headers.get(kXRealIp, kXRealIpHash);
+    if (real_ip.empty()) {
+        return;
+    }
+    net::IpAddress address;
+    if (!parse_ip_endpoint(real_ip, address)) {
+        return;
+    }
+    metadata.client_address = address;
+    metadata.has_client_address = true;
+    metadata.address_source = ClientAddressSource::EntryRealIp;
+    set_exact_targets(metadata, address);
+}
+
 void set_listener_scheme(ClientMetadata &metadata, bool secure) noexcept {
     metadata.secure = secure;
     metadata.external_scheme = secure ? std::string_view("https") : std::string_view("http");
@@ -456,8 +479,11 @@ ClientMetadata ClientMetadataResolver::resolve(const net::SocketAddress &peer, c
 
     const bool forwarding_present = has_forwarding_headers(headers);
     if (options_.mode == ClientMetadataMode::Direct) {
-        return direct_metadata(peer, connection_secure,
-                               forwarding_present ? ForwardingStatus::IgnoredDirectMode : ForwardingStatus::NotPresent);
+        ClientMetadata metadata = direct_metadata(peer, connection_secure,
+                                                  forwarding_present ? ForwardingStatus::IgnoredDirectMode
+                                                                     : ForwardingStatus::NotPresent);
+        apply_entry_real_ip(metadata, headers);
+        return metadata;
     }
 
     ClientMetadata metadata = direct_metadata(peer, connection_secure, ForwardingStatus::NotPresent);
@@ -559,6 +585,8 @@ std::string_view client_address_source_name(ClientAddressSource source) noexcept
     switch (source) {
         case ClientAddressSource::SocketPeer:
             return "socket_peer";
+        case ClientAddressSource::EntryRealIp:
+            return "entry_real_ip";
         case ClientAddressSource::Forwarded:
             return "forwarded";
         case ClientAddressSource::XForwardedFor:

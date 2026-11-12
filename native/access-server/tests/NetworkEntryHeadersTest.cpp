@@ -69,6 +69,8 @@ TEST(NetworkEntryHeadersTest, InternetEntryInjectsProxyHeadersFromScratch) {
     EXPECT_EQ(headers.get("X-Forwarded-For"), "203.0.113.9");
 }
 
+// X-Real-Ip carries the entry's client address (the CDN's connecting IP),
+// while X-Forwarded-For records the actual TCP hop this instance accepted.
 TEST(NetworkEntryHeadersTest, InternetEntryPrefersEoConnectingIpVerbatim) {
     mem::BufPool pool;
     http::HttpHeaders headers(pool);

@@ -29,6 +29,7 @@ enum class ClientMetadataMode : std::uint8_t {
 
 enum class ClientAddressSource : std::uint8_t {
     SocketPeer,
+    EntryRealIp,
     Forwarded,
     XForwardedFor,
     XRealIp,
@@ -71,6 +72,14 @@ struct ClientMetadata {
     bool peer_trusted = false;
 };
 
+// Resolves the request's client address, scheme, and policy targets.
+//
+// direct mode assumes apply_network_entry_headers() has already synthesized
+// the entry headers: it attributes the request to the server-authoritative
+// X-Real-Ip (the connection peer, or the CDN's EO-Connecting-IP behind the
+// internet entry) and falls back to the peer when the value is absent or does
+// not parse. Forwarded chains stay ignored in direct mode — only an explicit
+// trusted_proxy or legacy_headers deployment parses them.
 class ClientMetadataResolver {
 public:
     explicit ClientMetadataResolver(ClientMetadataResolverOptions options = {}) noexcept;
