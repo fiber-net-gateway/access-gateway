@@ -1036,6 +1036,333 @@ TEST(AccessServerTest, ServesWebSocketExtendedConnectOverHttp2Tls) {
     EXPECT_EQ(upstream.client_data(), "client-frame");
 }
 
+namespace {
+
+// A quiet websocket backend: completes the upgrade and then just holds the
+// session open without sending anything, the way a real loan backend behaves
+// while the CDN side of the session dies. The thread ends when the gateway
+// tears the upstream leg down (recv fails) — that is the observable proof the
+// relay aborted its upstream.
+class HoldingWebSocketUpstream {
+public:
+    HoldingWebSocketUpstream() {
+        listen_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
+        if (listen_fd_ < 0) {
+            return;
+        }
+        sockaddr_in address{};
+        address.sin_family = AF_INET;
+        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        address.sin_port = 0;
+        if (::bind(listen_fd_, reinterpret_cast<sockaddr *>(&address), sizeof(address)) != 0 ||
+            ::listen(listen_fd_, 1) != 0) {
+            ::close(listen_fd_);
+            listen_fd_ = -1;
+            return;
+        }
+        sockaddr_in bound{};
+        socklen_t length = sizeof(bound);
+        if (::getsockname(listen_fd_, reinterpret_cast<sockaddr *>(&bound), &length) != 0) {
+            ::close(listen_fd_);
+            listen_fd_ = -1;
+            return;
+        }
+        port_ = ntohs(bound.sin_port);
+        thread_ = std::thread([this] { serve(); });
+    }
+
+    ~HoldingWebSocketUpstream() {
+        if (listen_fd_ >= 0) {
+            ::shutdown(listen_fd_, SHUT_RDWR);
+            ::close(listen_fd_);
+        }
+        if (connection_fd_ >= 0) {
+            ::shutdown(connection_fd_, SHUT_RDWR);
+            ::close(connection_fd_);
+        }
+        if (thread_.joinable()) {
+            thread_.join();
+        }
+    }
+
+    [[nodiscard]] std::uint16_t port() const noexcept { return port_; }
+    [[nodiscard]] bool handshake_observed() const noexcept { return handshake_observed_; }
+    [[nodiscard]] bool gateway_tore_down() const noexcept { return gateway_tore_down_; }
+
+private:
+    void serve() {
+        connection_fd_ = ::accept(listen_fd_, nullptr, nullptr);
+        if (connection_fd_ < 0) {
+            return;
+        }
+        timeval timeout{.tv_sec = 30, .tv_usec = 0};
+        ::setsockopt(connection_fd_, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+
+        std::string request_text;
+        std::array<char, 4096> buffer{};
+        while (request_text.find("\r\n\r\n") == std::string::npos) {
+            const ssize_t size = ::recv(connection_fd_, buffer.data(), buffer.size(), 0);
+            if (size <= 0) {
+                return;
+            }
+            request_text.append(buffer.data(), static_cast<std::size_t>(size));
+        }
+        handshake_observed_ = true;
+
+        std::string key;
+        std::string lowercase_request = request_text;
+        std::transform(lowercase_request.begin(), lowercase_request.end(), lowercase_request.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        constexpr std::string_view kKeyPrefix = "sec-websocket-key:";
+        const std::size_t key_at = lowercase_request.find(kKeyPrefix);
+        if (key_at != std::string::npos) {
+            std::size_t begin = key_at + kKeyPrefix.size();
+            while (begin < request_text.size() && (request_text[begin] == ' ' || request_text[begin] == '\t')) {
+                ++begin;
+            }
+            const std::size_t end = request_text.find("\r\n", begin);
+            if (end != std::string::npos) {
+                key = request_text.substr(begin, end - begin);
+            }
+        }
+
+        std::string response("HTTP/1.1 101 Switching Protocols\r\n"
+                             "Connection: Upgrade\r\n"
+                             "Upgrade: websocket\r\n"
+                             "Sec-WebSocket-Accept: ");
+        response.append(websocket_accept(key));
+        response.append("\r\n\r\n");
+        std::size_t sent = 0;
+        while (sent < response.size()) {
+            const ssize_t size = ::send(connection_fd_, response.data() + sent, response.size() - sent, 0);
+            if (size <= 0) {
+                return;
+            }
+            sent += static_cast<std::size_t>(size);
+        }
+
+        // Hold the session open. The gateway's relay abort is what ends this.
+        const ssize_t size = ::recv(connection_fd_, buffer.data(), buffer.size(), 0);
+        gateway_tore_down_ = size <= 0 || errno != EAGAIN;
+    }
+
+    int listen_fd_ = -1;
+    int connection_fd_ = -1;
+    std::uint16_t port_ = 0;
+    std::atomic<bool> handshake_observed_{false};
+    std::atomic<bool> gateway_tore_down_{false};
+    std::thread thread_{};
+};
+
+struct DrainingClientOutcome {
+    common::IoErr error = common::IoErr::None;
+    bool head_received = false;
+    bool dropped = false;
+};
+
+// Extended-CONNECT client that holds the websocket open until told to drop the
+// whole connection, mirroring a CDN node dying mid-session.
+async::DetachedTask run_h2_websocket_drain_client(event::EventLoop &loop, std::uint16_t port,
+                                                  std::atomic<bool> &drop_now, std::chrono::milliseconds hold,
+                                                  std::promise<DrainingClientOutcome> *promise) {
+    DrainingClientOutcome outcome;
+    http::HttpClientTlsOptions tls;
+    tls.server_name = "localhost";
+
+    auto connection = std::make_shared<http::Http2ClientConnection>(loop);
+    auto connected = co_await connection->connect(net::SocketAddress(net::IpAddress::loopback_v4(), port), 5s, tls);
+    if (!connected) {
+        outcome.error = connected.error();
+        promise->set_value(std::move(outcome));
+        co_return;
+    }
+
+    struct RunState {
+        std::atomic_bool done{false};
+    };
+    auto run_state = std::make_shared<RunState>();
+    async::spawn(loop, [connection, run_state]() -> async::DetachedTask {
+        (void) co_await connection->wait_closed();
+        run_state->done.store(true, std::memory_order_release);
+    });
+
+    mem::BufPool pool;
+    http::ClientHttp2Exchange exchange(*connection, pool);
+    for (int i = 0; i < 500; ++i) {
+        if (exchange.extended_connect_support() == http::Http2ExtendedConnectSupport::Enabled) {
+            break;
+        }
+        co_await async::sleep(1ms);
+    }
+    http::HttpHeaders headers(pool);
+    headers.set("Sec-WebSocket-Version", "13");
+    auto sent = co_await exchange.send_request_header(
+            {
+                    .method = http::HttpMethod::Connect,
+                    .scheme = "https",
+                    .authority = "api.example.com",
+                    .path = "/ws",
+                    .protocol = "websocket",
+                    .headers = &headers,
+            },
+            false, 2s);
+    if (!sent) {
+        outcome.error = sent.error();
+    } else {
+        auto header = co_await exchange.read_header(2s);
+        if (!header) {
+            outcome.error = header.error();
+        } else {
+            outcome.head_received = (*header)->status_code == 200;
+        }
+    }
+
+    // Idle in the established session until the test says the CDN died.
+    for (int i = 0; i < static_cast<int>(hold.count()) && !drop_now.load(std::memory_order_acquire); ++i) {
+        co_await async::sleep(1ms);
+    }
+    connection->shutdown(common::IoErr::ConnReset);
+    outcome.dropped = true;
+    promise->set_value(std::move(outcome));
+    for (int i = 0; i < 2000 && !run_state->done.load(std::memory_order_acquire); ++i) {
+        co_await async::sleep(1ms);
+    }
+}
+
+} // namespace
+
+// 205 regression shape: RELEASE drains the listeners while a websocket session
+// is alive; the CDN then drops the client side while the backend holds its leg
+// open. The drain must still complete: the relay's client leg errors, aborts
+// the upstream, and every connection coroutine finishes.
+TEST(AccessServerTest, ReleaseDrainCompletesWhenWebsocketClientDropsWhileUpstreamHolds) {
+    HoldingWebSocketUpstream upstream;
+    ASSERT_NE(upstream.port(), 0);
+
+    ProjectConfig config;
+    config.version = 1;
+    config.hosts = std::vector<HostConfigEntry>{
+            HostConfigEntry{
+                    .pattern = "api.example.com",
+                    .strategy = HostStrategyConfig{},
+            },
+    };
+    RouteConfig route;
+    route.path = "/ws";
+    route.addresses = {std::optional<std::string>("127.0.0.1:" + std::to_string(upstream.port()))};
+    route.timeout_millis = 2000;
+    // Long idle timeout: the unwind must come from the client drop, not from
+    // the relay's own idle deadline firing.
+    route.websocket_timeout_millis = 60000;
+    config.routes = std::vector<std::optional<RouteConfig>>{std::move(route)};
+
+    RouteConfigStore store;
+    auto published = store.apply("orders", std::move(config));
+    ASSERT_TRUE(published) << published.error().message;
+
+    net::TlsCredentialOptions credential_options{};
+    credential_options.certificate_chain = net::TlsPemSource::from_content(kWsCertPem);
+    credential_options.private_key = net::TlsPemSource::from_content(kWwKeyPem);
+    auto credential = net::TlsCredential::create(credential_options);
+    ASSERT_TRUE(credential);
+    http::HttpServerTlsOptions tls{};
+    tls.configure_callback = &net::configure_tls_with_credential;
+    tls.configure_ctx = &*credential;
+
+    event::EventLoop accept_loop;
+    // Production shape: several worker loops (205 runs 8), HTTP/3 enabled
+    // alongside the TCP listeners, and a plaintext listener too.
+    event::EventLoopGroup workers(8);
+    AccessServer server(accept_loop, workers, store, {},
+                        AccessServerOptions{
+                                .http_server = {.tls = tls, .http3_enabled = true},
+                                .plain_listen_enabled = true,
+                                .plain_http_server = {},
+                        });
+    std::promise<std::uint16_t> port_promise;
+    auto port = port_promise.get_future();
+    std::promise<void> stopped_promise;
+    auto stopped = stopped_promise.get_future();
+    bool startup_ok = false;
+    std::atomic<bool> drain_begun{false};
+    std::atomic<bool> drop_now{false};
+
+    workers.start();
+    async::spawn(accept_loop, [&]() -> async::DetachedTask {
+        auto initialized = co_await server.initialize();
+        if (!initialized) {
+            port_promise.set_value(0);
+            accept_loop.stop();
+            co_return;
+        }
+        auto bound = server.bind(net::SocketAddress(net::IpAddress::v4({127, 0, 0, 1}), 0));
+        if (!bound) {
+            port_promise.set_value(0);
+            co_await server.shutdown_and_wait();
+            accept_loop.stop();
+            co_return;
+        }
+        auto plain_bound = server.bind_plain(net::SocketAddress(net::IpAddress::v4({127, 0, 0, 1}), 0));
+        if (!plain_bound) {
+            port_promise.set_value(0);
+            co_await server.shutdown_and_wait();
+            accept_loop.stop();
+            co_return;
+        }
+        startup_ok = true;
+        port_promise.set_value(listener_port(server.fd()));
+        async::spawn([&server]() { return server.serve(); });
+    });
+
+    DrainingClientOutcome client_outcome;
+    std::thread client([&]() {
+        const std::uint16_t bound_port = port.get();
+        if (bound_port != 0) {
+            std::promise<DrainingClientOutcome> client_done;
+            auto client_future = client_done.get_future();
+            async::spawn(accept_loop, [&]() {
+                return run_h2_websocket_drain_client(accept_loop, bound_port, drop_now,
+                                                     std::chrono::milliseconds(15000), &client_done);
+            });
+            // Wait for the session to establish, then run the RELEASE shape:
+            // drain first, client drop second.
+            for (int i = 0; i < 500 && !upstream.handshake_observed(); ++i) {
+                std::this_thread::sleep_for(1ms);
+            }
+            async::spawn(accept_loop, [&]() -> async::DetachedTask {
+                server.begin_drain();
+                drain_begun.store(true, std::memory_order_release);
+                co_return;
+            });
+            for (int i = 0; i < 300; ++i) {
+                std::this_thread::sleep_for(1ms);
+            }
+            drop_now.store(true, std::memory_order_release);
+            client_outcome = client_future.get();
+        }
+        async::spawn(accept_loop, [&]() -> async::DetachedTask {
+            if (startup_ok) {
+                server.begin_drain();
+                co_await server.shutdown_and_wait();
+            }
+            stopped_promise.set_value();
+            accept_loop.stop();
+        });
+    });
+
+    accept_loop.run();
+    client.join();
+    ASSERT_TRUE(startup_ok);
+    EXPECT_TRUE(drain_begun.load(std::memory_order_acquire));
+    EXPECT_TRUE(client_outcome.head_received);
+    EXPECT_TRUE(client_outcome.dropped);
+    EXPECT_EQ(stopped.wait_for(10s), std::future_status::ready) << "shutdown_and_wait wedged after client drop";
+    workers.stop();
+    workers.join();
+
+    EXPECT_TRUE(upstream.gateway_tore_down()) << "relay never aborted the upstream leg";
+}
+
 TEST(AccessServerTest, InjectsNetworkEntryBeforeHostPolicyAndReplacesClientSuppliedEntry) {
     ProjectConfig config = response_config();
     ASSERT_TRUE(config.hosts.has_value() && !config.hosts->empty());
