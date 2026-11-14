@@ -184,13 +184,11 @@ export function WafReleasesPage() {
   }
 
   return (
-    <section className="project-subpage" aria-labelledby="waf-releases-title">
-      <header className="subpage-header">
-        <div>
-          <p className="eyebrow">WAF PUBLICATION</p>
-          <h2 id="waf-releases-title">WAF 发布</h2>
-          <p>编译结果先预览确认，再创建 Release；回滚会从历史载荷生成新的 Release。</p>
-        </div>
+    <section className="project-subpage" aria-label="WAF 发布">
+      <div className="subpage-meta subpage-meta-actions">
+        <p className="subpage-lead">
+          编译结果先预览确认，再创建 Release；回滚会从历史载荷生成新的 Release。
+        </p>
         <div className="header-actions">
           <button
             className="button-secondary"
@@ -210,7 +208,7 @@ export function WafReleasesPage() {
             从草稿创建 Release
           </button>
         </div>
-      </header>
+      </div>
 
       {errorMessage ? (
         <div className="error-banner" role="alert">

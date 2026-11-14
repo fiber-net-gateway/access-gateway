@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from 'react'
 import {
   Link,
   NavLink,
@@ -27,7 +27,8 @@ import type {
 } from '../api/types'
 import { useConsoleContext, type ConsoleContextValue } from '../App'
 import { activationLabel } from '../components/ActivationEvidencePanel'
-import { CapabilityStrip } from '../components/CapabilityStrip'
+import { PageToolbar } from '../components/PageToolbar'
+import { ProjectSwitcher } from '../components/ProjectSwitcher'
 import { analyzeRouteSource, initialRouteModel, validateHostAliases } from '../routes/model'
 import { useUnsavedChangesGuard } from '../routes/useUnsavedChangesGuard'
 
@@ -49,15 +50,35 @@ export function useProjectContext(): ProjectContextValue {
   return useOutletContext<ProjectContextValue>()
 }
 
-const projectNavigation = [
-  { path: 'routes', label: 'Routes', detail: '编辑与校验' },
-  { path: 'host-policy', label: 'Host Policy', detail: '域名与 HTTPS' },
-  { path: 'network-policy', label: 'Network Policy', detail: 'CIDR 与访问来源' },
-  { path: 'waf-policy', label: 'WAF', detail: '模式与豁免' },
-  { path: 'versions', label: 'Versions', detail: '不可变配置' },
-  { path: 'releases', label: 'Releases', detail: 'rnacos 发布' },
-  { path: 'settings', label: 'Settings', detail: '生命周期与归档' },
+const projectNavigationGroups = [
+  {
+    group: '配置',
+    items: [
+      { path: 'routes', label: 'Routes', detail: '编辑与校验' },
+      { path: 'host-policy', label: 'Host Policy', detail: '域名与 HTTPS' },
+      { path: 'network-policy', label: 'Network Policy', detail: 'CIDR 与访问来源' },
+      { path: 'waf-policy', label: 'WAF', detail: '模式与豁免' },
+    ],
+  },
+  {
+    group: '资产与历史',
+    items: [
+      { path: 'versions', label: 'Versions', detail: '不可变配置' },
+      { path: 'releases', label: 'Releases', detail: 'rnacos 发布' },
+      { path: 'settings', label: 'Settings', detail: '生命周期与归档' },
+    ],
+  },
 ]
+
+const projectTabTitles: Record<string, string> = {
+  routes: 'Routes',
+  'host-policy': 'Host Policy',
+  'network-policy': 'Network Policy',
+  'waf-policy': 'WAF 策略',
+  versions: '配置版本',
+  releases: 'Release 记录',
+  settings: 'Settings',
+}
 
 export function ProjectLayout() {
   const consoleContext = useConsoleContext()
@@ -253,7 +274,7 @@ export function ProjectLayout() {
 
   if (!project || !projectId) {
     return (
-      <div className="projects-page">
+      <div className="workspace workspace-centered">
         <div className="error-banner" role="alert">
           <strong>无法打开 Project</strong>
           <span>{errorMessage ?? 'Project 不存在或当前用户无权访问'}</span>
@@ -265,137 +286,151 @@ export function ProjectLayout() {
     )
   }
 
+  const toolbarBadges: ReactNode[] = []
+  if (isConfigurationTab) {
+    toolbarBadges.push(
+      sourceVersion ? (
+        <span className="toolbar-chip toolbar-chip-warning" key="source">
+          历史 V{sourceVersion.number} 编辑副本
+        </span>
+      ) : (
+        <span className="toolbar-chip" key="baseline">
+          {currentVersionNumber ? `基线 V${currentVersionNumber}` : '尚无版本'}
+        </span>
+      ),
+      <span
+        className={`toolbar-chip ${workspaceDirty ? 'toolbar-chip-pending' : 'toolbar-chip-ready'}`}
+        key="dirty"
+      >
+        {workspaceDirty ? `${changedSectionCount} 个配置区域已修改` : '工作区已同步'}
+      </span>,
+    )
+  } else {
+    toolbarBadges.push(
+      <span className="toolbar-chip" key="baseline">
+        {currentVersionNumber ? `当前 V${currentVersionNumber}` : '尚无版本'}
+      </span>,
+      <span className="toolbar-chip" key="published">
+        {project.publishedVersion ? `已发布 V${project.publishedVersion}` : '尚未发布'}
+      </span>,
+    )
+  }
+
   return (
-    <div className="projects-page project-detail-page">
-      <div className="project-breadcrumbs" aria-label="面包屑">
-        <Link to="/projects">Projects</Link>
-        <span aria-hidden="true">/</span>
-        <span>{project.domain}</span>
-      </div>
+    <div className="workspace">
+      <aside className="context-sidebar">
+        <ProjectSwitcher current={project} />
 
-      <header className="project-detail-header">
-        <div>
-          <p className="eyebrow">DOMAIN PROJECT</p>
-          <h1>{project.domain}</h1>
-          <div className="project-status-row">
-            <span>生命周期：{project.status === 'active' ? 'Active' : '下线处理中'}</span>
-            <span>
-              当前配置：{project.draft?.revision ? `V${project.draft.revision}` : '尚无版本'}
-            </span>
-            <span>
-              rnacos 已发布：
-              {project.publishedVersion ? `V${project.publishedVersion}` : '尚未发布'}
-            </span>
-            <span>实例激活：{activationLabel(project.activationStatus)}</span>
-          </div>
-        </div>
-        <Link className="button-secondary inline-button-link" to="/projects">
-          切换 Project
-        </Link>
-      </header>
-
-      {consoleContext.statusError || errorMessage ? (
-        <div className="error-banner" role="alert">
-          <strong>部分信息加载失败</strong>
-          <span>{errorMessage ?? consoleContext.statusError}</span>
-        </div>
-      ) : null}
-
-      <CapabilityStrip
-        apiState={consoleContext.apiState}
-        health={consoleContext.health}
-        systemStatus={consoleContext.systemStatus}
-      />
-
-      <nav className="project-tabs" aria-label="Project 功能">
-        {projectNavigation.map((item) => (
-          <NavLink
-            className={({ isActive }) => `project-tab${isActive ? ' project-tab-active' : ''}`}
-            key={item.path}
-            to={
-              sourceVersionId && configurationTabs.has(item.path)
-                ? {
-                    pathname: item.path,
-                    search: `?sourceVersionId=${encodeURIComponent(sourceVersionId)}`,
+        <nav className="context-navigation" aria-label="Project 功能">
+          {projectNavigationGroups.map((group) => (
+            <div className="context-nav-group" key={group.group}>
+              <p className="context-nav-group-label">{group.group}</p>
+              {group.items.map((item) => (
+                <NavLink
+                  className={({ isActive }) =>
+                    `context-nav-item${isActive ? ' context-nav-item-active' : ''}`
                   }
-                : item.path
-            }
+                  key={item.path}
+                  to={
+                    sourceVersionId && configurationTabs.has(item.path)
+                      ? {
+                          pathname: item.path,
+                          search: `?sourceVersionId=${encodeURIComponent(sourceVersionId)}`,
+                        }
+                      : item.path
+                  }
+                >
+                  <span>{item.label}</span>
+                  <small>{item.detail}</small>
+                </NavLink>
+              ))}
+            </div>
+          ))}
+        </nav>
+
+        <div className="context-sidebar-footer">
+          <span
+            className={`status-chip status-chip-${project.activationStatus === 'active' ? 'ready' : project.activationStatus}`}
           >
-            <strong>{item.label}</strong>
-            <small>{item.detail}</small>
-          </NavLink>
-        ))}
-      </nav>
-
-      {isConfigurationTab ? (
-        <section className="project-workspace-bar" aria-label="Project 配置工作区">
-          <div>
-            <strong>Project Working Copy</strong>
-            <span>
-              {sourceVersion
-                ? `历史 V${sourceVersion.number} 编辑副本`
-                : currentVersionNumber
-                  ? `基线 V${currentVersionNumber}`
-                  : '尚无版本'}
-            </span>
-            <span className={`status-chip status-chip-${workspaceDirty ? 'pending' : 'ready'}`}>
-              {workspaceDirty ? `${changedSectionCount} 个配置区域已修改` : '工作区已同步'}
-            </span>
-          </div>
-          <div className="header-actions">
-            <button
-              className="button-secondary"
-              disabled={workspaceLoading || saving || !workspaceDirty}
-              onClick={() => void discardWorkspace()}
-              type="button"
-            >
-              放弃修改
-            </button>
-            <button
-              className="button-secondary"
-              disabled={workspaceLoading || validating || saving}
-              onClick={() => void validateWorkspace()}
-              type="button"
-            >
-              {validating ? '校验中…' : '校验完整配置'}
-            </button>
-            <button
-              className="button-primary"
-              disabled={workspaceLoading || saving || !workspaceDirty || workspaceHasLocalIssues}
-              onClick={() => setSaveDialogOpen(true)}
-              title={workspaceHasLocalIssues ? '请先修复配置问题' : undefined}
-              type="button"
-            >
-              保存为版本
-            </button>
-          </div>
-        </section>
-      ) : null}
-
-      {isConfigurationTab && workspaceError ? (
-        <div className="error-banner" role="alert">
-          <strong>Project 工作区操作未完成</strong>
-          <span>{workspaceError}</span>
+            实例：{activationLabel(project.activationStatus)}
+          </span>
+          <Link className="context-back-link" to="/projects">
+            ‹ 所有项目
+          </Link>
         </div>
-      ) : null}
+      </aside>
 
-      <div className="project-page-content">
-        <Outlet
-          context={{
-            ...consoleContext,
-            project,
-            refreshProject,
-            workspace,
-            setWorkspace,
-            workspaceLoading,
-            workspaceDirty,
-            currentVersionId,
-            currentVersionNumber,
-            sourceVersion,
-            validation,
-            setValidation,
-          }}
+      <div className="workspace-main">
+        <PageToolbar
+          actions={
+            isConfigurationTab ? (
+              <>
+                <button
+                  className="button-secondary"
+                  disabled={workspaceLoading || saving || !workspaceDirty}
+                  onClick={() => void discardWorkspace()}
+                  type="button"
+                >
+                  放弃修改
+                </button>
+                <button
+                  className="button-secondary"
+                  disabled={workspaceLoading || validating || saving}
+                  onClick={() => void validateWorkspace()}
+                  type="button"
+                >
+                  {validating ? '校验中…' : '校验完整配置'}
+                </button>
+                <button
+                  className="button-primary"
+                  disabled={
+                    workspaceLoading || saving || !workspaceDirty || workspaceHasLocalIssues
+                  }
+                  onClick={() => setSaveDialogOpen(true)}
+                  title={workspaceHasLocalIssues ? '请先修复配置问题' : undefined}
+                  type="button"
+                >
+                  保存为版本
+                </button>
+              </>
+            ) : undefined
+          }
+          badges={toolbarBadges}
+          title={projectTabTitles[activeProjectTab] ?? activeProjectTab}
         />
+
+        {consoleContext.statusError || errorMessage ? (
+          <div className="error-banner" role="alert">
+            <strong>部分信息加载失败</strong>
+            <span>{errorMessage ?? consoleContext.statusError}</span>
+          </div>
+        ) : null}
+
+        {isConfigurationTab && workspaceError ? (
+          <div className="error-banner" role="alert">
+            <strong>Project 工作区操作未完成</strong>
+            <span>{workspaceError}</span>
+          </div>
+        ) : null}
+
+        <div className="page-content">
+          <Outlet
+            context={{
+              ...consoleContext,
+              project,
+              refreshProject,
+              workspace,
+              setWorkspace,
+              workspaceLoading,
+              workspaceDirty,
+              currentVersionId,
+              currentVersionNumber,
+              sourceVersion,
+              validation,
+              setValidation,
+            }}
+          />
+        </div>
       </div>
 
       {saveDialogOpen ? (

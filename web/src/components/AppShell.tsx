@@ -1,78 +1,103 @@
 import type { ReactNode } from 'react'
-import { NavLink } from 'react-router'
+import { Link, NavLink } from 'react-router'
 
-import type { ApiConnectionState } from '../api/types'
+import type { ApiConnectionState, HealthResponse, SystemStatusResponse } from '../api/types'
 
 interface AppShellProps {
   apiState: ApiConnectionState
+  health: HealthResponse | null
+  systemStatus: SystemStatusResponse | null
   children: ReactNode
 }
 
-interface NavigationItem {
-  label: string
-  detail: string
-  href?: string
-}
-
-const navigation: NavigationItem[] = [
-  { label: 'Projects', detail: '域名与路由', href: '/projects' },
-  { label: 'WAF', detail: '边缘函数与防护', href: '/waf' },
-  { label: 'TLS', detail: '证书与自动 SNI', href: '/certificates' },
-  { label: 'Docs', detail: '中英文使用指南', href: '/docs' },
-  { label: 'Releases', detail: '版本与 rnacos 发布' },
-  { label: 'Audit', detail: '即将开放' },
-  { label: 'System', detail: '部署能力' },
+const primaryNavigation = [
+  { to: '/overview', label: '概览', end: true },
+  { to: '/projects', label: '项目', end: false },
+  { to: '/waf', label: 'WAF', end: false },
+  { to: '/certificates', label: '证书', end: false },
+  { to: '/docs', label: '文档', end: false },
 ]
 
-const connectionLabel: Record<ApiConnectionState, string> = {
-  loading: '正在连接 Console API',
-  online: 'Console API 已连接',
-  offline: 'Console API 连接失败',
+function dependencyTone(status: string | undefined): 'ready' | 'pending' | 'unknown' {
+  if (status === 'ready') return 'ready'
+  if (status === 'unavailable') return 'pending'
+  return 'unknown'
 }
 
-export function AppShell({ apiState, children }: AppShellProps) {
-  return (
-    <div className="app-shell">
-      <aside className="sidebar">
-        <div className="brand-block">
-          <div className="brand-mark" aria-hidden="true">
-            AG
-          </div>
-          <div>
-            <p className="eyebrow">CONTROL PLANE</p>
-            <p className="brand-name">Access Gateway</p>
-          </div>
-        </div>
+export function AppShell({ apiState, health, systemStatus, children }: AppShellProps) {
+  const validator = systemStatus?.dependencies.nativeValidator
+  const publicationWorker = systemStatus?.dependencies.publicationWorker
+  const database = systemStatus?.dependencies.database
+  const healthLabel =
+    apiState === 'online'
+      ? `正常${health?.version ? ` · v${health.version}` : ''}`
+      : apiState === 'loading'
+        ? '连接中'
+        : '连接失败'
 
-        <nav className="primary-navigation" aria-label="主导航">
-          {navigation.map((item) =>
-            item.href ? (
-              <NavLink
-                className={({ isActive }) =>
-                  `navigation-item${isActive ? ' navigation-item-active' : ''}`
-                }
-                key={item.label}
-                to={item.href}
-              >
-                <span>{item.label}</span>
-                <small>{item.detail}</small>
-              </NavLink>
-            ) : (
-              <div className="navigation-item" aria-disabled="true" key={item.label}>
-                <span>{item.label}</span>
-                <small>{item.detail}</small>
-              </div>
-            ),
-          )}
+  return (
+    <div className="app-frame">
+      <header className="top-bar">
+        <Link className="brand" to="/overview">
+          <span className="brand-mark" aria-hidden="true">
+            AG
+          </span>
+          <span className="brand-name">Access Gateway</span>
+        </Link>
+
+        <nav className="top-navigation" aria-label="全局导航">
+          {primaryNavigation.map((item) => (
+            <NavLink
+              className={({ isActive }) => `top-nav-item${isActive ? ' top-nav-item-active' : ''}`}
+              end={item.end}
+              key={item.to}
+              to={item.to}
+            >
+              {item.label}
+            </NavLink>
+          ))}
         </nav>
 
-        <div className={`connection-state connection-state-${apiState}`} role="status">
-          <span className="connection-dot" aria-hidden="true" />
-          <span>{connectionLabel[apiState]}</span>
-        </div>
-      </aside>
+        <Link
+          className={`health-pill health-pill-${apiState}`}
+          title="系统连接状态,点击查看概览"
+          to="/overview"
+        >
+          <span className={`connection-dot connection-dot-${apiState}`} aria-hidden="true" />
+          <span>{healthLabel}</span>
+        </Link>
+      </header>
 
-      <main className="main-content">{children}</main>
+      <main className="app-main">{children}</main>
+
+      <footer className="status-footer" role="status">
+        <Link className="status-footer-link" to="/overview">
+          <span className={`connection-dot connection-dot-${apiState}`} aria-hidden="true" />
+          <span>Console API</span>
+        </Link>
+        <Link className="status-footer-link" to="/overview">
+          <span>Native Validator</span>
+          <span className={`footer-tone footer-tone-${dependencyTone(validator?.status)}`}>
+            {validator?.status === 'ready' ? '可用' : validator?.status ? '不可用' : '未知'}
+          </span>
+        </Link>
+        <Link className="status-footer-link" to="/overview">
+          <span>rnacos 发布</span>
+          <span className={`footer-tone footer-tone-${dependencyTone(publicationWorker?.status)}`}>
+            {publicationWorker?.status === 'ready'
+              ? '可用'
+              : publicationWorker?.status
+                ? '不可用'
+                : '未知'}
+          </span>
+        </Link>
+        <Link className="status-footer-link" to="/overview">
+          <span>MySQL</span>
+          <span className={`footer-tone footer-tone-${dependencyTone(database?.status)}`}>
+            {database?.status === 'ready' ? '就绪' : database?.status ? '异常' : '未知'}
+          </span>
+        </Link>
+      </footer>
     </div>
   )
 }

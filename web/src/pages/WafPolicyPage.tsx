@@ -232,22 +232,18 @@ export function WafPolicyPage() {
   }
 
   return (
-    <section className="project-subpage" aria-labelledby="waf-policy-title">
-      <header className="subpage-header">
-        <div>
-          <p className="eyebrow">WAF POLICY DRAFT</p>
-          <h2 id="waf-policy-title">WAF 策略</h2>
-          <p>
-            规则按组管理：每个规则组决定生效与豁免的 Project，并发布为一个边缘函数；match 表达式使用
-            Access 脚本语言。
-          </p>
-        </div>
+    <section className="project-subpage" aria-label="WAF 策略草稿">
+      <div className="subpage-meta subpage-meta-actions">
+        <p className="subpage-lead">
+          规则按组管理：每个规则组决定生效与豁免的 Project，并发布为一个边缘函数；match 表达式使用
+          Access 脚本语言。
+        </p>
         <div className="header-actions">
           <Link className="button-secondary inline-button-link" to="/waf/releases">
             前往发布
           </Link>
         </div>
-      </header>
+      </div>
 
       {errorMessage ? (
         <div className="error-banner" role="alert">

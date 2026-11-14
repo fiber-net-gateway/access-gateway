@@ -40,7 +40,7 @@ export default function App() {
   }, [])
 
   return (
-    <AppShell apiState={apiState}>
+    <AppShell apiState={apiState} health={health} systemStatus={systemStatus}>
       <Outlet context={{ apiState, health, systemStatus, statusError }} />
     </AppShell>
   )

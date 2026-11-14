@@ -143,17 +143,13 @@ export function ProjectVersionsPage() {
   }
 
   return (
-    <section className="project-subpage" aria-labelledby="versions-title">
-      <header className="subpage-header">
-        <div>
-          <p className="eyebrow">IMMUTABLE CONFIGURATION</p>
-          <h2 id="versions-title">配置版本</h2>
-          <p>历史版本可以作为编辑起点；只有保存时才会创建新的不可变版本。</p>
-        </div>
+    <section className="project-subpage" aria-label="配置版本">
+      <div className="subpage-meta">
         <span className="status-chip status-chip-unknown">
           {versions.length} 个版本 · ETag {configurationLockVersion}
         </span>
-      </header>
+      </div>
+      <p className="subpage-lead">历史版本可以作为编辑起点；只有保存时才会创建新的不可变版本。</p>
 
       {errorMessage ? (
         <div className="error-banner" role="alert">

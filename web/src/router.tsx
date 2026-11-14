@@ -3,6 +3,7 @@ import { Navigate, createBrowserRouter } from 'react-router'
 import App from './App'
 import { CertificatesPage } from './pages/CertificatesPage'
 import { NotFoundPage } from './pages/NotFoundPage'
+import { OverviewPage } from './pages/OverviewPage'
 import { ProjectLayout } from './pages/ProjectLayout'
 import { ProjectHostPolicyPage } from './pages/ProjectHostPolicyPage'
 import { ProjectNetworkPolicyPage } from './pages/ProjectNetworkPolicyPage'
@@ -23,7 +24,8 @@ export const appRoutes = [
     path: '/',
     element: <App />,
     children: [
-      { index: true, element: <Navigate replace to="/projects" /> },
+      { index: true, element: <Navigate replace to="/overview" /> },
+      { path: 'overview', element: <OverviewPage /> },
       { path: 'certificates', element: <CertificatesPage /> },
       {
         path: 'docs',

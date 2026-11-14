@@ -209,17 +209,11 @@ export function WafEdgeFunctionsPage() {
   }
 
   return (
-    <section className="project-subpage" aria-labelledby="waf-edge-functions-title">
-      <header className="subpage-header">
-        <div>
-          <p className="eyebrow">EDGE FUNCTIONS · DRAFT</p>
-          <h2 id="waf-edge-functions-title">边缘函数</h2>
-          <p>
-            手写边缘函数与 WAF 生成函数在发布时合并为同一个函数索引；脚本使用 Access
-            脚本语言，每次修改自动经原生编译器逐函数校验。
-          </p>
-        </div>
-      </header>
+    <section className="project-subpage" aria-label="边缘函数草稿">
+      <p className="subpage-lead">
+        手写边缘函数与 WAF 生成函数在发布时合并为同一个函数索引；脚本使用 Access
+        脚本语言，每次修改自动经原生编译器逐函数校验。
+      </p>
 
       {errorMessage ? (
         <div className="error-banner" role="alert">

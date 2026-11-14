@@ -57,18 +57,11 @@ export function ProjectHostPolicyPage() {
   }
 
   return (
-    <section className="project-subpage" aria-labelledby="host-policy-title">
-      <header className="subpage-header">
-        <div>
-          <p className="eyebrow">PROJECT / HOST POLICY</p>
-          <h2 id="host-policy-title">Host Policy</h2>
-          <p>
-            主域名、额外域名和 HTTPS 入口策略与 Routes 一起保存为不可变配置版本；只有 Release
-            发布并经实例证据确认后才算激活。
-          </p>
-        </div>
-        <span className="status-chip status-chip-unknown">由 Project 工作区统一保存</span>
-      </header>
+    <section className="project-subpage" aria-label="Host Policy 工作区">
+      <p className="subpage-lead">
+        主域名、额外域名和 HTTPS 入口策略与 Routes 一起保存为不可变配置版本；只有 Release
+        发布并经实例证据确认后才算激活。
+      </p>
 
       {errorMessage ? (
         <div className="error-banner" role="alert">

@@ -114,22 +114,18 @@ export function ProjectSettingsPage() {
   }
 
   return (
-    <section className="project-subpage project-settings-page" aria-labelledby="settings-title">
-      <header className="subpage-header">
-        <div>
-          <p className="eyebrow">PROJECT LIFECYCLE</p>
-          <h2 id="settings-title">Settings</h2>
-          <p>
-            查看不可变主域名，并通过 Host Policy 管理域名与 HTTPS、通过有发布证据的 Release 下线
-            Project。
-          </p>
-        </div>
+    <section className="project-subpage project-settings-page" aria-label="Project 设置">
+      <div className="subpage-meta">
         <span
           className={`status-chip status-chip-${project.status === 'active' ? 'ready' : 'pending'}`}
         >
           {project.status === 'active' ? 'Active' : '下线处理中'}
         </span>
-      </header>
+      </div>
+      <p className="subpage-lead">
+        查看不可变主域名，并通过 Host Policy 管理域名与 HTTPS、通过有发布证据的 Release 下线
+        Project。
+      </p>
 
       {errorMessage ? (
         <div className="error-banner" role="alert">

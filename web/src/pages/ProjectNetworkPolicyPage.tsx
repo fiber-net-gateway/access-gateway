@@ -43,18 +43,11 @@ export function ProjectNetworkPolicyPage() {
         : null
     : null
   return (
-    <section className="project-subpage" aria-labelledby="network-policy-title">
-      <header className="subpage-header">
-        <div>
-          <p className="eyebrow">PROJECT / NETWORK POLICY</p>
-          <h2 id="network-policy-title">Network Policy</h2>
-          <p>
-            网络访问策略与 Routes 一起保存为不可变配置版本；只有 Release
-            发布并经实例证据确认后才算激活。
-          </p>
-        </div>
-        <span className="status-chip status-chip-unknown">由 Project 工作区统一保存</span>
-      </header>
+    <section className="project-subpage" aria-label="Network Policy 工作区">
+      <p className="subpage-lead">
+        网络访问策略与 Routes 一起保存为不可变配置版本；只有 Release
+        发布并经实例证据确认后才算激活。
+      </p>
 
       {cidrLimitMessage ? (
         <div className="project-validation-errors" role="alert">

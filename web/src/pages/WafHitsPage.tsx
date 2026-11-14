@@ -97,15 +97,11 @@ export function WafHitsPage() {
   )
 
   return (
-    <section className="project-subpage" aria-labelledby="waf-hits-title">
-      <header className="subpage-header">
-        <div>
-          <p className="eyebrow">WAF HIT STATISTICS</p>
-          <h2 id="waf-hits-title">命中统计</h2>
-          <p>
-            数据来自数据面经 Prometheus 抓取的规则命中计数；数据面仍是事实来源，控制台只做聚合展示。
-          </p>
-        </div>
+    <section className="project-subpage" aria-label="WAF 命中统计">
+      <div className="subpage-meta subpage-meta-actions">
+        <p className="subpage-lead">
+          数据来自数据面经 Prometheus 抓取的规则命中计数；数据面仍是事实来源，控制台只做聚合展示。
+        </p>
         <div className="header-actions">
           <button
             className="button-secondary"
@@ -116,7 +112,7 @@ export function WafHitsPage() {
             {loading ? '查询中…' : '刷新'}
           </button>
         </div>
-      </header>
+      </div>
 
       <section className="settings-card" aria-labelledby="waf-hits-window-title">
         <h3 id="waf-hits-window-title">统计窗口</h3>

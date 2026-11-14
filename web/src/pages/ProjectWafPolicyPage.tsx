@@ -97,17 +97,11 @@ export function ProjectWafPolicyPage() {
   }
 
   return (
-    <section className="project-subpage" aria-labelledby="project-waf-title">
-      <header className="subpage-header">
-        <div>
-          <p className="eyebrow">PROJECT WAF POLICY</p>
-          <h2 id="project-waf-title">WAF 策略</h2>
-          <p>
-            该 Project 的模式覆盖与规则组豁免；修改保存在同一个环境草稿中，
-            <Link to="/waf">在 WAF 页统一发布</Link>。
-          </p>
-        </div>
-      </header>
+    <section className="project-subpage" aria-label="Project WAF 策略">
+      <p className="subpage-lead">
+        该 Project 的模式覆盖与规则组豁免；修改保存在同一个环境草稿中，
+        <Link to="/waf">在 WAF 页统一发布</Link>。
+      </p>
 
       {errorMessage ? (
         <div className="error-banner" role="alert">

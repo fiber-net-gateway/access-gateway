@@ -85,13 +85,11 @@ export function ProjectReleasesPage() {
   }, [loadReleases, refreshDelay])
 
   return (
-    <section className="project-subpage" aria-labelledby="releases-title">
-      <header className="subpage-header">
-        <div>
-          <p className="eyebrow">RNACOS PUBLICATION</p>
-          <h2 id="releases-title">Release 记录</h2>
-          <p>每个 Release 独立记录 rnacos 写入和回读；实例激活证据始终单独展示。</p>
-        </div>
+    <section className="project-subpage" aria-label="Release 记录">
+      <div className="subpage-meta subpage-meta-actions">
+        <p className="subpage-lead">
+          每个 Release 独立记录 rnacos 写入和回读；实例激活证据始终单独展示。
+        </p>
         <button
           className="button-secondary"
           disabled={loading || refreshing}
@@ -104,7 +102,7 @@ export function ProjectReleasesPage() {
         >
           {refreshing ? '刷新中…' : '刷新状态'}
         </button>
-      </header>
+      </div>
 
       {errorMessage ? (
         <div className="error-banner" role="alert">

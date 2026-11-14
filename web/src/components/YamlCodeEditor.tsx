@@ -152,7 +152,7 @@ function codeMirrorDiagnostics(
 
 const editorTheme = EditorView.theme({
   '&': {
-    minHeight: '210px',
+    minHeight: '120px',
     backgroundColor: '#12201a',
     color: '#e8eee9',
     fontSize: '13px',

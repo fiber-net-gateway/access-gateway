@@ -58,9 +58,6 @@ export function ProjectRoutesPage() {
   const location = useLocation()
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set())
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
-  const sourceHasUserChanges = sourceVersion
-    ? JSON.stringify(model) !== JSON.stringify(sourceVersion.model)
-    : false
 
   useEffect(() => {
     setExpanded((current) => {
@@ -204,32 +201,16 @@ export function ProjectRoutesPage() {
   }
 
   return (
-    <section className="route-workspace project-subpage" aria-labelledby="routes-title">
-      <header className="subpage-header">
-        <div>
-          <p className="eyebrow">PROJECT / ROUTES</p>
-          <h2 id="routes-title">Routes</h2>
-          <div className="project-status-row">
-            <span className={`status-chip status-chip-${hasUnsavedChanges ? 'pending' : 'ready'}`}>
-              {sourceVersion
-                ? `历史 V${sourceVersion.number} 编辑副本${sourceHasUserChanges ? ' · 已修改' : ''}`
-                : hasUnsavedChanges
-                  ? '有未保存修改'
-                  : '工作区已同步'}
-            </span>
-            <span>
-              保存基线：{currentVersionNumber ? `当前 V${currentVersionNumber}` : '尚无版本'}
-            </span>
-            <span>{model.routes.length} Routes</span>
-            {routeLimits ? (
-              <span>
-                源码：{sourceBytes.toLocaleString()} /{' '}
-                {routeLimits.maxPayloadBytes.toLocaleString()} bytes
-              </span>
-            ) : null}
-          </div>
-        </div>
-      </header>
+    <section className="route-workspace project-subpage" aria-label="Routes 工作区">
+      <div className="subpage-meta">
+        <span>{model.routes.length} Routes</span>
+        {routeLimits ? (
+          <span>
+            源码：{sourceBytes.toLocaleString()} / {routeLimits.maxPayloadBytes.toLocaleString()}{' '}
+            bytes
+          </span>
+        ) : null}
+      </div>
 
       {errorMessage ? (
         <div className="error-banner" role="alert">
