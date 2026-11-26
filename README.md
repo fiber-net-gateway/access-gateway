@@ -19,12 +19,11 @@ This README describes what the product does and how to run it. To understand how
 
 ## Status
 
-Access Gateway is under active development and is not yet cleared for production.
+Access Gateway runs in production: the data plane is deployed and serving live traffic, and both
+parts remain under active development.
 
-- **Data plane:** a limited 2026-07-31 test-environment snapshot passed 352/352 decode-and-compile
-  checks, but production corpus differential verification and the final cutover gates are
-  incomplete. The [cutover gate](native/access-server/docs/cutover-evidence-gate.md) status is
-  `NOT_MET`.
+- **Data plane:** `access-server` carries production traffic. Every change is still gated by the
+  Java wire-compatibility contract and the native test suites.
 - **Console:** the only working identity mode is a local development administrator, and document
   encryption uses a local key. `AUTH_MODE=oidc` refuses to start until a provider adapter exists.
 

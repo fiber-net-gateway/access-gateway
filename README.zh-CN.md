@@ -13,9 +13,9 @@ Access Gateway 是一个自托管的 HTTP 网关，由两部分组成：
 
 ## 项目状态
 
-Access Gateway 正在积极开发中，尚不具备生产使用条件。
+Access Gateway 已在生产环境运行：数据面已部署并承载真实流量，两个部分仍在积极开发中。
 
-- **数据面**：2026-07-31 的有限测试环境快照通过了 352/352 项解码和编译检查，但生产语料差分验证和最终切流门禁尚未完成，[切流门禁](native/access-server/docs/cutover-evidence-gate.md)状态为 `NOT_MET`。
+- **数据面**：`access-server` 已承载生产流量。每次变更仍须通过 Java wire 兼容契约和 native 测试套件的门禁。
 - **Console**：目前唯一可用的身份模式是本地开发管理员，文档加密使用本地密钥。`AUTH_MODE=oidc` 在 provider 适配器实现之前会拒绝启动。
 
 完整清单见[已知限制](#已知限制)。
