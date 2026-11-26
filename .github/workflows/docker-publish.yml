@@ -37,9 +37,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            clang-18 \
-            libstdc++-14-dev \
-            lld-18 \
+            g++-14 \
+            gcc-14 \
             ninja-build \
             perl \
             pkg-config
@@ -62,8 +61,8 @@ jobs:
 
       - name: Build native release binaries (HTTP/3 enabled)
         env:
-          CC: clang-18
-          CXX: clang++-18
+          CC: gcc-14
+          CXX: g++-14
         run: |
           cmake -S native -B native/build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \

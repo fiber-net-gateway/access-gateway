@@ -54,9 +54,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            clang-18 \
-            libstdc++-14-dev \
-            lld-18 \
+            g++-14 \
+            gcc-14 \
             ninja-build \
             perl \
             pkg-config
@@ -74,8 +73,8 @@ jobs:
 
       - name: Configure native build
         env:
-          CC: clang-18
-          CXX: clang++-18
+          CC: gcc-14
+          CXX: g++-14
         run: npm run configure:native
 
       - name: Build access-server, validator, and tests
