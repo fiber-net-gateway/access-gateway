@@ -38,6 +38,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             clang-18 \
+            libstdc++-14-dev \
+            lld-18 \
             ninja-build \
             perl \
             pkg-config
