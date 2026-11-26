@@ -32,7 +32,6 @@ constexpr std::uint64_t kStrictTransportSecurityHash = http::http_header_name_ha
 constexpr std::string_view kStrictTransportSecurityValue = "max-age=31536000";
 
 struct RequestHostContext {
-    std::string normalized_host;
     std::string_view effective_host;
     // Non-empty only when the test-mode host rewrite happened; gates the outbound
     // ploto-origin-host header.
@@ -224,18 +223,19 @@ std::expected<RequestHostContext, Err> resolve_request_host(http::HttpExchange &
                 underscore == std::string_view::npos ? std::string_view::npos : origin_host.find('.', underscore);
         if (underscore > 0 && underscore != std::string_view::npos && dot > underscore &&
             dot != std::string_view::npos) {
-            result.normalized_host.reserve(origin_host.size() - (dot - underscore));
-            result.normalized_host.append(origin_host.substr(0, underscore));
-            result.normalized_host.append(origin_host.substr(dot));
-            result.effective_host = result.normalized_host;
+            std::string normalized_host;
+            normalized_host.reserve(origin_host.size() - (dot - underscore));
+            normalized_host.append(origin_host.substr(0, underscore));
+            normalized_host.append(origin_host.substr(dot));
             result.origin_host = origin_host;
             request_cluster = origin_host.substr(underscore + 1, dot - underscore - 1);
             http::HttpHeaders::HeaderField *const host_field = exchange.request_headers().set(
-                    kHostHeaderName, result.normalized_host, kHostHeaderLowcase.data(), kHostHeaderHash);
+                    kHostHeaderName, normalized_host, kHostHeaderLowcase.data(), kHostHeaderHash);
             if (host_field == nullptr) {
                 return std::unexpected(Err::from_error(common::IoErr::NoMem));
             }
             exchange.request_header_refs().host = host_field;
+            result.effective_host = host_field->value_view();
         } else {
             request_cluster = exchange.header(kTraceCluster);
         }
@@ -353,7 +353,7 @@ async::Task<Result<void>> AccessRequestHandler::handle_impl(http::HttpExchange &
     if (!resolved_host) {
         co_return std::unexpected(resolved_host.error());
     }
-    RequestHostContext request_host = std::move(*resolved_host);
+    const RequestHostContext request_host = *resolved_host;
     // Java InternalIpGrayInterceptor (order 10, before routing — production only; test mode
     // installs HeaderToCtxInterceptor instead, and resolve_request_host above is its native
     // counterpart, so the two never coexist). A match only writes the trace context: route
