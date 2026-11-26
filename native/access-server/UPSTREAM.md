@@ -10,7 +10,7 @@ HTTP, JSON/script, Nacos, CAT, and Prometheus modules are consumed from the pinn
 historical application import revision.
 
 The current reusable Fiber dependency is pinned at
-`47d847858fcdc26054bf12f55c65d44807781d0d` (upstream `master`, fetched 2026-11-11). The pinned
+`aae472c775ba801c8e0f5ae1b36b3e2697ae9dd6` (upstream `master`, fetched 2026-11-26). The pinned
 revision carries one repository-owned compatibility patch — the glibc 2.17 regex-cache
 `thread_local` destructor removal (`native/patches/0001`, see `native/patches/README.md`); the
 historical TLS dynamic-credential lifetime defect
@@ -19,6 +19,25 @@ briefly patched against `f832d5458d3bfca1cefa45a4c7a6cb1cd0662f23`, is fixed ups
 The repository-owned regression
 `ProxyExecutorTest.StreamsChunkedUpstreamWhoseFramingArrivesSeparatelyFromPayload` still guards
 the HTTP/1 chunked split-framing fix from the application side.
+The reviewed update range from the previous pin is
+`47d847858fcdc26054bf12f55c65d44807781d0d..aae472c775ba801c8e0f5ae1b36b3e2697ae9dd6` (ten
+non-merge commits, fast-forward). Its behavioral core is QUIC version 2 (RFC 9369) and QUIC
+version negotiation including compatible version negotiation (RFC 9368): wire-version constants
+(initial salt, HKDF labels, Retry integrity statics, and permuted long-header type bits) move into
+`QuicVersionSpec` (`include/fiber/quic/QuicVersion.h`, `035baaea`/`b25b6be1`); endpoints now
+advertise and admit `{v1, v2}` by default (`QuicUdpEndpoint::Options::supported_versions`,
+`Http3ServerOptions::quic_supported_versions`) with RFC 9368 incompatible version negotiation,
+`version_information` (`0x11`) downgrade validation, version-bound address validation tokens and
+client cache keys (`b1406d4a`/`d3d836b7`), and single mid-handshake compatible version upgrades
+without an extra round trip (`1095e563`/`af848254`/`84559b7f`/`3bbde9a1`, enabled by default with
+`compatible_version_negotiation = true` and `Http3ClientConnection`'s `[v2, v1]` preference
+starting from v1). The remaining commits add `Set-Cookie` and duplicate response field-line
+encoding coverage across QPACK/HPACK/h3/h1/gzip (`362b7c20`) and refresh the upstream READMEs
+(`aae472c7`). `AccessServer` stages `Http3Endpoint` without narrowing `quic_supported_versions`,
+so HTTP/3 listeners now accept both QUIC v1 and v2 with compatible version negotiation out of the
+box; the signature change on `quic_create_address_token`/`quic_validate_address_token` is unused
+here, no access-server source adaptation was needed, and `native/patches/0001` still applies
+unchanged and stays bound to the new pin.
 The reviewed update range from the previous pin is
 `8277303c0a664fe88f9a2b9ab345312dc90c36f3..47d847858fcdc26054bf12f55c65d44807781d0d` — not a
 fast-forward: upstream rewrote `master` in full (the two pins share no common ancestor) to redact
