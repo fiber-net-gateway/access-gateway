@@ -1,0 +1,41 @@
+name: Feature Request
+description: Propose a new feature or improvement for Fibron
+title: '[Feature]: '
+labels: ['enhancement']
+body:
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Data Plane (native/access-server)
+        - Control Plane / Console (server & web)
+        - Observability / Metrics / Tracing
+        - Deployment / Packaging
+        - Documentation
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: What problem does this solve? Why is the current behavior insufficient?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe the API, configuration, or UX behavior you have in mind.
+    validations:
+      required: true
+
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Compatibility or wire-contract impact
+      description: Does this affect rnacos Data IDs, route YAML/JS schema, or backwards compatibility?
+    validations:
+      required: false

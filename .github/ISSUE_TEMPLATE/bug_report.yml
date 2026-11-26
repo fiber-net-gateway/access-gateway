@@ -1,0 +1,52 @@
+name: Bug Report
+description: Report a bug in access-server, the Console, or deployment tooling
+title: '[Bug]: '
+labels: ['bug']
+body:
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - Data Plane (native/access-server)
+        - Control Plane API / Workers (server)
+        - Management Console UI (web)
+        - Docker / Deployment
+        - Documentation
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Clear and concise description of the bug. Please redact any tokens, passwords, or private keys.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Minimal config, route YAML/script, or commands to reproduce.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      placeholder: |
+        - OS / Kernel:
+        - Compiler / Node version:
+        - Fibron version or commit SHA:
+        - Deployment mode (prebuilt Docker / local build / standalone):
+    validations:
+      required: true

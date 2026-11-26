@@ -1,0 +1,164 @@
+name: Publish Container Images
+
+on:
+  push:
+    branches: [master, main]
+    tags: ['v*']
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  publish:
+    name: Build and Push GHCR Images (linux/amd64)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository with submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang-18 \
+            ninja-build \
+            perl \
+            pkg-config
+
+      - name: Setup CMake 4.1+
+        uses: jwlawson/actions-setup-cmake@v2
+        with:
+          cmake-version: '4.1.x'
+
+      - name: Cache native FetchContent downloads
+        uses: actions/cache@v4
+        with:
+          path: native/build/_deps
+          key: native-deps-${{ runner.os }}-${{ hashFiles('third_party/fiber-gateway-cpp/cmake/Deps.cmake') }}
+
+      - name: Build console workspaces
+        run: |
+          npm ci
+          npm run build
+
+      - name: Build native release binaries (HTTP/3 enabled)
+        env:
+          CC: clang-18
+          CXX: clang++-18
+        run: |
+          cmake -S native -B native/build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DFIBER_BUILD_TESTS=OFF \
+            -DFIBER_ENABLE_HTTP3=ON \
+            -DFIBER_ENABLE_LTO=OFF \
+            -DACCESS_GATEWAY_BUILD_REVISION="${GITHUB_SHA}"
+          cmake --build native/build \
+            --target fiber_app_access_server fiber_app_access_gateway_validator \
+            --parallel "$(nproc)"
+          strip native/build/apps/access-server native/build/apps/access-gateway-validator
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image owner lowercase
+        id: owner
+        run: echo "value=$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Metadata for access-server
+        id: meta-access-server
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ steps.owner.outputs.value }}/access-server
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=ref,event=branch
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push access-server
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile
+          target: access-server
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta-access-server.outputs.tags }}
+          labels: ${{ steps.meta-access-server.outputs.labels }}
+          cache-from: type=gha,scope=access-server
+          cache-to: type=gha,mode=max,scope=access-server
+
+      - name: Metadata for console
+        id: meta-console
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ steps.owner.outputs.value }}/access-gateway-console
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=ref,event=branch
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push console
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile
+          target: console-runtime
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta-console.outputs.tags }}
+          labels: ${{ steps.meta-console.outputs.labels }}
+          cache-from: type=gha,scope=console
+          cache-to: type=gha,mode=max,scope=console
+
+      - name: Metadata for demo runtime
+        id: meta-demo
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ steps.owner.outputs.value }}/access-gateway-demo
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=ref,event=branch
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push demo runtime
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile
+          target: demo-runtime
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta-demo.outputs.tags }}
+          labels: ${{ steps.meta-demo.outputs.labels }}
+          cache-from: type=gha,scope=demo
+          cache-to: type=gha,mode=max,scope=demo

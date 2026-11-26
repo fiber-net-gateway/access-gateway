@@ -1,35 +1,160 @@
-# Access Gateway
+# Fibron
+
+**High-performance C++23 HTTP/1.1, HTTP/2 & HTTP/3 gateway with compiled JS edge functions, built-in WAF, and verifiable release activation.** _(formerly Access Gateway)_
+
+[![CI](https://github.com/fiber-net-gateway/access-gateway/actions/workflows/ci.yml/badge.svg)](https://github.com/fiber-net-gateway/access-gateway/actions/workflows/ci.yml)
+[![Container Images](https://github.com/fiber-net-gateway/access-gateway/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/fiber-net-gateway/access-gateway/pkgs/container/access-server)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![C++23](https://img.shields.io/badge/C%2B%2B-23-00599C.svg)](native/CMakeLists.txt)
+[![Protocols](https://img.shields.io/badge/HTTP-1.1%20%7C%202%20%7C%203%20%28QUIC%29-2ea44f.svg)](#listeners-and-protocols)
 
 English | [简体中文](README.zh-CN.md)
 
-Access Gateway is a self-hosted HTTP gateway made of two parts:
+Fibron is a self-hosted, production-tested HTTP gateway made of two tightly integrated parts:
 
-- **`access-server`**, a C++23 data plane built on the
-  [Fiber](https://github.com/fiber-net-gateway/fiber-gateway-cpp) framework. It terminates client
-  traffic, selects a route, and serves or proxies each request.
-- **The Console**, a React and Fastify application where operators author, validate, release, and
-  roll back configuration, then confirm which instances are actually running it.
+- **`access-server`** — a C++23 data plane built on the
+  [Fiber](https://github.com/fiber-net-gateway/fiber-gateway-cpp) coroutine/EventLoop framework. It
+  terminates HTTP/1.1, HTTP/2, and HTTP/3 (QUIC) traffic, evaluates compiled routing/WAF/edge
+  scripts, and proxies HTTP and WebSocket workloads with ~4–6 MiB baseline RSS.
+- **The Console** — a React and Fastify control plane where teams author, validate (using the exact
+  C++ data-plane compiler), publish, and roll back configuration—then **prove** which live
+  instances are actually serving it.
 
-Configuration travels from the Console to the data plane through rnacos (Nacos). The data plane
-began as a migration of the Java `ploto-unified-access` gateway and keeps its configuration wire
-format.
+```mermaid
+flowchart LR
+    Client["Clients (HTTP/1.1, H2, H3/QUIC)"] --> DataPlane["access-server (C++23)"]
+    DataPlane --> Upstream["Upstreams (HTTP / WS)"]
+    DataPlane --> Obs["Prometheus / Grafana / CAT / Logs"]
+    Operator["Operators"] --> Console["React + Fastify Console"]
+    Console -. "Exact C++ Pre-Validation" .-> Validator["Native Validator"]
+    Console --> DB[(MySQL 8.4)]
+    Worker["Publication Worker"] <--> DB
+    Worker -- "Write + Readback" --> Nacos[(rnacos / Nacos)]
+    Nacos -- "Hot Config + Service Discovery" --> DataPlane
+    Collector["Activation Collector"] -- "Poll /v1/activation-evidence" --> DataPlane
+    Collector <--> DB
+```
 
-This README describes what the product does and how to run it. To understand how it works, read
-[Architecture and principles](docs/architecture.md) (Chinese).
+## Console Preview
 
-## Status
+| Route Editor (YAML & Compiled JS)                      | Release & Per-Instance Activation Evidence                        |
+| ------------------------------------------------------ | ----------------------------------------------------------------- |
+| ![Fibron Route Editor](docs/assets/console-routes.png) | ![Fibron Activation Evidence](docs/assets/console-activation.png) |
+| **WAF Policy (Compiled to Edge Functions)**            | **TLS Certificate Inventory & Automatic SNI**                     |
+| ![Fibron WAF Policy](docs/assets/console-waf.png)      | ![Fibron TLS Certificates](docs/assets/console-tls.png)           |
 
-Access Gateway runs in production: the data plane is deployed and serving live traffic, and both
-parts remain under active development.
+---
 
-- **Data plane:** `access-server` carries production traffic. Every change is still gated by the
-  Java wire-compatibility contract and the native test suites.
-- **Console:** the only working identity mode is a local development administrator, and document
-  encryption uses a local key. `AUTH_MODE=oidc` refuses to start until a provider adapter exists.
+## Why Fibron?
 
-See [Known limitations](#known-limitations) for the full list.
+| Capability                  | Fibron                                                                                          | Typical Self-Hosted Gateways                               |
+| --------------------------- | ----------------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| **Protocols**               | Native HTTP/1.1, HTTP/2 (ALPN), HTTP/3 (QUIC), WebSocket tunneling                              | Often H1/H2 only, or HTTP/3 experimental                   |
+| **Edge Functions & WAF**    | Compiled JS-like bytecode VM inside C++23 (no V8/Node/LuaJIT); WAF compiles into edge functions | External plugins, Lua/WASM overhead, or separate WAF layer |
+| **Pre-Publish Validation**  | Console invokes the exact C++ `access-gateway-validator` binary before creating a Release       | Control plane re-implements schema checks and drifts       |
+| **Activation Verification** | Explicitly separates **Draft → Published → Active** via authenticated per-instance polling      | Assumes "written to config store" means "live everywhere"  |
+| **Hot-Path Contention**     | Worker-sharded EventLoop SWRR + immutable pinned snapshots (zero hot-path config locks)         | Global locks or GC pauses under high-fanout traffic        |
+| **Certificate Management**  | Automatic SNI routing derived from leaf DNS SANs; atomic snapshot swap; encrypted at rest       | Manual SNI-to-cert bindings that drift on renewal          |
 
-## Data plane features
+## Performance Highlights
+
+Reproducible native microbenchmarks (`Release + LTO`, pinned to 4 CPU cores on an Intel i7-13700H;
+run locally with `npm run benchmark:native`). See [Benchmarks](docs/benchmarks.en.md) and the full
+[benchmark baselines](native/access-server/docs/benchmark-baselines.md) for methodology, manifests,
+and caveats.
+
+| Benchmark Path                                    | Throughput       | p50 Latency | Notes                                             |
+| ------------------------------------------------- | ---------------- | ----------- | ------------------------------------------------- |
+| **Worker-sharded SWRR service selection** (4w)    | **52.7M ops/s**  | `19.0 ns`   | **9.23x–10.12x** faster than shared-mutex SWRR    |
+| **SNI TLS certificate lookup** (wildcard / exact) | **34.1–35.1M/s** | `28.5 ns`   | Lock-free, zero-allocation ClientHello selection  |
+| **Route lookup** (352 projects, 1,056 routes, 4w) | **21.8M ops/s**  | `45.9 ns`   | Pinned immutable snapshot per request             |
+| **Static template rendering**                     | **>500M ops/s**  | `1.7 ns`    | `0` heap allocations / `0` bytes allocated        |
+| **Batch publish** (352 projects compile + commit) | **344K proj/s**  | `1.02 ms`   | **79.8x** faster than sequential project commits  |
+| **Benchmark process RSS**                         | —                | —           | **3.8–6.5 MiB** max RSS across core routing paths |
+
+> [!NOTE]
+> Microbenchmarks measure hot-path overhead and scaling regressions in isolation; they do not
+> substitute for end-to-end production capacity profiling.
+
+---
+
+## 60-Second Quick Start (Prebuilt Docker Demo)
+
+Run the full stack—Console, API, publication worker, activation collector, MySQL 8.4, R-Nacos, and
+`access-server`—with **zero local compilation** (requires only `git`, `openssl`, and Docker
+Compose):
+
+```bash
+git clone --depth 1 https://github.com/fiber-net-gateway/access-gateway.git
+cd access-gateway
+./deploy/demo/init-env.sh                     # generate local secrets & self-signed cert
+docker compose -f compose.prebuilt.yaml up -d # pull prebuilt GHCR image and start stack
+```
+
+Compose applies migrations, uploads the demo TLS certificate, publishes a TLS snapshot and a demo
+Project through the Console, and starts `access-server` once both are live in R-Nacos.
+
+| Service             | Address                                                         |
+| ------------------- | --------------------------------------------------------------- |
+| Console             | `http://localhost:8088`                                         |
+| Gateway HTTPS/HTTP2 | `curl -k --http2 -H 'Host: demo.local' https://localhost:8443/` |
+| Gateway plaintext   | `curl -H 'Host: demo.local' http://localhost:8000/`             |
+| Metrics             | `http://localhost:8001/metrics`                                 |
+| R-Nacos console     | `http://localhost:10848/rnacos/`                                |
+| MySQL               | `127.0.0.1:3307`                                                |
+
+Credentials are written to the ignored local `.env` file. Stop the demo with
+`docker compose -f compose.prebuilt.yaml down` (add `--volumes` to remove demo data).
+
+<details>
+<summary><strong>Build the Docker demo locally from source instead</strong></summary>
+
+Requires Node.js 20.19+, CMake 4.1+, Ninja, and Clang 17+ / GCC 13+:
+
+```bash
+git clone --recurse-submodules https://github.com/fiber-net-gateway/access-gateway.git
+cd access-gateway
+npm install
+npm run demo:init   # generate local secrets and a self-signed certificate
+npm run demo:up     # compile native + console locally, then start the stack
+```
+
+`NATIVE_BUILD_JOBS` controls native build parallelism (default `2`). Operate with
+`npm run demo:ps`, `npm run demo:logs`, and `npm run demo:down`.
+
+</details>
+
+<details>
+<summary><strong>Testing HTTP/3 from a Windows browser under WSL2</strong></summary>
+
+Use the WSL IP from `hostname -I` (WSL2 usually forwards TCP but not UDP from Windows `localhost`).
+Map that IP to `demo.local` in your Windows hosts file and trust `deploy/demo/certs/demo.crt` for
+local testing only. Set `ACCESS_SERVER_PUBLISHED_HOST=127.0.0.1` in `.env` to keep the gateway
+inside WSL.
+
+</details>
+
+---
+
+## Project Status
+
+Fibron's data plane runs in production serving live traffic, and both data plane and control plane
+remain under active development.
+
+- **Data plane (`access-server`):** serving production traffic. Changes remain gated by the native
+  test suites and wire-compatibility contracts; production script-corpus differential verification
+  and final cutover gates are still tracked as open engineering milestones.
+- **Control plane (Console):** includes MySQL migrations, RBAC, encrypted immutable versions,
+  CodeMirror YAML/JS route editors, Native Validator integration, TLS snapshots, WAF & edge
+  function authoring, Release state machine, leased rnacos publication worker, and activation
+  evidence collector. Currently only local development admin auth and local document encryption keys
+  are available (`AUTH_MODE=oidc` fails closed until an OIDC provider adapter is implemented).
+
+See [Known limitations](#known-limitations) for the complete, transparent list.
+
+---
+
+## Data Plane Features
 
 ### Listeners and protocols
 
@@ -40,7 +165,7 @@ See [Known limitations](#known-limitations) for the full list.
 | Plaintext      | `0.0.0.0:8000/tcp` | HTTP/1.1, alongside TLS or as the only traffic listener    |
 | Status         | `0.0.0.0:8001`     | Prometheus `/metrics` and optional activation evidence API |
 
-HTTP worker count follows the process CPU affinity and cgroup v1/v2 quota automatically.
+HTTP worker count follows process CPU affinity and cgroup v1/v2 quota automatically.
 
 ### Projects and hosts
 
@@ -54,12 +179,13 @@ one Project.
 | Suffix wildcard | `*.example.com`   | `a.example.com` and `a.b.example.com`, not `example.com` |
 | Global wildcard | `*`               | Any valid host                                           |
 
-Project selection uses HTTP `Host` or `:authority`. It is independent of the TLS SNI value, so one
+Project selection uses HTTP `Host` or `:authority`. It is independent of TLS SNI, so one
 certificate can serve several Projects and vice versa.
 
 ### Route matching
 
-Routes match on path structure first, then on an optional method and condition.
+Routes match on path structure first, then on an optional method and compiled `condition`
+expression reading `$path`, `$query`, `$header`, `$cookie`, `$context`, `$req`, and `$conn`:
 
 | Path form      | Example         | Captures                       |
 | -------------- | --------------- | ------------------------------ |
@@ -68,8 +194,7 @@ Routes match on path structure first, then on an optional method and condition.
 | Tail wildcard  | `/assets/*rest` | The remainder, as `$path.rest` |
 
 Static segments beat parameters, and parameters beat wildcards. Candidates on the same path are
-tried in configured order. A `condition` is a compiled expression that can read `$path`, `$query`,
-`$header`, `$cookie`, `$context`, `$req`, and `$conn`:
+tried in configured order.
 
 ```yaml
 path: /api/orders/:id
@@ -81,8 +206,8 @@ service: orders/stable
 
 ### Route types
 
-**RESPONSE** answers directly from the gateway, with no upstream. The body can be `TEXT`, `BASE64`
-(decoded at compile time), or `TEMPLATE` (`${...}` expressions evaluated per request).
+**RESPONSE** answers directly from the gateway with no upstream (`TEXT`, compile-time decoded
+`BASE64`, or per-request `${...}` `TEMPLATE`):
 
 ```yaml
 path: /healthz
@@ -96,7 +221,7 @@ response_headers:
   Content-Type: text/plain; charset=utf-8
 ```
 
-**PROXY** forwards to an upstream service, with templated path rewriting and headers.
+**PROXY** forwards to an upstream service with templated path rewriting and headers:
 
 ```yaml
 path: /api/orders/:id
@@ -110,11 +235,11 @@ response_headers:
   Cache-Control: no-store
 ```
 
-**SCRIPT** runs a JavaScript-like program compiled when the configuration loads. Scripts can read
-the request and JSON or binary bodies, set headers and cookies, send responses, and call fixed HTTP
-backends through an `http` directive. The standard library covers strings, arrays, binary, hashes,
-math, randomness, JSON, and URLs. This is not Node.js: there is no filesystem, timers, modules, or
-user-defined functions.
+**SCRIPT** runs a JavaScript-like program compiled at configuration load time. Scripts can read
+requests and JSON/binary bodies, set headers/cookies, send responses, and call fixed HTTP backends
+via an `http` directive. Standard libraries cover strings, arrays, binary, hashes, math,
+randomness, JSON, and URLs. (Not Node.js: no filesystem, timers, modules, or user-defined
+functions.)
 
 <!-- prettier-ignore -->
 ```javascript
@@ -127,39 +252,36 @@ return {
 
 ### Proxying
 
-- **Upstreams:** NamingService discovery (`service`, with an optional `/cluster` suffix) or a static
-  `addresses` list. Discovery uses only enabled, healthy, positively weighted instances and prefers
-  the local zone.
-- **Load balancing:** smooth weighted round robin with a per-endpoint circuit breaker.
-- **Retries:** a failed connection is re-selected, up to four attempts in total, only while the
-  request head has not started sending, so a request is never delivered twice.
-- **Connections:** connection pooling, a bounded DNS resolver with no implicit public fallback, and
-  Happy Eyeballs across resolved addresses under one connect deadline.
-- **Rewriting:** templated `rewrite`, `proxy_headers`, and `response_headers`, with the original
-  URI and percent-encoding preserved when no rewrite is set. `Location` and `Refresh` are rewritten
-  automatically unless a route overrides them.
-- **Streaming:** bodies stream in both directions. `flush: true` lowers latency for SSE and slow
-  uploads.
-- **WebSocket:** routes with `websocket_timeout` tunnel an HTTP/1.1 upgrade as raw bytes.
-- **Limits:** per-route `max_client_body_size`, `max_proxy_body_size`, and `timeout`, falling back
-  to the server defaults of 400 MiB for requests and 600 MiB for proxied responses.
+- **Upstreams:** NamingService discovery (`service`, optional `/cluster` suffix) or static
+  `addresses`. Discovery selects enabled, healthy, positively weighted instances and prefers the
+  local zone.
+- **Load balancing:** worker-sharded smooth weighted round robin (SWRR) with a shared per-endpoint
+  circuit breaker.
+- **Retries:** failed connections re-select up to 4 attempts only before sending the request head,
+  preventing duplicate delivery.
+- **Connections:** connection pooling, bounded DNS resolver (no implicit public fallback), and Happy
+  Eyeballs under a single connect deadline.
+- **Rewriting:** templated `rewrite`, `proxy_headers`, and `response_headers`, preserving original
+  URI and percent-encoding when no rewrite is set. `Location` and `Refresh` rewrite automatically
+  unless overridden.
+- **Streaming & WebSocket:** bidirectional body streaming (`flush: true` for SSE / slow uploads) and
+  raw-byte HTTP/1.1 WebSocket tunneling via `websocket_timeout`.
+- **Limits:** per-route `max_client_body_size`, `max_proxy_body_size`, and `timeout` (server
+  defaults: 400 MiB request / 600 MiB response).
 
 ### Upstream TLS
 
-The process-wide default is `ACCESS_SERVER_UPSTREAM_TLS_MODE`: `legacy_insecure` (the default, which
-does not verify certificates), `system_ca`, or `custom_ca`. Use a verifying mode in production.
-
-A PROXY route can override it with an immutable `upstream_tls` profile that sets the verification
-mode, an inline CA, the SNI name, a separate verification name, and a client certificate for mTLS.
-The client certificate is referenced by a Console certificate version UUID, so private keys never
-appear in route configuration.
+The process default is `ACCESS_SERVER_UPSTREAM_TLS_MODE` (`legacy_insecure`, `system_ca`, or
+`custom_ca`—use a verifying mode in production). Any `PROXY` route can override it with an immutable
+`upstream_tls` profile specifying verification mode, inline CA, SNI, verification name, and mTLS
+client certificate referenced by Console certificate version UUID (so private keys never appear in
+route configs).
 
 ### Response compression
 
-`gzip: true` (level 6) or `gzip: 1`–`9` enables compression on any route type. Static `TEXT` and
-`BASE64` bodies are precompressed at compile time; template, proxy, and script responses compress as
-a stream. The gateway negotiates on `Accept-Encoding`, applies a fixed MIME allow-list, merges
-`Vary`, and returns 406 when every representation is refused.
+`gzip: true` (level 6) or `gzip: 1`–`9` works on any route type. Static `TEXT` and `BASE64` bodies
+precompress at compile time; dynamic responses stream-compress with `Accept-Encoding` negotiation,
+fixed MIME allow-list, `Vary` merging, and `406` on full refusal.
 
 ### Access policies
 
@@ -167,50 +289,35 @@ a stream. The gateway negotiates on `Accept-Encoding`, applies a fixed MIME allo
 | -------------- | ----- | ------------------------------------------------------------------------------------ |
 | HTTPS redirect | Host  | Redirects with 301, 302, 307, or 308 and sends `Strict-Transport-Security`           |
 | Entry network  | Host  | Rejects with 403 unless the instance entry (`vdi`, `desktop`, `internet`) is allowed |
-| Source CIDR    | Route | `allows` holds allow and `!deny` entries, IPv4 and IPv6; deny wins, 403              |
-| Request body   | Route | Rejects oversized bodies with 413, for both declared and streamed lengths            |
+| Source CIDR    | Route | `allows` holds allow and `!deny` entries (IPv4/IPv6); deny wins, 403                 |
+| Request body   | Route | Rejects oversized bodies with 413 for both declared and streamed lengths             |
 
-HTTPS redirects fire on the plaintext listener. Behind a reverse proxy, the client address and
-scheme come from `ACCESS_SERVER_CLIENT_METADATA_MODE`:
-
-- `direct` (default) uses the socket peer and the listener's real TLS state and ignores all
-  forwarding headers.
-- `trusted_proxy` parses `Forwarded`, `X-Forwarded-For`, and `X-Real-Ip` only when the peer is in
-  `ACCESS_SERVER_TRUSTED_PROXY_CIDRS`. An invalid chain falls back to the socket peer.
-- `legacy_headers` keeps the Java behavior of trusting these headers and skipping the CIDR check
-  when `X-Real-Ip` is missing or invalid. Do not use it where untrusted clients can reach the
-  listener.
+Behind a reverse proxy, client IP and scheme follow `ACCESS_SERVER_CLIENT_METADATA_MODE`: `direct`
+(default, ignores forwarding headers), `trusted_proxy` (parses `Forwarded` / `X-Forwarded-For` /
+`X-Real-Ip` only for `ACCESS_SERVER_TRUSTED_PROXY_CIDRS`), or `legacy_headers` (Java compatibility
+mode; never expose to untrusted clients).
 
 ### Gray release and clusters
 
 Gray rules in `ploto.unified-access.gray-match` map an entry network to a ratio (out of 10,000) and
-a CIDR list. A matching request is routed to the `gray` cluster. Clusters can also come from a
-route's `service/cluster` value, its `cluster` field, or its `context` map. When a
-request-specified cluster has no usable instance, the gateway falls back to the configured one.
-
-With `ACCESS_SERVER_TEST_MODE=true`, the host form `api_gray.example.com` routes as
-`api.example.com` in cluster `gray`, and `HI-TRACE-CLUSTER` selects a cluster when the host names
-none. Gray rules do not apply in this mode.
+CIDR list, routing matches to the `gray` cluster. With `ACCESS_SERVER_TEST_MODE=true`,
+`api_gray.example.com` routes as `api.example.com` in cluster `gray`, and `HI-TRACE-CLUSTER` selects
+a cluster when the host names none.
 
 ### Edge functions
 
-Edge functions are scripts mounted on a set of Projects. They can inspect a request and answer it
-before it reaches the route's normal handling. They power the WAF and can also be written by hand.
+Edge functions are compiled scripts mounted on Projects that inspect requests and short-circuit
+responses before normal routing. They power the built-in WAF and can also be handwritten.
 
-- **Phases:** `request_head` runs before route matching, so unmatched paths are covered too.
-  `request_body` runs after matching and reads a buffered `$req.body`, only on PROXY routes with
-  `edge_function_body: true`, for JSON, form, text, and XML content types, within a 1 MiB cap.
-- **Mounting:** each function has project `include` and `exclude` globs, an execution `priority`,
-  and a sticky sampling `ratio` keyed on the client IP.
-- **Version canary:** `replaces` names the function a new version takes over inside its `ratio`.
-  Each request runs exactly one of the two, the old function's configuration stays untouched, and
-  removing the new function restores it. Behind a CDN or load balancer, set
-  `ACCESS_SERVER_CLIENT_METADATA_MODE` so sampling sees real clients rather than the intermediary.
-- **Capabilities:** read the request, respond early through `resp.*`, count events with
-  `ctx.report(event, label)`, and test addresses with a `cidr` directive. Functions cannot modify
-  the request or call upstreams.
-- **Failure:** a runtime error fails open by default. Set
-  `ACCESS_SERVER_EDGE_FUNCTION_FAIL_CLOSE=true` to reject with 503 instead.
+- **Phases:** `request_head` runs before route matching (protecting unmatched paths); `request_body`
+  runs after matching on `PROXY` routes with `edge_function_body: true` (JSON, form, text, XML; 1
+  MiB cap).
+- **Mounting & Canary:** project `include`/`exclude` globs, `priority`, sticky client-IP sampling
+  `ratio`, and mutually exclusive version canary via `replaces` (remove the new function to roll
+  back cleanly).
+- **Capabilities & Safety:** read-only request inspection, early `resp.*` responses,
+  `ctx.report(event, label)` metrics/logs, `cidr` directive, RE2 regex matching (no catastrophic
+  backtracking), fail-open by default (`ACCESS_SERVER_EDGE_FUNCTION_FAIL_CLOSE=true` for 503).
 
 ```javascript
 directive office = cidr "10.0.0.0/8;172.28.1.0/24";
@@ -223,215 +330,91 @@ if (!office.contains($conn.remote_addr) && strings.match($req.uri, "(?i)union\\s
 
 ### Hot configuration updates
 
-Routes, Project lists, gray rules, TLS certificates, and edge functions all update without a
-restart.
+Routes, Project lists, gray rules, TLS certificates, and edge functions all update without restart:
 
-- A candidate is fully parsed and compiled before it replaces the running snapshot.
-- An invalid or oversized candidate is rejected, and the previous snapshot keeps serving.
-- A candidate with the same version is ignored.
-- In-flight requests finish on the snapshot they started with.
-- Removing a Project from the list unloads it, which is distinct from a failed update.
+- Candidates are fully parsed and compiled before replacing the running snapshot.
+- Invalid or oversized candidates are rejected while the last-known-good snapshot keeps serving.
+- Same-version candidates are ignored; in-flight requests finish on the snapshot they started with.
+- Removing a Project unloads it cleanly (distinct from a failed update).
+- Certificates resolve at `ClientHello` via leaf DNS SANs and rotate atomically.
 
-Certificates are selected at the ClientHello by SNI, using an index built from each leaf
-certificate's DNS SANs. Rotating a certificate is an atomic snapshot swap.
+### Observability & Upgrades
 
-### Observability
+- **Prometheus & Grafana:** fixed-schema bounded metrics with LRU eviction for dynamic families
+  ([bounded metrics](native/access-server/docs/bounded-metrics.md)) plus two ready-to-use dashboards
+  in [`deploy/grafana/`](deploy/grafana/) (Request Handling and Runtime Health).
+- **Tracing & Logging:** CAT request trees, `HI-TRACE-ID`, W3C `traceparent`/`tracestate`,
+  asynchronous rotating access logs (100 MB, drop-on-full without backpressure), and structured edge
+  function event logs.
+- **Prewarmed Upgrades:** `access-server-boss` and `access-serverctl` spin up and sync a new
+  generation before handing off TCP listeners
+  ([upgrade guide](docs/access-server-prewarm-upgrade-design.md)).
 
-- **Prometheus:** a fixed-schema metric set covers requests, latency, per-route and per-upstream
-  traffic, proxy errors, circuit rejections, configuration outcomes, TLS rotation, DNS, service
-  discovery, WebSocket, and edge functions. Request-labeled families are capped with LRU eviction.
-  See [bounded metrics](native/access-server/docs/bounded-metrics.md).
-- **Grafana:** two dashboards are in [`deploy/grafana/`](deploy/grafana/): Request Handling and
-  Runtime Health.
-- **Tracing:** CAT request trees, `HI-TRACE-ID` continuation, and W3C `traceparent` and `tracestate`
-  propagation.
-- **Access log:** a Java-compatible, tab-separated line per proxy attempt, written asynchronously
-  and rotated at 100 MB. A full log queue drops lines rather than blocking requests.
-- **Edge function events:** a separate structured log line for each function event.
+---
 
-### Upgrades
+## Console Features
 
-`access-server-boss` supervises the process and `access-serverctl` drives prewarmed upgrades. The
-new generation syncs configuration and initializes workers while the old one still serves, then
-takes over the TCP listeners. This shrinks the gap in service but does not remove it, and HTTP/3
-requests can fail while the two processes overlap. See the
-[upgrade guide](docs/access-server-prewarm-upgrade-design.md).
+- **Projects & Routes:** per-route CodeMirror YAML and JavaScript editors, drag/keyboard reordering,
+  live native wire preview, and native resource limit indicators.
+- **Immutable Versions:** AES-256-GCM envelope-encrypted configuration versions protected by
+  `If-Match` optimistic locking and idempotency keys.
+- **Host & Network Policy:** primary domain, exact host aliases, HTTPS redirect modes, and
+  Project-wide allow/deny CIDR policies compiled into every route.
+- **Three-Stage Validation:** syntax → cross-resource semantics → full compilation by the C++
+  **Native Validator** binary (required to create a Release).
+- **Releases & Drift-Safe Publication:** immutable Releases, leased worker writing and readback per
+  rnacos Data ID, drift conflict detection, explicit Project decommission Releases, and rollback as
+  a new Release.
+- **Activation Evidence:** independent collector polling `/v1/activation-evidence` per instance and
+  aggregating `active`, `pending`, `degraded`, and `unknown` states onto each Release.
+- **TLS Certificates:** encrypted inventory (`valid` / `expiring` / `expired` / `superseded`), no
+  private-key download API, automatic SNI-from-SAN preview, SAN-change confirmation on renewal, and
+  atomic TLS Releases.
+- **WAF & Handwritten Edge Functions:** rule groups (`off` / `log` / `block`), Project overrides,
+  6-group starter pack (SQLi, RCE, XSS, path traversal, probing, malformed requests), native compile
+  and release-diff previews, Prometheus hit statistics (`1h`/`24h`/`7d`), and version canary
+  promotion.
+- **RBAC, Audit & Built-in Docs:** `admin`, `maintainer`, `publisher`, and `auditor` roles; redacted
+  audit trails; bilingual route/script docs served at `/docs`.
 
-## Console features
+---
 
-### Projects and routes
-
-A Project is a normalized domain name. Each route gets its own CodeMirror editor, written either as
-a YAML mapping or as a JavaScript route with path, method, and gzip set outside the source. Routes
-can be reordered by drag or keyboard. A preview shows the exact native wire output before anything
-is saved, and native resource limits appear in the editor.
-
-### Configuration versions
-
-Saving creates a new immutable, encrypted Configuration Version, protected by `If-Match` optimistic
-locking and idempotency keys. Any version can be previewed, restored, used as the starting point for
-new edits, or published directly.
-
-### Host and network policy
-
-- **Host Policy:** a fixed primary domain plus exact host aliases that share its routes and Release,
-  and an HTTPS redirect mode.
-- **Network Policy:** Project-wide allow and deny CIDR lists, compiled into every route.
-
-### Validation
-
-Configuration is checked in three stages: field syntax, relationships across resources, then full
-compilation by the Native Validator, which is the same codec and compiler the data plane runs.
-Creating a Release requires a working validator, so an unverified configuration cannot be published.
-
-### Releases and publication
-
-- A Release is created from the current version or any historical one and is stored immutably before
-  publishing. Rolling back means releasing an older version.
-- A leased worker writes each rnacos Data ID, reads it back, and records every attempt separately.
-- If rnacos has drifted from what the Release was based on, publishing stops with a conflict instead
-  of overwriting.
-- Decommissioning a Project is its own Release type, requiring a recorded reason.
-
-### Activation evidence
-
-Publishing is not the same as being active, so the Console tracks them separately. A collector polls
-each instance's authenticated `/v1/activation-evidence` endpoint and aggregates the results onto the
-Release page, with per-instance detail on demand.
-
-| Status     | Meaning                                                                     |
-| ---------- | --------------------------------------------------------------------------- |
-| `active`   | Every required instance has fresh evidence that exactly matches the Release |
-| `pending`  | Evidence is fresh, but the target has not reached the active snapshot yet   |
-| `degraded` | Collection failed, or an instance rejected the candidate                    |
-| `unknown`  | Evidence is missing or expired, which is never presented as success         |
-
-### TLS certificates
-
-- **Inventory:** encrypted certificates with immutable versions and a `valid`, `expiring` (within 30
-  days), `expired`, or `superseded` state. There is no private key download API.
-- **Automatic SNI:** selectors come from each certificate's DNS SANs, with no separate binding to
-  maintain. A preview shows which certificate a given server name resolves to.
-- **Renewal:** an update with the same SANs switches directly. Adding or removing a SAN changes SNI
-  coverage and requires explicit confirmation.
-- **TLS Releases:** a complete certificate snapshot is published and tracked like any other Release.
-
-### WAF
-
-WAF rules are authored in the Console and compile into edge functions, so the data plane has no
-WAF-specific logic.
-
-- **Rule groups:** each group has a mode (`off`, `log`, or `block`), a priority, and included and
-  exempted Projects. An exemption requires a written reason. Each active group publishes as one edge
-  function named `waf-<group>`.
-- **Rules:** a match expression with severity, action, and an optional scope of methods, paths, and
-  source CIDRs.
-- **Project overrides:** a per-Project mode that overrides the groups it belongs to.
-- **Starter rule pack:** nine rules in six groups (SQL injection, RCE, XSS, path traversal, probing,
-  malformed requests). Groups import as `off`, so importing changes nothing until they are enabled.
-- **Blocking:** a blocked request gets a 403 JSON body with code `WAF_BLOCKED` and the rule ID.
-- **Publishing:** a compile preview checks the generated scripts, and a release preview compares them
-  function by function against what is live in rnacos. Rollback creates a new Release from historical
-  content.
-- **Hit statistics:** per-rule `log` and `block` counts over 1 hour, 24 hours, or 7 days, read from
-  Prometheus. This page requires `PROMETHEUS_URL`.
-
-The recommended rollout is one Project in `log` mode, then review the hit statistics, then switch to
-`block`.
-
-### Handwritten edge functions
-
-A dedicated page edits function scripts, phases, and mounts, with per-function native compile
-previews. It starts a version canary from an existing function and promotes it once it owns all the
-traffic. Handwritten and WAF-generated functions publish together. The names `waf` and `waf-*` are
-reserved for the generator, and a snapshot can hold up to 64 functions in total.
-
-### Access control and audit
-
-- **Roles:** `admin` and `maintainer` edit configuration; `admin` and `publisher` create and publish
-  Releases; `auditor` can read but not change anything.
-- **Audit:** configuration, certificate, and publication changes write redacted audit events.
-- **Encryption:** configuration documents and private keys are stored with AES-256-GCM envelope
-  encryption.
-
-### Built-in documentation
-
-The route, script, and script API guides are served in the Console under `/docs`, in English and
-Simplified Chinese.
-
-## Known limitations
+## Known Limitations
 
 **Console**
 
-- OIDC is not implemented, so production login is unavailable. The local document key is for
-  development only; production needs an external key provider, which does not exist yet.
-- Gray rules and Host entry-network restrictions are not editable in the Console. Author them
-  directly in rnacos.
-- A failed or partial publication is final, with no automatic per-resource retry. Recover by
-  creating a new Release.
-- TLS Releases have no one-click rollback, unlike WAF Releases.
-- Audit events are written to the database, but there is no viewer or API yet.
-- Role memberships have no management page or API.
-- Script Data IDs of removed edge functions stay in rnacos as harmless orphans.
+- OIDC is not implemented yet, so production login is unavailable. Local document encryption keys
+  are for development only; production requires an external KMS provider (not yet implemented).
+- Gray rules and Host entry-network restrictions are authored directly in rnacos rather than in the
+  Console UI.
+- Failed or partial publications are terminal (no automatic per-resource retry; recover by creating
+  a new Release).
+- TLS Releases do not yet have one-click rollback like WAF Releases.
+- Audit events are persisted to MySQL, but an audit viewer UI/API is not built yet.
+- Role memberships have no management UI/API yet.
+- Removed edge function script Data IDs remain in rnacos as harmless orphans.
 
 **Data plane**
 
-- Upstream connections are HTTP/1.1 only, and WebSocket requires an HTTP/1.1 client upgrade.
-- JavaScript routes reject request bodies of unknown length with 413, and their `http` directive
-  does not resolve NamingService upstreams.
-- Edge functions cannot rewrite requests, and the script VM has no instruction budget. Static
-  language restrictions and input limits are the current safeguards.
-- `/metrics` has no authentication, so keep the status listener on a private network.
-- Changing the DNS resolver file, the process CA bundle, or the activation token requires a rolling
-  restart.
+- Upstream connections use HTTP/1.1 only, and WebSocket requires an HTTP/1.1 client upgrade.
+- JavaScript routes reject unknown-length request bodies with 413, and their `http` directive does
+  not resolve NamingService upstreams.
+- Edge functions cannot mutate requests, and the script VM has no instruction budget (protected by
+  static language restrictions and input caps).
+- `/metrics` has no authentication; bind the status listener to a private network.
+- Changing DNS resolver config, process CA bundle, or activation token requires a rolling restart.
 
-## Quick start: Docker demo
-
-The demo runs the full stack: Console and API, publication worker, activation collector, MySQL 8.4,
-R-Nacos, and `access-server`. It needs Docker Compose, OpenSSL, and the
-[development prerequisites](#prerequisites), because the binaries are compiled locally first.
-
-```bash
-git clone --recurse-submodules https://github.com/fiber-net-gateway/access-gateway.git
-cd access-gateway
-npm install
-npm run demo:init   # generate local secrets and a self-signed certificate
-npm run demo:up     # build locally, then start the stack
-```
-
-The first build downloads native dependencies and can take several minutes; `NATIVE_BUILD_JOBS`
-sets its parallelism (default 2). Compose applies migrations, uploads the demo certificate, publishes
-a TLS snapshot and a demo Project through the Console, and starts `access-server` once both are in
-R-Nacos.
-
-| Service             | Address                                                         |
-| ------------------- | --------------------------------------------------------------- |
-| Console             | `http://localhost:8088`                                         |
-| Gateway HTTPS/HTTP2 | `curl -k --http2 -H 'Host: demo.local' https://localhost:8443/` |
-| Gateway plaintext   | `curl -H 'Host: demo.local' http://localhost:8000/`             |
-| Metrics             | `http://localhost:8001/metrics`                                 |
-| R-Nacos console     | `http://localhost:10848/rnacos/`                                |
-| MySQL               | `127.0.0.1:3307`                                                |
-
-Credentials are in the ignored local `.env` file. Operate the stack with `npm run demo:ps`,
-`npm run demo:logs`, and `npm run demo:down`. Add `--volumes` to `docker compose down` only to delete
-all demo data.
-
-To test HTTP/3 from a Windows browser under WSL2, use the WSL address from `hostname -I`, because
-WSL2 forwards TCP but usually not UDP from Windows `localhost`. Map it to `demo.local` in the Windows
-hosts file and trust the demo certificate. Never reuse this certificate outside local testing. Set
-`ACCESS_SERVER_PUBLISHED_HOST=127.0.0.1` in `.env` to keep the gateway inside WSL.
+---
 
 ## Development
 
 ### Prerequisites
 
-- **Console:** Node.js 20.19 or later, with npm workspaces.
-- **Native (Linux):** CMake 4.1 or later, Ninja, and Clang 17+ or GCC 13+ with C++23 support.
+- **Console:** Node.js 20.19+ (npm workspaces).
+- **Native (Linux):** CMake 4.1+, Ninja, and Clang 17+ or GCC 13+ with C++23 support.
 
-Clone with `--recurse-submodules`, or run `git submodule update --init --recursive` in an existing
-checkout. Do not use `git submodule update --remote`: Fiber is pinned, and updates are deliberate,
-reviewed gitlink changes.
+Clone with `--recurse-submodules` (or run `git submodule update --init --recursive`). Do not run
+`git submodule update --remote`; Fiber is pinned deliberately.
 
 ### Console
 
@@ -441,31 +424,11 @@ cp server/.env.example server/.env
 npm run dev
 ```
 
-This starts the Console at `http://localhost:5173` and the API at `http://127.0.0.1:3000`, with Vite
-proxying `/api`. Use `npm run dev:web` or `npm run dev:server` to run one side.
-
-Without MySQL, persistent endpoints return `503` and `/api/health/ready` reports degraded. To enable
-persistence, create a MySQL 8.4 database, then set `MYSQL_ENABLED=true`, `MYSQL_PASSWORD`, and
-`DOCUMENT_ENCRYPTION_KEY_BASE64` (from `openssl rand -base64 32`) in `server/.env`:
-
-```bash
-npm run db:migrate
-npm run dev
-```
-
-The API never runs migrations on its own. A fresh database has no workspace, so create one with a
-single `POST /api/environments`; [`deploy/demo/bootstrap-console.mjs`](deploy/demo/bootstrap-console.mjs)
-shows the request.
-
-| Capability         | Setting                                                                                                                    |
-| ------------------ | -------------------------------------------------------------------------------------------------------------------------- |
-| Native validation  | `NATIVE_VALIDATOR_PATH`, the absolute path to `access-gateway-validator`                                                   |
-| Publication worker | `PUBLICATION_WORKER_ENABLED=true`, run with `npm run publication-worker --workspace server`                                |
-| Activation         | `ACTIVATION_COLLECTOR_ENABLED=true`, `ACTIVATION_TARGETS_JSON`, run with `npm run activation-collector --workspace server` |
-| WAF hit statistics | `PROMETHEUS_URL`                                                                                                           |
-
-The worker and collector run from the build output, so run `npm run build` first. See
-[`server/.env.example`](server/.env.example) for every setting.
+Starts Console at `http://localhost:5173` and API at `http://127.0.0.1:3000`. To enable MySQL
+persistence, configure `MYSQL_ENABLED=true`, `MYSQL_PASSWORD`, and `DOCUMENT_ENCRYPTION_KEY_BASE64`
+(`openssl rand -base64 32`) in `server/.env`, then run `npm run db:migrate && npm run dev`. See
+[`server/.env.example`](server/.env.example) and
+[`deploy/demo/bootstrap-console.mjs`](deploy/demo/bootstrap-console.mjs) for full setup details.
 
 ### Native
 
@@ -476,61 +439,28 @@ npm run build:native-validator   # native/build/apps/access-gateway-validator
 npm run test:native
 ```
 
-Further commands: `npm run test:native:sanitizers`, `npm run test:native:interop`,
+Additional native commands: `npm run test:native:sanitizers`, `npm run test:native:interop`,
 `npm run benchmark:native`, and `npm run verify:native:cutover`.
 
-### Validation
-
-| Changed scope           | Run                                                                      |
-| ----------------------- | ------------------------------------------------------------------------ |
-| `web/`, `server/`       | `npm run typecheck`, `npm test`, `npm run format:check`, `npm run build` |
-| `native/access-server/` | `npm run test:native`, `npm run format:native`, and review the diff      |
-
-The full matrix and all coding conventions are in [AGENTS.md](AGENTS.md).
-
-## Running access-server
+### Running `access-server` standalone
 
 ```bash
 cp native/access-server/access-server.env.example access-server.env
-# Set NACOS_SERVER_ADDRESSES and ACCESS_SERVER_NETWORK_ENTRY (see below).
+# Set NACOS_SERVER_ADDRESSES and ACCESS_SERVER_NETWORK_ENTRY.
 ./native/build/apps/access-server access-server.env
 ```
 
-Without an argument, the process reads `access-server.env` from the current directory. The format
-is strict `KEY=VALUE`, and unknown or duplicate keys fail startup. Do not commit this file.
+Startup is fail-closed: `access-server` waits for valid initial configuration (and valid TLS
+certificates when TLS is enabled), binds listeners, registers in Nacos, and begins serving only
+after registration succeeds. See
+[`access-server.env.example`](native/access-server/access-server.env.example) for all settings.
 
-Before serving, the process waits up to `ACCESS_SERVER_INITIAL_CONFIG_TIMEOUT_MILLIS` for a valid
-Project list and every route it references, plus a valid certificate snapshot when TLS is enabled.
-It then binds its listeners, registers in Nacos, and starts accepting once registered. Missing or
-invalid configuration, an expired certificate, or a failed bind stops startup.
+---
 
-| Area           | Settings                                                                                                               |
-| -------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| Required       | `NACOS_SERVER_ADDRESSES` (IP literals), `ACCESS_SERVER_NETWORK_ENTRY`                                                  |
-| Listeners      | `ACCESS_SERVER_TLS_*`, `ACCESS_SERVER_HTTP3_ENABLED`, `ACCESS_SERVER_PLAIN_LISTEN_*`, `ACCESS_SERVER_METRICS_LISTEN_*` |
-| Client trust   | `ACCESS_SERVER_CLIENT_METADATA_MODE`, `ACCESS_SERVER_TRUSTED_PROXY_CIDRS`                                              |
-| Upstreams      | `ACCESS_SERVER_UPSTREAM_*`, `ACCESS_SERVER_HAPPY_EYEBALLS_*`, `ACCESS_SERVER_DNS_*`                                    |
-| Limits         | `ACCESS_SERVER_MAX_REQUEST_BODY_SIZE`, `ACCESS_SERVER_MAX_RESPONSE_BODY_SIZE`                                          |
-| Edge functions | `ACCESS_SERVER_EDGE_FUNCTION_FAIL_CLOSE` (default `false`)                                                             |
-| Activation     | `ACCESS_SERVER_ACTIVATION_EVIDENCE_ENABLED`, `ACCESS_SERVER_INSTANCE_ID`, `ACCESS_SERVER_ACTIVATION_TOKEN`             |
-| Registration   | `ACCESS_SERVER_SERVICE_NAME`, `ACCESS_SERVER_CLUSTER`, `ACCESS_SERVER_ADVERTISE_ADDRESS`, `ACCESS_SERVER_ZONE`         |
-| Logging, CAT   | `ACCESS_SERVER_ACCESS_LOG_DIR`, `CAT_*`                                                                                |
+## Origin, Wire Contract & Compatibility
 
-`ACCESS_SERVER_NETWORK_ENTRY` declares the entry network this instance serves (for example
-`internet`, `vdi`, or `desktop`). The process refuses to start without it. The instance sets
-`X-Entry`, `X-Real-Ip`, `X-Forwarded-Proto`, and `X-Forwarded-For` from this value and the connection,
-replacing any client-supplied `X-Entry`. The `internet` entry also trusts `EO-Connecting-IP` from the
-CDN for `X-Real-Ip`. Route `allows`/`denies`, gray matching, and CAT/access logging all source their
-client address from this synthesized `X-Real-Ip`, so CDN-fronted traffic matches allowlists by the
-real client IP.
-
-To run plaintext only, set `ACCESS_SERVER_TLS_ENABLED=false` and
-`ACCESS_SERVER_HTTP3_ENABLED=false`.
-
-See [`access-server.env.example`](native/access-server/access-server.env.example) for defaults and
-per-setting notes.
-
-## rnacos contract
+Fibron's data plane originated as a production C++23 migration of the Java `ploto-unified-access`
+gateway and preserves its rnacos wire contract:
 
 | Purpose                 | Data ID                                     | Group           |
 | ----------------------- | ------------------------------------------- | --------------- |
@@ -542,52 +472,51 @@ per-setting notes.
 | Gray rules              | `ploto.unified-access.gray-match`           | `DEFAULT_GROUP` |
 | Test cluster allow-list | `ploto.test.temp-cluster-apps`              | `DEFAULT_GROUP` |
 
-The Project list is a semicolon-separated string, not JSON. The native codec is the source of truth
-for accepted values and defaults. `ploto.test.temp-cluster-apps` is read only when
-`ACCESS_SERVER_TEST_MODE=true`.
+The Project list is a semicolon-separated string; the native codec is the source of truth for
+accepted fields and defaults.
 
-## Repository layout
+## Repository Layout
 
 ```text
 access-gateway/
-├── native/access-server/        # C++23 data plane, tests, and native docs
-├── server/                      # Fastify control-plane API, worker, and collector
-├── web/                         # React and Vite console
-├── deploy/                      # Dockerfile, demo bootstrap, Grafana dashboards
-├── docs/                        # Architecture, design docs, and user guides
+├── native/access-server/           # C++23 data plane, validator, tests, and native docs
+├── server/                         # Fastify control-plane API, publication worker, collector
+├── web/                            # React and Vite management console
+├── deploy/                         # Dockerfile, demo bootstrap, Grafana dashboards
+├── docs/                           # Architecture, design docs, benchmarks, and user guides
 ├── third_party/fiber-gateway-cpp/  # Pinned, read-only Fiber submodule
-└── AGENTS.md                    # Development conventions
+├── .github/                        # CI, GHCR publishing workflows, and issue/PR templates
+└── AGENTS.md                       # Repository conventions and validation matrix
 ```
 
 ## Documentation
 
 **Start here**
 
-- [Architecture and principles](docs/architecture.md)
-- [User guide index](docs/user-guide/README.md), in English and Simplified Chinese:
+- [Architecture and principles (English)](docs/architecture.en.md) |
+  [架构与原理 (简体中文)](docs/architecture.md)
+- [Performance benchmarks (English)](docs/benchmarks.en.md) |
+  [性能基准与复现契约 (简体中文)](native/access-server/docs/benchmark-baselines.md)
+- [User guide index](docs/user-guide/README.md) (EN & ZH):
   [routing](docs/user-guide/en/routing.md), [script routes](docs/user-guide/en/script-routing.md),
-  and the [script reference](docs/user-guide/en/script-reference.md)
+  [script reference](docs/user-guide/en/script-reference.md)
 
-**Design**
+**Design & Data Plane**
 
 - [Edge functions and WAF](docs/edge-functions-and-waf-design.md)
 - [Instance activation evidence](docs/activation-evidence.md)
 - [Network policy and certificates](docs/network-policy-and-certificate-design.md)
 - [Prewarm upgrade](docs/access-server-prewarm-upgrade-design.md)
-- [Console requirements](docs/console-requirements.md) and
-  [detailed design](docs/console-detailed-design.md)
+- [Access Server guide](native/access-server/README.md),
+  [compatibility contract](native/access-server/docs/compatibility-contract.md),
+  [bounded metrics](native/access-server/docs/bounded-metrics.md), and
+  [upstream provenance](native/access-server/UPSTREAM.md)
 
-**Data plane**
+## Contributing
 
-- [Access Server guide](native/access-server/README.md)
-- [Compatibility contract](native/access-server/docs/compatibility-contract.md)
-- [Configuration compilation](native/access-server/docs/config-compilation.md) and
-  [resource limits](native/access-server/docs/config-resource-limits.md)
-- [Bounded metrics](native/access-server/docs/bounded-metrics.md)
-- [Benchmark baselines](native/access-server/docs/benchmark-baselines.md)
-- [Migration plan](native/access-server/docs/migration-plan.md) and
-  [cutover evidence gate](native/access-server/docs/cutover-evidence-gate.md)
-- [Upstream provenance](native/access-server/UPSTREAM.md)
+Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](AGENTS.md) for
+build/test commands, coding conventions, and open areas where help is most impactful (OIDC login,
+audit log UI, gray rule editor, Helm chart, and standalone file-config mode).
 
 ## License
 
