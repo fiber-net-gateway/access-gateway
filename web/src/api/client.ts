@@ -9,6 +9,13 @@ import type {
   ConfigurationVersionDetail,
   ConfigurationVersionListResult,
   DraftRevisionView,
+  GrayLiveView,
+  GrayReleaseView,
+  GrayRule,
+  GrayRuleEntry,
+  GrayRulesDocument,
+  GrayRulesDraftView,
+  GrayValidationPreviewView,
   HealthResponse,
   ProjectRoutesModel,
   ProjectRoutesValidationView,
@@ -1330,4 +1337,210 @@ export async function compileWafEdgeFunctionsPreview(
     },
     isWafEdgeFunctionCompilePreview,
   )
+}
+
+// ---------------------------------------------------------------------------
+// Gray Match rules & releases
+// ---------------------------------------------------------------------------
+
+function isGrayRuleEntry(value: unknown): value is GrayRuleEntry {
+  return value === 'internet' || value === 'vdi' || value === 'desktop' || value === 'custom'
+}
+
+function isGrayRule(value: unknown): value is GrayRule {
+  return (
+    isRecord(value) &&
+    isGrayRuleEntry(value.entry) &&
+    typeof value.ratio === 'number' &&
+    isStringList(value.cidrs)
+  )
+}
+
+function isGrayRulesDocument(value: unknown): value is GrayRulesDocument {
+  return (
+    isRecord(value) &&
+    value.schemaVersion === 1 &&
+    Array.isArray(value.rules) &&
+    value.rules.every(isGrayRule)
+  )
+}
+
+function isGrayRulesDraftView(value: unknown): value is GrayRulesDraftView {
+  return (
+    isRecord(value) &&
+    typeof value.id === 'string' &&
+    isGrayRulesDocument(value.document) &&
+    typeof value.documentSha256 === 'string' &&
+    typeof value.lockVersion === 'string' &&
+    typeof value.createdAt === 'string' &&
+    typeof value.updatedAt === 'string'
+  )
+}
+
+function isGrayValidationPreview(value: unknown): value is GrayValidationPreviewView {
+  return (
+    isRecord(value) &&
+    typeof value.valid === 'boolean' &&
+    Array.isArray(value.issues) &&
+    value.issues.every(
+      (issue) =>
+        isRecord(issue) &&
+        typeof issue.field === 'string' &&
+        typeof issue.code === 'string' &&
+        typeof issue.message === 'string',
+    ) &&
+    (value.wirePreview === null || typeof value.wirePreview === 'string') &&
+    (value.wireSha256 === null || typeof value.wireSha256 === 'string') &&
+    typeof value.dataId === 'string' &&
+    typeof value.group === 'string' &&
+    typeof value.ruleCount === 'number' &&
+    (value.nativeValid === null || typeof value.nativeValid === 'boolean') &&
+    Array.isArray(value.nativeErrors) &&
+    value.nativeErrors.every(
+      (error) =>
+        isRecord(error) &&
+        typeof error.code === 'string' &&
+        (error.field === undefined || typeof error.field === 'string') &&
+        (error.offset === undefined || typeof error.offset === 'number') &&
+        typeof error.message === 'string',
+    ) &&
+    (value.validator === null ||
+      (isRecord(value.validator) &&
+        typeof value.validator.contractVersion === 'number' &&
+        typeof value.validator.revision === 'string'))
+  )
+}
+
+function isGrayRelease(value: unknown): value is GrayReleaseView {
+  return (
+    isRecord(value) &&
+    typeof value.id === 'string' &&
+    typeof value.sequence === 'string' &&
+    typeof value.status === 'string' &&
+    typeof value.ruleCount === 'number' &&
+    Array.isArray(value.entries) &&
+    value.entries.every(isGrayRuleEntry) &&
+    typeof value.wireSha256 === 'string' &&
+    typeof value.description === 'string' &&
+    isRecord(value.resource) &&
+    typeof value.resource.id === 'string' &&
+    typeof value.resource.dataId === 'string' &&
+    typeof value.resource.group === 'string' &&
+    typeof value.resource.status === 'string' &&
+    (value.resource.verifiedSha256 === null || typeof value.resource.verifiedSha256 === 'string') &&
+    (value.resource.verifiedAt === null || typeof value.resource.verifiedAt === 'string') &&
+    isRecord(value.publication) &&
+    (value.publication.jobId === null || typeof value.publication.jobId === 'string') &&
+    (value.publication.state === null || typeof value.publication.state === 'string') &&
+    isActivationStatus(value.activationStatus) &&
+    isActivationSummary(value.activation) &&
+    typeof value.createdAt === 'string' &&
+    (value.publishedAt === null || typeof value.publishedAt === 'string')
+  )
+}
+
+function isGrayLiveView(value: unknown): value is GrayLiveView {
+  return (
+    isRecord(value) &&
+    typeof value.exists === 'boolean' &&
+    typeof value.dataId === 'string' &&
+    typeof value.group === 'string' &&
+    (value.sha256 === null || typeof value.sha256 === 'string') &&
+    (value.md5 === null || typeof value.md5 === 'string') &&
+    (value.content === null || typeof value.content === 'string') &&
+    (value.document === null || isGrayRulesDocument(value.document)) &&
+    (value.parseError === null || typeof value.parseError === 'string')
+  )
+}
+
+export async function fetchGrayRulesDraft(signal?: AbortSignal): Promise<GrayRulesDraftView> {
+  return requestJson('/api/gray/draft', { signal }, isGrayRulesDraftView)
+}
+
+export async function createGrayRulesDraft(): Promise<GrayRulesDraftView> {
+  return requestJson('/api/gray/draft', { method: 'POST' }, isGrayRulesDraftView)
+}
+
+export async function saveGrayRulesDraft(
+  document: GrayRulesDocument,
+  lockVersion: string,
+): Promise<GrayRulesDraftView> {
+  return requestJson(
+    '/api/gray/draft',
+    {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        'If-Match': `"${lockVersion}"`,
+      },
+      body: JSON.stringify({ document }),
+    },
+    isGrayRulesDraftView,
+  )
+}
+
+export async function validateGrayRulesPreview(
+  document: GrayRulesDocument,
+  signal?: AbortSignal,
+): Promise<GrayValidationPreviewView> {
+  return requestJson(
+    '/api/gray/validate',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(document),
+      signal,
+    },
+    isGrayValidationPreview,
+  )
+}
+
+export async function fetchGrayLive(signal?: AbortSignal): Promise<GrayLiveView> {
+  return requestJson('/api/gray/live', { signal }, isGrayLiveView)
+}
+
+export async function fetchGrayReleases(signal?: AbortSignal): Promise<readonly GrayReleaseView[]> {
+  const result = await requestJson(
+    '/api/gray/releases',
+    { signal },
+    (value): value is { items: GrayReleaseView[] } =>
+      isRecord(value) && Array.isArray(value.items) && value.items.every(isGrayRelease),
+  )
+  return result.items
+}
+
+export async function createGrayRelease(description?: string): Promise<GrayReleaseView> {
+  return requestJson(
+    '/api/gray/releases',
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Idempotency-Key': createUuid(),
+      },
+      body: JSON.stringify(description ? { description } : {}),
+    },
+    isGrayRelease,
+  )
+}
+
+export async function rollbackGrayRelease(releaseId: string): Promise<GrayReleaseView> {
+  return requestJson(
+    `/api/gray/releases/${encodeURIComponent(releaseId)}/rollback`,
+    { method: 'POST', headers: { 'Idempotency-Key': createUuid() } },
+    isGrayRelease,
+  )
+}
+
+export async function queueGrayReleasePublication(releaseId: string): Promise<GrayReleaseView> {
+  const result = await requestJson(
+    `/api/gray/releases/${encodeURIComponent(releaseId)}/publication`,
+    { method: 'POST', headers: { 'Idempotency-Key': createUuid() } },
+    (value): value is { jobId: string; state: string; release: GrayReleaseView } =>
+      isRecord(value) &&
+      typeof value.jobId === 'string' &&
+      typeof value.state === 'string' &&
+      isGrayRelease(value.release),
+  )
+  return result.release
 }

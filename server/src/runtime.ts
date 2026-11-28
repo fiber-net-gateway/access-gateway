@@ -38,6 +38,13 @@ import {
   DefaultEnvironmentService,
   UnavailableEnvironmentService,
 } from './modules/environments/service.js'
+import { GrayRuleDraftRepository } from './modules/gray/repository.js'
+import { GrayRuleReleaseRepository } from './modules/gray/release-repository.js'
+import {
+  DefaultGrayRuleReleaseService,
+  UnavailableGrayRuleReleaseService,
+} from './modules/gray/release-service.js'
+import { DefaultGrayRuleService, UnavailableGrayRuleService } from './modules/gray/service.js'
 import { ProjectRepository } from './modules/projects/repository.js'
 import { DefaultProjectService, UnavailableProjectService } from './modules/projects/service.js'
 import { ReleaseRepository } from './modules/releases/repository.js'
@@ -152,6 +159,8 @@ function unavailableServices(
     wafReleases: new UnavailableWafReleaseService(),
     wafHits: new UnavailableWafHitsService(),
     edgeFunctions: new UnavailableEdgeFunctionService(),
+    gray: new UnavailableGrayRuleService(),
+    grayReleases: new UnavailableGrayRuleReleaseService(),
   }
 }
 
@@ -194,6 +203,13 @@ export async function createApplicationRuntime(config: ServerConfig): Promise<Ap
     const wafDrafts = new WafPolicyDraftRepository(pool, documents)
     const edgeFunctionDrafts = new EdgeFunctionDraftRepository(pool, documents)
     const wafReleasesRepo = new WafReleaseRepository(pool, documents, undefined, activationRead)
+    const grayDrafts = new GrayRuleDraftRepository(pool, documents)
+    const grayReleasesRepo = new GrayRuleReleaseRepository(
+      pool,
+      documents,
+      undefined,
+      activationRead,
+    )
     const nacos = config.publication.enabled
       ? new HttpNacosClient({
           timeoutMillis: config.publication.requestTimeoutMillis,
@@ -255,6 +271,14 @@ export async function createApplicationRuntime(config: ServerConfig): Promise<Ap
       ),
       wafHits: new DefaultWafHitsService(prometheus),
       edgeFunctions: new DefaultEdgeFunctionService(edgeFunctionDrafts, environments, validator),
+      gray: new DefaultGrayRuleService(grayDrafts, environments, validator),
+      grayReleases: new DefaultGrayRuleReleaseService(
+        grayDrafts,
+        grayReleasesRepo,
+        environments,
+        validator,
+        nacos,
+      ),
     }
     return {
       services,

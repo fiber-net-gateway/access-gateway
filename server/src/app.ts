@@ -11,6 +11,9 @@ import { registerDraftRoutes } from './modules/drafts/routes.js'
 import { UnavailableDraftService } from './modules/drafts/service.js'
 import { registerEnvironmentRoutes } from './modules/environments/routes.js'
 import { UnavailableEnvironmentService } from './modules/environments/service.js'
+import { registerGrayRoutes } from './modules/gray/routes.js'
+import { UnavailableGrayRuleReleaseService } from './modules/gray/release-service.js'
+import { UnavailableGrayRuleService } from './modules/gray/service.js'
 import { registerProjectRoutes } from './modules/projects/routes.js'
 import { UnavailableProjectService } from './modules/projects/service.js'
 import { registerReleaseRoutes } from './modules/releases/routes.js'
@@ -112,6 +115,7 @@ export function buildApp(options: BuildAppOptions = {}) {
     services.wafHits,
     services.edgeFunctions,
   )
+  registerGrayRoutes(app, services.auth, services.gray, services.grayReleases)
 
   app.setNotFoundHandler(async (request, reply) => {
     const pathname = request.url.split('?', 1)[0] ?? request.url
@@ -196,5 +200,7 @@ function createUnavailableServices(): ApplicationServices {
     wafReleases: new UnavailableWafReleaseService(),
     wafHits: new UnavailableWafHitsService(),
     edgeFunctions: new UnavailableEdgeFunctionService(),
+    gray: new UnavailableGrayRuleService(),
+    grayReleases: new UnavailableGrayRuleReleaseService(),
   }
 }

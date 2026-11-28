@@ -3787,3 +3787,133 @@ button:disabled {
     scroll-behavior: auto !important;
   }
 }
+
+/* Gray Match rule editor & releases */
+.gray-lifecycle-strip {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.gray-lifecycle-strip > div {
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.gray-lifecycle-strip strong {
+  color: var(--ink-soft);
+  font-size: 0.78rem;
+}
+
+.gray-lifecycle-strip small {
+  color: var(--muted);
+  font-size: 0.65rem;
+  line-height: 1.5;
+}
+
+.gray-section-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+
+.gray-rule-list {
+  display: grid;
+  gap: 12px;
+}
+
+.gray-rule-card {
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+}
+
+.gray-rule-card-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.gray-rule-card-header > div {
+  display: grid;
+  gap: 3px;
+}
+
+.gray-rule-card-header strong {
+  color: var(--ink-soft);
+  font-size: 0.84rem;
+}
+
+.gray-rule-card-header small {
+  color: var(--muted);
+  font-size: 0.66rem;
+}
+
+.gray-rule-fields {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.8fr) minmax(240px, 1.2fr);
+  gap: 12px;
+}
+
+.gray-field {
+  display: grid;
+  gap: 6px;
+  color: var(--muted-strong);
+  font-size: 0.7rem;
+  font-weight: 700;
+}
+
+.gray-field-wide {
+  grid-column: 1 / -1;
+}
+
+.gray-field input[type='text'],
+.gray-field input[type='number'],
+.gray-field select,
+.gray-field textarea {
+  width: 100%;
+  padding: 9px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--ink-soft);
+  font-size: 0.74rem;
+}
+
+.gray-field textarea {
+  resize: vertical;
+  font-family: 'SFMono-Regular', Consolas, monospace;
+  line-height: 1.55;
+}
+
+.gray-ratio-controls {
+  display: grid;
+  grid-template-columns: 110px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.gray-error-list {
+  margin: 10px 0 0;
+  padding-left: 20px;
+  color: var(--danger-ink);
+  font-size: 0.72rem;
+  line-height: 1.6;
+}
+
+@media (max-width: 900px) {
+  .gray-lifecycle-strip,
+  .gray-rule-fields {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

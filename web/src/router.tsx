@@ -2,6 +2,9 @@ import { Navigate, createBrowserRouter } from 'react-router'
 
 import App from './App'
 import { CertificatesPage } from './pages/CertificatesPage'
+import { GrayLayout } from './pages/GrayLayout'
+import { GrayReleasesPage } from './pages/GrayReleasesPage'
+import { GrayRulesPage } from './pages/GrayRulesPage'
 import { NotFoundPage } from './pages/NotFoundPage'
 import { OverviewPage } from './pages/OverviewPage'
 import { ProjectLayout } from './pages/ProjectLayout'
@@ -38,6 +41,14 @@ export const appRoutes = [
               return { Component: DocumentationPage }
             },
           },
+        ],
+      },
+      {
+        path: 'gray',
+        element: <GrayLayout />,
+        children: [
+          { index: true, element: <GrayRulesPage /> },
+          { path: 'releases', element: <GrayReleasesPage /> },
         ],
       },
       {

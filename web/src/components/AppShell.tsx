@@ -13,6 +13,7 @@ interface AppShellProps {
 const primaryNavigation = [
   { to: '/overview', label: '概览', end: true },
   { to: '/projects', label: '项目', end: false },
+  { to: '/gray', label: '灰度', end: false },
   { to: '/waf', label: 'WAF', end: false },
   { to: '/certificates', label: '证书', end: false },
   { to: '/docs', label: '文档', end: false },
