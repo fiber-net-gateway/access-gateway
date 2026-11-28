@@ -1,0 +1,91 @@
+{{- if and .Values.console.enabled .Values.console.publicationWorker.enabled }}
+{{- include "fibron.validateConsole" . }}
+{{- $c := .Values.console -}}
+{{- $pw := $c.publicationWorker -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "fibron.console.publisherName" . }}
+  labels:
+    {{- include "fibron.componentLabels" (dict "root" . "component" "console-publisher") | nindent 4 }}
+  {{- with .Values.global.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  replicas: {{ $pw.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "fibron.selectorLabels" (dict "root" . "component" "console-publisher") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "fibron.componentLabels" (dict "root" . "component" "console-publisher") | nindent 8 }}
+        {{- with $pw.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/console/configmap.yaml") . | sha256sum }}
+        {{- with .Values.global.commonAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- with $pw.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "fibron.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
+      {{- include "fibron.imagePullSecrets" . | nindent 6 }}
+      {{- with $pw.priorityClassName }}
+      priorityClassName: {{ . | quote }}
+      {{- end }}
+      {{- with $pw.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: publication-worker
+          image: {{ include "fibron.image" (dict "root" . "image" $c.image) }}
+          imagePullPolicy: {{ $c.image.pullPolicy }}
+          command:
+            - node
+            - server/dist/processes/publication-worker.js
+          envFrom:
+            - configMapRef:
+                name: {{ include "fibron.console.fullname" . }}
+            {{- with $pw.extraEnvFrom }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          env:
+            {{- include "fibron.console.secretEnv" . | nindent 12 }}
+            {{- with $pw.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with $pw.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $pw.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+      {{- with $pw.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $pw.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $pw.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

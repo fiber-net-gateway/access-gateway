@@ -1,0 +1,87 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- if .Values.accessServer.enabled }}
+{{- $as := .Values.accessServer -}}
+{{- $cfg := $as.config -}}
+{{- $np := .Values.networkPolicy.accessServer -}}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "fibron.accessServer.fullname" . }}
+  labels:
+    {{- include "fibron.componentLabels" (dict "root" . "component" "access-server") | nindent 4 }}
+  {{- with .Values.global.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "fibron.selectorLabels" (dict "root" . "component" "access-server") | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    # Public gateway traffic listeners (TCP 8443/8000 and UDP 8443 for HTTP/3).
+    - ports:
+        {{- if $cfg.tls.enabled }}
+        - protocol: TCP
+          port: {{ $cfg.tls.listenPort }}
+        {{- if $cfg.tls.http3Enabled }}
+        - protocol: UDP
+          port: {{ $cfg.tls.listenPort }}
+        {{- end }}
+        {{- end }}
+        {{- if $cfg.plain.enabled }}
+        - protocol: TCP
+          port: {{ $cfg.plain.listenPort }}
+        {{- end }}
+      {{- with $np.trafficIngressFrom }}
+      from:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    {{- $allowCollector := and .Values.console.enabled .Values.console.activationCollector.enabled }}
+    {{- if or $allowCollector (gt (len $np.metricsIngressFrom) 0) }}
+    # Private status port (8001): restricted to activation-collector and configured Prometheus peers.
+    - ports:
+        - protocol: TCP
+          port: {{ $cfg.status.listenPort }}
+      from:
+        {{- if $allowCollector }}
+        - podSelector:
+            matchLabels:
+              {{- include "fibron.selectorLabels" (dict "root" . "component" "console-activation") | nindent 14 }}
+        {{- end }}
+      {{- with $np.metricsIngressFrom }}
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    {{- end }}
+{{- end }}
+{{- if .Values.console.enabled }}
+{{- $cnp := .Values.networkPolicy.consoleApi }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "fibron.console.apiName" . }}
+  labels:
+    {{- include "fibron.componentLabels" (dict "root" . "component" "console-api") | nindent 4 }}
+  {{- with .Values.global.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "fibron.selectorLabels" (dict "root" . "component" "console-api") | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: {{ .Values.console.api.port }}
+      {{- with $cnp.ingressFrom }}
+      from:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
+{{- end }}

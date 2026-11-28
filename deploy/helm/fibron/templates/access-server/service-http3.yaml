@@ -1,0 +1,33 @@
+{{- if and .Values.accessServer.enabled .Values.accessServer.config.tls.enabled .Values.accessServer.config.tls.http3Enabled (eq .Values.accessServer.service.http3Mode "separate") }}
+{{- $h3 := .Values.accessServer.service.http3Service -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "fibron.accessServer.http3ServiceName" . }}
+  labels:
+    {{- include "fibron.componentLabels" (dict "root" . "component" "access-server") | nindent 4 }}
+  {{- if or $h3.annotations .Values.global.commonAnnotations }}
+  annotations:
+    {{- with .Values.global.commonAnnotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+    {{- with $h3.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- end }}
+spec:
+  type: {{ $h3.type }}
+  {{- if or (eq $h3.type "LoadBalancer") (eq $h3.type "NodePort") }}
+  externalTrafficPolicy: {{ $h3.externalTrafficPolicy }}
+  {{- end }}
+  {{- if and (eq $h3.type "LoadBalancer") $h3.loadBalancerIP }}
+  loadBalancerIP: {{ $h3.loadBalancerIP | quote }}
+  {{- end }}
+  selector:
+    {{- include "fibron.selectorLabels" (dict "root" . "component" "access-server") | nindent 4 }}
+  ports:
+    - name: http3
+      port: {{ $h3.port }}
+      targetPort: http3
+      protocol: UDP
+{{- end }}

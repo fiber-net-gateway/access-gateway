@@ -1,0 +1,23 @@
+{{- if and .Values.console.enabled .Values.console.api.pdb.enabled }}
+{{- $pdb := .Values.console.api.pdb -}}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "fibron.console.apiName" . }}
+  labels:
+    {{- include "fibron.componentLabels" (dict "root" . "component" "console-api") | nindent 4 }}
+  {{- with .Values.global.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if not (kindIs "invalid" $pdb.minAvailable) }}
+  minAvailable: {{ $pdb.minAvailable }}
+  {{- end }}
+  {{- if not (kindIs "invalid" $pdb.maxUnavailable) }}
+  maxUnavailable: {{ $pdb.maxUnavailable }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "fibron.selectorLabels" (dict "root" . "component" "console-api") | nindent 6 }}
+{{- end }}

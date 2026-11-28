@@ -1,0 +1,58 @@
+{{- if .Values.console.enabled }}
+{{- include "fibron.validateConsole" . }}
+{{- $c := .Values.console -}}
+{{- $db := .Values.externalMysql -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "fibron.console.fullname" . }}
+  labels:
+    {{- include "fibron.componentLabels" (dict "root" . "component" "console") | nindent 4 }}
+  {{- with .Values.global.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+data:
+  APP_HOST: "0.0.0.0"
+  APP_PORT: {{ $c.api.port | quote }}
+  LOG_LEVEL: {{ $c.logLevel | quote }}
+  NODE_ENV: {{ include "fibron.console.nodeEnv" . | quote }}
+  AUTH_MODE: {{ $c.auth.mode | quote }}
+  AUTH_DEVELOPMENT_SUBJECT: {{ $c.auth.developmentSubject | quote }}
+  AUTH_DEVELOPMENT_DISPLAY_NAME: {{ $c.auth.developmentDisplayName | quote }}
+  MYSQL_ENABLED: "true"
+  MYSQL_HOST: {{ $db.host | quote }}
+  MYSQL_PORT: {{ $db.port | quote }}
+  MYSQL_DATABASE: {{ $db.database | quote }}
+  MYSQL_USER: {{ $db.user | quote }}
+  MYSQL_CONNECTION_LIMIT: {{ $db.connectionLimit | quote }}
+  MYSQL_SSL_MODE: {{ $db.sslMode | quote }}
+  DOCUMENT_ENCRYPTION_KEY_ID: {{ $c.documentEncryption.keyId | quote }}
+  NATIVE_VALIDATOR_PATH: {{ $c.nativeValidator.path | quote }}
+  NATIVE_VALIDATOR_CONTRACT_VERSION: {{ $c.nativeValidator.contractVersion | quote }}
+  NATIVE_VALIDATOR_TIMEOUT_MILLIS: {{ $c.nativeValidator.timeoutMillis | quote }}
+  NATIVE_VALIDATOR_MAX_INPUT_BYTES: {{ $c.nativeValidator.maxInputBytes | quote }}
+  NATIVE_VALIDATOR_MAX_OUTPUT_BYTES: {{ $c.nativeValidator.maxOutputBytes | quote }}
+  PUBLICATION_WORKER_ENABLED: {{ $c.publicationWorker.enabled | quote }}
+  {{- if .Values.externalNacos.endpointOverride }}
+  PUBLICATION_NACOS_ENDPOINT: {{ .Values.externalNacos.endpointOverride | quote }}
+  {{- end }}
+  NACOS_REQUEST_TIMEOUT_MILLIS: {{ $c.publicationWorker.requestTimeoutMillis | quote }}
+  NACOS_MAX_RESPONSE_BYTES: {{ $c.publicationWorker.maxResponseBytes | quote }}
+  PUBLICATION_POLL_INTERVAL_MILLIS: {{ $c.publicationWorker.pollIntervalMillis | quote }}
+  PUBLICATION_LEASE_MILLIS: {{ $c.publicationWorker.leaseMillis | quote }}
+  ACTIVATION_COLLECTOR_ENABLED: {{ $c.activationCollector.enabled | quote }}
+  ACTIVATION_REQUEST_TIMEOUT_MILLIS: {{ $c.activationCollector.requestTimeoutMillis | quote }}
+  ACTIVATION_MAX_RESPONSE_BYTES: {{ $c.activationCollector.maxResponseBytes | quote }}
+  ACTIVATION_POLL_INTERVAL_MILLIS: {{ $c.activationCollector.pollIntervalMillis | quote }}
+  ACTIVATION_EVIDENCE_TTL_MILLIS: {{ $c.activationCollector.evidenceTtlMillis | quote }}
+  ACTIVATION_LEASE_MILLIS: {{ $c.activationCollector.leaseMillis | quote }}
+  ACTIVATION_MAX_PAGES: {{ $c.activationCollector.maxPages | quote }}
+  ACTIVATION_MAX_PROJECTS: {{ $c.activationCollector.maxProjects | quote }}
+  ACTIVATION_CONCURRENCY: {{ $c.activationCollector.concurrency | quote }}
+  {{- if $c.prometheus.url }}
+  PROMETHEUS_URL: {{ $c.prometheus.url | quote }}
+  {{- end }}
+  PROMETHEUS_REQUEST_TIMEOUT_MILLIS: {{ $c.prometheus.requestTimeoutMillis | quote }}
+  PROMETHEUS_MAX_RESPONSE_BYTES: {{ $c.prometheus.maxResponseBytes | quote }}
+{{- end }}

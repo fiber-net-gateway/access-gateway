@@ -1,0 +1,21 @@
+apiVersion: v2
+name: fibron
+description: Production-ready Kubernetes Helm chart for Fibron (Access Gateway C++23 data plane and management console)
+type: application
+version: 0.1.0
+appVersion: '0.1.0'
+kubeVersion: '>=1.26.0-0'
+home: https://github.com/fiber-net-gateway/access-gateway
+sources:
+  - https://github.com/fiber-net-gateway/access-gateway
+keywords:
+  - api-gateway
+  - access-gateway
+  - fibron
+  - http3
+  - quic
+  - waf
+  - nacos
+maintainers:
+  - name: fiber-net-gateway
+    url: https://github.com/fiber-net-gateway/access-gateway

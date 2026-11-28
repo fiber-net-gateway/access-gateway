@@ -17,6 +17,8 @@
     "db:migrate": "npm run db:migrate --workspace server",
     "docs:build": "node scripts/build-user-guide.mjs",
     "docs:check": "node scripts/build-user-guide.mjs --check",
+    "helm:sync-dashboards": "node scripts/sync-helm-dashboards.mjs",
+    "helm:check-dashboards": "node scripts/sync-helm-dashboards.mjs --check",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
     "build": "npm run build --workspaces --if-present",

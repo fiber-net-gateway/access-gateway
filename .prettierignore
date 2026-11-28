@@ -4,3 +4,4 @@ native/
 third_party/
 package-lock.json
 LICENSE
+deploy/helm/*/templates/

@@ -1,0 +1,262 @@
+{{- if .Values.accessServer.enabled }}
+{{- include "fibron.validateAccessServer" . }}
+{{- $as := .Values.accessServer -}}
+{{- $cfg := $as.config -}}
+{{- $fullname := include "fibron.accessServer.fullname" . -}}
+apiVersion: apps/v1
+kind: {{ $as.kind }}
+metadata:
+  name: {{ $fullname }}
+  labels:
+    {{- include "fibron.componentLabels" (dict "root" . "component" "access-server") | nindent 4 }}
+  {{- with .Values.global.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if eq $as.kind "StatefulSet" }}
+  serviceName: {{ include "fibron.accessServer.headlessName" . }}
+  podManagementPolicy: Parallel
+  updateStrategy:
+    type: RollingUpdate
+  {{- end }}
+  {{- if not (and (eq $as.kind "Deployment") $as.hpa.enabled) }}
+  replicas: {{ $as.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "fibron.selectorLabels" (dict "root" . "component" "access-server") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "fibron.componentLabels" (dict "root" . "component" "access-server") | nindent 8 }}
+        {{- with $as.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/access-server/configmap.yaml") . | sha256sum }}
+        {{- with .Values.global.commonAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- with $as.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "fibron.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
+      {{- include "fibron.imagePullSecrets" . | nindent 6 }}
+      {{- with $as.priorityClassName }}
+      priorityClassName: {{ . | quote }}
+      {{- end }}
+      terminationGracePeriodSeconds: {{ $as.terminationGracePeriodSeconds }}
+      {{- with $as.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+        - name: render-config
+          image: {{ include "fibron.image" (dict "root" . "image" $as.image) }}
+          imagePullPolicy: {{ $as.image.pullPolicy }}
+          command:
+            - /bin/sh
+            - /etc/access-gateway/base/render-config.sh
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            {{- if $cfg.registration.usePodIpAsAdvertiseAddress }}
+            - name: ACCESS_SERVER_ADVERTISE_ADDRESS_VALUE
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            {{- else if $cfg.registration.advertiseAddress }}
+            - name: ACCESS_SERVER_ADVERTISE_ADDRESS_VALUE
+              value: {{ $cfg.registration.advertiseAddress | quote }}
+            {{- end }}
+            - name: NACOS_STATIC_ADDRESSES
+              value: {{ join "," .Values.externalNacos.addresses | quote }}
+            - name: NACOS_HOSTS
+              value: {{ join " " .Values.externalNacos.hosts | quote }}
+            - name: ACTIVATION_EVIDENCE_ENABLED
+              value: {{ $as.activationEvidence.enabled | quote }}
+            {{- if .Values.externalNacos.auth.existingSecret }}
+            - name: NACOS_AUTH_DIR
+              value: /etc/access-gateway/nacos-auth
+            - name: NACOS_AUTH_USERNAME_KEY
+              value: {{ .Values.externalNacos.auth.usernameKey | quote }}
+            - name: NACOS_AUTH_PASSWORD_KEY
+              value: {{ .Values.externalNacos.auth.passwordKey | quote }}
+            {{- end }}
+          {{- with $as.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $as.initResources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: base-config
+              mountPath: /etc/access-gateway/base
+              readOnly: true
+            - name: rendered-config
+              mountPath: /run/access-server
+            {{- if .Values.externalNacos.auth.existingSecret }}
+            - name: nacos-auth
+              mountPath: /etc/access-gateway/nacos-auth
+              readOnly: true
+            {{- end }}
+            {{- if $as.activationEvidence.enabled }}
+            - name: activation-tokens
+              mountPath: /etc/access-gateway/activation-tokens
+              readOnly: true
+            {{- end }}
+      containers:
+        - name: access-server
+          image: {{ include "fibron.image" (dict "root" . "image" $as.image) }}
+          imagePullPolicy: {{ $as.image.pullPolicy }}
+          command:
+            - /usr/local/bin/access-server
+            - /run/access-server/access-server.env
+          ports:
+            {{- if $cfg.tls.enabled }}
+            - name: https
+              containerPort: {{ $cfg.tls.listenPort }}
+              protocol: TCP
+              {{- if $as.service.hostPort.enabled }}
+              hostPort: {{ $as.service.httpsPort }}
+              {{- end }}
+            {{- if $cfg.tls.http3Enabled }}
+            - name: http3
+              containerPort: {{ $cfg.tls.listenPort }}
+              protocol: UDP
+              {{- if $as.service.hostPort.enabled }}
+              hostPort: {{ $as.service.httpsPort }}
+              {{- end }}
+            {{- end }}
+            {{- end }}
+            {{- if $cfg.plain.enabled }}
+            - name: http
+              containerPort: {{ $cfg.plain.listenPort }}
+              protocol: TCP
+              {{- if $as.service.hostPort.enabled }}
+              hostPort: {{ $as.service.plainPort }}
+              {{- end }}
+            {{- end }}
+            - name: status
+              containerPort: {{ $cfg.status.listenPort }}
+              protocol: TCP
+          {{- if gt (int $as.preStopSleepSeconds) 0 }}
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /bin/sh
+                  - -c
+                  - sleep {{ $as.preStopSleepSeconds }}
+          {{- end }}
+          startupProbe:
+            httpGet:
+              path: /metrics
+              port: status
+            initialDelaySeconds: {{ $as.probes.startup.initialDelaySeconds }}
+            periodSeconds: {{ $as.probes.startup.periodSeconds }}
+            timeoutSeconds: {{ $as.probes.startup.timeoutSeconds }}
+            failureThreshold: {{ $as.probes.startup.failureThreshold }}
+          readinessProbe:
+            tcpSocket:
+              port: {{ ternary "https" "http" $cfg.tls.enabled }}
+            periodSeconds: {{ $as.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ $as.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ $as.probes.readiness.failureThreshold }}
+          livenessProbe:
+            tcpSocket:
+              port: status
+            periodSeconds: {{ $as.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ $as.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ $as.probes.liveness.failureThreshold }}
+          {{- with $as.extraEnv }}
+          env:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $as.extraEnvFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $as.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $as.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: rendered-config
+              mountPath: /run/access-server
+              readOnly: true
+            {{- if eq $cfg.upstreamTls.mode "custom_ca" }}
+            - name: upstream-ca
+              mountPath: /etc/access-gateway/upstream-ca
+              readOnly: true
+            {{- end }}
+            {{- if $as.accessLog.enabled }}
+            - name: access-log
+              mountPath: {{ $as.accessLog.dir }}
+            {{- end }}
+            {{- with $as.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      volumes:
+        - name: base-config
+          configMap:
+            name: {{ $fullname }}
+            defaultMode: 0440
+        - name: rendered-config
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Mi
+        {{- if .Values.externalNacos.auth.existingSecret }}
+        - name: nacos-auth
+          secret:
+            secretName: {{ .Values.externalNacos.auth.existingSecret }}
+            defaultMode: 0400
+        {{- end }}
+        {{- if $as.activationEvidence.enabled }}
+        - name: activation-tokens
+          secret:
+            secretName: {{ $as.activationEvidence.existingSecret }}
+            defaultMode: 0400
+        {{- end }}
+        {{- if eq $cfg.upstreamTls.mode "custom_ca" }}
+        - name: upstream-ca
+          configMap:
+            name: {{ $cfg.upstreamTls.customCaExistingConfigMap }}
+            defaultMode: 0444
+        {{- end }}
+        {{- if $as.accessLog.enabled }}
+        - name: access-log
+          emptyDir:
+            sizeLimit: {{ $as.accessLog.emptyDirSizeLimit }}
+        {{- end }}
+        {{- with $as.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with $as.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $as.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $as.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $as.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

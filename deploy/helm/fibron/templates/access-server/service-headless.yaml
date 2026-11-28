@@ -1,0 +1,22 @@
+{{- if and .Values.accessServer.enabled (eq .Values.accessServer.kind "StatefulSet") }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "fibron.accessServer.headlessName" . }}
+  labels:
+    {{- include "fibron.componentLabels" (dict "root" . "component" "access-server") | nindent 4 }}
+  {{- with .Values.global.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: false
+  selector:
+    {{- include "fibron.selectorLabels" (dict "root" . "component" "access-server") | nindent 4 }}
+  ports:
+    - name: status
+      port: {{ .Values.accessServer.config.status.listenPort }}
+      targetPort: status
+      protocol: TCP
+{{- end }}

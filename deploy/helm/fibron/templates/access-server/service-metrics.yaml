@@ -1,0 +1,28 @@
+{{- if .Values.accessServer.enabled }}
+{{- $ms := .Values.accessServer.metricsService -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "fibron.accessServer.metricsServiceName" . }}
+  labels:
+    {{- include "fibron.componentLabels" (dict "root" . "component" "access-server") | nindent 4 }}
+    app.kubernetes.io/metrics: "true"
+  {{- if or $ms.annotations .Values.global.commonAnnotations }}
+  annotations:
+    {{- with .Values.global.commonAnnotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+    {{- with $ms.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- end }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "fibron.selectorLabels" (dict "root" . "component" "access-server") | nindent 4 }}
+  ports:
+    - name: status
+      port: {{ $ms.port }}
+      targetPort: status
+      protocol: TCP
+{{- end }}

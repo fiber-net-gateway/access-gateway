@@ -1,0 +1,46 @@
+{{- if .Values.accessServer.enabled }}
+{{- $as := .Values.accessServer -}}
+{{- $cfg := $as.config -}}
+{{- $svc := $as.service -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "fibron.accessServer.fullname" . }}
+  labels:
+    {{- include "fibron.componentLabels" (dict "root" . "component" "access-server") | nindent 4 }}
+  {{- if or $svc.annotations .Values.global.commonAnnotations }}
+  annotations:
+    {{- with .Values.global.commonAnnotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+    {{- with $svc.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- end }}
+spec:
+  type: {{ $svc.type }}
+  {{- if or (eq $svc.type "LoadBalancer") (eq $svc.type "NodePort") }}
+  externalTrafficPolicy: {{ $svc.externalTrafficPolicy }}
+  {{- end }}
+  selector:
+    {{- include "fibron.selectorLabels" (dict "root" . "component" "access-server") | nindent 4 }}
+  ports:
+    {{- if $cfg.tls.enabled }}
+    - name: https
+      port: {{ $svc.httpsPort }}
+      targetPort: https
+      protocol: TCP
+    {{- if and $cfg.tls.http3Enabled (eq $svc.http3Mode "combined") }}
+    - name: http3
+      port: {{ $svc.httpsPort }}
+      targetPort: http3
+      protocol: UDP
+    {{- end }}
+    {{- end }}
+    {{- if $cfg.plain.enabled }}
+    - name: http
+      port: {{ $svc.plainPort }}
+      targetPort: http
+      protocol: TCP
+    {{- end }}
+{{- end }}

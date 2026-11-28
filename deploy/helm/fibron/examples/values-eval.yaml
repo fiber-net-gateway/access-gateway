@@ -1,0 +1,60 @@
+# Evaluation values example for Fibron on Kubernetes (e.g. kind, k3s, minikube).
+# Replace the referenced Secret names with Secrets created in your target namespace.
+# NEVER commit real passwords, encryption keys, or bearer tokens into values files.
+
+externalNacos:
+  hosts:
+    - rnacos.default.svc.cluster.local
+  httpPort: 8848
+  grpcPort: 9848
+  endpointOverride: http://rnacos.default.svc.cluster.local:8848
+
+externalMysql:
+  host: mysql.default.svc.cluster.local
+  port: 3306
+  database: access_gateway
+  user: access_gateway
+  sslMode: disabled
+  existingSecret: fibron-mysql-secret
+  passwordKey: password
+
+accessServer:
+  kind: StatefulSet
+  replicaCount: 1
+  resources:
+    requests:
+      cpu: '1'
+      memory: 256Mi
+    limits:
+      cpu: '1'
+      memory: 512Mi
+  config:
+    networkEntry: internet
+    upstreamTls:
+      mode: system_ca
+    registration:
+      cluster: eval
+  service:
+    type: ClusterIP
+    http3Mode: combined
+  pdb:
+    enabled: false
+
+console:
+  auth:
+    mode: development
+    developmentSubject: eval-admin
+    developmentDisplayName: Evaluation Administrator
+  documentEncryption:
+    keyId: eval-v1
+    existingSecret: fibron-encryption-secret
+    keyBase64Key: keyBase64
+  api:
+    replicaCount: 1
+    pdb:
+      enabled: false
+  publicationWorker:
+    enabled: true
+    replicaCount: 1
+  activationCollector:
+    enabled: false
