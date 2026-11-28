@@ -74,6 +74,7 @@ AccessControlPlaneSupervisor::AccessControlPlaneSupervisor(event::EventLoop &coo
     config_service_(std::move(dependencies.config_service)), naming_service_(std::move(dependencies.naming_service)),
     instance_registration_(nacos_loop, *naming_service_, std::move(options.instance_registration)),
     cat_lifecycle_(dependencies.cat_lifecycle), nacos_lifecycle_(dependencies.nacos_lifecycle),
+    config_reload_context_(dependencies.config_reload_context), config_reload_(dependencies.config_reload),
     config_compiler_(nacos_loop), runtime_metrics_(nacos_loop, options.process_metrics),
     nacos_status_monitor_(nacos_loop, *config_service_, *naming_service_, runtime_metrics_.discovery().observer()),
     activation_evidence_(nacos_loop, activation_identity(options.activation_endpoint)), gray_store_(http_workers),
@@ -121,8 +122,7 @@ AccessControlPlaneSupervisor::AccessControlPlaneSupervisor(event::EventLoop &coo
                 .shutdown = &shutdown_cat_client,
         };
     }
-    if (!nacos_lifecycle_) {
-        FIBER_ASSERT(nacos_client_);
+    if (!nacos_lifecycle_ && nacos_client_) {
         nacos_lifecycle_ = AccessControlResourceLifecycle{
                 .context = nacos_client_.get(),
                 .start = &start_nacos_client,
@@ -283,6 +283,13 @@ bool AccessControlPlaneSupervisor::upgrade_ready() noexcept {
            (!tls_enabled_ || (tls.value && *tls.value == TlsCertificateReadiness::Ready));
 }
 
+void AccessControlPlaneSupervisor::trigger_config_reload() noexcept {
+    FIBER_ASSERT(coordinator_loop_->in_loop());
+    if (state_ == State::Running && config_reload_) {
+        config_reload_(config_reload_context_);
+    }
+}
+
 async::DetachedTask AccessControlPlaneSupervisor::deregister_instance_on_owner() noexcept {
     FIBER_ASSERT(nacos_loop_->in_loop());
     registration_stop_publisher_->publish(true);
@@ -311,22 +318,23 @@ async::DetachedTask AccessControlPlaneSupervisor::start_cat_on_owner() noexcept 
 
 async::DetachedTask AccessControlPlaneSupervisor::start_nacos_on_owner() noexcept {
     FIBER_ASSERT(nacos_loop_->in_loop());
-    FIBER_ASSERT(nacos_lifecycle_);
     const AccessDiscoveryMetricsObserver metrics = runtime_metrics_.discovery().observer();
     nacos_status_monitor_.start();
-    metrics.set_lifecycle(AccessNacosComponent::Client, AccessNacosLifecycleState::Starting);
-    nacos_client_start_attempted_ = true;
-    auto client_started = nacos_lifecycle_.start(nacos_lifecycle_.context);
-    if (!client_started) {
-        metrics.set_lifecycle(AccessNacosComponent::Client, AccessNacosLifecycleState::Failed);
-        nacos_start_publisher_->publish(NacosStartStatus{
-                .error = make_access_server_runtime_io_error(AccessServerRuntimeErrorCode::StartNacosClient,
-                                                             client_started.error()),
-        });
-        nacos_start_tasks_.done();
-        co_return;
+    if (nacos_lifecycle_) {
+        metrics.set_lifecycle(AccessNacosComponent::Client, AccessNacosLifecycleState::Starting);
+        nacos_client_start_attempted_ = true;
+        auto client_started = nacos_lifecycle_.start(nacos_lifecycle_.context);
+        if (!client_started) {
+            metrics.set_lifecycle(AccessNacosComponent::Client, AccessNacosLifecycleState::Failed);
+            nacos_start_publisher_->publish(NacosStartStatus{
+                    .error = make_access_server_runtime_io_error(AccessServerRuntimeErrorCode::StartNacosClient,
+                                                                 client_started.error()),
+            });
+            nacos_start_tasks_.done();
+            co_return;
+        }
+        metrics.set_lifecycle(AccessNacosComponent::Client, AccessNacosLifecycleState::Running);
     }
-    metrics.set_lifecycle(AccessNacosComponent::Client, AccessNacosLifecycleState::Running);
     metrics.set_lifecycle(AccessNacosComponent::ConfigService, AccessNacosLifecycleState::Starting);
     config_service_start_attempted_ = true;
     auto config_started = config_service_->start();

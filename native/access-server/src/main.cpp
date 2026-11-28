@@ -232,8 +232,12 @@ bool report_listening(const fiber::access_server::AccessServerRuntime &runtime,
         std::cout << (tls_address ? " and" : " on") << " http://" << plain_address->to_string()
                   << ", protocols=http/1.1";
     }
-    std::cout << ", metrics=http://" << metrics_address.to_string() << ", http workers=" << http_workers
-              << ", nacos servers=" << config.nacos_config().server_hosts().size() << std::endl;
+    std::cout << ", metrics=http://" << metrics_address.to_string() << ", http workers=" << http_workers;
+    if (config.config_provider() == fiber::access_server::AccessConfigProvider::File) {
+        std::cout << ", config=file:" << config.config_dir() << std::endl;
+    } else {
+        std::cout << ", nacos servers=" << config.nacos_config().server_hosts().size() << std::endl;
+    }
     std::string lifecycle_addresses;
     if (tls_address) {
         lifecycle_addresses += " tls_address=\"" + tls_address->to_string() + "\"";
@@ -242,12 +246,15 @@ bool report_listening(const fiber::access_server::AccessServerRuntime &runtime,
         lifecycle_addresses += " plain_address=\"" + plain_address->to_string() + "\"";
     }
     lifecycle_addresses += " metrics_address=\"" + metrics_address.to_string() + "\"";
+    const std::size_t nacos_server_count = config.has_nacos_config() ? config.nacos_config().server_hosts().size() : 0U;
     LOG(LOG_LIFECYCLE, INFO) << "server listening" << lifecycle_addresses << " http_workers=" << http_workers
                              << " cpu_affinity=" << cpu.affinity_count << " cpu_quota_workers=" << cpu.quota_count
                              << " cpu_quota_us=" << cpu.quota_us << " cpu_period_us=" << cpu.period_us
                              << " cpu_concurrency_source=" << fiber::util::cpu_concurrency_source_name(cpu.source)
-                             << " cgroup_probe_failed=" << cpu.cgroup_probe_failed
-                             << " nacos_servers=" << config.nacos_config().server_hosts().size()
+                             << " cgroup_probe_failed=" << cpu.cgroup_probe_failed << " config_provider="
+                             << (config.config_provider() == fiber::access_server::AccessConfigProvider::File ? "file"
+                                                                                                              : "nacos")
+                             << " nacos_servers=" << nacos_server_count
                              << " cat_enabled=" << config.cat_config().has_value() << " tls_enabled=" << tls_enabled
                              << " http2_enabled=" << tls_enabled << " http3_enabled=" << http3_enabled
                              << " plain_enabled=" << plain_enabled << " network_entry=\"" << config.network_entry()
@@ -338,7 +345,7 @@ int main(int argc, char **argv) {
 
     (void) ::signal(SIGPIPE, SIG_IGN);
     fiber::async::SignalSet shutdown_signals;
-    shutdown_signals.add(SIGINT).add(SIGTERM);
+    shutdown_signals.add(SIGINT).add(SIGTERM).add(SIGHUP);
     if (::pthread_sigmask(SIG_BLOCK, &shutdown_signals.native(), nullptr) != 0) {
         std::cerr << "failed to block shutdown signals\n";
         return 1;
@@ -482,16 +489,26 @@ int main(int argc, char **argv) {
             co_return;
         }
 
-        auto signal = co_await fiber::async::when_any([]() { return fiber::async::wait_signal(SIGINT); },
-                                                      []() { return fiber::async::wait_signal(SIGTERM); },
-                                                      [&]() { return wait_boss().select(); });
-        if (signal.is<0>()) {
-            (void) std::move(signal).get<0>();
-        } else if (signal.is<1>()) {
-            (void) std::move(signal).get<1>();
-        } else {
-            std::move(signal).get<2>();
-            exit_code = boss->failed() || boss->boss_lost() ? 1 : 0;
+        for (;;) {
+            auto signal = co_await fiber::async::when_any([]() { return fiber::async::wait_signal(SIGINT); },
+                                                          []() { return fiber::async::wait_signal(SIGTERM); },
+                                                          [&]() { return wait_boss().select(); },
+                                                          []() { return fiber::async::wait_signal(SIGHUP); });
+            if (signal.is<3>()) {
+                (void) std::move(signal).get<3>();
+                LOG(LOG_LIFECYCLE, INFO) << "received SIGHUP; triggering local configuration reload";
+                runtime->trigger_config_reload();
+                continue;
+            }
+            if (signal.is<0>()) {
+                (void) std::move(signal).get<0>();
+            } else if (signal.is<1>()) {
+                (void) std::move(signal).get<1>();
+            } else {
+                std::move(signal).get<2>();
+                exit_code = boss->failed() || boss->boss_lost() ? 1 : 0;
+            }
+            break;
         }
         co_await stop_runtime();
         signal_service.detach();

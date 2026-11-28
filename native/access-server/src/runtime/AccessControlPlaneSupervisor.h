@@ -55,12 +55,16 @@ struct AccessControlResourceLifecycle {
 };
 
 struct AccessControlPlaneDependencies {
+    using ReloadFunction = void (*)(void *context) noexcept;
+
     std::unique_ptr<cat::CatClient> cat_client;
     std::unique_ptr<nacos::NacosClient> nacos_client;
     std::unique_ptr<nacos::ConfigService> config_service;
     std::unique_ptr<nacos::NamingService> naming_service;
     AccessControlResourceLifecycle cat_lifecycle;
     AccessControlResourceLifecycle nacos_lifecycle;
+    void *config_reload_context = nullptr;
+    ReloadFunction config_reload = nullptr;
 };
 
 struct AccessControlPlaneOptions {
@@ -98,6 +102,7 @@ public:
     void register_background(AccessBoundEndpoint endpoint) noexcept;
     [[nodiscard]] std::string_view registration_state() noexcept;
     [[nodiscard]] bool upgrade_ready() noexcept;
+    void trigger_config_reload() noexcept;
     [[nodiscard]] async::Task<void> deregister_instance() noexcept;
     [[nodiscard]] async::Task<void> shutdown() noexcept;
 
@@ -175,6 +180,8 @@ private:
     AccessInstanceRegistration instance_registration_;
     AccessControlResourceLifecycle cat_lifecycle_;
     AccessControlResourceLifecycle nacos_lifecycle_;
+    void *config_reload_context_ = nullptr;
+    AccessControlPlaneDependencies::ReloadFunction config_reload_ = nullptr;
     AccessConfigCompiler config_compiler_;
     AccessRuntimeMetrics runtime_metrics_;
     NacosStatusMonitor nacos_status_monitor_;
