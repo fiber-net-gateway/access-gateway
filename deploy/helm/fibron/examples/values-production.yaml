@@ -1,0 +1,155 @@
+# Production-oriented values template for Fibron on Kubernetes.
+# Fill in your immutable image tags, external MySQL/R-Nacos endpoints, and pre-created
+# Kubernetes Secret references before installing.
+
+externalNacos:
+  # Prefer static IP literals or a stable internal ClusterIP Service for R-Nacos.
+  addresses:
+    - 10.20.0.10
+    - 10.20.0.11
+    - 10.20.0.12
+  httpPort: 8848
+  grpcPort: 9848
+  namespace: public
+  auth:
+    existingSecret: fibron-nacos-auth
+    usernameKey: username
+    passwordKey: password
+  endpointOverride: ''
+
+externalMysql:
+  host: mysql-prod.internal.example.com
+  port: 3306
+  database: access_gateway
+  user: access_gateway
+  connectionLimit: 20
+  sslMode: required
+  existingSecret: fibron-mysql-credentials
+  passwordKey: password
+
+accessServer:
+  enabled: true
+  kind: StatefulSet
+  replicaCount: 3
+  image:
+    repository: ghcr.io/fiber-net-gateway/access-server
+    # Replace with an immutable release or commit tag before production rollout.
+    tag: sha-0000000
+  resources:
+    requests:
+      cpu: '2'
+      memory: 512Mi
+    limits:
+      # Whole-core CPU limits map directly to access-server HTTP EventLoop workers.
+      cpu: '4'
+      memory: 2Gi
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: topology.kubernetes.io/zone
+      whenUnsatisfiable: ScheduleAnyway
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/component: access-server
+  config:
+    networkEntry: internet
+    tls:
+      enabled: true
+      listenPort: 8443
+      http3Enabled: true
+    plain:
+      enabled: true
+      listenPort: 8000
+    status:
+      listenPort: 8001
+    upstreamTls:
+      mode: system_ca
+    clientMetadata:
+      mode: trusted_proxy
+      trustedProxyCidrs:
+        - 10.0.0.0/8
+    registration:
+      cluster: prod
+      listener: plain
+      usePodIpAsAdvertiseAddress: true
+  activationEvidence:
+    enabled: true
+    # Secret must contain one unique 32-512 byte ASCII token per StatefulSet Pod:
+    #   fibron-access-server-0, fibron-access-server-1, fibron-access-server-2
+    existingSecret: fibron-access-server-activation-tokens
+  service:
+    type: LoadBalancer
+    externalTrafficPolicy: Local
+    httpsPort: 443
+    plainPort: 80
+    # Use "separate" if your cloud LoadBalancer forbids mixed TCP+UDP ports on one Service.
+    http3Mode: separate
+    http3Service:
+      type: LoadBalancer
+      externalTrafficPolicy: Local
+      port: 443
+  pdb:
+    enabled: true
+    minAvailable: 2
+
+console:
+  enabled: true
+  image:
+    repository: ghcr.io/fiber-net-gateway/access-gateway-console
+    tag: sha-0000000
+  auth:
+    # Keep Console private behind VPN / authenticating proxy until OIDC is available.
+    mode: development
+    developmentSubject: prod-console-operator
+    developmentDisplayName: Production Operator
+  documentEncryption:
+    keyId: prod-v1
+    existingSecret: fibron-document-encryption
+    keyBase64Key: keyBase64
+  prometheus:
+    url: http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090
+  migration:
+    enabled: true
+    useHelmHook: true
+  api:
+    replicaCount: 2
+    service:
+      type: ClusterIP
+    pdb:
+      enabled: true
+      minAvailable: 1
+  publicationWorker:
+    enabled: true
+    replicaCount: 2
+  activationCollector:
+    enabled: true
+    replicaCount: 2
+    existingSecret: fibron-activation-targets
+    targetsJsonKey: targetsJson
+    pollIntervalMillis: 5000
+    evidenceTtlMillis: 15000
+    leaseMillis: 30000
+
+monitoring:
+  serviceMonitor:
+    enabled: true
+    interval: 15s
+    scrapeTimeout: 10s
+    additionalLabels:
+      release: kube-prometheus-stack
+    usePodNameAsInstance: true
+  grafanaDashboards:
+    enabled: true
+    folder: Fibron
+
+networkPolicy:
+  enabled: true
+  accessServer:
+    metricsIngressFrom:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: monitoring
+  consoleApi:
+    ingressFrom:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: ingress-internal

@@ -1,0 +1,187 @@
+{{- if .Values.accessServer.enabled }}
+{{- include "fibron.validateAccessServer" . }}
+{{- $as := .Values.accessServer -}}
+{{- $cfg := $as.config -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "fibron.accessServer.fullname" . }}
+  labels:
+    {{- include "fibron.componentLabels" (dict "root" . "component" "access-server") | nindent 4 }}
+  {{- with .Values.global.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+data:
+  access-server.env.base: |
+    # Rendered by the Fibron Helm chart. Secrets and per-Pod runtime values are
+    # appended into /run/access-server/access-server.env by the render-config initContainer.
+    ACCESS_SERVER_NETWORK_ENTRY={{ $cfg.networkEntry }}
+    ACCESS_SERVER_TLS_LISTEN_ADDRESS={{ $cfg.tls.listenAddress }}
+    ACCESS_SERVER_TLS_LISTEN_PORT={{ $cfg.tls.listenPort }}
+    ACCESS_SERVER_TLS_ENABLED={{ $cfg.tls.enabled }}
+    ACCESS_SERVER_TLS_CERTIFICATES_DATA_ID={{ $cfg.tls.certificatesDataId }}
+    ACCESS_SERVER_TLS_CERTIFICATES_GROUP={{ $cfg.tls.certificatesGroup }}
+    ACCESS_SERVER_HTTP3_ENABLED={{ and $cfg.tls.enabled $cfg.tls.http3Enabled }}
+    ACCESS_SERVER_PLAIN_LISTEN_ENABLED={{ $cfg.plain.enabled }}
+    ACCESS_SERVER_PLAIN_LISTEN_ADDRESS={{ $cfg.plain.listenAddress }}
+    ACCESS_SERVER_PLAIN_LISTEN_PORT={{ $cfg.plain.listenPort }}
+    ACCESS_SERVER_UPSTREAM_TLS_MODE={{ $cfg.upstreamTls.mode }}
+    {{- if eq $cfg.upstreamTls.mode "custom_ca" }}
+    ACCESS_SERVER_UPSTREAM_TLS_CA_FILE=/etc/access-gateway/upstream-ca/{{ $cfg.upstreamTls.customCaKey }}
+    {{- else }}
+    ACCESS_SERVER_UPSTREAM_TLS_CA_FILE=
+    {{- end }}
+    ACCESS_SERVER_UPSTREAM_CONNECT_TIMEOUT_MILLIS={{ $cfg.upstreamTls.connectTimeoutMillis }}
+    ACCESS_SERVER_HAPPY_EYEBALLS_ENABLED={{ $cfg.happyEyeballs.enabled }}
+    ACCESS_SERVER_HAPPY_EYEBALLS_DELAY_MILLIS={{ $cfg.happyEyeballs.delayMillis }}
+    ACCESS_SERVER_HAPPY_EYEBALLS_MAX_CONCURRENT_ATTEMPTS={{ $cfg.happyEyeballs.maxConcurrentAttempts }}
+    ACCESS_SERVER_HAPPY_EYEBALLS_FIRST_ADDRESS_FAMILY_COUNT={{ $cfg.happyEyeballs.firstAddressFamilyCount }}
+    ACCESS_SERVER_HAPPY_EYEBALLS_ADDRESS_POLICY={{ $cfg.happyEyeballs.addressPolicy }}
+    ACCESS_SERVER_DNS_MODE={{ $cfg.dns.mode }}
+    {{- if eq $cfg.dns.mode "system" }}
+    ACCESS_SERVER_DNS_RESOLV_CONF={{ $cfg.dns.resolvConf }}
+    {{- else }}
+    ACCESS_SERVER_DNS_SERVERS={{ join "," $cfg.dns.servers }}
+    {{- end }}
+    ACCESS_SERVER_METRICS_LISTEN_ADDRESS={{ $cfg.status.listenAddress }}
+    ACCESS_SERVER_METRICS_LISTEN_PORT={{ $cfg.status.listenPort }}
+    ACCESS_SERVER_ACTIVATION_EVIDENCE_ENABLED={{ $as.activationEvidence.enabled }}
+    ACCESS_SERVER_INITIAL_CONFIG_TIMEOUT_MILLIS={{ $cfg.initialConfigTimeoutMillis }}
+    ACCESS_SERVER_MAX_REQUEST_BODY_SIZE={{ $cfg.maxRequestBodySize }}
+    ACCESS_SERVER_MAX_RESPONSE_BODY_SIZE={{ $cfg.maxResponseBodySize }}
+    ACCESS_SERVER_TEST_MODE={{ $cfg.testMode }}
+    ACCESS_SERVER_EDGE_FUNCTION_FAIL_CLOSE={{ $cfg.edgeFunctionFailClose }}
+    ACCESS_SERVER_CLIENT_METADATA_MODE={{ $cfg.clientMetadata.mode }}
+    {{- if eq $cfg.clientMetadata.mode "trusted_proxy" }}
+    ACCESS_SERVER_TRUSTED_PROXY_CIDRS={{ join "," $cfg.clientMetadata.trustedProxyCidrs }}
+    {{- else }}
+    ACCESS_SERVER_TRUSTED_PROXY_CIDRS=
+    {{- end }}
+    {{- if $as.accessLog.enabled }}
+    ACCESS_SERVER_ACCESS_LOG_DIR={{ $as.accessLog.dir }}
+    {{- else }}
+    ACCESS_SERVER_ACCESS_LOG_DIR=
+    {{- end }}
+    ACCESS_SERVER_PROJECTS_DATA_ID={{ $cfg.nacosContract.projectsDataId }}
+    ACCESS_SERVER_ROUTE_DATA_ID_PREFIX={{ $cfg.nacosContract.routeDataIdPrefix }}
+    ACCESS_SERVER_ROUTE_GROUP={{ $cfg.nacosContract.routeGroup }}
+    ACCESS_SERVER_GRAY_DATA_ID={{ $cfg.nacosContract.grayDataId }}
+    ACCESS_SERVER_TEMP_CLUSTER_DATA_ID={{ $cfg.nacosContract.tempClusterDataId }}
+    ACCESS_SERVER_NAMING_GROUP={{ $cfg.nacosContract.namingGroup }}
+    ACCESS_SERVER_ZONE={{ $cfg.nacosContract.zone }}
+    ACCESS_SERVER_SERVICE_NAME={{ $cfg.registration.serviceName }}
+    ACCESS_SERVER_CLUSTER={{ $cfg.registration.cluster }}
+    ACCESS_SERVER_REGISTRATION_LISTENER={{ $cfg.registration.listener }}
+    ACCESS_SERVER_REGISTRATION_TIMEOUT_MILLIS={{ $cfg.registration.timeoutMillis }}
+    NACOS_HTTP_PORT={{ .Values.externalNacos.httpPort }}
+    NACOS_GRPC_PORT={{ .Values.externalNacos.grpcPort }}
+    NACOS_NAMESPACE={{ .Values.externalNacos.namespace }}
+    NACOS_TENANT={{ .Values.externalNacos.tenant }}
+    NACOS_CLIENT_VERSION={{ .Values.externalNacos.clientVersion }}
+    CAT_APP_KEY={{ $cfg.cat.appKey }}
+    CAT_HOSTNAME={{ $cfg.cat.hostname }}
+    CAT_IP={{ $cfg.cat.ip }}
+    CAT_ROUTER_ADDRESSES={{ $cfg.cat.routerAddresses }}
+    CAT_COLLECTOR_ADDRESSES={{ $cfg.cat.collectorAddresses }}
+    {{- range $key := keys $cfg.extraConfig | sortAlpha }}
+    {{ $key }}={{ index $cfg.extraConfig $key }}
+    {{- end }}
+
+  render-config.sh: |
+    #!/bin/sh
+    set -eu
+
+    umask 077
+    out_file="/run/access-server/access-server.env"
+    cp /etc/access-gateway/base/access-server.env.base "$out_file"
+
+    nacos_ips=""
+    append_ip() {
+        candidate="$1"
+        [ -n "$candidate" ] || return 0
+        case ",${nacos_ips}," in
+            *",${candidate},"*) return 0 ;;
+        esac
+        if [ -z "$nacos_ips" ]; then
+            nacos_ips="$candidate"
+        else
+            nacos_ips="${nacos_ips},${candidate}"
+        fi
+    }
+
+    if [ -n "${NACOS_STATIC_ADDRESSES:-}" ]; then
+        OLD_IFS="$IFS"
+        IFS=","
+        for addr in $NACOS_STATIC_ADDRESSES; do
+            IFS="$OLD_IFS"
+            trimmed="$(printf '%s' "$addr" | tr -d '[:space:]')"
+            append_ip "$trimmed"
+            IFS=","
+        done
+        IFS="$OLD_IFS"
+    fi
+
+    if [ -n "${NACOS_HOSTS:-}" ]; then
+        for host in $NACOS_HOSTS; do
+            resolved="$(getent ahostsv4 "$host" 2>/dev/null | awk '{print $1}' | sort -u || true)"
+            if [ -z "$resolved" ]; then
+                resolved="$(getent ahosts "$host" 2>/dev/null | awk '{print $1}' | sort -u || true)"
+            fi
+            if [ -z "$resolved" ]; then
+                echo "render-config: failed to resolve Nacos host: $host" >&2
+                exit 1
+            fi
+            for ip in $resolved; do
+                append_ip "$ip"
+            done
+        done
+    fi
+
+    if [ -z "$nacos_ips" ]; then
+        echo "render-config: NACOS_SERVER_ADDRESSES resolved to empty" >&2
+        exit 1
+    fi
+    printf 'NACOS_SERVER_ADDRESSES=%s\n' "$nacos_ips" >> "$out_file"
+
+    if [ -n "${ACCESS_SERVER_ADVERTISE_ADDRESS_VALUE:-}" ]; then
+        printf 'ACCESS_SERVER_ADVERTISE_ADDRESS=%s\n' "$ACCESS_SERVER_ADVERTISE_ADDRESS_VALUE" >> "$out_file"
+    fi
+
+    if [ -n "${NACOS_AUTH_DIR:-}" ]; then
+        nacos_user=""
+        nacos_pass=""
+        if [ -f "${NACOS_AUTH_DIR}/${NACOS_AUTH_USERNAME_KEY}" ]; then
+            nacos_user="$(tr -d '\r\n' < "${NACOS_AUTH_DIR}/${NACOS_AUTH_USERNAME_KEY}")"
+        fi
+        if [ -f "${NACOS_AUTH_DIR}/${NACOS_AUTH_PASSWORD_KEY}" ]; then
+            nacos_pass="$(tr -d '\r\n' < "${NACOS_AUTH_DIR}/${NACOS_AUTH_PASSWORD_KEY}")"
+        fi
+        printf 'NACOS_USERNAME=%s\n' "$nacos_user" >> "$out_file"
+        printf 'NACOS_PASSWORD=%s\n' "$nacos_pass" >> "$out_file"
+    else
+        printf 'NACOS_USERNAME=\n' >> "$out_file"
+        printf 'NACOS_PASSWORD=\n' >> "$out_file"
+    fi
+
+    if [ "${ACTIVATION_EVIDENCE_ENABLED:-false}" = "true" ]; then
+        if [ -z "${POD_NAME:-}" ]; then
+            echo "render-config: POD_NAME is required when activation evidence is enabled" >&2
+            exit 1
+        fi
+        token_file="/etc/access-gateway/activation-tokens/${POD_NAME}"
+        if [ ! -f "$token_file" ]; then
+            echo "render-config: missing activation token key '${POD_NAME}' in activation evidence Secret" >&2
+            exit 1
+        fi
+        token="$(tr -d '\r\n' < "$token_file")"
+        if [ -z "$token" ]; then
+            echo "render-config: empty activation token for instance '${POD_NAME}'" >&2
+            exit 1
+        fi
+        printf 'ACCESS_SERVER_INSTANCE_ID=%s\n' "$POD_NAME" >> "$out_file"
+        printf 'ACCESS_SERVER_ACTIVATION_TOKEN=%s\n' "$token" >> "$out_file"
+    fi
+
+    chmod 0600 "$out_file"
+{{- end }}

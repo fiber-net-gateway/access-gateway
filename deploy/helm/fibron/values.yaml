@@ -1,0 +1,550 @@
+# Default values for the Fibron (Access Gateway) Helm chart.
+#
+# Security notice:
+#   - This file intentionally contains NO hardcoded passwords, encryption keys,
+#     or bearer tokens. Supply all credentials via pre-created Kubernetes Secrets
+#     referenced by `existingSecret` fields (compatible with External Secrets
+#     Operator, Sealed Secrets, Vault, or SOPS).
+#   - See README.md and examples/ for complete installation instructions.
+
+nameOverride: ''
+fullnameOverride: ''
+
+global:
+  # Optional image registry override (e.g. "registry.internal.example.com").
+  # When non-empty, replaces the leading registry segment of component images.
+  imageRegistry: ''
+  imagePullSecrets: []
+  commonLabels: {}
+  commonAnnotations: {}
+
+serviceAccount:
+  create: true
+  name: ''
+  # None of the Fibron workloads talk to the Kubernetes API.
+  automountServiceAccountToken: false
+  annotations: {}
+
+# External R-Nacos (Nacos) configuration shared by access-server and Console publication.
+externalNacos:
+  # Explicit IPv4/IPv6 literals for access-server's NACOS_SERVER_ADDRESSES.
+  # access-server strictly requires IP literals (not DNS names).
+  addresses: []
+  # Optional DNS hostnames (e.g. ["rnacos.nacos.svc.cluster.local"]) resolved
+  # to IPv4 literals at Pod startup by the access-server render-config initContainer.
+  # Prefer a stable ClusterIP Service or static `addresses` in production.
+  hosts: []
+  httpPort: 8848
+  grpcPort: 9848
+  namespace: public
+  tenant: ''
+  clientVersion: fiber-access-server/helm
+  auth:
+    # Optional Secret containing Nacos credentials.
+    existingSecret: ''
+    usernameKey: username
+    passwordKey: password
+  # Optional HTTP(S) origin override for Console publication worker (PUBLICATION_NACOS_ENDPOINT),
+  # e.g. "http://rnacos.nacos.svc.cluster.local:8848". Leave empty to use each
+  # environment's configured Nacos endpoint stored in MySQL.
+  endpointOverride: ''
+
+# External MySQL 8.4 database required when console.enabled=true.
+externalMysql:
+  host: ''
+  port: 3306
+  database: access_gateway
+  user: access_gateway
+  connectionLimit: 10
+  # "required" (recommended for production) or "disabled".
+  sslMode: required
+  # Required when console.enabled=true. Secret must contain `passwordKey`.
+  existingSecret: ''
+  passwordKey: password
+
+# ------------------------------------------------------------------------------
+# Data Plane: access-server (C++23 / Fiber)
+# ------------------------------------------------------------------------------
+accessServer:
+  enabled: true
+  # Workload kind:
+  #   - "StatefulSet" (recommended default): stable Pod identity (ACCESS_SERVER_INSTANCE_ID)
+  #     and stable headless DNS for per-instance activation evidence polling.
+  #   - "Deployment": stateless autoscaling (only allowed when activationEvidence.enabled=false
+  #     or replicaCount == 1).
+  kind: StatefulSet
+  replicaCount: 2
+
+  image:
+    repository: ghcr.io/fiber-net-gateway/access-server
+    # Pin an immutable semver or sha-<commit> tag in production.
+    tag: latest
+    pullPolicy: IfNotPresent
+
+  podAnnotations: {}
+  podLabels: {}
+  priorityClassName: ''
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  topologySpreadConstraints: []
+
+  terminationGracePeriodSeconds: 30
+  # Wait before SIGTERM so kube-proxy / LB endpoints drain cleanly.
+  preStopSleepSeconds: 5
+
+  podSecurityContext:
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
+
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop:
+        - ALL
+
+  # IMPORTANT: access-server sizes its HTTP EventLoop workers automatically from
+  # the container's cgroup CPU quota (limits.cpu). Use whole-core limits in
+  # production to match your desired worker thread count.
+  resources:
+    requests:
+      cpu: '1'
+      memory: 256Mi
+    limits:
+      cpu: '2'
+      memory: 1Gi
+
+  initResources:
+    requests:
+      cpu: 50m
+      memory: 32Mi
+    limits:
+      cpu: 200m
+      memory: 64Mi
+
+  config:
+    # Required entry network name (becomes X-Entry; e.g. internet, vdi, desktop).
+    networkEntry: internet
+
+    tls:
+      enabled: true
+      listenAddress: 0.0.0.0
+      listenPort: 8443
+      # Serves HTTP/3 (QUIC) over UDP on the same port as TLS when enabled.
+      http3Enabled: true
+      certificatesDataId: ploto.unified-access.tls-certificates
+      certificatesGroup: ACCESS-SERVER
+
+    plain:
+      enabled: true
+      listenAddress: 0.0.0.0
+      listenPort: 8000
+
+    # Private status listener for Prometheus /metrics and optional /v1/activation-evidence.
+    # NEVER exposed on the public traffic Service.
+    status:
+      listenAddress: 0.0.0.0
+      listenPort: 8001
+
+    upstreamTls:
+      # "system_ca" (recommended), "custom_ca", or "legacy_insecure".
+      mode: system_ca
+      # Required when mode=custom_ca: ConfigMap containing a PEM CA bundle.
+      customCaExistingConfigMap: ''
+      customCaKey: ca.crt
+      connectTimeoutMillis: 3000
+
+    happyEyeballs:
+      enabled: true
+      delayMillis: 250
+      maxConcurrentAttempts: 2
+      firstAddressFamilyCount: 1
+      # "v6_first" or "v4_first"
+      addressPolicy: v6_first
+
+    dns:
+      # "system" (uses resolvConf) or "override" (uses 1-3 unicast IPs in servers).
+      mode: system
+      resolvConf: /etc/resolv.conf
+      servers: []
+
+    clientMetadata:
+      # "direct" (default), "trusted_proxy", or "legacy_headers".
+      mode: direct
+      # Required when mode=trusted_proxy (list of CIDRs, e.g. ["10.0.0.0/8"]).
+      trustedProxyCidrs: []
+
+    initialConfigTimeoutMillis: 60000
+    maxRequestBodySize: 419430400
+    maxResponseBodySize: 629145600
+    testMode: false
+    edgeFunctionFailClose: false
+
+    nacosContract:
+      projectsDataId: ploto.unified-access.projects
+      routeDataIdPrefix: ploto.unified-access.route.
+      routeGroup: ACCESS-SERVER
+      grayDataId: ploto.unified-access.gray-match
+      tempClusterDataId: ploto.test.temp-cluster-apps
+      namingGroup: DEFAULT_GROUP
+      zone: ''
+
+    registration:
+      serviceName: unified-access-server
+      cluster: prod
+      # "plain" or "tls" (must match an enabled listener).
+      listener: plain
+      timeoutMillis: 10000
+      # Uses Kubernetes Downward API status.podIP as ACCESS_SERVER_ADVERTISE_ADDRESS.
+      usePodIpAsAdvertiseAddress: true
+      # Static override when usePodIpAsAdvertiseAddress=false.
+      advertiseAddress: ''
+
+    cat:
+      appKey: ''
+      hostname: ''
+      ip: ''
+      routerAddresses: ''
+      collectorAddresses: ''
+
+    # Optional additional KEY: "VALUE" pairs appended to access-server.env.
+    # Never place secrets here.
+    extraConfig: {}
+
+  # Java-compatible TSV access log file (rotated at 100 MB, up to 300 archives).
+  # Disabled by default in containers to keep rootfs read-only and disk bounded.
+  accessLog:
+    enabled: false
+    dir: /data/logs/ploto-server
+    emptyDirSizeLimit: 1Gi
+
+  # High-cardinality per-instance activation evidence on port 8001 (/v1/activation-evidence).
+  activationEvidence:
+    enabled: false
+    # Required when enabled=true: pre-created Secret with one key per Pod name
+    # (e.g. "<release>-fibron-access-server-0", "<release>-fibron-access-server-1").
+    # Each value must be a unique 32-512 byte printable ASCII bearer token.
+    existingSecret: ''
+
+  service:
+    # Use "LoadBalancer" or "NodePort" for direct external exposure.
+    type: ClusterIP
+    # Applied only when type is LoadBalancer or NodePort; preserves client IP.
+    externalTrafficPolicy: Local
+    annotations: {}
+    httpsPort: 8443
+    plainPort: 8000
+    # How UDP 8443 (HTTP/3) is exposed when tls.enabled && tls.http3Enabled:
+    #   - "combined": include UDP 8443 on the primary traffic Service (K8s 1.26+ mixed protocol)
+    #   - "separate": create a dedicated UDP Service (for cloud LBs forbidding mixed TCP+UDP)
+    #   - "disabled": do not expose UDP via Service (e.g. when using hostPort or disabling HTTP/3)
+    http3Mode: combined
+    http3Service:
+      type: LoadBalancer
+      externalTrafficPolicy: Local
+      port: 8443
+      annotations: {}
+      loadBalancerIP: ''
+    hostPort:
+      enabled: false
+
+  # Private ClusterIP Service exposing ONLY status port 8001 for Prometheus.
+  metricsService:
+    annotations: {}
+    port: 8001
+
+  probes:
+    startup:
+      initialDelaySeconds: 2
+      periodSeconds: 5
+      timeoutSeconds: 3
+      # 24 * 5s = 120s, covering initialConfigTimeoutMillis + registration.timeoutMillis.
+      failureThreshold: 24
+    readiness:
+      periodSeconds: 10
+      timeoutSeconds: 3
+      failureThreshold: 3
+    liveness:
+      periodSeconds: 15
+      timeoutSeconds: 3
+      failureThreshold: 3
+
+  pdb:
+    enabled: true
+    minAvailable: 1
+    maxUnavailable: null
+
+  # Only applicable when accessServer.kind=Deployment.
+  hpa:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+
+  extraEnv: []
+  extraEnvFrom: []
+  extraVolumes: []
+  extraVolumeMounts: []
+
+# ------------------------------------------------------------------------------
+# Control Plane: Console (API + SPA, Migration Job, Publication Worker, Activation Collector)
+# ------------------------------------------------------------------------------
+console:
+  enabled: true
+
+  image:
+    repository: ghcr.io/fiber-net-gateway/access-gateway-console
+    # Pin an immutable semver or sha-<commit> tag in production.
+    tag: latest
+    pullPolicy: IfNotPresent
+
+  logLevel: info
+
+  auth:
+    # Current implementation status: only "development" is functional; "oidc"
+    # refuses to start until an OIDC provider adapter is implemented.
+    # When mode=development, containers run with NODE_ENV=development as required
+    # by server/src/config/env.ts. Keep the Console Service private (ClusterIP)
+    # behind an authenticating reverse proxy/VPN until OIDC is available.
+    mode: development
+    developmentSubject: k8s-console-admin
+    developmentDisplayName: Kubernetes Console Administrator
+
+  documentEncryption:
+    keyId: k8s-v1
+    # Required when console.enabled=true. Secret must contain a 32-byte base64 AES-256-GCM key.
+    existingSecret: ''
+    keyBase64Key: keyBase64
+
+  nativeValidator:
+    path: /usr/local/bin/access-gateway-validator
+    contractVersion: 1
+    timeoutMillis: 10000
+    maxInputBytes: 4194304
+    maxOutputBytes: 1048576
+
+  # Optional Prometheus HTTP API origin for the Console WAF hit statistics page.
+  prometheus:
+    url: ''
+    requestTimeoutMillis: 5000
+    maxResponseBytes: 1048576
+
+  # Idempotent checksum-verified MySQL migration Job (server/dist/processes/migrate.js).
+  migration:
+    enabled: true
+    useHelmHook: true
+    hookWeight: '-5'
+    hookDeletePolicy: before-hook-creation,hook-succeeded
+    backoffLimit: 3
+    activeDeadlineSeconds: 300
+    # Applied only when useHelmHook=false.
+    ttlSecondsAfterFinished: 600
+    annotations: {}
+    podAnnotations: {}
+    podLabels: {}
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+    podSecurityContext:
+      runAsNonRoot: true
+      seccompProfile:
+        type: RuntimeDefault
+    securityContext:
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+      capabilities:
+        drop:
+          - ALL
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 256Mi
+    extraEnv: []
+    extraEnvFrom: []
+
+  # Console API + React SPA (server/dist/index.js). Never receives activation tokens.
+  api:
+    replicaCount: 2
+    port: 3000
+    podAnnotations: {}
+    podLabels: {}
+    priorityClassName: ''
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+    topologySpreadConstraints: []
+    podSecurityContext:
+      runAsNonRoot: true
+      seccompProfile:
+        type: RuntimeDefault
+    securityContext:
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+      capabilities:
+        drop:
+          - ALL
+    resources:
+      requests:
+        cpu: 200m
+        memory: 256Mi
+      limits:
+        cpu: '1'
+        memory: 512Mi
+    service:
+      type: ClusterIP
+      port: 3000
+      annotations: {}
+    ingress:
+      enabled: false
+      className: ''
+      annotations: {}
+      hosts: []
+      tls: []
+    probes:
+      startup:
+        initialDelaySeconds: 2
+        periodSeconds: 5
+        timeoutSeconds: 3
+        failureThreshold: 12
+      readiness:
+        periodSeconds: 10
+        timeoutSeconds: 3
+        failureThreshold: 3
+      liveness:
+        periodSeconds: 15
+        timeoutSeconds: 3
+        failureThreshold: 3
+    pdb:
+      enabled: true
+      minAvailable: 1
+      maxUnavailable: null
+    extraEnv: []
+    extraEnvFrom: []
+
+  # Leased R-Nacos publication worker (server/dist/processes/publication-worker.js).
+  publicationWorker:
+    enabled: true
+    replicaCount: 1
+    requestTimeoutMillis: 5000
+    maxResponseBytes: 5242880
+    pollIntervalMillis: 1000
+    leaseMillis: 30000
+    podAnnotations: {}
+    podLabels: {}
+    priorityClassName: ''
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+    podSecurityContext:
+      runAsNonRoot: true
+      seccompProfile:
+        type: RuntimeDefault
+    securityContext:
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+      capabilities:
+        drop:
+          - ALL
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 256Mi
+    extraEnv: []
+    extraEnvFrom: []
+
+  # Leased activation evidence collector (server/dist/processes/activation-collector.js).
+  # Runs separately from Console API so instance bearer tokens stay isolated.
+  activationCollector:
+    enabled: false
+    replicaCount: 1
+    # Required when enabled=true: Secret containing ACTIVATION_TARGETS_JSON
+    # (1-64 target objects with environmentCode, instanceKey, endpoint, token).
+    existingSecret: ''
+    targetsJsonKey: targetsJson
+    requestTimeoutMillis: 5000
+    maxResponseBytes: 1048576
+    pollIntervalMillis: 5000
+    evidenceTtlMillis: 15000
+    leaseMillis: 30000
+    maxPages: 16
+    maxProjects: 1024
+    concurrency: 4
+    podAnnotations: {}
+    podLabels: {}
+    priorityClassName: ''
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+    podSecurityContext:
+      runAsNonRoot: true
+      seccompProfile:
+        type: RuntimeDefault
+    securityContext:
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+      capabilities:
+        drop:
+          - ALL
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 256Mi
+    extraEnv: []
+    extraEnvFrom: []
+
+# ------------------------------------------------------------------------------
+# Observability: Prometheus ServiceMonitor & Grafana Dashboards
+# ------------------------------------------------------------------------------
+monitoring:
+  serviceMonitor:
+    enabled: false
+    namespace: ''
+    interval: 15s
+    scrapeTimeout: 10s
+    scheme: http
+    additionalLabels: {}
+    annotations: {}
+    # Relabel __meta_kubernetes_pod_name -> instance so Grafana $instance dropdown shows Pod names.
+    usePodNameAsInstance: true
+    relabelings: []
+    metricRelabelings: []
+
+  # Creates ConfigMaps from dashboards/ (synced from deploy/grafana/) for Grafana sidecar discovery.
+  grafanaDashboards:
+    enabled: false
+    namespace: ''
+    label: grafana_dashboard
+    labelValue: '1'
+    folderAnnotation: grafana_folder
+    folder: Fibron
+    additionalLabels: {}
+    annotations: {}
+    # Optional fixed Prometheus datasource UID. When empty, dashboards keep the
+    # standard Grafana `${datasource}` templating variable.
+    prometheusDatasourceUid: ''
+
+# ------------------------------------------------------------------------------
+# NetworkPolicy (optional; requires a CNI that enforces NetworkPolicy)
+# ------------------------------------------------------------------------------
+networkPolicy:
+  enabled: false
+  accessServer:
+    # Empty list permits all ingress to public traffic ports (8443/8000).
+    trafficIngressFrom: []
+    # Additional peers permitted to scrape private status port 8001 (e.g. Prometheus namespace).
+    # The release's activation-collector Pods are automatically allowed when enabled.
+    metricsIngressFrom: []
+  consoleApi:
+    # Empty list permits all in-cluster ingress to port 3000; restrict in production.
+    ingressFrom: []

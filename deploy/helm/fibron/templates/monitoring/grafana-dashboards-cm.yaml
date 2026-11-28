@@ -1,0 +1,41 @@
+{{- if .Values.monitoring.grafanaDashboards.enabled }}
+{{- $gd := .Values.monitoring.grafanaDashboards -}}
+{{- $dashboards := .Files.Glob "dashboards/*.json" -}}
+{{- if eq (len $dashboards) 0 }}
+{{- fail "monitoring.grafanaDashboards.enabled=true but no JSON files were found under dashboards/ (run `npm run helm:sync-dashboards`)" }}
+{{- end }}
+{{- range $path, $_ := $dashboards }}
+{{- $filename := base $path -}}
+{{- $slug := $filename | trimSuffix ".json" | replace "_" "-" -}}
+{{- $raw := $.Files.Get $path -}}
+{{- $content := $raw -}}
+{{- if $gd.prometheusDatasourceUid }}
+  {{- $content = replace "${datasource}" $gd.prometheusDatasourceUid $raw }}
+{{- end }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ printf "%s-dashboard-%s" (include "fibron.fullname" $) $slug | trunc 63 | trimSuffix "-" }}
+  namespace: {{ default $.Release.Namespace $gd.namespace }}
+  labels:
+    {{- include "fibron.componentLabels" (dict "root" $ "component" "monitoring") | nindent 4 }}
+    {{ $gd.label }}: {{ $gd.labelValue | quote }}
+    {{- with $gd.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  annotations:
+    {{- if and $gd.folderAnnotation $gd.folder }}
+    {{ $gd.folderAnnotation }}: {{ $gd.folder | quote }}
+    {{- end }}
+    {{- with $.Values.global.commonAnnotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+    {{- with $gd.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+data:
+  {{ $filename }}: |
+    {{- $content | nindent 4 }}
+{{- end }}
+{{- end }}

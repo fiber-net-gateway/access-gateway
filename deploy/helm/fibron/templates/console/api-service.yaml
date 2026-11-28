@@ -1,0 +1,27 @@
+{{- if .Values.console.enabled }}
+{{- $svc := .Values.console.api.service -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "fibron.console.apiName" . }}
+  labels:
+    {{- include "fibron.componentLabels" (dict "root" . "component" "console-api") | nindent 4 }}
+  {{- if or $svc.annotations .Values.global.commonAnnotations }}
+  annotations:
+    {{- with .Values.global.commonAnnotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+    {{- with $svc.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- end }}
+spec:
+  type: {{ $svc.type }}
+  selector:
+    {{- include "fibron.selectorLabels" (dict "root" . "component" "console-api") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ $svc.port }}
+      targetPort: http
+      protocol: TCP
+{{- end }}

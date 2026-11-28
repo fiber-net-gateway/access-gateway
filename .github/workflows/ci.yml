@@ -104,3 +104,48 @@ jobs:
         run: |
           docker compose -f compose.yaml config --quiet
           docker compose -f compose.prebuilt.yaml config --quiet
+
+  helm-validate:
+    name: Validate Helm Chart
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Check Grafana dashboards stay synced with Helm chart
+        run: npm run helm:check-dashboards
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.17.3
+
+      - name: Install kubeconform
+        run: |
+          curl -fsSL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz \
+            | sudo tar -xz -C /usr/local/bin kubeconform
+
+      - name: Lint, render, validate, and package Helm chart
+        run: |
+          helm lint --strict deploy/helm/fibron -f deploy/helm/fibron/examples/values-eval.yaml
+          helm lint --strict deploy/helm/fibron -f deploy/helm/fibron/examples/values-production.yaml
+          helm lint --strict deploy/helm/fibron --set console.enabled=false --set 'externalNacos.addresses={10.20.0.10}'
+
+          if helm template test deploy/helm/fibron >/dev/null 2>&1; then
+            echo "Expected default values without Secret references to fail rendering" >&2
+            exit 1
+          fi
+
+          helm template fibron deploy/helm/fibron -n fibron -f deploy/helm/fibron/examples/values-eval.yaml \
+            | kubeconform -strict -kubernetes-version 1.31.0 -skip ServiceMonitor
+          helm template fibron deploy/helm/fibron -n fibron -f deploy/helm/fibron/examples/values-production.yaml \
+            | kubeconform -strict -kubernetes-version 1.31.0 -skip ServiceMonitor
+          helm template fibron-edge deploy/helm/fibron -n fibron-edge --set console.enabled=false --set 'externalNacos.addresses={10.20.0.10}' \
+            | kubeconform -strict -kubernetes-version 1.31.0 -skip ServiceMonitor
+
+          helm package deploy/helm/fibron -d /tmp

@@ -1,0 +1,123 @@
+{{- if and .Values.console.enabled .Values.console.migration.enabled }}
+{{- include "fibron.validateConsole" . }}
+{{- $c := .Values.console -}}
+{{- $m := $c.migration -}}
+{{- $db := .Values.externalMysql -}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "fibron.console.migrationName" . }}{{ if not $m.useHelmHook }}-{{ .Release.Revision }}{{ end }}
+  labels:
+    {{- include "fibron.componentLabels" (dict "root" . "component" "console-migrate") | nindent 4 }}
+  annotations:
+    {{- if $m.useHelmHook }}
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: {{ $m.hookWeight | quote }}
+    helm.sh/hook-delete-policy: {{ $m.hookDeletePolicy | quote }}
+    {{- end }}
+    {{- with .Values.global.commonAnnotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+    {{- with $m.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  backoffLimit: {{ $m.backoffLimit }}
+  activeDeadlineSeconds: {{ $m.activeDeadlineSeconds }}
+  {{- if and (not $m.useHelmHook) (not (kindIs "invalid" $m.ttlSecondsAfterFinished)) }}
+  ttlSecondsAfterFinished: {{ $m.ttlSecondsAfterFinished }}
+  {{- end }}
+  template:
+    metadata:
+      labels:
+        {{- include "fibron.componentLabels" (dict "root" . "component" "console-migrate") | nindent 8 }}
+        {{- with $m.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- if or $m.podAnnotations .Values.global.commonAnnotations }}
+      annotations:
+        {{- with .Values.global.commonAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- with $m.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- end }}
+    spec:
+      restartPolicy: OnFailure
+      {{- if or (not $m.useHelmHook) (not .Values.serviceAccount.create) }}
+      serviceAccountName: {{ include "fibron.serviceAccountName" . }}
+      {{- end }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
+      {{- include "fibron.imagePullSecrets" . | nindent 6 }}
+      {{- with $m.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: migrate
+          image: {{ include "fibron.image" (dict "root" . "image" $c.image) }}
+          imagePullPolicy: {{ $c.image.pullPolicy }}
+          command:
+            - node
+            - server/dist/processes/migrate.js
+          # Inline non-secret env vars so pre-install hooks do not depend on non-hook ConfigMaps.
+          env:
+            - name: LOG_LEVEL
+              value: {{ $c.logLevel | quote }}
+            - name: NODE_ENV
+              value: {{ include "fibron.console.nodeEnv" . | quote }}
+            - name: AUTH_MODE
+              value: {{ $c.auth.mode | quote }}
+            - name: MYSQL_ENABLED
+              value: "true"
+            - name: MYSQL_HOST
+              value: {{ $db.host | quote }}
+            - name: MYSQL_PORT
+              value: {{ $db.port | quote }}
+            - name: MYSQL_DATABASE
+              value: {{ $db.database | quote }}
+            - name: MYSQL_USER
+              value: {{ $db.user | quote }}
+            - name: MYSQL_CONNECTION_LIMIT
+              value: {{ $db.connectionLimit | quote }}
+            - name: MYSQL_SSL_MODE
+              value: {{ $db.sslMode | quote }}
+            - name: DOCUMENT_ENCRYPTION_KEY_ID
+              value: {{ $c.documentEncryption.keyId | quote }}
+            {{- include "fibron.console.secretEnv" . | nindent 12 }}
+            {{- with $m.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with $m.extraEnvFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $m.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $m.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+      {{- with $m.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $m.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $m.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

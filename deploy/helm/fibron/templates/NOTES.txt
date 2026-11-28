@@ -1,0 +1,63 @@
+Fibron (Access Gateway) release "{{ .Release.Name }}" has been rendered in namespace "{{ .Release.Namespace }}".
+
+Components deployed:
+{{- if .Values.accessServer.enabled }}
+  - Data plane (access-server, {{ .Values.accessServer.kind }}):
+      Traffic Service: {{ include "fibron.accessServer.fullname" . }} ({{ .Values.accessServer.service.type }})
+      {{- if .Values.accessServer.config.tls.enabled }}
+        HTTPS (TCP):   {{ .Values.accessServer.service.httpsPort }}
+        {{- if .Values.accessServer.config.tls.http3Enabled }}
+        HTTP/3 (UDP):  {{ if eq .Values.accessServer.service.http3Mode "separate" }}{{ .Values.accessServer.service.http3Service.port }} via {{ include "fibron.accessServer.http3ServiceName" . }}{{ else if eq .Values.accessServer.service.http3Mode "combined" }}{{ .Values.accessServer.service.httpsPort }} (combined){{ else }}disabled on Service{{ end }}
+        {{- end }}
+      {{- end }}
+      {{- if .Values.accessServer.config.plain.enabled }}
+        Plain (TCP):   {{ .Values.accessServer.service.plainPort }}
+      {{- end }}
+      Metrics Service: {{ include "fibron.accessServer.metricsServiceName" . }}:{{ .Values.accessServer.metricsService.port }} (ClusterIP, private)
+      {{- if eq .Values.accessServer.kind "StatefulSet" }}
+      Headless DNS:    {{ include "fibron.accessServer.headlessName" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.accessServer.config.status.listenPort }}
+      {{- end }}
+{{- end }}
+{{- if .Values.console.enabled }}
+  - Control plane (Console):
+      API Service:     {{ include "fibron.console.apiName" . }}:{{ .Values.console.api.service.port }} ({{ .Values.console.api.service.type }})
+      Migration Job:   {{ ternary "enabled" "disabled" .Values.console.migration.enabled }}
+      Publisher:       {{ ternary "enabled" "disabled" .Values.console.publicationWorker.enabled }}
+      Activation Col.: {{ ternary "enabled" "disabled" .Values.console.activationCollector.enabled }}
+{{- end }}
+{{- if .Values.monitoring.serviceMonitor.enabled }}
+  - Prometheus ServiceMonitor: {{ include "fibron.accessServer.fullname" . }}
+{{- end }}
+{{- if .Values.monitoring.grafanaDashboards.enabled }}
+  - Grafana Dashboards: ConfigMaps created with label {{ .Values.monitoring.grafanaDashboards.label }}={{ .Values.monitoring.grafanaDashboards.labelValue }}
+{{- end }}
+
+Quick verification:
+{{- if .Values.console.enabled }}
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "fibron.console.apiName" . }} 8088:{{ .Values.console.api.service.port }}
+  curl -fsS http://127.0.0.1:8088/api/health/ready
+{{- end }}
+{{- if .Values.accessServer.enabled }}
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "fibron.accessServer.metricsServiceName" . }} 8001:{{ .Values.accessServer.metricsService.port }}
+  curl -fsS http://127.0.0.1:8001/metrics | head -n 20
+{{- end }}
+
+Important operational notices:
+{{- if and .Values.console.enabled (eq .Values.console.auth.mode "development") }}
+  [WARNING] Console is running with AUTH_MODE=development (OIDC is not yet implemented).
+            Do NOT expose the Console directly to untrusted networks; place it behind a
+            private VPN or authenticating reverse proxy (such as oauth2-proxy).
+{{- end }}
+{{- if and .Values.accessServer.enabled (eq .Values.accessServer.config.upstreamTls.mode "legacy_insecure") }}
+  [WARNING] access-server upstreamTls.mode=legacy_insecure disables upstream TLS verification.
+            Switch to system_ca or custom_ca for production traffic.
+{{- end }}
+{{- if and .Values.accessServer.enabled (not .Values.accessServer.activationEvidence.enabled) }}
+  [INFO]    Per-instance activation evidence is disabled. Published Releases will report
+            activation status as "unknown" until both accessServer.activationEvidence and
+            console.activationCollector are enabled with per-instance Secrets.
+{{- end }}
+{{- if not .Values.networkPolicy.enabled }}
+  [INFO]    NetworkPolicy is disabled. Remember that /metrics on port 8001 is unauthenticated;
+            keep port 8001 restricted to Prometheus and the activation collector.
+{{- end }}

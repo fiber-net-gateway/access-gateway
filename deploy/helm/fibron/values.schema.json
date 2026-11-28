@@ -1,0 +1,277 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "Fibron Helm Chart Values",
+  "type": "object",
+  "properties": {
+    "nameOverride": { "type": "string", "maxLength": 63 },
+    "fullnameOverride": { "type": "string", "maxLength": 63 },
+    "global": {
+      "type": "object",
+      "properties": {
+        "imageRegistry": { "type": "string" },
+        "imagePullSecrets": { "type": "array" },
+        "commonLabels": { "type": "object" },
+        "commonAnnotations": { "type": "object" }
+      }
+    },
+    "serviceAccount": {
+      "type": "object",
+      "properties": {
+        "create": { "type": "boolean" },
+        "name": { "type": "string" },
+        "automountServiceAccountToken": { "type": "boolean" },
+        "annotations": { "type": "object" }
+      }
+    },
+    "externalNacos": {
+      "type": "object",
+      "properties": {
+        "addresses": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "hosts": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "httpPort": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "grpcPort": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "namespace": { "type": "string" },
+        "tenant": { "type": "string" },
+        "clientVersion": { "type": "string", "minLength": 1 },
+        "endpointOverride": { "type": "string" },
+        "auth": {
+          "type": "object",
+          "properties": {
+            "existingSecret": { "type": "string" },
+            "usernameKey": { "type": "string", "minLength": 1 },
+            "passwordKey": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    },
+    "externalMysql": {
+      "type": "object",
+      "properties": {
+        "host": { "type": "string" },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "database": { "type": "string", "minLength": 1 },
+        "user": { "type": "string", "minLength": 1 },
+        "connectionLimit": { "type": "integer", "minimum": 1, "maximum": 500 },
+        "sslMode": { "type": "string", "enum": ["required", "disabled"] },
+        "existingSecret": { "type": "string" },
+        "passwordKey": { "type": "string", "minLength": 1 }
+      }
+    },
+    "accessServer": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "kind": { "type": "string", "enum": ["StatefulSet", "Deployment"] },
+        "replicaCount": { "type": "integer", "minimum": 1 },
+        "terminationGracePeriodSeconds": { "type": "integer", "minimum": 1 },
+        "preStopSleepSeconds": { "type": "integer", "minimum": 0 },
+        "config": {
+          "type": "object",
+          "properties": {
+            "networkEntry": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "pattern": "^[A-Za-z0-9!#$%&'*+.^_`|~-]+$"
+            },
+            "tls": {
+              "type": "object",
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "listenAddress": { "type": "string", "minLength": 1 },
+                "listenPort": { "type": "integer", "minimum": 1, "maximum": 65535 },
+                "http3Enabled": { "type": "boolean" },
+                "certificatesDataId": { "type": "string", "minLength": 1 },
+                "certificatesGroup": { "type": "string", "minLength": 1 }
+              }
+            },
+            "plain": {
+              "type": "object",
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "listenAddress": { "type": "string", "minLength": 1 },
+                "listenPort": { "type": "integer", "minimum": 1, "maximum": 65535 }
+              }
+            },
+            "status": {
+              "type": "object",
+              "properties": {
+                "listenAddress": { "type": "string", "minLength": 1 },
+                "listenPort": { "type": "integer", "minimum": 1, "maximum": 65535 }
+              }
+            },
+            "upstreamTls": {
+              "type": "object",
+              "properties": {
+                "mode": { "type": "string", "enum": ["system_ca", "custom_ca", "legacy_insecure"] },
+                "customCaExistingConfigMap": { "type": "string" },
+                "customCaKey": { "type": "string", "minLength": 1 },
+                "connectTimeoutMillis": { "type": "integer", "minimum": 10, "maximum": 60000 }
+              }
+            },
+            "happyEyeballs": {
+              "type": "object",
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "delayMillis": { "type": "integer", "minimum": 0, "maximum": 2000 },
+                "maxConcurrentAttempts": { "type": "integer", "minimum": 1, "maximum": 4 },
+                "firstAddressFamilyCount": { "type": "integer", "minimum": 1, "maximum": 4 },
+                "addressPolicy": { "type": "string", "enum": ["v6_first", "v4_first"] }
+              }
+            },
+            "dns": {
+              "type": "object",
+              "properties": {
+                "mode": { "type": "string", "enum": ["system", "override"] },
+                "resolvConf": { "type": "string" },
+                "servers": {
+                  "type": "array",
+                  "maxItems": 3,
+                  "items": { "type": "string", "minLength": 1 }
+                }
+              }
+            },
+            "clientMetadata": {
+              "type": "object",
+              "properties": {
+                "mode": { "type": "string", "enum": ["direct", "trusted_proxy", "legacy_headers"] },
+                "trustedProxyCidrs": {
+                  "type": "array",
+                  "items": { "type": "string", "minLength": 1 }
+                }
+              }
+            },
+            "initialConfigTimeoutMillis": { "type": "integer", "minimum": 1000 },
+            "maxRequestBodySize": { "type": "integer", "minimum": 1 },
+            "maxResponseBodySize": { "type": "integer", "minimum": 0 },
+            "testMode": { "type": "boolean" },
+            "edgeFunctionFailClose": { "type": "boolean" },
+            "registration": {
+              "type": "object",
+              "properties": {
+                "serviceName": { "type": "string", "minLength": 1 },
+                "cluster": { "type": "string", "minLength": 1 },
+                "listener": { "type": "string", "enum": ["plain", "tls"] },
+                "timeoutMillis": { "type": "integer", "minimum": 1000 },
+                "usePodIpAsAdvertiseAddress": { "type": "boolean" },
+                "advertiseAddress": { "type": "string" }
+              }
+            }
+          }
+        },
+        "service": {
+          "type": "object",
+          "properties": {
+            "type": { "type": "string", "enum": ["ClusterIP", "NodePort", "LoadBalancer"] },
+            "externalTrafficPolicy": { "type": "string", "enum": ["Cluster", "Local"] },
+            "httpsPort": { "type": "integer", "minimum": 1, "maximum": 65535 },
+            "plainPort": { "type": "integer", "minimum": 1, "maximum": 65535 },
+            "http3Mode": { "type": "string", "enum": ["combined", "separate", "disabled"] }
+          }
+        },
+        "activationEvidence": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "existingSecret": { "type": "string" }
+          }
+        }
+      }
+    },
+    "console": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "logLevel": {
+          "type": "string",
+          "enum": ["fatal", "error", "warn", "info", "debug", "trace", "silent"]
+        },
+        "auth": {
+          "type": "object",
+          "properties": {
+            "mode": { "type": "string", "enum": ["development", "oidc"] },
+            "developmentSubject": { "type": "string", "minLength": 1 },
+            "developmentDisplayName": { "type": "string", "minLength": 1 }
+          }
+        },
+        "documentEncryption": {
+          "type": "object",
+          "properties": {
+            "keyId": { "type": "string", "minLength": 1 },
+            "existingSecret": { "type": "string" },
+            "keyBase64Key": { "type": "string", "minLength": 1 }
+          }
+        },
+        "api": {
+          "type": "object",
+          "properties": {
+            "replicaCount": { "type": "integer", "minimum": 1 },
+            "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+          }
+        },
+        "publicationWorker": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "replicaCount": { "type": "integer", "minimum": 1 },
+            "requestTimeoutMillis": { "type": "integer", "minimum": 1 },
+            "maxResponseBytes": { "type": "integer", "minimum": 1 },
+            "pollIntervalMillis": { "type": "integer", "minimum": 1 },
+            "leaseMillis": { "type": "integer", "minimum": 1 }
+          }
+        },
+        "activationCollector": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "replicaCount": { "type": "integer", "minimum": 1 },
+            "existingSecret": { "type": "string" },
+            "targetsJsonKey": { "type": "string", "minLength": 1 },
+            "requestTimeoutMillis": { "type": "integer", "minimum": 100, "maximum": 60000 },
+            "maxResponseBytes": { "type": "integer", "minimum": 4096, "maximum": 16777216 },
+            "pollIntervalMillis": { "type": "integer", "minimum": 100, "maximum": 3600000 },
+            "evidenceTtlMillis": { "type": "integer", "minimum": 1000, "maximum": 86400000 },
+            "leaseMillis": { "type": "integer", "minimum": 1000, "maximum": 3600000 },
+            "maxPages": { "type": "integer", "minimum": 1, "maximum": 256 },
+            "maxProjects": { "type": "integer", "minimum": 1, "maximum": 65536 },
+            "concurrency": { "type": "integer", "minimum": 1, "maximum": 64 }
+          }
+        }
+      }
+    },
+    "monitoring": {
+      "type": "object",
+      "properties": {
+        "serviceMonitor": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "scheme": { "type": "string", "enum": ["http", "https"] },
+            "usePodNameAsInstance": { "type": "boolean" }
+          }
+        },
+        "grafanaDashboards": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "label": { "type": "string", "minLength": 1 },
+            "labelValue": { "type": "string", "minLength": 1 },
+            "prometheusDatasourceUid": { "type": "string" }
+          }
+        }
+      }
+    },
+    "networkPolicy": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" }
+      }
+    }
+  }
+}
