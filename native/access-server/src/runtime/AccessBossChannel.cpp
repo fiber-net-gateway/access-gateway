@@ -50,12 +50,17 @@ AccessBossChannelOptions access_boss_channel_options(const AccessServerConfig &c
     add(config.metrics_listen_address().to_string());
     add(config.network_entry());
     add(config.test_mode() ? "test" : "production");
-    add(config.nacos_config().namespace_id());
-    add(config.nacos_config().tenant());
-    for (const auto &host: config.nacos_config().server_hosts()) {
-        add(host.value());
+    if (config.config_provider() == AccessConfigProvider::File) {
+        add("file");
+        add(config.config_dir());
+    } else {
+        add(config.nacos_config().namespace_id());
+        add(config.nacos_config().tenant());
+        for (const auto &host: config.nacos_config().server_hosts()) {
+            add(host.value());
+        }
+        add(std::to_string(config.nacos_config().grpc_port()));
     }
-    add(std::to_string(config.nacos_config().grpc_port()));
     add(config.watcher_options().project_list_data_id);
     add(config.watcher_options().project_route_data_id_prefix);
     add(config.watcher_options().project_route_group);

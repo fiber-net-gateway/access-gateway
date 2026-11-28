@@ -65,6 +65,8 @@ std::string_view AccessServerRuntime::registration_state() const noexcept {
     return control_plane_->registration_state();
 }
 
+void AccessServerRuntime::trigger_config_reload() noexcept { control_plane_->trigger_config_reload(); }
+
 async::Task<void> AccessServerRuntime::shutdown() noexcept { return coordinator_.shutdown(); }
 
 int AccessServerRuntime::fd() const noexcept { return data_plane_->fd(); }

@@ -1,5 +1,7 @@
 #include "AccessRuntimeFactory.h"
 
+#include "LocalFileConfigService.h"
+
 #include <new>
 #include <utility>
 
@@ -41,20 +43,64 @@ AccessRuntimeFactory::create(event::EventLoop &accept_loop, event::EventLoop &na
                                                                    "failed to initialize upstream TLS trust store"));
     }
 
-    auto client = nacos::NacosClient::create(nacos_loop, config.nacos_config());
-    if (!client) {
-        return std::unexpected(make_access_server_runtime_create_error(AccessServerRuntimeErrorCode::CreateNacosClient,
-                                                                       client.error()));
-    }
-    auto config_service = nacos::ConfigService::create(**client);
-    if (!config_service) {
-        return std::unexpected(make_access_server_runtime_create_error(
-                AccessServerRuntimeErrorCode::CreateConfigService, config_service.error()));
-    }
-    auto naming_service = nacos::NamingService::create(**client);
-    if (!naming_service) {
-        return std::unexpected(make_access_server_runtime_create_error(
-                AccessServerRuntimeErrorCode::CreateNamingService, naming_service.error()));
+    std::unique_ptr<nacos::NacosClient> nacos_client;
+    std::unique_ptr<nacos::ConfigService> config_service;
+    std::unique_ptr<nacos::NamingService> naming_service;
+    void *config_reload_context = nullptr;
+    AccessControlPlaneDependencies::ReloadFunction config_reload = nullptr;
+
+    if (config.config_provider() == AccessConfigProvider::File) {
+        LocalFileConfigLayout layout{
+                .project_list_data_id = config.watcher_options().project_list_data_id,
+                .project_route_data_id_prefix = config.watcher_options().project_route_data_id_prefix,
+                .project_route_group = config.watcher_options().project_route_group,
+                .tls_certificates_data_id = config.tls_certificate_watcher_options().data_id,
+                .tls_certificates_group = config.tls_certificate_watcher_options().group,
+                .edge_functions_data_id = std::string(kEdgeFunctionsIndexDataId),
+                .edge_functions_group = config.watcher_options().project_route_group,
+                .edge_function_script_data_id_prefix = std::string(kEdgeFunctionDataIdPrefix),
+                .gray_data_id = config.gray_watcher_options().data_id,
+                .gray_group = config.gray_watcher_options().group,
+                .temp_cluster_data_id = config.temp_cluster_watcher_options().data_id,
+                .temp_cluster_group = config.temp_cluster_watcher_options().group,
+        };
+        auto file_service = std::unique_ptr<LocalFileConfigService>(new (std::nothrow) LocalFileConfigService(
+                nacos_loop, LocalFileConfigServiceOptions{
+                                    .directory = std::string(config.config_dir()),
+                                    .layout = std::move(layout),
+                                    .poll_interval = config.config_poll_interval(),
+                            }));
+        auto standalone_naming = std::unique_ptr<LocalStandaloneNamingService>(
+                new (std::nothrow) LocalStandaloneNamingService(nacos_loop));
+        if (!file_service || !standalone_naming) {
+            return std::unexpected(AccessServerRuntimeError{
+                    .code = AccessServerRuntimeErrorCode::AllocateRuntime,
+                    .create_error = nacos::NacosCreateErrorCode::NoMem,
+            });
+        }
+        config_reload_context = file_service.get();
+        config_reload = [](void *ctx) noexcept { static_cast<LocalFileConfigService *>(ctx)->trigger_reload(); };
+        config_service = std::move(file_service);
+        naming_service = std::move(standalone_naming);
+    } else {
+        auto client = nacos::NacosClient::create(nacos_loop, config.nacos_config());
+        if (!client) {
+            return std::unexpected(make_access_server_runtime_create_error(
+                    AccessServerRuntimeErrorCode::CreateNacosClient, client.error()));
+        }
+        auto created_config = nacos::ConfigService::create(**client);
+        if (!created_config) {
+            return std::unexpected(make_access_server_runtime_create_error(
+                    AccessServerRuntimeErrorCode::CreateConfigService, created_config.error()));
+        }
+        auto created_naming = nacos::NamingService::create(**client);
+        if (!created_naming) {
+            return std::unexpected(make_access_server_runtime_create_error(
+                    AccessServerRuntimeErrorCode::CreateNamingService, created_naming.error()));
+        }
+        nacos_client = std::move(*client);
+        config_service = std::move(*created_config);
+        naming_service = std::move(*created_naming);
     }
 
     std::unique_ptr<cat::CatClient> cat_client;
@@ -94,9 +140,11 @@ AccessRuntimeFactory::create(event::EventLoop &accept_loop, event::EventLoop &na
             },
             AccessControlPlaneDependencies{
                     .cat_client = std::move(cat_client),
-                    .nacos_client = std::move(*client),
-                    .config_service = std::move(*config_service),
-                    .naming_service = std::move(*naming_service),
+                    .nacos_client = std::move(nacos_client),
+                    .config_service = std::move(config_service),
+                    .naming_service = std::move(naming_service),
+                    .config_reload_context = config_reload_context,
+                    .config_reload = config_reload,
             }));
     if (!control_plane) {
         return std::unexpected(AccessServerRuntimeError{

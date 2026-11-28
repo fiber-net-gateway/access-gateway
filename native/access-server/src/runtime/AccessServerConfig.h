@@ -34,6 +34,11 @@ enum class AccessDnsMode : std::uint8_t {
     Override,
 };
 
+enum class AccessConfigProvider : std::uint8_t {
+    Nacos,
+    File,
+};
+
 enum class AccessServerConfigErrorCode : std::uint8_t {
     OpenFailed,
     ReadFailed,
@@ -106,7 +111,11 @@ public:
     [[nodiscard]] std::string_view dns_resolver_config_path() const noexcept { return dns_resolver_config_path_; }
     [[nodiscard]] std::expected<AccessDnsServiceOptions, AccessServerConfigError> resolve_dns_options() const;
     [[nodiscard]] const std::optional<cat::CatClientConfig> &cat_config() const noexcept { return cat_config_; }
-    [[nodiscard]] const nacos::NacosClientConfig &nacos_config() const noexcept { return nacos_config_; }
+    [[nodiscard]] AccessConfigProvider config_provider() const noexcept { return config_provider_; }
+    [[nodiscard]] std::string_view config_dir() const noexcept { return config_dir_; }
+    [[nodiscard]] std::chrono::milliseconds config_poll_interval() const noexcept { return config_poll_interval_; }
+    [[nodiscard]] bool has_nacos_config() const noexcept { return nacos_config_.has_value(); }
+    [[nodiscard]] const nacos::NacosClientConfig &nacos_config() const noexcept { return *nacos_config_; }
     [[nodiscard]] const AccessConfigWatcherOptions &watcher_options() const noexcept { return watcher_options_; }
     [[nodiscard]] const GrayConfigWatcherOptions &gray_watcher_options() const noexcept {
         return gray_watcher_options_;
@@ -137,8 +146,10 @@ private:
                        std::chrono::milliseconds upstream_connect_timeout,
                        ProxyHappyEyeballsPolicy happy_eyeballs_policy, AccessDnsMode dns_mode,
                        std::string dns_resolver_config_path, dns::DnsNameserverList dns_override_nameservers,
-                       std::optional<cat::CatClientConfig> cat_config, nacos::NacosClientConfig nacos_config,
-                       AccessConfigWatcherOptions watcher_options, GrayConfigWatcherOptions gray_watcher_options,
+                       std::optional<cat::CatClientConfig> cat_config, AccessConfigProvider config_provider,
+                       std::string config_dir, std::chrono::milliseconds config_poll_interval,
+                       std::optional<nacos::NacosClientConfig> nacos_config, AccessConfigWatcherOptions watcher_options,
+                       GrayConfigWatcherOptions gray_watcher_options,
                        TempClusterConfigWatcherOptions temp_cluster_watcher_options,
                        TlsCertificateWatcherOptions tls_certificate_watcher_options,
                        AccessServiceDiscoveryOptions service_discovery_options,
@@ -167,7 +178,10 @@ private:
     std::string dns_resolver_config_path_ = "/etc/resolv.conf";
     dns::DnsNameserverList dns_override_nameservers_;
     std::optional<cat::CatClientConfig> cat_config_;
-    nacos::NacosClientConfig nacos_config_;
+    AccessConfigProvider config_provider_ = AccessConfigProvider::Nacos;
+    std::string config_dir_;
+    std::chrono::milliseconds config_poll_interval_{2000};
+    std::optional<nacos::NacosClientConfig> nacos_config_;
     AccessConfigWatcherOptions watcher_options_;
     GrayConfigWatcherOptions gray_watcher_options_;
     TempClusterConfigWatcherOptions temp_cluster_watcher_options_;

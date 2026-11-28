@@ -39,6 +39,7 @@ public:
     [[nodiscard]] async::Task<std::expected<void, AccessServerRuntimeError>> release() noexcept;
     [[nodiscard]] bool upgrade_ready() noexcept;
     [[nodiscard]] std::string_view registration_state() const noexcept;
+    void trigger_config_reload() noexcept;
     [[nodiscard]] async::Task<void> shutdown() noexcept;
 
     [[nodiscard]] AccessServerRuntimeState state() const noexcept { return coordinator_.state(); }

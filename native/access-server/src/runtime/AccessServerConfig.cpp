@@ -70,6 +70,9 @@ constexpr std::string_view kServiceName = "ACCESS_SERVER_SERVICE_NAME";
 constexpr std::string_view kAdvertiseAddress = "ACCESS_SERVER_ADVERTISE_ADDRESS";
 constexpr std::string_view kRegistrationListener = "ACCESS_SERVER_REGISTRATION_LISTENER";
 constexpr std::string_view kRegistrationTimeout = "ACCESS_SERVER_REGISTRATION_TIMEOUT_MILLIS";
+constexpr std::string_view kConfigProvider = "ACCESS_SERVER_CONFIG_PROVIDER";
+constexpr std::string_view kConfigDir = "ACCESS_SERVER_CONFIG_DIR";
+constexpr std::string_view kConfigPollInterval = "ACCESS_SERVER_CONFIG_POLL_INTERVAL_MILLIS";
 constexpr std::string_view kNacosServers = "NACOS_SERVER_ADDRESSES";
 constexpr std::string_view kNacosHttpPort = "NACOS_HTTP_PORT";
 constexpr std::string_view kNacosGrpcPort = "NACOS_GRPC_PORT";
@@ -85,6 +88,9 @@ constexpr std::string_view kCatRouters = "CAT_ROUTER_ADDRESSES";
 constexpr std::string_view kCatCollectors = "CAT_COLLECTOR_ADDRESSES";
 constexpr std::size_t kMaxUpstreamTlsCaFileBytes = 4096;
 constexpr std::size_t kMaxDnsResolverConfigPathBytes = 4096;
+constexpr std::size_t kMaxConfigDirPathBytes = 4096;
+constexpr std::uint64_t kMinConfigPollIntervalMillis = 100;
+constexpr std::uint64_t kMaxConfigPollIntervalMillis = 3600000;
 constexpr std::uint64_t kMinUpstreamConnectTimeoutMillis = 10;
 constexpr std::uint64_t kMaxUpstreamConnectTimeoutMillis = 60000;
 constexpr std::uint64_t kMaxHappyEyeballsDelayMillis = 2000;
@@ -381,7 +387,8 @@ AccessServerConfig::AccessServerConfig(
         std::string access_log_directory, UpstreamTlsClientPolicy upstream_tls_client_policy,
         std::chrono::milliseconds upstream_connect_timeout, ProxyHappyEyeballsPolicy happy_eyeballs_policy,
         AccessDnsMode dns_mode, std::string dns_resolver_config_path, dns::DnsNameserverList dns_override_nameservers,
-        std::optional<cat::CatClientConfig> cat_config, nacos::NacosClientConfig nacos_config,
+        std::optional<cat::CatClientConfig> cat_config, AccessConfigProvider config_provider, std::string config_dir,
+        std::chrono::milliseconds config_poll_interval, std::optional<nacos::NacosClientConfig> nacos_config,
         AccessConfigWatcherOptions watcher_options, GrayConfigWatcherOptions gray_watcher_options,
         TempClusterConfigWatcherOptions temp_cluster_watcher_options,
         TlsCertificateWatcherOptions tls_certificate_watcher_options,
@@ -401,6 +408,7 @@ AccessServerConfig::AccessServerConfig(
     upstream_connect_timeout_(upstream_connect_timeout), happy_eyeballs_policy_(happy_eyeballs_policy),
     dns_mode_(dns_mode), dns_resolver_config_path_(std::move(dns_resolver_config_path)),
     dns_override_nameservers_(std::move(dns_override_nameservers)), cat_config_(std::move(cat_config)),
+    config_provider_(config_provider), config_dir_(std::move(config_dir)), config_poll_interval_(config_poll_interval),
     nacos_config_(std::move(nacos_config)), watcher_options_(std::move(watcher_options)),
     gray_watcher_options_(std::move(gray_watcher_options)),
     temp_cluster_watcher_options_(std::move(temp_cluster_watcher_options)),
@@ -464,6 +472,10 @@ AccessServerConfig::load_from_string(std::string_view input) {
             .thread_name = "cat-sender",
     };
     bool cat_setting_present = false;
+    AccessConfigProvider config_provider = AccessConfigProvider::Nacos;
+    std::string config_dir;
+    std::uint64_t config_poll_interval_millis = 2000;
+    bool config_poll_interval_present = false;
     nacos::NacosClientConfigParams nacos_params;
     nacos_params.namespace_id = "public";
     AccessConfigWatcherOptions watcher_options;
@@ -730,6 +742,29 @@ AccessServerConfig::load_from_string(std::string_view input) {
                 return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, entry.line, entry.key,
                                              "expected milliseconds in range 1..60000"));
             }
+        } else if (entry.key == kConfigProvider) {
+            if (value == "nacos") {
+                config_provider = AccessConfigProvider::Nacos;
+            } else if (value == "file") {
+                config_provider = AccessConfigProvider::File;
+            } else {
+                return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, entry.line, entry.key,
+                                             "expected nacos or file"));
+            }
+        } else if (entry.key == kConfigDir) {
+            if (value.empty() || value.size() > kMaxConfigDirPathBytes || value.find('\0') != std::string_view::npos) {
+                return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, entry.line, entry.key,
+                                             "expected a non-empty directory path no longer than 4096 bytes"));
+            }
+            config_dir = entry.value;
+        } else if (entry.key == kConfigPollInterval) {
+            if (!parse_unsigned(value, config_poll_interval_millis) ||
+                (config_poll_interval_millis != 0 && (config_poll_interval_millis < kMinConfigPollIntervalMillis ||
+                                                      config_poll_interval_millis > kMaxConfigPollIntervalMillis))) {
+                return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, entry.line, entry.key,
+                                             "expected 0 or milliseconds in range 100..3600000"));
+            }
+            config_poll_interval_present = true;
         } else if (entry.key == kNacosServers) {
             auto parsed = parse_nacos_servers(value, entry.line);
             if (!parsed) {
@@ -882,9 +917,31 @@ AccessServerConfig::load_from_string(std::string_view input) {
                                      "activation identity and token are only valid "
                                      "when activation evidence is enabled"));
     }
-    auto nacos_config = nacos::NacosClientConfig::create(std::move(nacos_params));
-    if (!nacos_config) {
-        return std::unexpected(nacos_error(nacos_config.error()));
+    if (config_provider == AccessConfigProvider::File) {
+        if (config_dir.empty()) {
+            return std::unexpected(
+                    error(AccessServerConfigErrorCode::MissingRequiredKey, 0, kConfigDir,
+                          "ACCESS_SERVER_CONFIG_DIR is required when ACCESS_SERVER_CONFIG_PROVIDER=file"));
+        }
+    } else {
+        if (!config_dir.empty()) {
+            return std::unexpected(
+                    error(AccessServerConfigErrorCode::InvalidValue, 0, kConfigDir,
+                          "ACCESS_SERVER_CONFIG_DIR is only valid when ACCESS_SERVER_CONFIG_PROVIDER=file"));
+        }
+        if (config_poll_interval_present) {
+            return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, 0, kConfigPollInterval,
+                                         "ACCESS_SERVER_CONFIG_POLL_INTERVAL_MILLIS is only valid when "
+                                         "ACCESS_SERVER_CONFIG_PROVIDER=file"));
+        }
+    }
+    std::optional<nacos::NacosClientConfig> nacos_config;
+    if (config_provider == AccessConfigProvider::Nacos) {
+        auto created_nacos = nacos::NacosClientConfig::create(std::move(nacos_params));
+        if (!created_nacos) {
+            return std::unexpected(nacos_error(created_nacos.error()));
+        }
+        nacos_config = std::move(*created_nacos);
     }
     std::optional<cat::CatClientConfig> cat_config;
     if (cat_setting_present) {
@@ -912,16 +969,18 @@ AccessServerConfig::load_from_string(std::string_view input) {
     http_options.http3_enabled = http3_enabled;
     AccessHttpListenerOptions plain_http_options;
     plain_http_options.http3_enabled = false;
-    return AccessServerConfig(
-            tls_address, std::move(http_options), plain_listen_enabled, plain_address, std::move(plain_http_options),
-            metrics_address, std::move(activation_endpoint_options), std::chrono::milliseconds(timeout_millis),
-            max_request_body, max_response_body, test_mode, edge_function_fail_close,
-            std::move(client_metadata_options), std::move(network_entry), std::move(access_log_directory),
-            std::move(upstream_tls_client_policy), std::chrono::milliseconds(upstream_connect_timeout_millis),
-            happy_eyeballs_policy, dns_mode, std::move(dns_resolver_config_path), std::move(dns_override_nameservers),
-            std::move(cat_config), std::move(*nacos_config), std::move(watcher_options), std::move(gray_options),
-            std::move(temp_cluster_options), std::move(tls_certificate_options), std::move(service_discovery_options),
-            std::move(instance_registration_options), selected_registration_listener);
+    return AccessServerConfig(tls_address, std::move(http_options), plain_listen_enabled, plain_address,
+                              std::move(plain_http_options), metrics_address, std::move(activation_endpoint_options),
+                              std::chrono::milliseconds(timeout_millis), max_request_body, max_response_body, test_mode,
+                              edge_function_fail_close, std::move(client_metadata_options), std::move(network_entry),
+                              std::move(access_log_directory), std::move(upstream_tls_client_policy),
+                              std::chrono::milliseconds(upstream_connect_timeout_millis), happy_eyeballs_policy,
+                              dns_mode, std::move(dns_resolver_config_path), std::move(dns_override_nameservers),
+                              std::move(cat_config), config_provider, std::move(config_dir),
+                              std::chrono::milliseconds(config_poll_interval_millis), std::move(nacos_config),
+                              std::move(watcher_options), std::move(gray_options), std::move(temp_cluster_options),
+                              std::move(tls_certificate_options), std::move(service_discovery_options),
+                              std::move(instance_registration_options), selected_registration_listener);
 }
 
 std::expected<AccessDnsServiceOptions, AccessServerConfigError> AccessServerConfig::resolve_dns_options() const {
