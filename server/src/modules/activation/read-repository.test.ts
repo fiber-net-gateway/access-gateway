@@ -68,6 +68,8 @@ test('instance pagination binds LIMIT as an exact decimal value for MySQL 8.4', 
   assert.equal(result?.items[0]?.activeVersion, '9')
   assert.match(calls[1]!.sql, /LIMIT \?/u)
   assert.match(calls[1]!.sql, /release_record\.status = 'published'/u)
+  assert.match(calls[1]!.sql, /WHEN 'gray_rules' THEN observation\.gray_md5/u)
+  assert.match(calls[1]!.sql, /WHEN 'gray_rules' THEN observation\.gray_generation/u)
   assert.equal(calls[1]!.values.at(-1), '21')
   assert.equal(typeof calls[1]!.values.at(-1), 'string')
 })

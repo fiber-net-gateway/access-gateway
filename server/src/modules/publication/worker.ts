@@ -42,6 +42,7 @@ interface PublicationResourceRow extends RowDataPacket {
     | 'tls_certificates'
     | 'edge_function_script'
     | 'edge_function_index'
+    | 'gray_rules'
   data_id: string
   group_name: string
   operation: 'upsert' | 'remove'
@@ -523,6 +524,16 @@ export class PublicationWorker {
            WHERE previous.id <> ? AND previous.status = 'published'
              AND previous.kind = 'edge_functions'
              AND current.kind = 'edge_functions'
+             AND previous.environment_id = current.environment_id`,
+          [claim.releaseInternalId, claim.releaseInternalId],
+        )
+        await transaction.execute(
+          `UPDATE releases previous
+           INNER JOIN releases current ON current.id = ?
+           SET previous.status = 'superseded', previous.lock_version = previous.lock_version + 1
+           WHERE previous.id <> ? AND previous.status = 'published'
+             AND previous.kind = 'gray_rules'
+             AND current.kind = 'gray_rules'
              AND previous.environment_id = current.environment_id`,
           [claim.releaseInternalId, claim.releaseInternalId],
         )

@@ -3,6 +3,8 @@ import type { ActivationService } from './modules/activation/model.js'
 import type { CertificateService } from './modules/certificates/service.js'
 import type { DraftService } from './modules/drafts/service.js'
 import type { EnvironmentService } from './modules/environments/service.js'
+import type { GrayRuleReleaseService } from './modules/gray/release-service.js'
+import type { GrayRuleService } from './modules/gray/service.js'
 import type { ProjectService } from './modules/projects/service.js'
 import type { ReleaseService } from './modules/releases/service.js'
 import type { SystemStatusService } from './modules/system/service.js'
@@ -30,6 +32,8 @@ export interface ApplicationServices {
   wafReleases: WafReleaseService
   wafHits: WafHitsService
   edgeFunctions: EdgeFunctionService
+  gray: GrayRuleService
+  grayReleases: GrayRuleReleaseService
 }
 
 export interface ApplicationRuntime {

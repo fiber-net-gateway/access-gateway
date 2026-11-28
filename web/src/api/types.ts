@@ -591,3 +591,90 @@ export interface WafHitsView {
   queriedAt: string
   rows: readonly WafHitRow[]
 }
+
+export type GrayRuleEntry = 'internet' | 'vdi' | 'desktop' | 'custom'
+
+export interface GrayRule {
+  entry: GrayRuleEntry
+  ratio: number
+  cidrs: readonly string[]
+}
+
+export interface GrayRulesDocument {
+  schemaVersion: 1
+  rules: readonly GrayRule[]
+}
+
+export interface GrayRulesDraftView {
+  id: string
+  document: GrayRulesDocument
+  documentSha256: string
+  lockVersion: string
+  createdAt: string
+  updatedAt: string
+}
+
+export interface GrayValidationIssue {
+  field: string
+  code: string
+  message: string
+}
+
+export interface GrayNativeValidationError {
+  code: string
+  field?: string
+  offset?: number
+  message: string
+}
+
+export interface GrayValidationPreviewView {
+  valid: boolean
+  issues: readonly GrayValidationIssue[]
+  wirePreview: string | null
+  wireSha256: string | null
+  dataId: string
+  group: string
+  ruleCount: number
+  nativeValid: boolean | null
+  nativeErrors: readonly GrayNativeValidationError[]
+  validator: { contractVersion: number; revision: string } | null
+}
+
+export interface GrayReleaseResourceView {
+  id: string
+  dataId: string
+  group: string
+  status: string
+  verifiedSha256: string | null
+  verifiedAt: string | null
+}
+
+export interface GrayReleaseView {
+  id: string
+  sequence: string
+  status: string
+  ruleCount: number
+  entries: readonly GrayRuleEntry[]
+  wireSha256: string
+  description: string
+  resource: GrayReleaseResourceView
+  publication: {
+    jobId: string | null
+    state: string | null
+  }
+  activationStatus: ActivationStatus
+  activation: ActivationSummary
+  createdAt: string
+  publishedAt: string | null
+}
+
+export interface GrayLiveView {
+  exists: boolean
+  dataId: string
+  group: string
+  sha256: string | null
+  md5: string | null
+  content: string | null
+  document: GrayRulesDocument | null
+  parseError: string | null
+}

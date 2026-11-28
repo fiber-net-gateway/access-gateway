@@ -12,6 +12,7 @@ export interface ActivationReleaseResource {
     | 'tls_certificates'
     | 'edge_function_script'
     | 'edge_function_index'
+    | 'gray_rules'
   dataId: string
   group: string
   operation: 'upsert' | 'remove'
@@ -121,6 +122,8 @@ export function decideInstanceActivation(input: ActivationDecisionInput): Activa
     !input.evidence.tls.enabled ||
     input.evidence.tls.watcherState === 'failed' ||
     input.evidence.tls.watcherState === 'stopped'
+  const grayWatcherFailed =
+    input.evidence.gray.watcherState === 'failed' || input.evidence.gray.watcherState === 'stopped'
   let exactResources = 0
   let rejectedTarget = false
   for (const resource of input.resources) {
@@ -162,6 +165,14 @@ export function decideInstanceActivation(input: ActivationDecisionInput): Activa
     if (resource.kind === 'edge_function_index' || resource.kind === 'edge_function_script') {
       if (edgeIndex.exact) exactResources += 1
       else rejectedTarget ||= edgeIndex.rejected
+      continue
+    }
+
+    if (resource.kind === 'gray_rules') {
+      const candidate = input.evidence.gray.resource
+      if (!sameResourceIdentity(resource, candidate)) rejectedTarget = true
+      else if (candidate.activeMd5 === targetMd5) exactResources += 1
+      else rejectedTarget ||= grayWatcherFailed || explicitlyRejected(targetMd5, candidate)
       continue
     }
 

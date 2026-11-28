@@ -332,3 +332,116 @@ test('an edge-function release stays unknown without edge evidence or on identit
     'degraded',
   )
 })
+
+const grayMd5 = '77777777777777777777777777777777'
+
+function grayResource(): ActivationReleaseResource {
+  return {
+    kind: 'gray_rules',
+    dataId: 'ploto.unified-access.gray-match',
+    group: 'DEFAULT_GROUP',
+    operation: 'upsert',
+    verifiedNacosMd5: grayMd5,
+    verifiedSha256: 'c'.repeat(64),
+    allocatedProjectVersion: null,
+    projectName: null,
+  }
+}
+
+function grayEvidenceSnapshot(
+  overrides: Partial<ActivationEvidence['gray']['resource']> = {},
+): ActivationEvidence {
+  const snapshot = evidence()
+  snapshot.gray = {
+    watcherState: 'running',
+    generation: '2',
+    ruleCount: 1,
+    resource: {
+      dataId: 'ploto.unified-access.gray-match',
+      group: 'DEFAULT_GROUP',
+      candidateStatus: 'accepted',
+      observedMd5: grayMd5,
+      activeMd5: grayMd5,
+      observedAtUnixMillis: 1,
+      activeAtUnixMillis: 1,
+      failure: null,
+      ...overrides,
+    },
+  }
+  return snapshot
+}
+
+test('a gray_rules release is active when evidence.gray matches dataId, group, and activeMd5', () => {
+  const snapshot = grayEvidenceSnapshot()
+  assert.equal(
+    decideInstanceActivation({
+      pollErrorCode: null,
+      evidence: snapshot,
+      resources: [grayResource()],
+    }),
+    'active',
+  )
+})
+
+test('a gray_rules release is pending while an older gray snapshot is still active', () => {
+  const snapshot = grayEvidenceSnapshot({
+    activeMd5: '88888888888888888888888888888888',
+    observedMd5: '88888888888888888888888888888888',
+  })
+  assert.equal(
+    decideInstanceActivation({
+      pollErrorCode: null,
+      evidence: snapshot,
+      resources: [grayResource()],
+    }),
+    'pending',
+  )
+})
+
+test('a gray_rules release degrades on rejection, watcher failure, or resource identity mismatch', () => {
+  const rejected = grayEvidenceSnapshot({
+    activeMd5: '88888888888888888888888888888888',
+    observedMd5: grayMd5,
+    candidateStatus: 'rejected',
+    failure: {
+      stage: 'compile',
+      code: 'invalid_cidr',
+      field: 'rules[0].cidrs[0]',
+      offset: 0,
+      observedAtUnixMillis: 2,
+    },
+  })
+  assert.equal(
+    decideInstanceActivation({
+      pollErrorCode: null,
+      evidence: rejected,
+      resources: [grayResource()],
+    }),
+    'degraded',
+  )
+
+  const failedWatcher = grayEvidenceSnapshot({
+    activeMd5: '88888888888888888888888888888888',
+  })
+  failedWatcher.gray.watcherState = 'failed'
+  assert.equal(
+    decideInstanceActivation({
+      pollErrorCode: null,
+      evidence: failedWatcher,
+      resources: [grayResource()],
+    }),
+    'degraded',
+  )
+
+  const mismatched = grayEvidenceSnapshot({
+    group: 'ACCESS-SERVER',
+  })
+  assert.equal(
+    decideInstanceActivation({
+      pollErrorCode: null,
+      evidence: mismatched,
+      resources: [grayResource()],
+    }),
+    'degraded',
+  )
+})
